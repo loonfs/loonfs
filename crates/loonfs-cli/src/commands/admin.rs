@@ -645,7 +645,7 @@ async fn run_admin_index_enable(
         (_, GrepIndexLifecycle::Active { .. }) => Some(
             context
                 .target
-                .namespace_status(&context.namespace)
+                .get_namespace(&context.namespace)
                 .await
                 .map_err(|error| context.fail(kind, error))?
                 .head_seq,
@@ -671,7 +671,7 @@ async fn run_admin_index_enable(
     let response = if waited.is_some() {
         context
             .target
-            .grep_index_status(&context.namespace)
+            .get_grep_index_status(&context.namespace)
             .await
             .map_err(|error| context.fail(kind, error))?
     } else {
@@ -699,7 +699,7 @@ async fn run_admin_index_status(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
-        .grep_index_status(&context.namespace)
+        .get_grep_index_status(&context.namespace)
         .await
         .map_err(|error| context.fail(kind, error))?;
     Ok(CommandOutput {

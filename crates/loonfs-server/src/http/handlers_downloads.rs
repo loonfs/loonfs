@@ -37,6 +37,7 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "begin_download",
         path = "/v0/namespaces/{namespace_id}/filesystem/downloads",
         tag = "filesystem",
         summary = "Begin download",
@@ -99,6 +100,7 @@ pub(super) async fn begin_download(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "begin_download_by_inode",
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",

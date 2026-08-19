@@ -1063,7 +1063,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
 
     // Reading the session mints another one for the same durable bytes.
     let (status, receipt) = engine
-        .read_upload_status(upload.upload_id())
+        .get_upload_status(upload.upload_id())
         .await
         .expect("read upload status");
     match status.status {

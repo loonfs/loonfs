@@ -1130,7 +1130,7 @@ async fn commit_a_finished_upload(
     };
     let Ok(status) = context
         .target
-        .read_upload_status(&context.namespace, &resume.upload_id)
+        .get_upload_status(&context.namespace, &resume.upload_id)
         .await
     else {
         return Ok(None);

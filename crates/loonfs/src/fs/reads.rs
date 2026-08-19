@@ -283,17 +283,17 @@ impl FsReader {
     /// Returns a namespace's current state.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.namespace_status",
+        name = "loonfs.get_namespace",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "namespace_status",
+            operation = "get_namespace",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
+    pub async fn get_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(loonfs_core::cache::load_namespace(self.core.store(), namespace_id).await?)
     }

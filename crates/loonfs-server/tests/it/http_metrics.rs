@@ -65,7 +65,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
         .expect("write file");
     harness
         .client
-        .namespace_status(&namespace)
+        .get_namespace(&namespace)
         .await
         .expect("read status");
 
@@ -123,7 +123,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     // only that series.
     harness
         .client
-        .namespace_status(&namespace)
+        .get_namespace(&namespace)
         .await
         .expect("read status again");
     let second = scrape(&harness.server_url, Some("test-token")).expect("second scrape");

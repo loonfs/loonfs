@@ -471,7 +471,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     /// Returns the public lifecycle summary for the durable grep root.
-    pub async fn index_status(
+    pub async fn get_grep_index_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndexStatusResponse> {

@@ -48,6 +48,7 @@ pub(super) struct StatInodeQuery {
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "stat_inode",
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
         tag = "inodes",
         summary = "Stat inode",
@@ -94,6 +95,7 @@ pub(super) async fn stat_inode(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "list_file_revisions_by_inode",
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
         tag = "inodes",
         summary = "List file revisions by inode",
@@ -145,6 +147,7 @@ pub(super) async fn list_file_revisions_by_inode(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "get_file_revision_bytes_by_inode",
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
         summary = "Read file revision by inode",

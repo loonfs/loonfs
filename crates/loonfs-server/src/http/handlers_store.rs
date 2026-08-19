@@ -16,6 +16,7 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome};
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "probe_store",
         path = "/v0/admin/store/probe",
         tag = "admin",
         summary = "Probe the store contract",

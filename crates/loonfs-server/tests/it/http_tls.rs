@@ -79,7 +79,7 @@ async fn a_client_without_the_certificate_authority_is_refused_at_the_handshake(
     // A self-signed certificate the platform roots do not vouch for is a
     // transport failure, reported rather than panicked through.
     let error = untrusting
-        .namespace_status(&namespace_id("over-tls"))
+        .get_namespace(&namespace_id("over-tls"))
         .await
         .expect_err("untrusted certificate");
     let message = error.to_string();

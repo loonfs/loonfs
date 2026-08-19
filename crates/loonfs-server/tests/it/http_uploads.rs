@@ -415,7 +415,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
-    let status = read_upload_status(&harness.server_url, open.upload_id());
+    let status = get_upload_status(&harness.server_url, open.upload_id());
     assert_eq!(status.namespace_id, namespace);
     assert_eq!(&status.upload_id, open.upload_id());
     assert_eq!(status.mode, UploadMode::ServiceProxied);
@@ -434,7 +434,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     else {
         panic!("abort reports an aborted session")
     };
-    let status = read_upload_status(&harness.server_url, open.upload_id());
+    let status = get_upload_status(&harness.server_url, open.upload_id());
     assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Aborted { aborted_at_ms } = status.status else {
         panic!("an aborted session reports itself aborted");
@@ -456,7 +456,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     // the read hands back, without sending a byte of content again.
     let (upload_id, content_ref, completed_at_ms) =
         complete_upload_session(&harness, &namespace, b"status re-mint").await;
-    let status = read_upload_status(&harness.server_url, &upload_id);
+    let status = get_upload_status(&harness.server_url, &upload_id);
     assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Completed {
         completed_at_ms: reported_completed_at_ms,
@@ -529,7 +529,7 @@ async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
 
     let status = harness
         .client
-        .read_upload_status(&namespace, &upload_id)
+        .get_upload_status(&namespace, &upload_id)
         .await
         .expect("read the upload session back");
     assert_eq!(status.namespace_id, namespace);
@@ -611,7 +611,7 @@ async fn complete_upload_session(
     (begin.upload_id().clone(), content_ref, completed_at_ms)
 }
 
-fn read_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSessionResponse {
+fn get_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSessionResponse {
     let response = raw_agent()
         .get(&format!(
             "{server_url}/v0/namespaces/demo/uploads/{upload_id}"

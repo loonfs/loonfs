@@ -43,16 +43,16 @@ use self::handlers_inodes::{
     get_file_revision_bytes_by_inode, list_file_revisions_by_inode, stat_inode,
 };
 use self::handlers_namespace::{
-    create_checkpoint, create_namespace, delete_namespace, fork_namespace, list_checkpoints,
-    maintenance_step, namespace_diagnostics, namespace_status, release_checkpoint,
+    create_checkpoint, create_namespace, delete_namespace, fork_namespace, get_namespace,
+    get_namespace_diagnostics, list_checkpoints, maintenance_step, release_checkpoint,
 };
 use self::handlers_query::{
-    disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_index_not_maintained,
-    grep_index_status, grep_queries_not_served,
+    disable_grep_index, enable_grep_index, gc_grep_index, get_grep_index_status, grep,
+    grep_index_not_maintained, grep_queries_not_served,
 };
 use self::handlers_store::probe_store as probe_store_handler;
 use self::handlers_uploads::{
-    abort_upload, begin_upload, complete_upload, read_upload_status, sign_upload_parts,
+    abort_upload, begin_upload, complete_upload, get_upload_status, sign_upload_parts,
     upload_content,
 };
 use self::serve::AppState;
@@ -216,7 +216,7 @@ fn router(state: AppState) -> Router {
     // deployment that only answers searches has no authority over the state
     // this reports, so it gates with the mutating three.
     let grep_status_route = if maintains_index {
-        get(grep_index_status)
+        get(get_grep_index_status)
     } else {
         get(grep_index_not_maintained)
     };
@@ -224,17 +224,17 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/readiness", get(readiness))
-        .route("/metrics", get(serve_metrics))
+        .route("/metrics", get(get_metrics))
         .route("/v0/capabilities", get(handlers_namespace::capabilities))
         .route("/v0/namespaces", post(create_namespace))
         .route(
             "/v0/namespaces/{namespace_id}",
-            get(namespace_status).delete(delete_namespace),
+            get(get_namespace).delete(delete_namespace),
         )
         .route("/v0/namespaces/{namespace_id}/forks", post(fork_namespace))
         .route(
             "/v0/admin/namespaces/{namespace_id}/diagnostics",
-            get(namespace_diagnostics),
+            get(get_namespace_diagnostics),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/list",
@@ -325,7 +325,7 @@ fn router(state: AppState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
-            get(read_upload_status),
+            get(get_upload_status),
         )
         .route("/v0/namespaces/{namespace_id}/changes", get(list_changes))
         .route(
@@ -392,6 +392,7 @@ async fn method_not_allowed() -> ApiResponseError {
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "health",
         path = "/health",
         tag = "health",
         summary = "Check health",
@@ -411,6 +412,7 @@ async fn health() -> &'static str {
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "readiness",
         path = "/readiness",
         tag = "health",
         summary = "Check readiness",
@@ -450,6 +452,7 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "get_metrics",
         path = "/metrics",
         tag = "health",
         summary = "Scrape metrics",
@@ -463,7 +466,7 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
         )
     )
 )]
-async fn serve_metrics(
+async fn get_metrics(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiResponseError> {

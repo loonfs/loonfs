@@ -176,12 +176,12 @@ impl EmbeddedBackend {
         self.settle_background_work_after(result).await
     }
 
-    pub(super) async fn namespace_status(
+    pub(super) async fn get_namespace(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<Namespace, BackendError> {
         self.reader
-            .namespace_status(namespace_id)
+            .get_namespace(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
@@ -317,15 +317,15 @@ impl EmbeddedBackend {
         // server. Driving the backfill afterwards is the command's job, not
         // this call's, so an embedded caller and a remote one get the same
         // answer to the same question.
-        self.grep_index_status(namespace_id).await
+        self.get_grep_index_status(namespace_id).await
     }
 
-    pub(super) async fn grep_index_status(
+    pub(super) async fn get_grep_index_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndexStatusResponse, BackendError> {
         self.grep_worker()
-            .index_status(namespace_id)
+            .get_grep_index_status(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
     }
@@ -534,7 +534,7 @@ impl EmbeddedBackend {
             .map_err(grep_error)?
         {
             GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
-                self.grep_index_status(namespace_id).await
+                self.get_grep_index_status(namespace_id).await
             }
             GrepDisableOutcome::Superseded => Err(grep_error(GrepError::PublicationConflict {
                 object_key: loonfs_grep::keyspace::root_key(namespace_id),
@@ -1047,7 +1047,7 @@ mod tests {
             .expect("enable the index without driving it");
         let head_seq = target
             .backend
-            .namespace_status(&indexed)
+            .get_namespace(&indexed)
             .await
             .expect("status before the drain")
             .head_seq;
@@ -1087,7 +1087,7 @@ mod tests {
             let status = target
                 .backend
                 .admin
-                .namespace_diagnostics(namespace_id)
+                .get_namespace_diagnostics(namespace_id)
                 .await
                 .expect("diagnostics after the drain");
             assert!(
@@ -1099,7 +1099,7 @@ mod tests {
         }
         let indexed_status = target
             .backend
-            .grep_index_status(&indexed)
+            .get_grep_index_status(&indexed)
             .await
             .expect("index status after the drain");
         assert!(
@@ -1175,7 +1175,7 @@ mod tests {
             .expect("enable the index without driving it");
         let head_seq = target
             .backend
-            .namespace_status(&namespace)
+            .get_namespace(&namespace)
             .await
             .expect("status before hosting")
             .head_seq;
@@ -1187,7 +1187,7 @@ mod tests {
             wait_until(|| async {
                 target
                     .backend
-                    .grep_index_status(&namespace)
+                    .get_grep_index_status(&namespace)
                     .await
                     .expect("index status while hosting")
                     .lifecycle
@@ -1206,7 +1206,7 @@ mod tests {
         let status = target
             .backend
             .admin
-            .namespace_diagnostics(&namespace)
+            .get_namespace_diagnostics(&namespace)
             .await
             .expect("diagnostics after hosting");
         assert!(

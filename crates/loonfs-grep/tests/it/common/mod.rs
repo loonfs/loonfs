@@ -104,7 +104,7 @@ impl GrepHost {
         if let Some(target_seq) = target_seq {
             self.catch_up_grep_index(namespace_id, target_seq).await?;
         }
-        self.grep_index_status(namespace_id).await
+        self.get_grep_index_status(namespace_id).await
     }
 
     /// Runs the index job's bounded steps until the index has built through
@@ -140,7 +140,7 @@ impl GrepHost {
     ) -> Result<GrepIndexStatusResponse, GrepError> {
         match self.worker.disable(namespace_id).await? {
             GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
-                self.grep_index_status(namespace_id).await
+                self.get_grep_index_status(namespace_id).await
             }
             GrepDisableOutcome::Superseded => Err(GrepError::PublicationConflict {
                 object_key: loonfs_grep::keyspace::root_key(namespace_id),
@@ -148,7 +148,7 @@ impl GrepHost {
         }
     }
 
-    pub(crate) async fn grep_index_status(
+    pub(crate) async fn get_grep_index_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndexStatusResponse, GrepError> {

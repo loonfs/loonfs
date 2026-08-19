@@ -18,6 +18,7 @@ use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceRea
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "grep",
         path = "/v0/namespaces/{namespace_id}/query/grep",
         tag = "query",
         summary = "Content search",
@@ -94,6 +95,7 @@ pub(super) async fn grep_index_not_maintained(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "enable_grep_index",
         path = "/v0/admin/namespaces/{namespace_id}/grep/index/enable",
         tag = "admin",
         summary = "Enable the grep index",
@@ -143,6 +145,7 @@ pub(super) async fn enable_grep_index(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "get_grep_index_status",
         path = "/v0/admin/namespaces/{namespace_id}/grep/index",
         tag = "admin",
         summary = "Read the grep index's lifecycle",
@@ -158,7 +161,7 @@ pub(super) async fn enable_grep_index(
         )
     )
 )]
-pub(super) async fn grep_index_status(
+pub(super) async fn get_grep_index_status(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
@@ -174,7 +177,7 @@ async fn read_grep_index_status(
 ) -> Result<GrepIndexStatusResponse, ApiResponseError> {
     state
         .grep_worker()
-        .index_status(namespace_id)
+        .get_grep_index_status(namespace_id)
         .await
         .map_err(|error| map_grep_error(namespace_id, error))
 }
@@ -183,6 +186,7 @@ async fn read_grep_index_status(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "disable_grep_index",
         path = "/v0/admin/namespaces/{namespace_id}/grep/index/disable",
         tag = "admin",
         summary = "Disable the grep index",
@@ -232,6 +236,7 @@ pub(super) async fn disable_grep_index(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "gc_grep_index",
         path = "/v0/admin/namespaces/{namespace_id}/grep/index/gc",
         tag = "admin",
         summary = "Collect grep-index garbage",

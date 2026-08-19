@@ -36,7 +36,7 @@ pub use self::publish_view::{PublishTailOptions, PublishTailWeight};
 pub(crate) use self::uploads::{
     abort_upload, begin_direct_multipart_upload_target, begin_direct_put_upload_target,
     begin_upload, complete_upload, complete_upload_for_mode, direct_multipart_part_targets,
-    read_upload_status, stage_owned_bytes, stage_owned_stream, upload_content,
+    get_upload_status, stage_owned_bytes, stage_owned_stream, upload_content,
     upload_streamed_content, AbandonedUpload,
 };
 pub use self::uploads::{

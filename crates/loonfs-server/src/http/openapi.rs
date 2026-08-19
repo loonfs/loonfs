@@ -2,9 +2,8 @@
 //!
 //! The `#[utoipa::path]` operation metadata lives on the handlers
 //! themselves; this module registers those operations and the schema set
-//! into one document. utoipa derives each operation id from the handler fn
-//! name, so renaming a handler changes the published id — regenerate
-//! `docs/specs/openapi.json` deliberately when that happens.
+//! into one document. Every path macro declares its operation id explicitly,
+//! so renaming a handler alone does not change the published id.
 
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
@@ -71,11 +70,11 @@ impl utoipa::ToSchema for CompleteUploadRequestSchema {
     paths(
         crate::http::health,
         crate::http::readiness,
-        crate::http::serve_metrics,
+        crate::http::get_metrics,
         crate::http::handlers_namespace::capabilities,
         crate::http::handlers_namespace::create_namespace,
-        crate::http::handlers_namespace::namespace_status,
-        crate::http::handlers_namespace::namespace_diagnostics,
+        crate::http::handlers_namespace::get_namespace,
+        crate::http::handlers_namespace::get_namespace_diagnostics,
         crate::http::handlers_namespace::delete_namespace,
         crate::http::handlers_namespace::fork_namespace,
         crate::http::handlers_filesystem::list_path_entries,
@@ -94,14 +93,14 @@ impl utoipa::ToSchema for CompleteUploadRequestSchema {
         crate::http::handlers_uploads::sign_upload_parts,
         crate::http::handlers_uploads::complete_upload,
         crate::http::handlers_uploads::abort_upload,
-        crate::http::handlers_uploads::read_upload_status,
+        crate::http::handlers_uploads::get_upload_status,
         crate::http::handlers_filesystem::list_changes,
         crate::http::handlers_namespace::create_checkpoint,
         crate::http::handlers_namespace::list_checkpoints,
         crate::http::handlers_namespace::release_checkpoint,
         crate::http::handlers_namespace::maintenance_step,
         crate::http::handlers_query::grep,
-        crate::http::handlers_query::grep_index_status,
+        crate::http::handlers_query::get_grep_index_status,
         crate::http::handlers_query::enable_grep_index,
         crate::http::handlers_query::disable_grep_index,
         crate::http::handlers_query::gc_grep_index,

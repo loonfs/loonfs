@@ -396,7 +396,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<NamespaceDiagnostics> {
-        block_on(self.admin.namespace_diagnostics(namespace_id))
+        block_on(self.admin.get_namespace_diagnostics(namespace_id))
     }
 
     fn maintenance_step_namespace_blocking(

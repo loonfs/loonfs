@@ -169,6 +169,7 @@ impl utoipa::ToSchema for OpenApiDefaultFalseBoolean {}
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "list_path_entries",
         path = "/v0/namespaces/{namespace_id}/filesystem/list",
         tag = "filesystem",
         summary = "List directory",
@@ -229,6 +230,7 @@ pub(super) async fn list_path_entries(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "stat_path",
         path = "/v0/namespaces/{namespace_id}/filesystem/stat",
         tag = "filesystem",
         summary = "Stat path",
@@ -277,6 +279,7 @@ pub(super) async fn stat_path(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "get_file_bytes",
         path = "/v0/namespaces/{namespace_id}/filesystem/content",
         tag = "filesystem",
         summary = "Read file",
@@ -342,6 +345,7 @@ pub(super) async fn get_file_bytes(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "list_trash",
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
         summary = "List recoverable deletions",
@@ -387,6 +391,7 @@ pub(super) async fn list_trash(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "list_file_revisions",
         path = "/v0/namespaces/{namespace_id}/filesystem/revisions",
         tag = "filesystem",
         summary = "List file revisions",
@@ -439,6 +444,7 @@ pub(super) async fn list_file_revisions(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "apply_commit",
         path = "/v0/namespaces/{namespace_id}/commits",
         tag = "filesystem",
         summary = "Apply a commit",
@@ -551,6 +557,7 @@ pub(super) async fn apply_commit(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "list_changes",
         path = "/v0/namespaces/{namespace_id}/changes",
         tag = "filesystem",
         summary = "List changes after a sequence",

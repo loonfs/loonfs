@@ -5,6 +5,16 @@ use std::collections::BTreeSet;
 
 const OPENAPI_JSON_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/openapi.json");
+const OPENAPI_PATH_SOURCES: &[&str] = &[
+    include_str!("../../src/http/mod.rs"),
+    include_str!("../../src/http/handlers_downloads.rs"),
+    include_str!("../../src/http/handlers_filesystem.rs"),
+    include_str!("../../src/http/handlers_inodes.rs"),
+    include_str!("../../src/http/handlers_namespace.rs"),
+    include_str!("../../src/http/handlers_query.rs"),
+    include_str!("../../src/http/handlers_store.rs"),
+    include_str!("../../src/http/handlers_uploads.rs"),
+];
 
 #[test]
 fn openapi_static_file_is_current() {
@@ -253,6 +263,23 @@ fn openapi_operation_ids_are_the_frozen_public_registry() {
                 .expect("OpenAPI operation has an operationId")
         })
         .collect::<Vec<_>>();
+    let path_macro_count = OPENAPI_PATH_SOURCES
+        .iter()
+        .map(|source| source.matches("utoipa::path(").count())
+        .sum::<usize>();
+    let explicit_operation_id_count = OPENAPI_PATH_SOURCES
+        .iter()
+        .map(|source| source.matches("operation_id = \"").count())
+        .sum::<usize>();
+    assert_eq!(
+        explicit_operation_id_count, path_macro_count,
+        "every utoipa path macro must declare an explicit operation id"
+    );
+    assert_eq!(
+        path_macro_count,
+        operation_ids.len(),
+        "every registered OpenAPI operation must have one documented path macro"
+    );
     let unique_operation_ids = operation_ids.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         unique_operation_ids.len(),
@@ -280,8 +307,12 @@ fn openapi_operation_ids_are_the_frozen_public_registry() {
             "gc_grep_index",
             "get_file_bytes",
             "get_file_revision_bytes_by_inode",
+            "get_grep_index_status",
+            "get_metrics",
+            "get_namespace",
+            "get_namespace_diagnostics",
+            "get_upload_status",
             "grep",
-            "grep_index_status",
             "health",
             "list_changes",
             "list_checkpoints",
@@ -290,13 +321,9 @@ fn openapi_operation_ids_are_the_frozen_public_registry() {
             "list_path_entries",
             "list_trash",
             "maintenance_step",
-            "namespace_diagnostics",
-            "namespace_status",
             "probe_store",
-            "read_upload_status",
             "readiness",
             "release_checkpoint",
-            "serve_metrics",
             "sign_upload_parts",
             "stat_inode",
             "stat_path",
@@ -313,7 +340,7 @@ fn openapi_publishes_namespace_diagnostics_in_the_admin_plane() {
     )
     .expect("parse openapi json");
     let operation = &spec["paths"]["/v0/admin/namespaces/{namespace_id}/diagnostics"]["get"];
-    assert_eq!(operation["operationId"], "namespace_diagnostics");
+    assert_eq!(operation["operationId"], "get_namespace_diagnostics");
     assert_eq!(operation["tags"], serde_json::json!(["admin"]));
     assert_eq!(
         operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],

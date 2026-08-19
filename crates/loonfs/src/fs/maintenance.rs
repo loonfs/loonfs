@@ -150,17 +150,17 @@ impl FsAdmin {
     /// Returns namespace state and storage details used by maintenance.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.namespace_diagnostics",
+        name = "loonfs.get_namespace_diagnostics",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "namespace_diagnostics",
+            operation = "get_namespace_diagnostics",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn namespace_diagnostics(
+    pub async fn get_namespace_diagnostics(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceDiagnostics> {
@@ -210,7 +210,7 @@ impl FsAdmin {
                 .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
         }
         let collects_only = plan.gc.is_some() && plan.metadata.is_none() && !plan.advance_retention;
-        let status_before = match self.namespace_diagnostics(namespace_id).await {
+        let status_before = match self.get_namespace_diagnostics(namespace_id).await {
             Ok(status) => status,
             // A tombstoned namespace keeps reclaimable derived state — WAL
             // segments, tables, manifests, checkpoint records — until GC

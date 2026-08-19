@@ -1770,7 +1770,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
         })
         .expect("valid client config");
         assert_api_error(
-            client.namespace_status(&namespace_id("demo")).await,
+            client.get_namespace(&namespace_id("demo")).await,
             401,
             "unauthorized",
             Some("missing or invalid bearer token"),

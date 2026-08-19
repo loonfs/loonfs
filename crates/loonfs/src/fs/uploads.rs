@@ -421,17 +421,17 @@ impl FsWriter {
     /// Reads one upload session, with a fresh receipt when it is completed.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.read_upload_status",
+        name = "loonfs.get_upload_status",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "read_upload_status",
+            operation = "get_upload_status",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn read_upload_status(
+    pub async fn get_upload_status(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -439,7 +439,7 @@ impl FsWriter {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
-            .read_upload_status(upload_id)
+            .get_upload_status(upload_id)
             .await?)
     }
 }

@@ -152,7 +152,7 @@ impl MaintenanceJob for MetadataJob {
         // debt has no comparably cheap question, and it needs none: a
         // publishing unit concludes `Progressed`, so a backlog is folded by
         // the run that found it rather than left for a sweep.
-        match admin.namespace_diagnostics(namespace_id).await {
+        match admin.get_namespace_diagnostics(namespace_id).await {
             Ok(status) => {
                 let threshold = MetadataMaintenanceOptions::default().max_wal_tail_segments;
                 Ok(if status.wal_tail_segments >= threshold.get() {

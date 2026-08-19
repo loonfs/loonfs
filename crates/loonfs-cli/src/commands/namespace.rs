@@ -59,7 +59,7 @@ async fn run_namespace_show(
         .namespace;
     let namespace = resolved
         .target
-        .namespace_status(&namespace_id)
+        .get_namespace(&namespace_id)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
@@ -218,7 +218,7 @@ pub(crate) async fn run_namespace_use(
 
     resolved
         .target
-        .namespace_status(&namespace_id)
+        .get_namespace(&namespace_id)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 

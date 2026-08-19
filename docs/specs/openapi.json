@@ -45,7 +45,7 @@
         ],
         "summary": "Scrape metrics",
         "description": "Returns this process's metrics in Prometheus text exposition format 0.0.4. Unlike `/health` and `/readiness`, the route requires the deployment's bearer token.",
-        "operationId": "serve_metrics",
+        "operationId": "get_metrics",
         "responses": {
           "200": {
             "description": "Prometheus text exposition",
@@ -376,7 +376,7 @@
         ],
         "summary": "Get namespace diagnostics",
         "description": "Returns namespace state together with the current manifest and visible WAL tail.",
-        "operationId": "namespace_diagnostics",
+        "operationId": "get_namespace_diagnostics",
         "parameters": [
           {
             "name": "namespace_id",
@@ -452,7 +452,7 @@
         ],
         "summary": "Read the grep index's lifecycle",
         "description": "Reports where the namespace's grep index is: `disabled`, `backfilling` with the sequence it walks toward and how far the walk got, or `active` with the watermark it has built through. One grep root read, no side effects. A namespace that never enabled the index reads as `disabled`. Requires this deployment to maintain the grep index.",
-        "operationId": "grep_index_status",
+        "operationId": "get_grep_index_status",
         "parameters": [
           {
             "name": "namespace_id",
@@ -1066,7 +1066,7 @@
         ],
         "summary": "Get namespace",
         "description": "Returns the current head and retention state for a namespace.",
-        "operationId": "namespace_status",
+        "operationId": "get_namespace",
         "parameters": [
           {
             "name": "namespace_id",
@@ -2856,7 +2856,7 @@
         ],
         "summary": "Read upload session",
         "description": "Reads one upload session. A completed session answers with a freshly minted content token, so a client that lost a commit response can commit again without re-uploading anything.",
-        "operationId": "read_upload_status",
+        "operationId": "get_upload_status",
         "parameters": [
           {
             "name": "namespace_id",

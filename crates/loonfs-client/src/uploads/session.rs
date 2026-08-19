@@ -230,7 +230,7 @@ impl Client {
     /// A completed session returns its content reference and a fresh content
     /// token. A caller that kept the upload id can therefore recover from a
     /// lost completion response without uploading the content again.
-    pub async fn read_upload_status(
+    pub async fn get_upload_status(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
