@@ -15,6 +15,109 @@ enum Value {
     Object(Map),
 }
 
+/// Public operation IDs are stable because generated SDKs use them as method
+/// names. Keep this registry sorted so changes are easy to review.
+pub(crate) const OPENAPI_OPERATION_IDS: &[&str] = &[
+    "abort_upload",
+    "apply_commit",
+    "begin_download",
+    "begin_download_by_inode",
+    "begin_upload",
+    "capabilities",
+    "complete_upload",
+    "create_checkpoint",
+    "create_namespace",
+    "delete_namespace",
+    "disable_grep_index",
+    "enable_grep_index",
+    "fork_namespace",
+    "gc_grep_index",
+    "get_file_bytes",
+    "get_file_revision_bytes_by_inode",
+    "get_grep_index_status",
+    "get_metrics",
+    "get_namespace",
+    "get_namespace_diagnostics",
+    "get_upload_status",
+    "grep",
+    "health",
+    "list_changes",
+    "list_checkpoints",
+    "list_file_revisions",
+    "list_file_revisions_by_inode",
+    "list_path_entries",
+    "list_trash",
+    "maintenance_step",
+    "probe_store",
+    "readiness",
+    "release_checkpoint",
+    "sign_upload_parts",
+    "stat_inode",
+    "stat_path",
+    "upload_content",
+];
+
+/// Retry behavior published for generated SDKs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RetryClass {
+    Safe,
+    Replay,
+    Verify,
+    NewAttempt,
+}
+
+impl RetryClass {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Safe => "safe",
+            Self::Replay => "replay",
+            Self::Verify => "verify",
+            Self::NewAttempt => "new_attempt",
+        }
+    }
+}
+
+/// One retry classification for every public operation ID.
+pub(crate) const OPERATION_RETRY_CLASSES: &[(&str, RetryClass)] = &[
+    ("abort_upload", RetryClass::Safe),
+    ("apply_commit", RetryClass::Replay),
+    ("begin_download", RetryClass::Safe),
+    ("begin_download_by_inode", RetryClass::Safe),
+    ("begin_upload", RetryClass::NewAttempt),
+    ("capabilities", RetryClass::Safe),
+    ("complete_upload", RetryClass::Verify),
+    ("create_checkpoint", RetryClass::NewAttempt),
+    ("create_namespace", RetryClass::NewAttempt),
+    ("delete_namespace", RetryClass::NewAttempt),
+    ("disable_grep_index", RetryClass::Safe),
+    ("enable_grep_index", RetryClass::Safe),
+    ("fork_namespace", RetryClass::NewAttempt),
+    ("gc_grep_index", RetryClass::NewAttempt),
+    ("get_file_bytes", RetryClass::Safe),
+    ("get_file_revision_bytes_by_inode", RetryClass::Safe),
+    ("get_grep_index_status", RetryClass::Safe),
+    ("get_metrics", RetryClass::Safe),
+    ("get_namespace", RetryClass::Safe),
+    ("get_namespace_diagnostics", RetryClass::Safe),
+    ("get_upload_status", RetryClass::Safe),
+    ("grep", RetryClass::Safe),
+    ("health", RetryClass::Safe),
+    ("list_changes", RetryClass::Safe),
+    ("list_checkpoints", RetryClass::Safe),
+    ("list_file_revisions", RetryClass::Safe),
+    ("list_file_revisions_by_inode", RetryClass::Safe),
+    ("list_path_entries", RetryClass::Safe),
+    ("list_trash", RetryClass::Safe),
+    ("maintenance_step", RetryClass::NewAttempt),
+    ("probe_store", RetryClass::NewAttempt),
+    ("readiness", RetryClass::Safe),
+    ("release_checkpoint", RetryClass::Safe),
+    ("sign_upload_parts", RetryClass::Safe),
+    ("stat_inode", RetryClass::Safe),
+    ("stat_path", RetryClass::Safe),
+    ("upload_content", RetryClass::Safe),
+];
+
 impl Value {
     fn get(&self, name: &str) -> Option<&Self> {
         self.as_object()?.get(name)
@@ -57,7 +160,62 @@ pub(crate) fn openapi_json_pretty(
     let mut document = serde_json::from_str(&derived)?;
     normalize_optional_schemas(&mut document);
     add_union_discriminators(&mut document);
+    add_operation_retry_classes(&mut document);
     serde_json::to_string_pretty(&document)
+}
+
+/// Publishes the retry rule associated with each stable operation ID.
+fn add_operation_retry_classes(document: &mut Value) {
+    assert_eq!(
+        OPENAPI_OPERATION_IDS.len(),
+        OPERATION_RETRY_CLASSES.len(),
+        "the operation ID registry and retry classification table differ in length"
+    );
+    for (registered, (classified, _)) in OPENAPI_OPERATION_IDS
+        .iter()
+        .zip(OPERATION_RETRY_CLASSES.iter())
+    {
+        assert_eq!(
+            registered, classified,
+            "the operation ID registry and retry classification table differ"
+        );
+    }
+
+    let paths = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("paths"))
+        .and_then(Value::as_object_mut)
+        .expect("OpenAPI document has no paths object");
+
+    for path_item in paths.values_mut() {
+        let path_item = path_item
+            .as_object_mut()
+            .expect("OpenAPI path item is not an object");
+        for method in ["get", "post", "put", "delete", "patch"] {
+            let Some(operation) = path_item.get_mut(method) else {
+                continue;
+            };
+            let operation = operation
+                .as_object_mut()
+                .expect("OpenAPI operation is not an object");
+            let operation_id = operation
+                .get("operationId")
+                .and_then(Value::as_str)
+                .expect("OpenAPI operation has no operationId");
+            let retry_class = OPERATION_RETRY_CLASSES
+                .iter()
+                .find_map(|(candidate, retry_class)| {
+                    (*candidate == operation_id).then_some(*retry_class)
+                })
+                .unwrap_or_else(|| {
+                    panic!("OpenAPI operation `{operation_id}` has no retry classification")
+                });
+            operation.insert(
+                "x-loonfs-retry".to_owned(),
+                Value::String(retry_class.as_str().to_owned()),
+            );
+        }
+    }
 }
 
 /// Removes `null` from schemas for values that are omitted when absent.
