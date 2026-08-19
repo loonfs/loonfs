@@ -396,7 +396,7 @@ async fn method_not_allowed() -> ApiResponseError {
         get,
         operation_id = "health",
         path = "/health",
-        tag = "health",
+        tag = "system",
         summary = "Check health",
         description = "Returns `ok` when the server is running and can accept requests.",
         security(()),
@@ -416,7 +416,7 @@ async fn health() -> &'static str {
         get,
         operation_id = "readiness",
         path = "/readiness",
-        tag = "health",
+        tag = "system",
         summary = "Check readiness",
         description = "Returns `ready` while the server admits new work. Once shutdown \
                        begins and publisher admission closes, answers 503 `shutting_down` \
@@ -454,7 +454,7 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
         get,
         operation_id = "get_metrics",
         path = "/metrics",
-        tag = "health",
+        tag = "system",
         summary = "Scrape metrics",
         description = "Returns this process's metrics in Prometheus text exposition format \
                        0.0.4. Unlike `/health` and `/readiness`, the route requires the \

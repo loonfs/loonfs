@@ -13,7 +13,7 @@
     "/health": {
       "get": {
         "tags": [
-          "health"
+          "system"
         ],
         "summary": "Check health",
         "description": "Returns `ok` when the server is running and can accept requests.",
@@ -42,7 +42,7 @@
     "/metrics": {
       "get": {
         "tags": [
-          "health"
+          "system"
         ],
         "summary": "Scrape metrics",
         "description": "Returns this process's metrics in Prometheus text exposition format 0.0.4. Unlike `/health` and `/readiness`, the route requires the deployment's bearer token.",
@@ -78,7 +78,7 @@
     "/readiness": {
       "get": {
         "tags": [
-          "health"
+          "system"
         ],
         "summary": "Check readiness",
         "description": "Returns `ready` while the server admits new work. Once shutdown begins and publisher admission closes, answers 503 `shutting_down` so load balancers can drain the instance. `/health` stays the liveness probe: it only reports that the process is up.",
@@ -7051,7 +7051,7 @@
   ],
   "tags": [
     {
-      "name": "health",
+      "name": "system",
       "description": "Server health"
     },
     {

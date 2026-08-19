@@ -174,7 +174,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     security(("bearer_auth" = [])),
     modifiers(&BearerAuth),
     tags(
-        (name = "health", description = "Server health"),
+        (name = "system", description = "Server health"),
         (name = "capabilities", description = "Capability discovery"),
         (name = "namespaces", description = "Namespace lifecycle and status"),
         (name = "filesystem", description = "Path-oriented filesystem APIs"),
