@@ -1,9 +1,9 @@
 //! Static OpenAPI document assembly for the v0 HTTP API.
 //!
-//! The `#[utoipa::path]` operation metadata lives on the handlers
-//! themselves; this module registers those operations and the schema set
-//! into one document. Every path macro declares its operation id explicitly,
-//! so renaming a handler alone does not change the published id.
+//! Handlers define their own `#[utoipa::path]` metadata. This module combines
+//! those operations and their schemas into one document. Each handler sets an
+//! explicit operation ID, so changing its Rust function name does not rename
+//! the generated SDK method.
 
 use loonfs_api::ChangeSeq;
 use loonfs_api::{

@@ -237,8 +237,8 @@ fn openapi_documents_current_server_paths() {
 }
 
 #[test]
-fn openapi_operation_ids_are_the_frozen_public_registry() {
-    const REGISTRY_MESSAGE: &str = "the operationId registry is a frozen public contract; record any deliberate rename in crates/loonfs-server/tests/it/openapi.rs::openapi_operation_ids_are_the_frozen_public_registry";
+fn openapi_operation_ids_match_the_public_registry() {
+    const REGISTRY_MESSAGE: &str = "operation IDs define generated SDK method names; update crates/loonfs-server/tests/it/openapi.rs::openapi_operation_ids_match_the_public_registry only for a deliberate public rename";
 
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -273,12 +273,12 @@ fn openapi_operation_ids_are_the_frozen_public_registry() {
         .sum::<usize>();
     assert_eq!(
         explicit_operation_id_count, path_macro_count,
-        "every utoipa path macro must declare an explicit operation id"
+        "every utoipa path macro must set an explicit operation ID"
     );
     assert_eq!(
         path_macro_count,
         operation_ids.len(),
-        "every registered OpenAPI operation must have one documented path macro"
+        "the registered operations and documented path macros must match"
     );
     let unique_operation_ids = operation_ids.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(

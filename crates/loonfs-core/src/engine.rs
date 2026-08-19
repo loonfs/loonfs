@@ -802,9 +802,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Reads an upload session. For a completed upload, it also creates a new
-    /// receipt so the caller can retry publication without uploading the content
-    /// again.
+    /// Returns an upload session. Completed uploads include a new receipt so
+    /// the caller can retry publication without uploading the content again.
     pub async fn get_upload_status(
         &self,
         upload_id: &UploadId,

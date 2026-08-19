@@ -1065,7 +1065,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     let (status, receipt) = engine
         .get_upload_status(upload.upload_id())
         .await
-        .expect("read upload status");
+        .expect("get upload status");
     match status.status {
         UploadSessionStatus::Completed { content_ref, .. } => {
             assert_eq!(content_ref, staged.content_ref);

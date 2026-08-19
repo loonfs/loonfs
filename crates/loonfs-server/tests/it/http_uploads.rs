@@ -618,7 +618,7 @@ fn get_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> Uplo
         ))
         .set("authorization", "Bearer test-token")
         .call()
-        .expect("read upload status");
+        .expect("get upload status");
     serde_json::from_reader(response.into_reader()).expect("decode upload status")
 }
 

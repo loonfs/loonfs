@@ -790,8 +790,8 @@ mod completion_body_tests {
         operation_id = "get_upload_status",
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
-        summary = "Read upload session",
-        description = "Reads one upload session. A completed session answers with a freshly minted content token, so a client that lost a commit response can commit again without re-uploading anything.",
+        summary = "Get upload session",
+        description = "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")

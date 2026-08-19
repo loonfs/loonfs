@@ -1213,8 +1213,7 @@ impl AbandonedUpload {
     }
 }
 
-/// Reads an upload session and returns a fresh receipt when the session is
-/// completed.
+/// Returns an upload session and a new receipt when the upload is complete.
 ///
 /// A caller that lost the original completion response can recover the
 /// receipt without uploading the content again.

@@ -442,12 +442,10 @@ async fn readiness(State(state): State<AppState>) -> Result<&'static str, ApiRes
 /// Content type of the Prometheus text exposition format this server emits.
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 
-/// Renders this process's metrics.
+/// Returns this process's metrics in Prometheus text format.
 ///
-/// Authorized like every other route, unlike `/health` and `/readiness`:
-/// those report whether the process is up, while this reports what it has
-/// been doing, and a deployment's traffic shape is not public. Scrapers send
-/// the same bearer token clients do.
+/// Unlike `/health` and `/readiness`, this route requires authentication
+/// because its output describes deployment activity.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(

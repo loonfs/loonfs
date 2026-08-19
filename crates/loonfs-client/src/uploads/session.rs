@@ -225,7 +225,7 @@ impl Client {
             .await
     }
 
-    /// Reads one upload session back.
+    /// Returns the current state of an upload session.
     ///
     /// A completed session returns its content reference and a fresh content
     /// token. A caller that kept the upload id can therefore recover from a

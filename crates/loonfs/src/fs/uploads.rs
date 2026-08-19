@@ -418,7 +418,7 @@ impl FsWriter {
         Ok(self.engine(namespace_id).abort_upload(upload_id).await?)
     }
 
-    /// Reads one upload session, with a fresh receipt when it is completed.
+    /// Returns an upload session and a new receipt when the upload is complete.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.get_upload_status",

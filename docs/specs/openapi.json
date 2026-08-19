@@ -450,8 +450,8 @@
         "tags": [
           "admin"
         ],
-        "summary": "Read the grep index's lifecycle",
-        "description": "Reports where the namespace's grep index is: `disabled`, `backfilling` with the sequence it walks toward and how far the walk got, or `active` with the watermark it has built through. One grep root read, no side effects. A namespace that never enabled the index reads as `disabled`. Requires this deployment to maintain the grep index.",
+        "summary": "Get grep index status",
+        "description": "Returns whether the namespace's grep index is `disabled`, `backfilling`, or `active`, including build progress when available. A namespace that has never enabled the index is `disabled`. This operation requires a deployment that maintains grep indexes and does not change the index.",
         "operationId": "get_grep_index_status",
         "parameters": [
           {
@@ -466,7 +466,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The index's lifecycle and bookkeeping",
+            "description": "Grep index status and build progress",
             "content": {
               "application/json": {
                 "schema": {
@@ -2854,8 +2854,8 @@
         "tags": [
           "uploads"
         ],
-        "summary": "Read upload session",
-        "description": "Reads one upload session. A completed session answers with a freshly minted content token, so a client that lost a commit response can commit again without re-uploading anything.",
+        "summary": "Get upload session",
+        "description": "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
         "operationId": "get_upload_status",
         "parameters": [
           {

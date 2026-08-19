@@ -278,7 +278,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
         "a store failure must not delete the client's object"
     );
     let (status, _) = block_on(fs.writer.get_upload_status(&namespace_id, &begin.upload_id))
-        .expect("read upload status");
+        .expect("get upload status");
     assert!(
         matches!(status.status, UploadSessionStatus::Open { .. }),
         "a store failure must not end the session"
