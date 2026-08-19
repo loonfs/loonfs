@@ -28,6 +28,7 @@ fs4.workspace = true
 futures.workspace = true
 http-body.workspace = true
 http.workspace = true
+indexmap.workspace = true
 loonfs-api.workspace = true
 loonfs.workspace = true
 loonfs-grep.workspace = true

@@ -6,8 +6,8 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{
     v0::{
-        BeginUploadRequest, FilesystemChange, UploadMode, UploadSessionResponse,
-        UploadSessionStatus,
+        BeginUploadRequest, CompleteUploadRequest, FilesystemChange, UploadMode,
+        UploadSessionResponse, UploadSessionStatus,
     },
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
     DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
@@ -108,7 +108,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stored_proxied_mode_rejects_multipart_and_retired_completion_fields_precisely() {
+async fn stored_proxied_mode_rejects_other_tags_and_retired_completion_fields_precisely() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -135,14 +135,17 @@ async fn stored_proxied_mode_rejects_multipart_and_retired_completion_fields_pre
     );
     for (body, wrong) in [
         (
-            r#"{"content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"parts":[]}"#,
-            "unknown field `content`",
+            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"parts":[]}"#,
+            "completion request mode `direct_multipart` does not match stored upload mode `service_proxied`",
         ),
         (
-            r#"{"completion":"content_ref"}"#,
+            r#"{"mode":"service_proxied","completion":"content_ref"}"#,
             "unknown field `completion`",
         ),
-        (r#"{"content_ref":{}}"#, "unknown field `content_ref`"),
+        (
+            r#"{"mode":"service_proxied","content_ref":{}}"#,
+            "unknown field `content_ref`",
+        ),
     ] {
         let result = raw_agent()
             .post(&completion_url)
@@ -163,7 +166,6 @@ async fn stored_proxied_mode_rejects_multipart_and_retired_completion_fields_pre
             "completion error should name `{wrong}` verbatim: {}",
             error.message
         );
-        assert!(error.message.contains("service_proxied completion"));
     }
 
     harness
@@ -173,9 +175,13 @@ async fn stored_proxied_mode_rejects_multipart_and_retired_completion_fields_pre
         .expect("stage content");
     harness
         .client
-        .complete_upload(&namespace, begin.upload_id())
+        .complete_upload(
+            &namespace,
+            begin.upload_id(),
+            &CompleteUploadRequest::ServiceProxied {},
+        )
         .await
-        .expect("empty completion succeeds for proxied mode");
+        .expect("tagged completion succeeds for proxied mode");
     harness.server.abort();
 }
 
@@ -216,7 +222,8 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
     );
 
     let mut just_under = vec![b' '; limit - 1];
-    just_under[..2].copy_from_slice(b"{}");
+    let tagged_body = br#"{"mode":"service_proxied"}"#;
+    just_under[..tagged_body.len()].copy_from_slice(tagged_body);
     let result = raw_agent()
         .post(&completion_url)
         .set("authorization", "Bearer test-token")
@@ -445,7 +452,11 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     // deletion will.
     let completion = harness
         .client
-        .complete_upload(&namespace, open.upload_id())
+        .complete_upload(
+            &namespace,
+            open.upload_id(),
+            &CompleteUploadRequest::ServiceProxied {},
+        )
         .await
         .expect_err("an aborted session cannot complete");
     assert_eq!(completion.code(), Some(ErrorCode::UploadNotFound));
@@ -596,7 +607,11 @@ async fn complete_upload_session(
         .expect("upload content");
     let completed = harness
         .client
-        .complete_upload(namespace, begin.upload_id())
+        .complete_upload(
+            namespace,
+            begin.upload_id(),
+            &CompleteUploadRequest::ServiceProxied {},
+        )
         .await
         .expect("complete upload");
     assert_eq!(completed.mode, UploadMode::ServiceProxied);

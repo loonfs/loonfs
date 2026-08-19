@@ -22,7 +22,7 @@ mod tests;
 mod tls;
 
 #[cfg(feature = "openapi")]
-pub use self::openapi::{openapi_document, openapi_json_pretty};
+pub use self::openapi::openapi_document;
 pub use self::serve::{
     app, app_with_store, check_config, probe_store, serve, serve_with_shutdown, ServeError,
 };

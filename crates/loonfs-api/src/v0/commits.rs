@@ -164,6 +164,7 @@ pub enum FilesystemChange {
         /// Directory binding removed by the deletion, when the delete
         /// recorded one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         deleted_direntry: Option<DeletedDirentry>,
     },
     /// A deleted inode was recovered and re-bound.
@@ -242,6 +243,7 @@ pub struct ChangesResponse {
     pub through_seq: ChangeSeq,
     /// Cursor to request when another page remains, or `None` at `through_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_after_seq: Option<ChangeSeq>,
     /// Logical commits after `after_seq`, ordered by ascending namespace sequence.
     pub changes: Vec<CommittedChange>,

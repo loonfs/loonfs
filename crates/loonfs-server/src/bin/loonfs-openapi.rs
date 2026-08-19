@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+#[path = "loonfs-openapi/openapi_postprocess.rs"]
+mod openapi_postprocess;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args_os()
         .nth(1)
@@ -14,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut json = loonfs_server::openapi_json_pretty()?;
+    let mut json = openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())?;
     json.push('\n');
     std::fs::write(path, json)?;
     Ok(())

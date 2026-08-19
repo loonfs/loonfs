@@ -26,6 +26,7 @@ pub struct GrepRequest {
     /// Restrict matches to files under this complete absolute path, resolved
     /// to a directory inode before candidates are filtered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub path_prefix: Option<AbsolutePath>,
     /// Resume cursor from a previous page. The cursor resumes strictly
     /// after the last candidate the issuing page finished scanning and is
@@ -147,7 +148,7 @@ pub enum GrepIndexLifecycle {
         )]
         #[cfg_attr(
             feature = "openapi",
-            schema(schema_with = crate::public_inode_id::optional_schema)
+            schema(schema_with = crate::public_inode_id::schema)
         )]
         cursor_inode_id: Option<InodeId>,
         /// Checkpoint pinning the state being walked.

@@ -50,14 +50,16 @@ pub struct AuthoritativePathEntry {
     )]
     #[cfg_attr(
         feature = "openapi",
-        schema(schema_with = crate::public_inode_id::optional_schema)
+        schema(schema_with = crate::public_inode_id::schema)
     )]
     pub parent_inode_id: Option<InodeId>,
     /// Stored display name for this path component, absent for the nameless root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub display_name: Option<DisplayName>,
     /// The inode's attribute projection, when requested.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub attributes: Option<AttributesProjection>,
 }
 
@@ -165,6 +167,7 @@ pub struct AttributesProjection {
     /// Actor responsible for the latest attribute update. This is `None` for
     /// the initial empty state at revision 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub attributes_updated_by: Option<ActorRef>,
     /// Time of the latest attribute update, in Unix milliseconds. This is
     /// `None` for the initial empty state at revision 0.
@@ -239,14 +242,16 @@ pub struct TrashEntry {
     )]
     #[cfg_attr(
         feature = "openapi",
-        schema(schema_with = crate::public_inode_id::optional_schema)
+        schema(schema_with = crate::public_inode_id::schema)
     )]
     pub parent_inode_id: Option<InodeId>,
     /// Canonical key of the deleted binding, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub name_key: Option<NameKey>,
     /// User-facing spelling of the deleted binding, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub display_name: Option<DisplayName>,
 }
 

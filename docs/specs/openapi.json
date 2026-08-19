@@ -736,14 +736,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/GrepGcRequest"
-                  }
-                ]
+                "$ref": "#/components/schemas/GrepGcRequest"
               }
             }
           }
@@ -3035,7 +3028,7 @@
           "uploads"
         ],
         "summary": "Complete upload",
-        "description": "Completes an upload using the body required by its stored mode. Service-proxied and direct-put sessions accept `{}`. Direct-multipart sessions require the content claim and completed parts.",
+        "description": "Completes an upload. The request mode must match the mode used to start the session. Direct-multipart requests also include the content claim and completed parts.",
         "operationId": "complete_upload",
         "parameters": [
           {
@@ -3058,7 +3051,7 @@
           }
         ],
         "requestBody": {
-          "description": "The stored upload mode determines which body is accepted.",
+          "description": "The request mode must match the upload session.",
           "content": {
             "application/json": {
               "schema": {
@@ -3464,15 +3457,8 @@
             "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
           },
           "details": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ErrorDetails",
-                "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
-              }
-            ]
+            "$ref": "#/components/schemas/ErrorDetails",
+            "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
           },
           "feature": {
             "type": [
@@ -3554,15 +3540,8 @@
             "minimum": 0
           },
           "attributes_updated_by": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ActorRef",
-                "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
-              }
-            ]
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
           }
         }
       },
@@ -3573,15 +3552,8 @@
             "description": "File-or-directory classification and its kind-specific payload."
           },
           {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AttributesProjection",
-                "description": "The inode's attribute projection, when requested."
-              }
-            ]
+            "$ref": "#/components/schemas/AttributesProjection",
+            "description": "The inode's attribute projection, when requested."
           },
           {
             "type": "object",
@@ -3605,15 +3577,8 @@
                 "description": "Actor that created this inode, as supplied by the application."
               },
               "display_name": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/DisplayName",
-                    "description": "Stored display name for this path component, absent for the nameless root."
-                  }
-                ]
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Stored display name for this path component, absent for the nameless root."
               },
               "head_seq": {
                 "$ref": "#/components/schemas/ChangeSeq",
@@ -3630,17 +3595,10 @@
                 "description": "Namespace that was read."
               },
               "parent_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "type": "string",
-                    "description": "Stable inode ID within a namespace",
-                    "example": "ino_123",
-                    "pattern": "^ino_[1-9][0-9]*$"
-                  }
-                ]
+                "type": "string",
+                "description": "Stable inode ID within a namespace",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "path": {
                 "$ref": "#/components/schemas/AbsolutePath",
@@ -3715,7 +3673,14 @@
             }
           }
         ],
-        "description": "Kind-specific metadata for an authoritative path entry."
+        "description": "Kind-specific metadata for an authoritative path entry.",
+        "discriminator": {
+          "propertyName": "inode_kind",
+          "mapping": {
+            "dir": "#/components/schemas/AuthoritativePathEntryKind/oneOf/0",
+            "file": "#/components/schemas/AuthoritativePathEntryKind/oneOf/1"
+          }
+        }
       },
       "BeginDownloadByInodeRequest": {
         "type": "object",
@@ -3769,15 +3734,8 @@
             "description": "Absolute path of the file to read."
           },
           "revision_no": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Revision to read, or `None` for the path's current revision."
-              }
-            ]
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision to read, or `None` for the path's current revision."
           }
         },
         "additionalProperties": false
@@ -3869,20 +3827,21 @@
                 ]
               },
               "multipart": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/DirectMultipartUploadOptions",
-                    "description": "Selects the part geometry; absent takes the server's default.\nA multipart upload claims its content at completion, so nothing\nabout the payload is declared here."
-                  }
-                ]
+                "$ref": "#/components/schemas/DirectMultipartUploadOptions",
+                "description": "Selects the part geometry; absent takes the server's default.\nA multipart upload claims its content at completion, so nothing\nabout the payload is declared here."
               }
             }
           }
         ],
-        "description": "Request to start an upload session, tagged by transport mode.\n\nEach variant contains only fields valid for that transport, so invalid\ncombinations are rejected during decoding. The `mode` field is required."
+        "description": "Request to start an upload session, tagged by transport mode.\n\nEach variant contains only fields valid for that transport, so invalid\ncombinations are rejected during decoding. The `mode` field is required.",
+        "discriminator": {
+          "propertyName": "mode",
+          "mapping": {
+            "service_proxied": "#/components/schemas/BeginUploadRequest/oneOf/0",
+            "direct_put": "#/components/schemas/BeginUploadRequest/oneOf/1",
+            "direct_multipart": "#/components/schemas/BeginUploadRequest/oneOf/2"
+          }
+        }
       },
       "BeginUploadResponse": {
         "oneOf": [
@@ -3975,7 +3934,15 @@
             }
           }
         ],
-        "description": "Response to starting an upload session, tagged by transport mode.\n\nEach variant contains only the fields needed by that transport. Unknown\nresponse fields are accepted for forward compatibility."
+        "description": "Response to starting an upload session, tagged by transport mode.\n\nEach variant contains only the fields needed by that transport. Unknown\nresponse fields are accepted for forward compatibility.",
+        "discriminator": {
+          "propertyName": "mode",
+          "mapping": {
+            "service_proxied": "#/components/schemas/BeginUploadResponse/oneOf/0",
+            "direct_put": "#/components/schemas/BeginUploadResponse/oneOf/1",
+            "direct_multipart": "#/components/schemas/BeginUploadResponse/oneOf/2"
+          }
+        }
       },
       "CapabilityDocument": {
         "type": "object",
@@ -4053,15 +4020,8 @@
             "description": "Namespace whose ordered commit stream was read."
           },
           "next_after_seq": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Cursor to request when another page remains, or `None` at `through_seq`."
-              }
-            ]
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Cursor to request when another page remains, or `None` at `through_seq`."
           },
           "through_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -4164,7 +4124,14 @@
             }
           }
         ],
-        "description": "Who a checkpoint record answers to, as the record durably records it.\n\nThe two owners have different releases, so a listing that names the\nowner also says which records the release endpoint will act on: a user\npin is released by id, and a fork lease is released by deleting the\ntarget namespace it protects."
+        "description": "Who a checkpoint record answers to, as the record durably records it.\n\nThe two owners have different releases, so a listing that names the\nowner also says which records the release endpoint will act on: a user\npin is released by id, and a fork lease is released by deleting the\ntarget namespace it protects.",
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "user": "#/components/schemas/CheckpointOwnerSummary/oneOf/0",
+            "fork": "#/components/schemas/CheckpointOwnerSummary/oneOf/1"
+          }
+        }
       },
       "Checksum": {
         "type": "object",
@@ -4309,43 +4276,79 @@
           }
         }
       },
-      "CompleteKnownContentUploadRequest": {
-        "type": "object",
-        "description": "Empty request used when the upload session already contains the content\nreference.",
-        "additionalProperties": false
-      },
-      "CompleteMultipartUploadRequest": {
-        "type": "object",
-        "description": "Information required to complete a `direct_multipart` upload.",
-        "required": [
-          "content",
-          "parts"
-        ],
-        "properties": {
-          "content": {
-            "$ref": "#/components/schemas/UploadContentClaim",
-            "description": "Expected length and checksum of the assembled object."
-          },
-          "parts": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CompletedUploadPart"
-            },
-            "description": "Uploaded parts in ascending part order."
-          }
-        },
-        "additionalProperties": false
-      },
       "CompleteUploadRequest": {
         "oneOf": [
           {
-            "$ref": "#/components/schemas/CompleteKnownContentUploadRequest"
+            "type": "object",
+            "title": "CompleteUploadServiceProxied",
+            "description": "Complete a service-proxied upload.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "service_proxied"
+                ]
+              }
+            }
           },
           {
-            "$ref": "#/components/schemas/CompleteMultipartUploadRequest"
+            "type": "object",
+            "title": "CompleteUploadDirectPut",
+            "description": "Complete a direct-PUT upload.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "direct_put"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "CompleteUploadDirectMultipart",
+            "description": "Complete a direct multipart upload.",
+            "required": [
+              "content",
+              "parts",
+              "mode"
+            ],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/UploadContentClaim",
+                "description": "Expected length and checksum of the assembled object."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "direct_multipart"
+                ]
+              },
+              "parts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CompletedUploadPart"
+                },
+                "description": "Uploaded parts in ascending part order."
+              }
+            }
           }
         ],
-        "description": "The upload session determines the accepted body. Service-proxied and direct-put sessions use an empty object. Direct-multipart sessions provide the content claim and completed parts."
+        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Service-proxied and\ndirect-PUT uploads need no other fields. Direct multipart uploads also\ninclude the completed parts and the expected content details.",
+        "discriminator": {
+          "propertyName": "mode",
+          "mapping": {
+            "service_proxied": "#/components/schemas/CompleteUploadRequest/oneOf/0",
+            "direct_put": "#/components/schemas/CompleteUploadRequest/oneOf/1",
+            "direct_multipart": "#/components/schemas/CompleteUploadRequest/oneOf/2"
+          }
+        }
       },
       "CompletedUploadPart": {
         "type": "object",
@@ -4619,15 +4622,8 @@
             "minimum": 0
           },
           "active_deletion_seq": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Deletion generation actually active for the inode."
-              }
-            ]
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Deletion generation actually active for the inode."
           },
           "active_writer": {
             "type": [
@@ -4637,70 +4633,28 @@
             "description": "Writer id recorded by the current epoch's acquirer, when the head\nrecorded one."
           },
           "active_writer_epoch": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/WriterEpoch",
-                "description": "Epoch that currently owns the namespace."
-              }
-            ]
+            "$ref": "#/components/schemas/WriterEpoch",
+            "description": "Epoch that currently owns the namespace."
           },
           "actual_attributes_revision_no": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AttributeRevisionNo",
-                "description": "Attribute revision that is actually current for the inode."
-              }
-            ]
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "Attribute revision that is actually current for the inode."
           },
           "actual_head_seq": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Head sequence the namespace was actually at, which is what a caller\nthat still means to delete it retries against."
-              }
-            ]
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Head sequence the namespace was actually at, which is what a caller\nthat still means to delete it retries against."
           },
           "actual_revision_no": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Revision that is actually current; absent when the inode has none."
-              }
-            ]
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision that is actually current; absent when the inode has none."
           },
           "after_seq": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Change-feed cursor the request asked to resume after."
-              }
-            ]
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Change-feed cursor the request asked to resume after."
           },
           "commit_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/CommitId",
-                "description": "Idempotency key of the commit the error concerns."
-              }
-            ]
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Idempotency key of the commit the error concerns."
           },
           "committed_fingerprint": {
             "type": [
@@ -4710,72 +4664,30 @@
             "description": "Semantic identity of the mutation that already landed under that\ncommit id, from the same receipt as `committed_seq` and present\nexactly when it is. A retry recomputes this value from the request it\njust made — see\n[`put_retry_fingerprint`](crate::put_retry_fingerprint) — and equality\nis what proves the two are the same request."
           },
           "committed_seq": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence at which that commit id already landed. Present when the\nfailure was decided against a durable commit receipt, which is what\nholds the sequence; absent when nothing has committed under the id\nyet and two live requests are simply claiming it at once."
-              }
-            ]
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence at which that commit id already landed. Present when the\nfailure was decided against a durable commit receipt, which is what\nholds the sequence; absent when nothing has committed under the id\nyet and two live requests are simply claiming it at once."
           },
           "expected_attributes_revision_no": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AttributeRevisionNo",
-                "description": "Attribute revision the request expected to be current."
-              }
-            ]
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "Attribute revision the request expected to be current."
           },
           "expected_head_seq": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Head sequence a namespace delete required the namespace to still be\nat."
-              }
-            ]
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Head sequence a namespace delete required the namespace to still be\nat."
           },
           "expected_revision_no": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Revision the request expected to be current."
-              }
-            ]
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision the request expected to be current."
           },
           "fenced_epoch": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/WriterEpoch",
-                "description": "Epoch the failing writer session held when it was displaced."
-              }
-            ]
+            "$ref": "#/components/schemas/WriterEpoch",
+            "description": "Epoch the failing writer session held when it was displaced."
           },
           "inode_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              }
-            ]
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           },
           "operation_index": {
             "type": [
@@ -4787,26 +4699,12 @@
             "minimum": 0
           },
           "requested_deletion_seq": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Deletion generation an undelete asked to recover."
-              }
-            ]
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Deletion generation an undelete asked to recover."
           },
           "retention_floor_seq": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Oldest sequence still promised for incremental replay."
-              }
-            ]
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Oldest sequence still promised for incremental replay."
           }
         }
       },
@@ -5029,15 +4927,8 @@
             ],
             "properties": {
               "deleted_direntry": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/DeletedDirentry",
-                    "description": "Directory binding removed by the deletion, when the delete\nrecorded one."
-                  }
-                ]
+                "$ref": "#/components/schemas/DeletedDirentry",
+                "description": "Directory binding removed by the deletion, when the delete\nrecorded one."
               },
               "inode_id": {
                 "type": "string",
@@ -5122,7 +5013,19 @@
             }
           }
         ],
-        "description": "One semantic filesystem change inside a commit.\n\nA commit's events are the operations it applied, in the order it applied\nthem. One request operation can apply several: creating missing parent\ndirectories, or replacing a file by moving over it, each produce an event\nper directory created or file replaced. So a request with three\noperations may report more than three events, and the events stay in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode or\nmaintain its own binding projection from this feed."
+        "description": "One semantic filesystem change inside a commit.\n\nA commit's events are the operations it applied, in the order it applied\nthem. One request operation can apply several: creating missing parent\ndirectories, or replacing a file by moving over it, each produce an event\nper directory created or file replaced. So a request with three\noperations may report more than three events, and the events stay in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode or\nmaintain its own binding projection from this feed.",
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "directory_created": "#/components/schemas/FilesystemChange/oneOf/0",
+            "file_created": "#/components/schemas/FilesystemChange/oneOf/1",
+            "content_changed": "#/components/schemas/FilesystemChange/oneOf/2",
+            "moved": "#/components/schemas/FilesystemChange/oneOf/3",
+            "deleted": "#/components/schemas/FilesystemChange/oneOf/4",
+            "undeleted": "#/components/schemas/FilesystemChange/oneOf/5",
+            "attributes_changed": "#/components/schemas/FilesystemChange/oneOf/6"
+          }
+        }
       },
       "FilesystemOperation": {
         "oneOf": [
@@ -5170,15 +5073,8 @@
                 "description": "Immutable bytes that must be covered by a valid preparation proof."
               },
               "expected_revision_no": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/RevisionNo",
-                    "description": "When set (with `replace` behavior), the put applies only while\nthe file's current revision is still this one; a raced write\nfails the request instead of silently stacking on it, and a\nmissing file answers `path_not_found`."
-                  }
-                ]
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "When set (with `replace` behavior), the put applies only while\nthe file's current revision is still this one; a raced write\nfails the request instead of silently stacking on it, and a\nmissing file answers `path_not_found`."
               },
               "kind": {
                 "type": "string",
@@ -5206,17 +5102,10 @@
                 "description": "Whether a non-empty directory may be tombstoned recursively."
               },
               "expected_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "type": "string",
-                    "description": "Stable inode ID within a namespace",
-                    "example": "ino_123",
-                    "pattern": "^ino_[1-9][0-9]*$"
-                  }
-                ]
+                "type": "string",
+                "description": "Stable inode ID within a namespace",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -5317,15 +5206,8 @@
                 ]
               },
               "path": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/AbsolutePath",
-                    "description": "Optional destination for the restored inode.\n\nWhen absent, the inode is rebound to the parent and name recorded by the\ndeletion. Parent identity, rather than an old path string, keeps this\ncorrect after ancestor renames. An explicit path is required when the\ndeletion recorded no binding."
-                  }
-                ]
+                "$ref": "#/components/schemas/AbsolutePath",
+                "description": "Optional destination for the restored inode.\n\nWhen absent, the inode is rebound to the parent and name recorded by the\ndeletion. Parent identity, rather than an old path string, keeps this\ncorrect after ancestor renames. An explicit path is required when the\ndeletion recorded no binding."
               }
             }
           },
@@ -5365,28 +5247,14 @@
             ],
             "properties": {
               "expected_attributes_revision_no": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/AttributeRevisionNo",
-                    "description": "When set, the update applies only while the inode's attribute\nrevision is still this one. Absent means the update is applied\nover whatever revision is current; either way the write carries\nits own revision guard, so a concurrent update never merges\nsilently."
-                  }
-                ]
+                "$ref": "#/components/schemas/AttributeRevisionNo",
+                "description": "When set, the update applies only while the inode's attribute\nrevision is still this one. Absent means the update is applied\nover whatever revision is current; either way the write carries\nits own revision guard, so a concurrent update never merges\nsilently."
               },
               "expected_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "type": "string",
-                    "description": "Stable inode ID within a namespace",
-                    "example": "ino_123",
-                    "pattern": "^ino_[1-9][0-9]*$"
-                  }
-                ]
+                "type": "string",
+                "description": "Stable inode ID within a namespace",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -5420,7 +5288,20 @@
             }
           }
         ],
-        "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because concurrency guards are optional. A\nmisspelled guard must fail decoding instead of silently becoming `None`\nand allowing an unguarded write. Any future fieldless variant must use\nempty braces so serde also rejects unexpected fields for that variant."
+        "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because concurrency guards are optional. A\nmisspelled guard must fail decoding instead of silently becoming `None`\nand allowing an unguarded write. Any future fieldless variant must use\nempty braces so serde also rejects unexpected fields for that variant.",
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "create_directory": "#/components/schemas/FilesystemOperation/oneOf/0",
+            "put_file": "#/components/schemas/FilesystemOperation/oneOf/1",
+            "delete_path": "#/components/schemas/FilesystemOperation/oneOf/2",
+            "move_path": "#/components/schemas/FilesystemOperation/oneOf/3",
+            "copy_path": "#/components/schemas/FilesystemOperation/oneOf/4",
+            "undelete": "#/components/schemas/FilesystemOperation/oneOf/5",
+            "restore_revision": "#/components/schemas/FilesystemOperation/oneOf/6",
+            "update_attributes": "#/components/schemas/FilesystemOperation/oneOf/7"
+          }
+        }
       },
       "ForkNamespaceRequest": {
         "type": "object",
@@ -5685,17 +5566,10 @@
                 "description": "Checkpoint pinning the state being walked."
               },
               "cursor_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "type": "string",
-                    "description": "Stable inode ID within a namespace",
-                    "example": "ino_123",
-                    "pattern": "^ino_[1-9][0-9]*$"
-                  }
-                ]
+                "type": "string",
+                "description": "Stable inode ID within a namespace",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "status": {
                 "type": "string",
@@ -5736,7 +5610,15 @@
             }
           }
         ],
-        "description": "Where a namespace's grep index is in its lifecycle.\n\nEach status contains only the fields valid for that lifecycle state.\n`Backfilling` reports its target and current position. `Active` reports\nhow far the index has been built. Clients should treat a namespace as\nsearchable only when the index is `Active`."
+        "description": "Where a namespace's grep index is in its lifecycle.\n\nEach status contains only the fields valid for that lifecycle state.\n`Backfilling` reports its target and current position. `Active` reports\nhow far the index has been built. Clients should treat a namespace as\nsearchable only when the index is `Active`.",
+        "discriminator": {
+          "propertyName": "status",
+          "mapping": {
+            "disabled": "#/components/schemas/GrepIndexLifecycle/oneOf/0",
+            "backfilling": "#/components/schemas/GrepIndexLifecycle/oneOf/1",
+            "active": "#/components/schemas/GrepIndexLifecycle/oneOf/2"
+          }
+        }
       },
       "GrepIndexStatusResponse": {
         "allOf": [
@@ -5856,15 +5738,8 @@
             "minimum": 0
           },
           "path_prefix": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Restrict matches to files under this complete absolute path, resolved\nto a directory inode before candidates are filtered."
-              }
-            ]
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Restrict matches to files under this complete absolute path, resolved\nto a directory inode before candidates are filtered."
           },
           "pattern": {
             "type": "string",
@@ -6072,26 +5947,12 @@
             "description": "Advance the retention floor to the flushed manifest head. Nothing\nsurrenders replay history unless this is true."
           },
           "gc": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/GcRequest",
-                "description": "Run one bounded mark-and-sweep garbage-collection pass. Nothing\nsweeps unless this is present."
-              }
-            ]
+            "$ref": "#/components/schemas/GcRequest",
+            "description": "Run one bounded mark-and-sweep garbage-collection pass. Nothing\nsweeps unless this is present."
           },
           "metadata": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/MetadataMaintenanceRequest",
-                "description": "Flush the visible WAL tail into metadata tables, then run one bounded\nreorganization step."
-              }
-            ]
+            "$ref": "#/components/schemas/MetadataMaintenanceRequest",
+            "description": "Flush the visible WAL tail into metadata tables, then run one bounded\nreorganization step."
           }
         },
         "additionalProperties": false
@@ -6105,41 +5966,20 @@
         ],
         "properties": {
           "gc": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/GcResponse",
-                "description": "What the collection pass reclaimed."
-              }
-            ]
+            "$ref": "#/components/schemas/GcResponse",
+            "description": "What the collection pass reclaimed."
           },
           "metadata": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/MetadataMaintenanceResponse",
-                "description": "What the metadata-upkeep action did."
-              }
-            ]
+            "$ref": "#/components/schemas/MetadataMaintenanceResponse",
+            "description": "What the metadata-upkeep action did."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the step ran against."
           },
           "retention": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AdvanceRetentionResponse",
-                "description": "Where the retention floor ended up."
-              }
-            ]
+            "$ref": "#/components/schemas/AdvanceRetentionResponse",
+            "description": "Where the retention floor ended up."
           },
           "status_before": {
             "$ref": "#/components/schemas/NamespaceDiagnostics",
@@ -6227,15 +6067,8 @@
         ],
         "properties": {
           "current_manifest_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ManifestId",
-                "description": "Current manifest pointer recorded by the head."
-              }
-            ]
+            "$ref": "#/components/schemas/ManifestId",
+            "description": "Current manifest pointer recorded by the head."
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -6309,7 +6142,13 @@
             }
           }
         ],
-        "description": "Client-facing direct transfer capability."
+        "description": "Client-facing direct transfer capability.",
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "presigned_url": "#/components/schemas/ObjectTransferAccess/oneOf/0"
+          }
+        }
       },
       "ReleaseCheckpointResponse": {
         "type": "object",
@@ -6430,7 +6269,19 @@
             }
           }
         ],
-        "description": "What the metadata-reorganization part of a maintenance step did.\n\nDeliberately coarse: the run counts and byte budgets a reorganization\nconsumes are engine policy, not a wire contract."
+        "description": "What the metadata-reorganization part of a maintenance step did.\n\nDeliberately coarse: the run counts and byte budgets a reorganization\nconsumes are engine policy, not a wire contract.",
+        "discriminator": {
+          "propertyName": "outcome",
+          "mapping": {
+            "not_needed": "#/components/schemas/ReorganizeStepOutcome/oneOf/0",
+            "unit_published": "#/components/schemas/ReorganizeStepOutcome/oneOf/1",
+            "compaction_started": "#/components/schemas/ReorganizeStepOutcome/oneOf/2",
+            "compaction_running": "#/components/schemas/ReorganizeStepOutcome/oneOf/3",
+            "compaction_at_capacity": "#/components/schemas/ReorganizeStepOutcome/oneOf/4",
+            "compaction_required": "#/components/schemas/ReorganizeStepOutcome/oneOf/5",
+            "superseded": "#/components/schemas/ReorganizeStepOutcome/oneOf/6"
+          }
+        }
       },
       "RetainedCandidates": {
         "type": "object",
@@ -6665,15 +6516,8 @@
             "description": "Commit sequence that identifies this deletion."
           },
           "display_name": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "User-facing spelling of the deleted binding, when recorded."
-              }
-            ]
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "User-facing spelling of the deleted binding, when recorded."
           },
           "inode_id": {
             "type": "string",
@@ -6682,28 +6526,14 @@
             "pattern": "^ino_[1-9][0-9]*$"
           },
           "name_key": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/NameKey",
-                "description": "Canonical key of the deleted binding, when recorded."
-              }
-            ]
+            "$ref": "#/components/schemas/NameKey",
+            "description": "Canonical key of the deleted binding, when recorded."
           },
           "parent_inode_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              }
-            ]
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           }
         }
       },
@@ -6864,15 +6694,8 @@
                 "description": "Verified content selected by this session."
               },
               "content_token": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/ContentToken",
-                    "description": "Fresh proof for a later commit. This is absent after the token\nminting window closes, while `content_ref` remains available."
-                  }
-                ]
+                "$ref": "#/components/schemas/ContentToken",
+                "description": "Fresh proof for a later commit. This is absent after the token\nminting window closes, while `content_ref` remains available."
               },
               "status": {
                 "type": "string",
@@ -6906,7 +6729,15 @@
             }
           }
         ],
-        "description": "Observed state of an upload session.\n\nA session starts as `Open` and ends as either `Completed` or `Aborted`.\nBoth final states are permanent. Reading a completed session issues a new\nreceipt for the durable content, so a lost commit response does not require\nthe content to be uploaded again."
+        "description": "Observed state of an upload session.\n\nA session starts as `Open` and ends as either `Completed` or `Aborted`.\nBoth final states are permanent. Reading a completed session issues a new\nreceipt for the durable content, so a lost commit response does not require\nthe content to be uploaded again.",
+        "discriminator": {
+          "propertyName": "status",
+          "mapping": {
+            "open": "#/components/schemas/UploadSessionStatus/oneOf/0",
+            "completed": "#/components/schemas/UploadSessionStatus/oneOf/1",
+            "aborted": "#/components/schemas/UploadSessionStatus/oneOf/2"
+          }
+        }
       },
       "WalFlushStepOutcome": {
         "oneOf": [
@@ -6991,7 +6822,16 @@
             }
           }
         ],
-        "description": "What the WAL-flush part of a maintenance step did."
+        "description": "What the WAL-flush part of a maintenance step did.",
+        "discriminator": {
+          "propertyName": "outcome",
+          "mapping": {
+            "not_needed": "#/components/schemas/WalFlushStepOutcome/oneOf/0",
+            "flushed": "#/components/schemas/WalFlushStepOutcome/oneOf/1",
+            "superseded": "#/components/schemas/WalFlushStepOutcome/oneOf/2",
+            "race_lost": "#/components/schemas/WalFlushStepOutcome/oneOf/3"
+          }
+        }
       },
       "WriterEpoch": {
         "type": "integer",
@@ -7019,15 +6859,8 @@
                   "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
                 },
                 "details": {
-                  "oneOf": [
-                    {
-                      "type": "null"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ErrorDetails",
-                      "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
-                    }
-                  ]
+                  "$ref": "#/components/schemas/ErrorDetails",
+                  "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
                 },
                 "feature": {
                   "type": [

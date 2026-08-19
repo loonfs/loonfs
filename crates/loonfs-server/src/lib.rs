@@ -14,11 +14,11 @@ pub use config::{
     load_server_config, GrepConfig, GrepMode, LocalCacheConfig, MaintenanceMode,
     RuntimeCacheConfigOverrides, ServerConfig, ServerConfigError, StoreConfig, TlsServerConfig,
 };
+#[cfg(feature = "openapi")]
+pub use http::openapi_document;
 pub use http::{
     app, app_with_store, check_config, probe_store, serve, serve_with_shutdown, ServeError,
     TlsConfigError,
 };
-#[cfg(feature = "openapi")]
-pub use http::{openapi_document, openapi_json_pretty};
 pub use local_cache::FoyerStoredMetadataBlockCache;
 pub use trace::{init_tracing_from_env, TraceInitError};

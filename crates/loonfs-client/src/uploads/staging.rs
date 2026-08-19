@@ -488,7 +488,13 @@ impl Client {
             let _ = self.abort_upload(namespace_id, &upload_id).await;
             return Err(error);
         }
-        let response = self.complete_upload(namespace_id, &upload_id).await?;
+        let response = self
+            .complete_upload(
+                namespace_id,
+                &upload_id,
+                &CompleteUploadRequest::DirectPut {},
+            )
+            .await?;
         Self::staged_from_completion(response)
     }
 
@@ -780,7 +786,13 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> Result<StagedContent> {
-        let response = self.complete_upload(namespace_id, upload_id).await?;
+        let response = self
+            .complete_upload(
+                namespace_id,
+                upload_id,
+                &CompleteUploadRequest::ServiceProxied {},
+            )
+            .await?;
         Self::staged_from_completion(response)
     }
 

@@ -42,6 +42,7 @@ pub struct ApiError {
     /// machine-usable identity (API spec, "Standard error contract"). Boxed
     /// so the rare detailed error does not widen every error-carrying result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub details: Option<Box<ErrorDetails>>,
 }
 
@@ -55,12 +56,14 @@ pub struct ApiError {
 pub struct ErrorDetails {
     /// Idempotency key of the commit the error concerns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub commit_id: Option<CommitId>,
     /// Sequence at which that commit id already landed. Present when the
     /// failure was decided against a durable commit receipt, which is what
     /// holds the sequence; absent when nothing has committed under the id
     /// yet and two live requests are simply claiming it at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub committed_seq: Option<ChangeSeq>,
     /// Semantic identity of the mutation that already landed under that
     /// commit id, from the same receipt as `committed_seq` and present
@@ -77,9 +80,11 @@ pub struct ErrorDetails {
     pub operation_index: Option<u32>,
     /// Epoch the failing writer session held when it was displaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub fenced_epoch: Option<WriterEpoch>,
     /// Epoch that currently owns the namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_writer_epoch: Option<WriterEpoch>,
     /// Writer id recorded by the current epoch's acquirer, when the head
     /// recorded one.
@@ -98,40 +103,50 @@ pub struct ErrorDetails {
     )]
     #[cfg_attr(
         feature = "openapi",
-        schema(schema_with = crate::public_inode_id::optional_schema)
+        schema(schema_with = crate::public_inode_id::schema)
     )]
     pub inode_id: Option<InodeId>,
     /// Revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_revision_no: Option<RevisionNo>,
     /// Revision that is actually current; absent when the inode has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_revision_no: Option<RevisionNo>,
     /// Attribute revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_attributes_revision_no: Option<AttributeRevisionNo>,
     /// Attribute revision that is actually current for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_attributes_revision_no: Option<AttributeRevisionNo>,
     /// Change-feed cursor the request asked to resume after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub after_seq: Option<ChangeSeq>,
     /// Oldest sequence still promised for incremental replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention_floor_seq: Option<ChangeSeq>,
     /// Deletion generation an undelete asked to recover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub requested_deletion_seq: Option<ChangeSeq>,
     /// Deletion generation actually active for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_deletion_seq: Option<ChangeSeq>,
     /// Head sequence a namespace delete required the namespace to still be
     /// at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_head_seq: Option<ChangeSeq>,
     /// Head sequence the namespace was actually at, which is what a caller
     /// that still means to delete it retries against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_head_seq: Option<ChangeSeq>,
 }
 
@@ -177,6 +192,7 @@ pub struct NamespaceDiagnostics {
     pub retention_floor_seq: ChangeSeq,
     /// Current manifest pointer recorded by the head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub current_manifest_id: Option<ManifestId>,
     /// Number of visible WAL segments after the current manifest.
     pub wal_tail_segments: u64,
@@ -253,6 +269,7 @@ pub enum FilesystemOperation {
         /// fails the request instead of silently stacking on it, and a
         /// missing file answers `path_not_found`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_revision_no: Option<RevisionNo>,
     },
     /// Delete one path.
@@ -273,7 +290,7 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(
             feature = "openapi",
-            schema(schema_with = crate::public_inode_id::optional_schema)
+            schema(schema_with = crate::public_inode_id::schema)
         )]
         expected_inode_id: Option<InodeId>,
     },
@@ -321,6 +338,7 @@ pub enum FilesystemOperation {
         /// correct after ancestor renames. An explicit path is required when the
         /// deletion recorded no binding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         path: Option<AbsolutePath>,
     },
     /// Restore an older revision as the current revision for a path.
@@ -357,7 +375,7 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(
             feature = "openapi",
-            schema(schema_with = crate::public_inode_id::optional_schema)
+            schema(schema_with = crate::public_inode_id::schema)
         )]
         expected_inode_id: Option<InodeId>,
         /// When set, the update applies only while the inode's attribute
@@ -366,6 +384,7 @@ pub enum FilesystemOperation {
         /// its own revision guard, so a concurrent update never merges
         /// silently.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_attributes_revision_no: Option<AttributeRevisionNo>,
     },
 }
@@ -921,6 +940,7 @@ pub struct MaintenanceStepRequest {
     /// Flush the visible WAL tail into metadata tables, then run one bounded
     /// reorganization step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub metadata: Option<MetadataMaintenanceRequest>,
     /// Advance the retention floor to the flushed manifest head. Nothing
     /// surrenders replay history unless this is true.
@@ -929,6 +949,7 @@ pub struct MaintenanceStepRequest {
     /// Run one bounded mark-and-sweep garbage-collection pass. Nothing
     /// sweeps unless this is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub gc: Option<GcRequest>,
 }
 
@@ -1017,12 +1038,15 @@ pub struct MaintenanceStepResponse {
     pub status_before: NamespaceDiagnostics,
     /// What the metadata-upkeep action did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub metadata: Option<MetadataMaintenanceResponse>,
     /// Where the retention floor ended up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention: Option<AdvanceRetentionResponse>,
     /// What the collection pass reclaimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub gc: Option<GcResponse>,
 }
 

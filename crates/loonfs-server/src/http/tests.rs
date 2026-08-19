@@ -3865,8 +3865,8 @@ mod direct_download {
                 assert_eq!(code, ErrorCode::InvalidRequest.as_str());
                 assert_eq!(
                     message,
-                    "invalid upload content: request body is not valid JSON for direct_put \
-                     completion: unknown field `content`, there are no fields at line 1 column 10"
+                    "invalid upload content: completion request mode `direct_multipart` does not \
+                     match stored upload mode `direct_put`"
                 );
             }
             other => panic!("expected a typed invalid_request, got {other:?}"),

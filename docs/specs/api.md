@@ -1123,9 +1123,9 @@ so cross-origin access is governed by the bucket's or container's own CORS
 configuration rather than by anything this API sets.
 
 After uploading to the presigned URL, the client completes the session with
-`{}`. The server loads the expected content reference from the session and
-compares it with the object's size and checksum at the provider. A mismatch
-fails completion and deletes the unpublished object.
+`{"mode":"direct_put"}`. The server reads the expected size and checksum from
+the session and compares them with the object in storage. If they do not
+match, completion fails and the server deletes the unpublished object.
 If the provider metadata request fails, the server returns `server_error`
 without changing the object or session, so the client can retry. The server
 does not download the object during this check.
@@ -1189,6 +1189,7 @@ resulting content reference stores that complete-object checksum.
 
 ```json
 {
+  "mode": "direct_multipart",
   "content": {
     "size_bytes": 17301504,
     "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" }
@@ -1202,8 +1203,9 @@ resulting content reference stores that complete-object checksum.
 ```
 
 The request lists every part once in ascending order. The server returns the
-content reference after completion. Service-proxied and direct-PUT sessions
-use `{}` because the session already stores the required content information.
+content reference after completion. Service-proxied and direct-PUT completion
+requests include only `{"mode":"service_proxied"}` or `{"mode":"direct_put"}`.
+The session already contains the other required information.
 
 The server asks the provider to assemble the object, then reads its stored size
 and checksum and compares them with the completion request. This read is
@@ -1926,9 +1928,17 @@ only the fields for that mode:
 `direct_multipart` accepts an optional `multipart` object and otherwise uses
 the default part size.
 
-The stored upload mode determines the completion body. Service-proxied and
-direct-PUT sessions accept only `{}`. Multipart sessions require `content` and
-`parts`. Unknown, missing, or mode-specific fields return `invalid_request`.
+Completion requests use the same `mode` values as begin requests:
+
+```json
+{ "mode": "service_proxied" }
+{ "mode": "direct_put" }
+{ "mode": "direct_multipart", "content": { "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" } }, "parts": [] }
+```
+
+The request mode must match the upload session. Multipart requests require
+`content` and `parts`. The other two modes do not accept additional fields.
+Unknown fields, missing fields, and mode mismatches return `invalid_request`.
 
 The begin-upload *response* is tagged the same way, in the same `mode`, and
 carries its transport's field and no other's: `service_proxied` carries

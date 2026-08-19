@@ -243,22 +243,22 @@ impl Client {
             .await
     }
 
-    /// Completes a service-proxied or direct-PUT upload session.
+    /// Completes an upload session.
+    ///
+    /// The request mode must match the mode used to start the session.
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
+        request: &CompleteUploadRequest,
     ) -> Result<UploadSessionResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             self.base_url
         );
         // The durable completed-session record replays an identical completion without new effect.
-        self.request_json::<_, UploadSessionResponse>(
-            self.post(&url),
-            Some(&CompleteKnownContentUploadRequest {}),
-        )
-        .await
+        self.request_json::<_, UploadSessionResponse>(self.post(&url), Some(request))
+            .await
     }
 
     /// Completes a direct-multipart upload session.
@@ -272,7 +272,13 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             self.base_url
         );
-        self.request_json::<_, UploadSessionResponse>(self.post(&url), Some(request))
-            .await
+        self.request_json::<_, UploadSessionResponse>(
+            self.post(&url),
+            Some(&CompleteUploadRequest::DirectMultipart {
+                content: request.content.clone(),
+                parts: request.parts.clone(),
+            }),
+        )
+        .await
     }
 }

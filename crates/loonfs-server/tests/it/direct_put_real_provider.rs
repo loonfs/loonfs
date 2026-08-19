@@ -8,9 +8,9 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
     v0::{
-        BeginUploadResponse, CompleteMultipartUploadRequest, DirectMultipartUpload,
-        DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess, UploadContentClaim,
-        UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
+        BeginUploadResponse, CompleteMultipartUploadRequest, CompleteUploadRequest,
+        DirectMultipartUpload, DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess,
+        UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
     },
     ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse,
     DestinationBehavior, FilesystemOperation, NamespaceId,
@@ -208,7 +208,11 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
 
     let complete = harness
         .client
-        .complete_upload(&namespace_id, begin.upload_id())
+        .complete_upload(
+            &namespace_id,
+            begin.upload_id(),
+            &CompleteUploadRequest::DirectPut {},
+        )
         .await
         .expect("complete direct-put upload");
     assert_eq!(complete.mode, UploadMode::DirectPut);
@@ -356,7 +360,11 @@ async fn assert_wrong_direct_put_bytes_rejected(
     );
     expect_client_rejection(
         client
-            .complete_upload(namespace_id, begin.upload_id())
+            .complete_upload(
+                namespace_id,
+                begin.upload_id(),
+                &CompleteUploadRequest::DirectPut {},
+            )
             .await,
         "complete wrong-bytes direct put",
     );
@@ -416,7 +424,11 @@ async fn assert_direct_put_requires_its_signed_headers(
         // find and hands out no token.
         expect_client_rejection(
             client
-                .complete_upload(namespace_id, begin.upload_id())
+                .complete_upload(
+                    namespace_id,
+                    begin.upload_id(),
+                    &CompleteUploadRequest::DirectPut {},
+                )
                 .await,
             &format!("complete after {label}"),
         );
@@ -452,7 +464,11 @@ async fn assert_direct_put_is_no_replace(
     );
 
     let complete = client
-        .complete_upload(namespace_id, begin.upload_id())
+        .complete_upload(
+            namespace_id,
+            begin.upload_id(),
+            &CompleteUploadRequest::DirectPut {},
+        )
         .await
         .expect("complete first direct put");
     assert!(
@@ -782,7 +798,11 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
 
     // Completion uses the content reference stored in the session.
     let complete = client
-        .complete_upload(namespace_id, begin.upload_id())
+        .complete_upload(
+            namespace_id,
+            begin.upload_id(),
+            &CompleteUploadRequest::DirectPut {},
+        )
         .await
         .expect("complete the honest promise");
     assert_eq!(complete.mode, UploadMode::DirectPut);
