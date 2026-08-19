@@ -3,10 +3,15 @@ package conformance_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"hash/crc64"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,11 +21,10 @@ import (
 	loonfs "github.com/loonfs/loonfs-sdk-go"
 	"github.com/loonfs/loonfs-sdk-go/client"
 	"github.com/loonfs/loonfs-sdk-go/option"
+	"github.com/loonfs/loonfs-sdk-go/transfers"
 )
 
 const fixtureVersion = 1
-
-const transferSkip = "file transfer cases are not implemented in the Go harness yet"
 
 type conformanceCase struct {
 	Version  int             `json:"version"`
@@ -88,8 +92,16 @@ func TestSDKConformance(t *testing.T) {
 				runPagination(t, h, testCase)
 			case "changes":
 				runChanges(t, h, testCase)
-			case "upload_direct_put", "upload_multipart", "upload_abort", "download", "end_to_end":
-				t.Skip(transferSkip)
+			case "upload_direct_put":
+				runDirectPut(t, h, testCase)
+			case "upload_multipart":
+				runMultipart(t, h, testCase)
+			case "upload_abort":
+				runAbort(t, h, testCase)
+			case "download":
+				runDownload(t, h, testCase)
+			case "end_to_end":
+				runEndToEnd(t, h, testCase)
 			default:
 				t.Fatalf("unknown case family %q", testCase.Family)
 			}
@@ -288,6 +300,552 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		replayed.CommittedSeq != first.CommittedSeq ||
 		replayed.NamespaceID != first.NamespaceID {
 		t.Errorf("replayed commit = %#v, want %#v", replayed, first)
+	}
+}
+
+type directPutRequest struct {
+	NamespaceID string          `json:"namespace_id"`
+	Path        string          `json:"path"`
+	CommitID    string          `json:"commit_id"`
+	Actor       loonfs.ActorRef `json:"actor"`
+	ContentUTF8 string          `json:"content_utf8"`
+}
+
+type directPutExpected struct {
+	Mode              string `json:"mode"`
+	SizeBytes         int64  `json:"size_bytes"`
+	ChecksumAlgorithm string `json:"checksum_algorithm"`
+	CommittedSeq      int64  `json:"committed_seq"`
+}
+
+func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[directPutRequest, directPutExpected](t, testCase)
+	createNamespace(t, h.client, request.NamespaceID)
+	payload := []byte(request.ContentUTF8)
+	claim := &loonfs.UploadContentClaim{
+		Checksum:  mustChecksum(t, loonfs.ChecksumAlgorithmSha256, payload),
+		SizeBytes: int64(len(payload)),
+	}
+	begin, err := h.client.Uploads.BeginUpload(context.Background(), &loonfs.BeginUploadBody{
+		NamespaceID: request.NamespaceID,
+		Body: &loonfs.BeginUploadRequest{
+			DirectPut: &loonfs.BeginUploadDirectPut{Content: claim},
+		},
+	})
+	if err != nil {
+		t.Fatalf("begin direct PUT: %v", err)
+	}
+	if begin.DirectPut == nil || begin.DirectPut.DirectPut == nil {
+		t.Fatalf("begin upload mode = %q, want direct_put", begin.Mode)
+	}
+	directPut := begin.DirectPut.DirectPut
+	if expected.Mode != "direct_put" {
+		t.Errorf("expected mode = %q, want direct_put", expected.Mode)
+	}
+	if directPut.ContentRef == nil {
+		t.Fatal("direct PUT has no content_ref")
+	}
+	if directPut.ContentRef.SizeBytes != expected.SizeBytes {
+		t.Errorf("direct PUT size_bytes = %d, want %d", directPut.ContentRef.SizeBytes, expected.SizeBytes)
+	}
+	if directPut.ContentRef.Checksum == nil || string(directPut.ContentRef.Checksum.Algorithm) != expected.ChecksumAlgorithm {
+		t.Errorf("direct PUT checksum = %#v, want algorithm %q", directPut.ContentRef.Checksum, expected.ChecksumAlgorithm)
+	}
+	assertChecksum(t, directPut.ContentRef.Checksum, payload)
+
+	putPresigned(t, directPut.Access, payload, false)
+	completed, err := h.client.Uploads.CompleteUpload(context.Background(), &loonfs.CompleteUploadBody{
+		NamespaceID: request.NamespaceID,
+		UploadID:    string(begin.DirectPut.UploadID),
+		Body: &loonfs.CompleteUploadRequest{
+			DirectPut: &loonfs.CompleteUploadDirectPut{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("complete direct PUT: %v", err)
+	}
+	completedStatus := requireCompletedStatus(t, completed)
+	assertContentRefEqual(t, completedStatus.ContentRef, directPut.ContentRef)
+
+	committed := commitCompletedFile(
+		t,
+		h.client,
+		request.NamespaceID,
+		request.Path,
+		request.CommitID,
+		&request.Actor,
+		completedStatus.ContentRef,
+		completedStatus.ContentToken,
+	)
+	if int64(committed.CommittedSeq) != expected.CommittedSeq {
+		t.Errorf("committed_seq = %d, want %d", committed.CommittedSeq, expected.CommittedSeq)
+	}
+	stat := statPath(t, h.client, request.NamespaceID, request.Path)
+	file := requireFileProjection(t, stat)
+	assertContentRefEqual(t, file.ContentRef, directPut.ContentRef)
+	readback := getFile(t, h.client, request.NamespaceID, request.Path)
+	if !bytes.Equal(readback.Bytes, payload) {
+		t.Error("direct PUT readback did not match payload")
+	}
+}
+
+type multipartRequest struct {
+	NamespaceID    string          `json:"namespace_id"`
+	Path           string          `json:"path"`
+	CommitID       string          `json:"commit_id"`
+	Actor          loonfs.ActorRef `json:"actor"`
+	PartSizeBytes  int64           `json:"part_size_bytes"`
+	ContentPattern bytePattern     `json:"content_pattern"`
+}
+
+type bytePattern struct {
+	Length  int64 `json:"length"`
+	Modulus uint8 `json:"modulus"`
+}
+
+type multipartExpected struct {
+	Mode              string `json:"mode"`
+	PartCount         int    `json:"part_count"`
+	SizeBytes         int64  `json:"size_bytes"`
+	ChecksumAlgorithm string `json:"checksum_algorithm"`
+	CommittedSeq      int64  `json:"committed_seq"`
+}
+
+func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[multipartRequest, multipartExpected](t, testCase)
+	createNamespace(t, h.client, request.NamespaceID)
+	payload := makeBytePattern(t, request.ContentPattern)
+	begin, err := h.client.Uploads.BeginUpload(context.Background(), &loonfs.BeginUploadBody{
+		NamespaceID: request.NamespaceID,
+		Body: &loonfs.BeginUploadRequest{
+			DirectMultipart: &loonfs.BeginUploadDirectMultipart{
+				Multipart: &loonfs.DirectMultipartUploadOptions{
+					PartSizeBytes: &request.PartSizeBytes,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("begin multipart upload: %v", err)
+	}
+	if begin.DirectMultipart == nil || begin.DirectMultipart.DirectMultipart == nil {
+		t.Fatalf("begin upload mode = %q, want direct_multipart", begin.Mode)
+	}
+	multipart := begin.DirectMultipart.DirectMultipart
+	if expected.Mode != "direct_multipart" {
+		t.Errorf("expected mode = %q, want direct_multipart", expected.Mode)
+	}
+	if multipart.PartSizeBytes != request.PartSizeBytes {
+		t.Errorf("part_size_bytes = %d, want %d", multipart.PartSizeBytes, request.PartSizeBytes)
+	}
+	if string(multipart.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
+		t.Errorf("checksum_algorithm = %q, want %q", multipart.ChecksumAlgorithm, expected.ChecksumAlgorithm)
+	}
+	parts := splitPayload(t, payload, multipart.PartSizeBytes)
+	if len(parts) != expected.PartCount {
+		t.Fatalf("part count = %d, want %d", len(parts), expected.PartCount)
+	}
+	claims := make([]*loonfs.UploadPartChecksumClaim, len(parts))
+	for index, part := range parts {
+		claims[index] = &loonfs.UploadPartChecksumClaim{
+			Checksum:   mustChecksum(t, multipart.ChecksumAlgorithm, part),
+			PartNumber: index + 1,
+		}
+	}
+	signed, err := h.client.Uploads.SignUploadParts(context.Background(), &loonfs.SignUploadPartsRequest{
+		NamespaceID: request.NamespaceID,
+		UploadID:    string(begin.DirectMultipart.UploadID),
+		Parts:       claims,
+	})
+	if err != nil {
+		t.Fatalf("sign multipart parts: %v", err)
+	}
+	if len(signed.Parts) != expected.PartCount {
+		t.Fatalf("signed part count = %d, want %d", len(signed.Parts), expected.PartCount)
+	}
+	completedParts := make([]*loonfs.CompletedUploadPart, 0, len(parts))
+	for _, signedPart := range signed.Parts {
+		partNumber := signedPart.PartNumber
+		if partNumber < 1 || partNumber > len(parts) {
+			t.Fatalf("signed invalid part number %d", partNumber)
+		}
+		etag := putPresigned(t, signedPart.Access, parts[partNumber-1], true)
+		completedParts = append(completedParts, &loonfs.CompletedUploadPart{
+			Checksum:   claims[partNumber-1].Checksum,
+			Etag:       etag,
+			PartNumber: partNumber,
+		})
+	}
+	sort.Slice(completedParts, func(left, right int) bool {
+		return completedParts[left].PartNumber < completedParts[right].PartNumber
+	})
+	wholeChecksum := mustChecksum(t, multipart.ChecksumAlgorithm, payload)
+	completionRequest := &loonfs.CompleteUploadBody{
+		NamespaceID: request.NamespaceID,
+		UploadID:    string(begin.DirectMultipart.UploadID),
+		Body: &loonfs.CompleteUploadRequest{
+			DirectMultipart: &loonfs.CompleteUploadDirectMultipart{
+				Content: &loonfs.UploadContentClaim{
+					Checksum:  wholeChecksum,
+					SizeBytes: int64(len(payload)),
+				},
+				Parts: completedParts,
+			},
+		},
+	}
+	first, err := h.client.Uploads.CompleteUpload(context.Background(), completionRequest)
+	if err != nil {
+		t.Fatalf("complete multipart upload: %v", err)
+	}
+	firstStatus := requireCompletedStatus(t, first)
+	replayed, err := h.client.Uploads.CompleteUpload(context.Background(), completionRequest)
+	if err != nil {
+		t.Fatalf("replay multipart completion: %v", err)
+	}
+	replayedStatus := requireCompletedStatus(t, replayed)
+	if replayed.NamespaceID != first.NamespaceID || replayed.UploadID != first.UploadID || replayed.Mode != first.Mode {
+		t.Errorf("replayed upload identity = %#v, want %#v", replayed, first)
+	}
+	assertContentRefEqual(t, replayedStatus.ContentRef, firstStatus.ContentRef)
+	if replayedStatus.CompletedAtMs != firstStatus.CompletedAtMs {
+		t.Errorf("replayed completed_at_ms = %d, want %d", replayedStatus.CompletedAtMs, firstStatus.CompletedAtMs)
+	}
+	if firstStatus.ContentRef.SizeBytes != expected.SizeBytes {
+		t.Errorf("multipart size_bytes = %d, want %d", firstStatus.ContentRef.SizeBytes, expected.SizeBytes)
+	}
+	assertChecksumEqual(t, firstStatus.ContentRef.Checksum, wholeChecksum)
+	assertChecksum(t, firstStatus.ContentRef.Checksum, payload)
+
+	committed := commitCompletedFile(
+		t,
+		h.client,
+		request.NamespaceID,
+		request.Path,
+		request.CommitID,
+		&request.Actor,
+		firstStatus.ContentRef,
+		replayedStatus.ContentToken,
+	)
+	if int64(committed.CommittedSeq) != expected.CommittedSeq {
+		t.Errorf("committed_seq = %d, want %d", committed.CommittedSeq, expected.CommittedSeq)
+	}
+	readback := getFile(t, h.client, request.NamespaceID, request.Path)
+	if !bytes.Equal(readback.Bytes, payload) {
+		t.Error("multipart readback did not match payload")
+	}
+
+	// The same content through the high-level helper: the payload exceeds the
+	// part size, so this exercises PutFile's multipart branch.
+	helperPath := request.Path + "-helper"
+	helperCommit, err := transfers.PutFile(context.Background(), h.client, transfers.PutFileInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(helperPath),
+		Bytes:       payload,
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID(request.CommitID + "-helper"),
+	})
+	if err != nil {
+		t.Fatalf("helper multipart put: %v", err)
+	}
+	if helperCommit.CommittedSeq == 0 {
+		t.Error("helper multipart put reported no committed_seq")
+	}
+	helperReadback := getFile(t, h.client, request.NamespaceID, helperPath)
+	if !bytes.Equal(helperReadback.Bytes, payload) {
+		t.Error("helper multipart readback did not match payload")
+	}
+	// Content ids are random per upload and the helper may choose a different
+	// checksum algorithm; the comparable content fact is the size.
+	if helperReadback.ContentRef == nil || helperReadback.ContentRef.SizeBytes != firstStatus.ContentRef.SizeBytes {
+		t.Error("helper multipart size did not match the manual upload")
+	}
+}
+
+type abortRequest struct {
+	NamespaceID string `json:"namespace_id"`
+}
+
+type abortExpected struct {
+	Mode   string `json:"mode"`
+	Status string `json:"status"`
+}
+
+func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[abortRequest, abortExpected](t, testCase)
+	createNamespace(t, h.client, request.NamespaceID)
+	begin, err := h.client.Uploads.BeginUpload(context.Background(), &loonfs.BeginUploadBody{
+		NamespaceID: request.NamespaceID,
+		Body: &loonfs.BeginUploadRequest{
+			ServiceProxied: &loonfs.BeginUploadServiceProxied{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("begin abortable upload: %v", err)
+	}
+	if begin.ServiceProxied == nil {
+		t.Fatalf("begin upload mode = %q, want service_proxied", begin.Mode)
+	}
+	abort := &loonfs.AbortUploadRequest{
+		NamespaceID: request.NamespaceID,
+		UploadID:    string(begin.ServiceProxied.UploadID),
+	}
+	first, err := h.client.Uploads.AbortUpload(context.Background(), abort)
+	if err != nil {
+		t.Fatalf("abort upload: %v", err)
+	}
+	replayed, err := h.client.Uploads.AbortUpload(context.Background(), abort)
+	if err != nil {
+		t.Fatalf("replay abort: %v", err)
+	}
+	if expected.Mode != "service_proxied" {
+		t.Errorf("expected mode = %q, want service_proxied", expected.Mode)
+	}
+	if expected.Status != "aborted" {
+		t.Errorf("expected status = %q, want aborted", expected.Status)
+	}
+	firstStatus := requireAbortedStatus(t, first)
+	replayedStatus := requireAbortedStatus(t, replayed)
+	if replayed.NamespaceID != first.NamespaceID || replayed.UploadID != first.UploadID || replayed.Mode != first.Mode {
+		t.Errorf("replayed abort identity = %#v, want %#v", replayed, first)
+	}
+	if replayedStatus.AbortedAtMs != firstStatus.AbortedAtMs {
+		t.Errorf("replayed aborted_at_ms = %d, want %d", replayedStatus.AbortedAtMs, firstStatus.AbortedAtMs)
+	}
+}
+
+type downloadRequest struct {
+	NamespaceID string          `json:"namespace_id"`
+	Path        string          `json:"path"`
+	CommitID    string          `json:"commit_id"`
+	Actor       loonfs.ActorRef `json:"actor"`
+	ContentUTF8 string          `json:"content_utf8"`
+}
+
+type downloadExpected struct {
+	SizeBytes         int64  `json:"size_bytes"`
+	ChecksumAlgorithm string `json:"checksum_algorithm"`
+	CommittedSeq      int64  `json:"committed_seq"`
+}
+
+func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[downloadRequest, downloadExpected](t, testCase)
+	createNamespace(t, h.client, request.NamespaceID)
+	payload := []byte(request.ContentUTF8)
+	commitID := loonfs.CommitID(request.CommitID)
+	committed, err := transfers.PutFile(context.Background(), h.client, transfers.PutFileInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(request.Path),
+		Bytes:       payload,
+		Actor:       &request.Actor,
+		CommitID:    commitID,
+	})
+	if err != nil {
+		t.Fatalf("put download file: %v", err)
+	}
+	if int64(committed.CommittedSeq) != expected.CommittedSeq {
+		t.Errorf("committed_seq = %d, want %d", committed.CommittedSeq, expected.CommittedSeq)
+	}
+	stat := statPath(t, h.client, request.NamespaceID, request.Path)
+	file := requireFileProjection(t, stat)
+	grant, err := h.client.Filesystem.BeginDownload(context.Background(), &loonfs.BeginDownloadRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        loonfs.AbsolutePath(request.Path),
+	})
+	if err != nil {
+		t.Fatalf("begin direct download: %v", err)
+	}
+	if grant == nil || grant.ContentRef == nil {
+		t.Fatal("download grant has no content_ref")
+	}
+	assertContentRefEqual(t, file.ContentRef, grant.ContentRef)
+	if grant.ContentRef.SizeBytes != expected.SizeBytes {
+		t.Errorf("download size_bytes = %d, want %d", grant.ContentRef.SizeBytes, expected.SizeBytes)
+	}
+	if grant.ContentRef.Checksum == nil || string(grant.ContentRef.Checksum.Algorithm) != expected.ChecksumAlgorithm {
+		t.Errorf("download checksum = %#v, want algorithm %q", grant.ContentRef.Checksum, expected.ChecksumAlgorithm)
+	}
+	readback := getPresigned(t, grant.Access)
+	if int64(len(readback)) != grant.ContentRef.SizeBytes {
+		t.Errorf("downloaded bytes = %d, want %d", len(readback), grant.ContentRef.SizeBytes)
+	}
+	assertChecksum(t, grant.ContentRef.Checksum, readback)
+	if !bytes.Equal(readback, payload) {
+		t.Error("downloaded content did not match payload")
+	}
+}
+
+type endToEndRequest struct {
+	NamespaceID string            `json:"namespace_id"`
+	Directory   string            `json:"directory"`
+	UploadPath  string            `json:"upload_path"`
+	MovedPath   string            `json:"moved_path"`
+	Actor       loonfs.ActorRef   `json:"actor"`
+	ContentUTF8 string            `json:"content_utf8"`
+	CommitIDs   endToEndCommitIDs `json:"commit_ids"`
+}
+
+type endToEndCommitIDs struct {
+	Mkdir  string `json:"mkdir"`
+	Upload string `json:"upload"`
+	Move   string `json:"move"`
+	Remove string `json:"remove"`
+}
+
+type endToEndExpected struct {
+	MkdirCommittedSeq  int64 `json:"mkdir_committed_seq"`
+	UploadCommittedSeq int64 `json:"upload_committed_seq"`
+	MoveCommittedSeq   int64 `json:"move_committed_seq"`
+	RemoveCommittedSeq int64 `json:"remove_committed_seq"`
+	SizeBytes          int64 `json:"size_bytes"`
+	RevisionCount      int   `json:"revision_count"`
+	ChangeCount        int   `json:"change_count"`
+}
+
+func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[endToEndRequest, endToEndExpected](t, testCase)
+	createNamespace(t, h.client, request.NamespaceID)
+	mkdir := applyCommit(t, h.client, createDirectoryCommit(
+		request.NamespaceID,
+		request.CommitIDs.Mkdir,
+		&request.Actor,
+		request.Directory,
+		nil,
+	))
+	if int64(mkdir.CommittedSeq) != expected.MkdirCommittedSeq {
+		t.Errorf("mkdir committed_seq = %d, want %d", mkdir.CommittedSeq, expected.MkdirCommittedSeq)
+	}
+
+	uploadCommitID := loonfs.CommitID(request.CommitIDs.Upload)
+	upload, err := transfers.PutFile(context.Background(), h.client, transfers.PutFileInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(request.UploadPath),
+		Bytes:       []byte(request.ContentUTF8),
+		Actor:       &request.Actor,
+		CommitID:    uploadCommitID,
+	})
+	if err != nil {
+		t.Fatalf("upload end-to-end file: %v", err)
+	}
+	if int64(upload.CommittedSeq) != expected.UploadCommittedSeq {
+		t.Errorf("upload committed_seq = %d, want %d", upload.CommittedSeq, expected.UploadCommittedSeq)
+	}
+	stat := statPath(t, h.client, request.NamespaceID, request.UploadPath)
+	file := requireFileProjection(t, stat)
+	if file.SizeBytes != expected.SizeBytes {
+		t.Errorf("uploaded size_bytes = %d, want %d", file.SizeBytes, expected.SizeBytes)
+	}
+	uploadedInode := stat.InodeID
+
+	initialListing := listPathEntries(t, h.client, request.NamespaceID, request.Directory)
+	if !listingContainsPath(initialListing, request.UploadPath) {
+		t.Errorf("initial listing does not contain %q", request.UploadPath)
+	}
+	downloaded := getFile(t, h.client, request.NamespaceID, request.UploadPath)
+	if !bytes.Equal(downloaded.Bytes, []byte(request.ContentUTF8)) {
+		t.Error("end-to-end download did not match payload")
+	}
+
+	noReplace := loonfs.DestinationBehaviorNoReplace
+	moved := applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID(request.CommitIDs.Move),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				MovePath: &loonfs.FsOpMovePath{
+					Behavior: &noReplace,
+					FromPath: loonfs.AbsolutePath(request.UploadPath),
+					ToPath:   loonfs.AbsolutePath(request.MovedPath),
+				},
+			},
+		},
+	})
+	if int64(moved.CommittedSeq) != expected.MoveCommittedSeq {
+		t.Errorf("move committed_seq = %d, want %d", moved.CommittedSeq, expected.MoveCommittedSeq)
+	}
+	movedListing := listPathEntries(t, h.client, request.NamespaceID, request.Directory)
+	if !listingContainsPath(movedListing, request.MovedPath) {
+		t.Errorf("moved listing does not contain %q", request.MovedPath)
+	}
+
+	revisions, err := h.client.Filesystem.ListFileRevisions(context.Background(), &loonfs.ListFileRevisionsRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        request.MovedPath,
+	})
+	if err != nil {
+		t.Fatalf("list end-to-end revisions: %v", err)
+	}
+	if len(revisions.Results) != expected.RevisionCount {
+		t.Fatalf("revision count = %d, want %d", len(revisions.Results), expected.RevisionCount)
+	}
+	if string(revisions.Results[0].CommitID) != request.CommitIDs.Upload {
+		t.Errorf("revision commit_id = %q, want %q", revisions.Results[0].CommitID, request.CommitIDs.Upload)
+	}
+
+	changesBeforeRemove := listChanges(t, h.client, request.NamespaceID)
+	if len(changesBeforeRemove.Changes) != expected.ChangeCount-1 {
+		t.Errorf("change count before remove = %d, want %d", len(changesBeforeRemove.Changes), expected.ChangeCount-1)
+	}
+	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
+	removed := applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID(request.CommitIDs.Remove),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				DeletePath: &loonfs.FsOpDeletePath{
+					Behavior: &nonRecursive,
+					Path:     loonfs.AbsolutePath(request.MovedPath),
+				},
+			},
+		},
+	})
+	if int64(removed.CommittedSeq) != expected.RemoveCommittedSeq {
+		t.Errorf("remove committed_seq = %d, want %d", removed.CommittedSeq, expected.RemoveCommittedSeq)
+	}
+
+	changes := listChanges(t, h.client, request.NamespaceID)
+	if len(changes.Changes) != expected.ChangeCount {
+		t.Fatalf("change count = %d, want %d", len(changes.Changes), expected.ChangeCount)
+	}
+	expectedIDs := []string{
+		request.CommitIDs.Mkdir,
+		request.CommitIDs.Upload,
+		request.CommitIDs.Move,
+		request.CommitIDs.Remove,
+	}
+	for index, change := range changes.Changes {
+		if string(change.CommitID) != expectedIDs[index] {
+			t.Errorf("change %d commit_id = %q, want %q", index, change.CommitID, expectedIDs[index])
+		}
+		if !actorsEqual(change.CommittedBy, &request.Actor) {
+			t.Errorf("change %d committed_by = %#v, want %#v", index, change.CommittedBy, request.Actor)
+		}
+	}
+
+	trash, err := h.client.Filesystem.ListTrash(context.Background(), &loonfs.ListTrashRequest{
+		NamespaceID: request.NamespaceID,
+	})
+	if err != nil {
+		t.Fatalf("list end-to-end trash: %v", err)
+	}
+	var removedEntry *loonfs.TrashEntry
+	for _, entry := range trash.Results {
+		if entry.InodeID == uploadedInode {
+			removedEntry = entry
+			break
+		}
+	}
+	if removedEntry == nil {
+		t.Fatalf("trash does not contain removed inode %q", uploadedInode)
+	}
+	if removedEntry.DeletionSeq != removed.CommittedSeq {
+		t.Errorf("trash deletion_seq = %d, want %d", removedEntry.DeletionSeq, removed.CommittedSeq)
 	}
 }
 
@@ -526,6 +1084,354 @@ func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 	if len(change.Events) != 1 || change.Events[0] == nil || change.Events[0].DirectoryCreated == nil {
 		t.Errorf("change events = %#v, want one directory_created event", change.Events)
 	}
+}
+
+var (
+	conformanceCRC32CTable    = crc32.MakeTable(crc32.Castagnoli)
+	conformanceCRC64NVMeTable = crc64.MakeTable(0x9a6c9329ac4bc9b5)
+)
+
+func makeBytePattern(t *testing.T, pattern bytePattern) []byte {
+	t.Helper()
+	if pattern.Modulus == 0 {
+		t.Fatal("byte pattern modulus must be greater than zero")
+	}
+	maximumInt := int(^uint(0) >> 1)
+	if pattern.Length < 0 || uint64(pattern.Length) > uint64(maximumInt) {
+		t.Fatalf("byte pattern length %d does not fit int", pattern.Length)
+	}
+	payload := make([]byte, int(pattern.Length))
+	for offset := range payload {
+		payload[offset] = byte(offset % int(pattern.Modulus))
+	}
+	return payload
+}
+
+func splitPayload(t *testing.T, payload []byte, partSizeBytes int64) [][]byte {
+	t.Helper()
+	maximumInt := int(^uint(0) >> 1)
+	if partSizeBytes <= 0 || uint64(partSizeBytes) > uint64(maximumInt) {
+		t.Fatalf("invalid part size %d", partSizeBytes)
+	}
+	partSize := int(partSizeBytes)
+	parts := make([][]byte, 0, (len(payload)+partSize-1)/partSize)
+	for offset := 0; offset < len(payload); offset += partSize {
+		end := offset + partSize
+		if end > len(payload) {
+			end = len(payload)
+		}
+		parts = append(parts, payload[offset:end])
+	}
+	return parts
+}
+
+func mustChecksum(t *testing.T, algorithm loonfs.ChecksumAlgorithm, payload []byte) *loonfs.Checksum {
+	t.Helper()
+	checksum, err := checksumFor(algorithm, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return checksum
+}
+
+func checksumFor(algorithm loonfs.ChecksumAlgorithm, payload []byte) (*loonfs.Checksum, error) {
+	var value string
+	switch algorithm {
+	case loonfs.ChecksumAlgorithmSha256:
+		digest := sha256.Sum256(payload)
+		value = hex.EncodeToString(digest[:])
+	case loonfs.ChecksumAlgorithmCrc64Nvme:
+		value = fmt.Sprintf("%016x", crc64.Checksum(payload, conformanceCRC64NVMeTable))
+	case loonfs.ChecksumAlgorithmCrc32C:
+		value = fmt.Sprintf("%08x", crc32.Checksum(payload, conformanceCRC32CTable))
+	default:
+		return nil, fmt.Errorf("unsupported checksum algorithm %q", algorithm)
+	}
+	return &loonfs.Checksum{Algorithm: algorithm, Value: value}, nil
+}
+
+func assertChecksum(t *testing.T, expected *loonfs.Checksum, payload []byte) {
+	t.Helper()
+	if expected == nil {
+		t.Fatal("expected checksum is nil")
+	}
+	actual := mustChecksum(t, expected.Algorithm, payload)
+	assertChecksumEqual(t, actual, expected)
+}
+
+func assertChecksumEqual(t *testing.T, actual, expected *loonfs.Checksum) {
+	t.Helper()
+	if actual == nil || expected == nil {
+		if actual != expected {
+			t.Errorf("checksum = %#v, want %#v", actual, expected)
+		}
+		return
+	}
+	if actual.Algorithm != expected.Algorithm || actual.Value != expected.Value {
+		t.Errorf("checksum = %#v, want %#v", actual, expected)
+	}
+}
+
+func assertContentRefEqual(t *testing.T, actual, expected *loonfs.ContentRef) {
+	t.Helper()
+	if actual == nil || expected == nil {
+		if actual != expected {
+			t.Errorf("content_ref = %#v, want %#v", actual, expected)
+		}
+		return
+	}
+	if actual.ContentID != expected.ContentID || actual.Kind != expected.Kind || actual.SizeBytes != expected.SizeBytes {
+		t.Errorf("content_ref = %#v, want %#v", actual, expected)
+	}
+	assertChecksumEqual(t, actual.Checksum, expected.Checksum)
+}
+
+func putPresigned(
+	t *testing.T,
+	access *loonfs.ObjectTransferAccess,
+	payload []byte,
+	requireETag bool,
+) string {
+	t.Helper()
+	response := sendPresigned(t, access, http.MethodPut, bytes.NewReader(payload))
+	defer response.Body.Close()
+	assertSuccessfulTransfer(t, response)
+	_, _ = io.Copy(io.Discard, response.Body)
+	etag := response.Header.Get("ETag")
+	if requireETag && etag == "" {
+		t.Fatal("multipart PUT response has no ETag")
+	}
+	return etag
+}
+
+func getPresigned(t *testing.T, access *loonfs.ObjectTransferAccess) []byte {
+	t.Helper()
+	response := sendPresigned(t, access, http.MethodGet, nil)
+	defer response.Body.Close()
+	assertSuccessfulTransfer(t, response)
+	payload, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read presigned GET response: %v", err)
+	}
+	return payload
+}
+
+func sendPresigned(
+	t *testing.T,
+	access *loonfs.ObjectTransferAccess,
+	expectedMethod string,
+	body io.Reader,
+) *http.Response {
+	t.Helper()
+	if access == nil || access.PresignedURL == nil {
+		t.Fatal("object transfer access is not a presigned URL")
+	}
+	presigned := access.PresignedURL
+	if presigned.Method != expectedMethod {
+		t.Fatalf("presigned method = %q, want %q", presigned.Method, expectedMethod)
+	}
+	request, err := http.NewRequestWithContext(context.Background(), expectedMethod, presigned.URL, body)
+	if err != nil {
+		t.Fatalf("build presigned request: %v", err)
+	}
+	for name, value := range presigned.Headers {
+		if strings.EqualFold(name, "host") {
+			request.Host = value
+			continue
+		}
+		request.Header.Set(name, value)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send presigned request: %v", err)
+	}
+	return response
+}
+
+func assertSuccessfulTransfer(t *testing.T, response *http.Response) {
+	t.Helper()
+	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
+	detail := strings.TrimSpace(string(body))
+	if detail == "" {
+		t.Fatalf("presigned request returned %s", response.Status)
+	}
+	t.Fatalf("presigned request returned %s: %s", response.Status, detail)
+}
+
+func uploadSessionStatus(t *testing.T, response *loonfs.UploadSessionResponse) *loonfs.UploadSessionStatus {
+	t.Helper()
+	if response == nil {
+		t.Fatal("upload session response is nil")
+	}
+	if _, ok := response.GetExtraProperties()["status"]; !ok {
+		t.Fatal("upload session response has no status")
+	}
+	data, err := json.Marshal(response.GetExtraProperties())
+	if err != nil {
+		t.Fatalf("encode upload status: %v", err)
+	}
+	var status loonfs.UploadSessionStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		t.Fatalf("decode upload status: %v", err)
+	}
+	return &status
+}
+
+func requireCompletedStatus(
+	t *testing.T,
+	response *loonfs.UploadSessionResponse,
+) *loonfs.UploadSessionStatusCompleted {
+	t.Helper()
+	status := uploadSessionStatus(t, response)
+	if status.Completed == nil || status.Completed.ContentRef == nil {
+		t.Fatalf("upload status = %q, want completed", status.Status)
+	}
+	return status.Completed
+}
+
+func requireAbortedStatus(
+	t *testing.T,
+	response *loonfs.UploadSessionResponse,
+) *loonfs.UploadSessionStatusAborted {
+	t.Helper()
+	status := uploadSessionStatus(t, response)
+	if status.Aborted == nil {
+		t.Fatalf("upload status = %q, want aborted", status.Status)
+	}
+	return status.Aborted
+}
+
+func requireFileProjection(t *testing.T, entry *loonfs.AuthoritativePathEntry) *loonfs.AuthoritativePathEntryFile {
+	t.Helper()
+	if entry == nil {
+		t.Fatal("path entry is nil")
+	}
+	data, err := json.Marshal(entry.GetExtraProperties())
+	if err != nil {
+		t.Fatalf("encode path entry projection: %v", err)
+	}
+	var projection loonfs.AuthoritativePathEntryKind
+	if err := json.Unmarshal(data, &projection); err != nil {
+		t.Fatalf("decode path entry projection: %v", err)
+	}
+	if projection.File == nil {
+		t.Fatalf("path entry kind = %q, want file", projection.InodeKind)
+	}
+	return projection.File
+}
+
+func commitCompletedFile(
+	t *testing.T,
+	sdk *client.Client,
+	namespaceID string,
+	path string,
+	commitID string,
+	actor *loonfs.ActorRef,
+	contentRef *loonfs.ContentRef,
+	contentToken *loonfs.ContentToken,
+) *loonfs.CommitResponse {
+	t.Helper()
+	noReplace := loonfs.DestinationBehaviorNoReplace
+	contentTokens := []*loonfs.ContentToken(nil)
+	if contentToken != nil {
+		contentTokens = []*loonfs.ContentToken{contentToken}
+	}
+	return applyCommit(t, sdk, &loonfs.CommitRequest{
+		NamespaceID:   namespaceID,
+		Actor:         actor,
+		CommitID:      loonfs.CommitID(commitID),
+		ContentTokens: contentTokens,
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				PutFile: &loonfs.FsOpPutFile{
+					Behavior:   &noReplace,
+					ContentRef: contentRef,
+					Path:       loonfs.AbsolutePath(path),
+				},
+			},
+		},
+	})
+}
+
+func applyCommit(t *testing.T, sdk *client.Client, request *loonfs.CommitRequest) *loonfs.CommitResponse {
+	t.Helper()
+	response, err := sdk.Filesystem.ApplyCommit(context.Background(), request)
+	if err != nil {
+		t.Fatalf("apply commit %q: %v", request.CommitID, err)
+	}
+	return response
+}
+
+func statPath(t *testing.T, sdk *client.Client, namespaceID, path string) *loonfs.AuthoritativePathEntry {
+	t.Helper()
+	entry, err := sdk.Filesystem.StatPath(context.Background(), &loonfs.StatPathRequest{
+		NamespaceID: namespaceID,
+		Path:        path,
+	})
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return entry
+}
+
+func getFile(t *testing.T, sdk *client.Client, namespaceID, path string) *transfers.GetFileResult {
+	t.Helper()
+	result, err := transfers.GetFile(context.Background(), sdk, transfers.GetFileInput{
+		NamespaceID: loonfs.NamespaceID(namespaceID),
+		Path:        loonfs.AbsolutePath(path),
+	})
+	if err != nil {
+		t.Fatalf("get %s: %v", path, err)
+	}
+	return result
+}
+
+func listPathEntries(
+	t *testing.T,
+	sdk *client.Client,
+	namespaceID string,
+	path string,
+) []*loonfs.AuthoritativePathEntry {
+	t.Helper()
+	page, err := sdk.Filesystem.ListPathEntries(context.Background(), &loonfs.ListPathEntriesRequest{
+		NamespaceID: namespaceID,
+		Path:        path,
+	})
+	if err != nil {
+		t.Fatalf("list %s: %v", path, err)
+	}
+	return page.Results
+}
+
+func listingContainsPath(entries []*loonfs.AuthoritativePathEntry, path string) bool {
+	for _, entry := range entries {
+		if entry != nil && string(entry.Path) == path {
+			return true
+		}
+	}
+	return false
+}
+
+func listChanges(t *testing.T, sdk *client.Client, namespaceID string) *loonfs.ChangesResponse {
+	t.Helper()
+	changes, err := sdk.Filesystem.ListChanges(context.Background(), &loonfs.ListChangesRequest{
+		NamespaceID: namespaceID,
+		AfterSeq:    loonfs.ChangeSeq(0),
+	})
+	if err != nil {
+		t.Fatalf("list changes: %v", err)
+	}
+	return changes
+}
+
+func actorsEqual(left, right *loonfs.ActorRef) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.ID == right.ID && left.Kind == right.Kind
 }
 
 func createNamespace(t *testing.T, sdk *client.Client, namespaceID string) {
