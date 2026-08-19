@@ -1339,12 +1339,7 @@
             }
           }
         },
-        "x-loonfs-retry": "safe",
-        "x-fern-pagination": {
-          "cursor": "$request.after_seq",
-          "next_cursor": "$response.next_after_seq",
-          "results": "$response.changes"
-        }
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/commits": {

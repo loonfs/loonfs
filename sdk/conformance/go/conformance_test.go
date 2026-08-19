@@ -330,29 +330,32 @@ func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	observed := make([]string, 0, len(request.EntryNames))
-	var cursor *string
 	pageCount := 0
 	var savedCursor *string
 	resumeOffset := -1
+	ctx := context.Background()
+	page, err := h.client.Filesystem.ListPathEntries(
+		ctx,
+		&loonfs.ListPathEntriesRequest{
+			NamespaceID: request.NamespaceID,
+			Path:        request.Directory,
+			Limit:       &request.PageSize,
+		},
+	)
+	if err != nil {
+		t.Fatalf("list first pagination page: %v", err)
+	}
+	var cursor *string
 	for {
-		page, err := h.client.Filesystem.ListPathEntries(
-			context.Background(),
-			&loonfs.ListPathEntriesRequest{
-				NamespaceID: request.NamespaceID,
-				Path:        request.Directory,
-				Limit:       &request.PageSize,
-				Cursor:      cursor,
-			},
-		)
-		if err != nil {
-			t.Fatalf("list pagination page: %v", err)
+		if page.Response == nil {
+			t.Fatal("pagination page has no response")
 		}
 		pageCount++
-		if int64(page.HeadSeq) != expected.HeadSeq {
-			t.Errorf("page %d head_seq = %d, want %d", pageCount, page.HeadSeq, expected.HeadSeq)
+		if int64(page.Response.HeadSeq) != expected.HeadSeq {
+			t.Errorf("page %d head_seq = %d, want %d", pageCount, page.Response.HeadSeq, expected.HeadSeq)
 		}
-		observed = append(observed, listedNames(t, page.Entries)...)
-		cursor = page.NextCursor
+		observed = append(observed, listedNames(t, page.Results)...)
+		cursor = page.Response.NextCursor
 		if pageCount == request.ResumeAfterPage {
 			if cursor != nil {
 				value := *cursor
@@ -362,6 +365,10 @@ func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 		}
 		if cursor == nil {
 			break
+		}
+		page, err = page.GetNextPage(ctx)
+		if err != nil {
+			t.Fatalf("list next pagination page: %v", err)
 		}
 	}
 	if len(observed) != expected.EntryCount {
@@ -381,24 +388,30 @@ func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	resumed := make([]string, 0, len(request.EntryNames)-resumeOffset)
-	cursor = savedCursor
+	page, err = h.client.Filesystem.ListPathEntries(
+		ctx,
+		&loonfs.ListPathEntriesRequest{
+			NamespaceID: request.NamespaceID,
+			Path:        request.Directory,
+			Limit:       &request.PageSize,
+			Cursor:      savedCursor,
+		},
+	)
+	if err != nil {
+		t.Fatalf("resume pagination: %v", err)
+	}
 	for {
-		page, err := h.client.Filesystem.ListPathEntries(
-			context.Background(),
-			&loonfs.ListPathEntriesRequest{
-				NamespaceID: request.NamespaceID,
-				Path:        request.Directory,
-				Limit:       &request.PageSize,
-				Cursor:      cursor,
-			},
-		)
-		if err != nil {
-			t.Fatalf("resume pagination page: %v", err)
+		if page.Response == nil {
+			t.Fatal("resumed pagination page has no response")
 		}
-		resumed = append(resumed, listedNames(t, page.Entries)...)
-		cursor = page.NextCursor
+		resumed = append(resumed, listedNames(t, page.Results)...)
+		cursor = page.Response.NextCursor
 		if cursor == nil {
 			break
+		}
+		page, err = page.GetNextPage(ctx)
+		if err != nil {
+			t.Fatalf("resume next pagination page: %v", err)
 		}
 	}
 	if err := validatePageWalk(request.EntryNames, observed, resumeOffset, resumed); err != nil {
