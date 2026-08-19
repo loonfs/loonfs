@@ -646,6 +646,153 @@ fn every_registered_operation_publishes_its_retry_class() {
 }
 
 #[test]
+fn cursor_list_operations_publish_the_registered_pagination_metadata() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let published = operations_by_id(&spec)
+        .into_iter()
+        .filter_map(|(operation_id, operation)| {
+            operation
+                .get("x-fern-pagination")
+                .cloned()
+                .map(|extension| (operation_id, extension))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected = openapi_postprocess::PAGINATION_OPERATIONS
+        .iter()
+        .map(|metadata| {
+            (
+                metadata.operation_id,
+                serde_json::json!({
+                    "cursor": "$request.cursor",
+                    "next_cursor": "$response.next_cursor",
+                    "results": format!("$response.{}", metadata.results_field),
+                }),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(published, expected);
+}
+
+#[test]
+fn every_cursor_query_operation_publishes_pagination_metadata() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+
+    for (operation_id, operation) in operations_by_id(&spec) {
+        if !operation_has_query_parameter(operation, "cursor") {
+            continue;
+        }
+        assert!(
+            operation.get("x-fern-pagination").is_some(),
+            "cursor query operation `{operation_id}` has no x-fern-pagination extension"
+        );
+    }
+}
+
+#[test]
+fn pagination_response_components_publish_cursor_and_result_fields() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let operations = operations_by_id(&spec);
+    let schemas = spec
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+
+    for metadata in openapi_postprocess::PAGINATION_OPERATIONS {
+        let operation = operations
+            .get(metadata.operation_id)
+            .unwrap_or_else(|| panic!("missing operation `{}`", metadata.operation_id));
+        let response_reference = operation
+            .pointer("/responses/200/content/application~1json/schema/$ref")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                panic!(
+                    "pagination operation `{}` has no 200 response schema reference",
+                    metadata.operation_id
+                )
+            });
+        let response_schema = component_schema_for_ref(schemas, response_reference)
+            .unwrap_or_else(|| panic!("missing response component `{response_reference}`"));
+        let properties = response_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| {
+                panic!(
+                    "pagination operation `{}` response has no properties",
+                    metadata.operation_id
+                )
+            });
+
+        assert!(
+            properties.contains_key("next_cursor"),
+            "pagination operation `{}` response has no next_cursor property",
+            metadata.operation_id
+        );
+        assert_eq!(
+            properties
+                .get(metadata.results_field)
+                .and_then(|property| property.get("type"))
+                .and_then(Value::as_str),
+            Some("array"),
+            "pagination operation `{}` response field `{}` is not an array",
+            metadata.operation_id,
+            metadata.results_field
+        );
+    }
+}
+
+#[test]
+fn proxy_cursor_list_operations_keep_pagination_metadata() {
+    let full: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let proxy: Value = serde_json::from_str(
+        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
+    )
+    .expect("parse proxy openapi json");
+    let full_operations = operations_by_id(&full);
+    let proxy_operations = operations_by_id(&proxy);
+    let table_operation_ids = openapi_postprocess::PAGINATION_OPERATIONS
+        .iter()
+        .map(|metadata| metadata.operation_id)
+        .collect::<BTreeSet<_>>();
+    let expected_proxy_operations = openapi_postprocess::PROXY_OPERATIONS
+        .iter()
+        .map(|(operation_id, _)| *operation_id)
+        .filter(|operation_id| table_operation_ids.contains(operation_id))
+        .collect::<BTreeSet<_>>();
+    let mut actual_proxy_operations = BTreeSet::new();
+
+    for (operation_id, proxy_operation) in proxy_operations {
+        if !table_operation_ids.contains(operation_id) {
+            continue;
+        }
+        let full_operation = full_operations
+            .get(operation_id)
+            .unwrap_or_else(|| panic!("missing full operation `{operation_id}`"));
+        assert_eq!(
+            proxy_operation.get("x-fern-pagination"),
+            full_operation.get("x-fern-pagination"),
+            "proxy pagination metadata differs for `{operation_id}`"
+        );
+        actual_proxy_operations.insert(operation_id);
+    }
+
+    assert_eq!(actual_proxy_operations, expected_proxy_operations);
+}
+
+#[test]
 fn openapi_publishes_namespace_diagnostics_in_the_admin_plane() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -1476,6 +1623,45 @@ fn required_fields(schema: &Value) -> BTreeSet<&str> {
         .flatten()
         .filter_map(Value::as_str)
         .collect()
+}
+
+fn operations_by_id(spec: &Value) -> BTreeMap<&str, &Value> {
+    let paths = spec
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("openapi paths object");
+    let mut operations = BTreeMap::new();
+
+    for path_item in paths.values() {
+        let path_item = path_item.as_object().expect("openapi path item object");
+        for method in ["get", "post", "put", "delete", "patch"] {
+            let Some(operation) = path_item.get(method) else {
+                continue;
+            };
+            let operation_id = operation
+                .get("operationId")
+                .and_then(Value::as_str)
+                .expect("OpenAPI operation has an operationId");
+            assert!(
+                operations.insert(operation_id, operation).is_none(),
+                "duplicate operationId `{operation_id}`"
+            );
+        }
+    }
+
+    operations
+}
+
+fn operation_has_query_parameter(operation: &Value, parameter_name: &str) -> bool {
+    operation
+        .get("parameters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|parameter| {
+            parameter.get("in").and_then(Value::as_str) == Some("query")
+                && parameter.get("name").and_then(Value::as_str) == Some(parameter_name)
+        })
 }
 
 fn component_schema_for_ref<'a>(

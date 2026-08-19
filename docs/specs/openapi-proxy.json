@@ -581,7 +581,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.entries"
+        }
       }
     },
     "/v0/mounts/{mount}/filesystem/revisions": {
@@ -689,7 +694,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.revisions"
+        }
       }
     },
     "/v0/mounts/{mount}/filesystem/stat": {
@@ -874,7 +884,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.entries"
+        }
       }
     },
     "/v0/mounts/{mount}/query/grep": {
