@@ -610,10 +610,11 @@ commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
 a process restart, resubmit the same request with the same `commit_id` and
 read the definitive answer from the response.
 
-The blocking Rust client automatically retries reads, commits,
-replay-safe upload stages, and idempotent maintenance calls, but makes one
-attempt for namespace create, fork, and delete, upload-session begin, and
-presigned direct PUT.
+The blocking Rust client automatically retries reads, commits, replay-safe
+upload stages, upload completion, and idempotent maintenance calls. It makes
+one attempt for every `new_attempt` operation: namespace create, fork, and
+delete; upload-session begin; checkpoint create; maintenance step; grep-index
+collection; and store probe. Presigned direct PUT also makes one attempt.
 
 Commits record a durable receipt binding the `commit_id` to its
 `committed_seq`; replay reads that receipt, and a reuse conflict reports the
@@ -686,7 +687,6 @@ Every operation includes an `x-loonfs-retry` value for generated SDKs:
 
 - `safe`: the operation is read-only, or resending the same request is harmless.
 - `replay`: resend the same request to receive the original result.
-- `verify`: read the operation status after an unclear failure before retrying.
 - `new_attempt`: another request starts new work or returns a final conflict.
 
 The table below lists the retry class for every v0 operation.
@@ -712,7 +712,7 @@ The table below lists the retry class for every v0 operation.
 | Start an upload | `begin_upload` | `new_attempt` | `POST /v0/namespaces/{ns}/uploads` |
 | Upload content through the server | `upload_content` | `safe` | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
 | Create multipart upload URLs | `sign_upload_parts` | `safe` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
-| Complete an upload | `complete_upload` | `verify` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
+| Complete an upload | `complete_upload` | `replay` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
 | Read upload status | `get_upload_status` | `safe` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
 | Abort an upload session | `abort_upload` | `safe` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
 | Read committed changes | `list_changes` | `safe` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
@@ -1225,12 +1225,16 @@ object, and returns failure. The client must start a new session. If assembly
 or the metadata read fails before a comparison can be made, the server returns
 `server_error` and keeps the session open so completion can be retried.
 
-If completion fails without a clear response, read the upload status before
-retrying:
+If completion fails without a clear response, resend the same completion
+request:
 
-- `completed`: use the result and its fresh receipt.
-- `open`: resend the same completion request.
-- `aborted`: do not retry.
+- a completed session returns its stored result and a fresh `content_token`
+  while the minting window remains open;
+- an open session continues completion;
+- an aborted session is terminal; do not retry.
+
+A caller that cannot resend the same request reads the upload status instead;
+a completed status returns the same stored result.
 
 When an `open` multipart upload no longer exists at the provider, the server
 checks whether the completed object matches the request. A match completes the

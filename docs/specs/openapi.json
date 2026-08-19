@@ -3170,7 +3170,7 @@
             }
           }
         },
-        "x-loonfs-retry": "verify"
+        "x-loonfs-retry": "replay"
       }
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content": {

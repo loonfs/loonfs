@@ -669,6 +669,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_policy_matches_admin_operation_classes() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+
+        let (transport, client) = single_attempt_probe();
+        assert_single_attempt(
+            client
+                .create_checkpoint(
+                    &namespace_id,
+                    &CreateCheckpointRequest {
+                        name: "backup".to_owned(),
+                        ttl_ms: None,
+                    },
+                )
+                .await,
+            &transport,
+        );
+        drop(transport);
+
+        let response = NamespaceDiagnostics {
+            namespace_id: namespace_id.clone(),
+            head_seq: ChangeSeq(3),
+            retention_floor_seq: ChangeSeq(1),
+            current_manifest_id: None,
+            wal_tail_segments: 2,
+        };
+        let transport = crate::transport::test_transport::failure_then_success(
+            serde_json::to_vec(&response).expect("serialize response"),
+        );
+        let client = retry_policy_client();
+
+        let actual = client
+            .get_namespace_diagnostics(&namespace_id)
+            .await
+            .expect("safe admin read should retry");
+        assert_eq!(actual, response);
+        assert_eq!(transport.attempts(), 2);
+    }
+
+    #[tokio::test]
     async fn retry_policy_commit_id_filesystem_mutation_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let commit_id =

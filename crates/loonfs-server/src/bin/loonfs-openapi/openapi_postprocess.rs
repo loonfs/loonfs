@@ -61,7 +61,6 @@ pub(crate) const OPENAPI_OPERATION_IDS: &[&str] = &[
 pub(crate) enum RetryClass {
     Safe,
     Replay,
-    Verify,
     NewAttempt,
 }
 
@@ -70,10 +69,17 @@ impl RetryClass {
         match self {
             Self::Safe => "safe",
             Self::Replay => "replay",
-            Self::Verify => "verify",
             Self::NewAttempt => "new_attempt",
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OpenapiPostprocessError {
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("OpenAPI operation `{operation_id}` has no retry classification")]
+    MissingRetryClassification { operation_id: String },
 }
 
 /// Retry class for each public operation.
@@ -84,7 +90,7 @@ pub(crate) const OPERATION_RETRY_CLASSES: &[(&str, RetryClass)] = &[
     ("begin_download_by_inode", RetryClass::Safe),
     ("begin_upload", RetryClass::NewAttempt),
     ("capabilities", RetryClass::Safe),
-    ("complete_upload", RetryClass::Verify),
+    ("complete_upload", RetryClass::Replay),
     ("create_checkpoint", RetryClass::NewAttempt),
     ("create_namespace", RetryClass::NewAttempt),
     ("delete_namespace", RetryClass::NewAttempt),
@@ -154,17 +160,17 @@ impl Value {
 /// Generates OpenAPI JSON, applies schema fixes, and preserves field order.
 pub(crate) fn openapi_json_pretty(
     document: &(impl Serialize + ?Sized),
-) -> Result<String, serde_json::Error> {
+) -> Result<String, OpenapiPostprocessError> {
     let derived = serde_json::to_string(document)?;
     let mut document = serde_json::from_str(&derived)?;
     normalize_optional_schemas(&mut document);
     add_union_discriminators(&mut document);
-    add_operation_retry_classes(&mut document);
-    serde_json::to_string_pretty(&document)
+    add_operation_retry_classes(&mut document)?;
+    Ok(serde_json::to_string_pretty(&document)?)
 }
 
 /// Adds `x-loonfs-retry` to every OpenAPI operation.
-fn add_operation_retry_classes(document: &mut Value) {
+fn add_operation_retry_classes(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
     assert_eq!(
         OPENAPI_OPERATION_IDS.len(),
         OPERATION_RETRY_CLASSES.len(),
@@ -206,15 +212,16 @@ fn add_operation_retry_classes(document: &mut Value) {
                 .find_map(|(candidate, retry_class)| {
                     (*candidate == operation_id).then_some(*retry_class)
                 })
-                .unwrap_or_else(|| {
-                    panic!("OpenAPI operation `{operation_id}` has no retry classification")
-                });
+                .ok_or_else(|| OpenapiPostprocessError::MissingRetryClassification {
+                    operation_id: operation_id.to_owned(),
+                })?;
             operation.insert(
                 "x-loonfs-retry".to_owned(),
                 Value::String(retry_class.as_str().to_owned()),
             );
         }
     }
+    Ok(())
 }
 
 /// Removes `null` from schemas for values that are omitted when absent.
@@ -486,6 +493,25 @@ mod tests {
         let once = document.clone();
         add_union_discriminators(&mut document);
         assert_eq!(document, once);
+    }
+
+    #[test]
+    fn missing_retry_classification_returns_a_named_error() {
+        let mut document = ordered(serde_json::json!({
+            "paths": {
+                "/future": {
+                    "post": {"operationId": "future_operation"}
+                }
+            }
+        }));
+
+        let error = add_operation_retry_classes(&mut document)
+            .expect_err("unknown operation should fail generation");
+        assert!(matches!(
+            error,
+            OpenapiPostprocessError::MissingRetryClassification { operation_id }
+                if operation_id == "future_operation"
+        ));
     }
 
     #[test]

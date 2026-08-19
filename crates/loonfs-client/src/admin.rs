@@ -76,6 +76,7 @@ impl Client {
     /// name is a label, not a key. This is a maintenance operation, not a
     /// file mutation. The record is a garbage-collection root until released
     /// or expired.
+    /// Retrying this request starts a distinct attempt.
     pub async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
@@ -85,7 +86,7 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
             self.base_url
         );
-        self.request_json(self.post(&url), Some(request)).await
+        self.request_json_once(self.post(&url), Some(request)).await
     }
 
     /// Creates a checkpoint pager beginning at `cursor` (admin plane).
@@ -142,6 +143,7 @@ impl Client {
     /// The request selects the actions by naming them, and a request that
     /// names none is rejected. Absent overrides inside a selected action use
     /// the server's defaults.
+    /// Retrying this request starts a distinct attempt.
     pub async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
@@ -151,7 +153,7 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/maintenance/step",
             self.base_url
         );
-        self.request_json(self.post(&url), Some(request)).await
+        self.request_json_once(self.post(&url), Some(request)).await
     }
 
     /// Proves the server's backing store honours the object-store contract
@@ -161,9 +163,10 @@ impl Client {
     /// runs only when asked. A store that fails a check answers with that
     /// check reported failed rather than with an error: the probe ran, and
     /// the answer is that the store is wrong.
+    /// Retrying this request starts a distinct attempt.
     pub async fn probe_store(&self, request: &StoreProbeRequest) -> Result<StoreProbeResponse> {
         let url = format!("{}/v0/admin/store/probe", self.base_url);
-        self.request_json(self.post(&url), Some(request)).await
+        self.request_json_once(self.post(&url), Some(request)).await
     }
 
     /// Content search over the namespace's grep index (query plane).
@@ -225,6 +228,7 @@ impl Client {
     ///
     /// `max_objects` bounds the reads the pass spends; when keys remain the
     /// response carries a `next_cursor` to resume from.
+    /// Retrying this request starts a distinct attempt.
     pub async fn gc_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -234,6 +238,6 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/gc",
             self.base_url
         );
-        self.request_json(self.post(&url), Some(request)).await
+        self.request_json_once(self.post(&url), Some(request)).await
     }
 }
