@@ -93,35 +93,56 @@ pub(crate) enum RetryClass {
 
 /// Pagination fields for cursor list operations. Keep this table sorted.
 ///
+/// Most entries page through the opaque `cursor` and `next_cursor` pair.
+/// `list_changes` pages through its sequence fields: `next_after_seq` is
+/// absent on the final page, so a pager stops at the snapshot head.
+///
 /// `grep` stores its cursor in the request body. The pinned generators do not
 /// wire request-body cursors. `gc_grep_index` resumes a maintenance pass across
-/// calls and does not paginate results. `list_changes` is sequence-keyed by
-/// design through `after_seq` and `next_after_seq`, not an opaque cursor.
+/// calls and does not paginate results.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PaginationOperation {
     pub(crate) operation_id: &'static str,
+    pub(crate) cursor_parameter: &'static str,
+    pub(crate) next_field: &'static str,
     pub(crate) results_field: &'static str,
 }
 
 pub(crate) const PAGINATION_OPERATIONS: &[PaginationOperation] = &[
     PaginationOperation {
+        operation_id: "list_changes",
+        cursor_parameter: "after_seq",
+        next_field: "next_after_seq",
+        results_field: "changes",
+    },
+    PaginationOperation {
         operation_id: "list_checkpoints",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
         results_field: "checkpoints",
     },
     PaginationOperation {
         operation_id: "list_file_revisions",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
         results_field: "revisions",
     },
     PaginationOperation {
         operation_id: "list_file_revisions_by_inode",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
         results_field: "revisions",
     },
     PaginationOperation {
         operation_id: "list_path_entries",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
         results_field: "entries",
     },
     PaginationOperation {
         operation_id: "list_trash",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
         results_field: "entries",
     },
 ];
@@ -144,8 +165,11 @@ pub(crate) enum OpenapiPostprocessError {
     MissingRetryClassification { operation_id: String },
     #[error("OpenAPI pagination operation `{operation_id}` does not appear in the document")]
     MissingPaginationOperation { operation_id: String },
-    #[error("OpenAPI pagination operation `{operation_id}` has no `cursor` query parameter")]
-    MissingPaginationCursorParameter { operation_id: String },
+    #[error("OpenAPI pagination operation `{operation_id}` has no `{parameter}` query parameter")]
+    MissingPaginationCursorParameter {
+        operation_id: String,
+        parameter: &'static str,
+    },
     #[error("OpenAPI pagination operation `{operation_id}` has no 200 response component schema")]
     MissingPaginationResponseSchema { operation_id: String },
     #[error("OpenAPI pagination operation `{operation_id}` response has no `{property}` property")]
@@ -161,9 +185,12 @@ pub(crate) enum OpenapiPostprocessError {
         results_field: String,
     },
     #[error(
-        "OpenAPI operation `{operation_id}` has a `cursor` query parameter but no pagination metadata entry"
+        "OpenAPI operation `{operation_id}` has a `{parameter}` pagination query parameter but no pagination metadata entry"
     )]
-    MissingPaginationMetadata { operation_id: String },
+    MissingPaginationMetadata {
+        operation_id: String,
+        parameter: String,
+    },
     #[error("OpenAPI pagination metadata cannot read `{location}`")]
     InvalidPaginationDocument { location: &'static str },
     #[error("OpenAPI path item `{path}` is not an object")]
@@ -679,11 +706,11 @@ fn add_pagination_metadata(document: &mut Value) -> Result<(), OpenapiPostproces
             let mut extension = Map::new();
             extension.insert(
                 "cursor".to_owned(),
-                Value::String("$request.cursor".to_owned()),
+                Value::String(format!("$request.{}", metadata.cursor_parameter)),
             );
             extension.insert(
                 "next_cursor".to_owned(),
-                Value::String("$response.next_cursor".to_owned()),
+                Value::String(format!("$response.{}", metadata.next_field)),
             );
             extension.insert(
                 "results".to_owned(),
@@ -731,20 +758,24 @@ fn validate_pagination_metadata(document: &Value) -> Result<(), OpenapiPostproce
                     method,
                     path: path.clone(),
                 })?;
-            let has_cursor = has_query_parameter(operation, "cursor");
+            let pagination_parameter = ["cursor", "after_seq"]
+                .into_iter()
+                .find(|name| has_query_parameter(operation, name));
             let Some(metadata) = pagination_operation(operation_id) else {
-                if has_cursor {
+                if let Some(parameter) = pagination_parameter {
                     return Err(OpenapiPostprocessError::MissingPaginationMetadata {
                         operation_id: operation_id.to_owned(),
+                        parameter: parameter.to_owned(),
                     });
                 }
                 continue;
             };
             found_operations.insert(metadata.operation_id);
 
-            if !has_cursor {
+            if !has_query_parameter(operation, metadata.cursor_parameter) {
                 return Err(OpenapiPostprocessError::MissingPaginationCursorParameter {
                     operation_id: operation_id.to_owned(),
+                    parameter: metadata.cursor_parameter,
                 });
             }
             validate_pagination_response(schemas, operation, metadata)?;
@@ -809,7 +840,7 @@ fn validate_pagination_response(
             },
         )?;
 
-    for property in ["next_cursor", metadata.results_field] {
+    for property in [metadata.next_field, metadata.results_field] {
         if !properties.contains_key(property) {
             return Err(OpenapiPostprocessError::MissingPaginationResponseProperty {
                 operation_id: metadata.operation_id.to_owned(),
@@ -1364,7 +1395,7 @@ mod tests {
         assert!(matches!(
             error,
             OpenapiPostprocessError::MissingPaginationOperation { operation_id }
-                if operation_id == "list_checkpoints"
+                if operation_id == "list_changes"
         ));
     }
 
@@ -1385,8 +1416,10 @@ mod tests {
             .expect_err("unregistered cursor operation should fail generation");
         assert!(matches!(
             error,
-            OpenapiPostprocessError::MissingPaginationMetadata { operation_id }
-                if operation_id == "future_list"
+            OpenapiPostprocessError::MissingPaginationMetadata {
+                operation_id,
+                parameter,
+            } if operation_id == "future_list" && parameter == "cursor"
         ));
     }
 

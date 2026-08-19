@@ -666,8 +666,8 @@ fn cursor_list_operations_publish_the_registered_pagination_metadata() {
             (
                 metadata.operation_id,
                 serde_json::json!({
-                    "cursor": "$request.cursor",
-                    "next_cursor": "$response.next_cursor",
+                    "cursor": format!("$request.{}", metadata.cursor_parameter),
+                    "next_cursor": format!("$response.{}", metadata.next_field),
                     "results": format!("$response.{}", metadata.results_field),
                 }),
             )
