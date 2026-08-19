@@ -1405,8 +1405,10 @@ fn openapi_flattens_the_path_entry_attribute_projection() {
     assert!(projection_properties.contains_key("attributes_revision_no"));
     assert!(projection_properties.contains_key("attributes"));
     let required = required_fields(projection);
-    assert!(required.contains("attributes_revision_no"));
-    assert!(required.contains("attributes"));
+    assert!(
+        !required.contains("attributes_revision_no") && !required.contains("attributes"),
+        "path entries may omit attribute fields when attributes are not requested"
+    );
 
     let path_entry = schemas
         .get("AuthoritativePathEntry")
