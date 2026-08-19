@@ -51,6 +51,7 @@ pub(super) struct CheckpointPageQuery {
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "capabilities",
         path = "/v0/capabilities",
         tag = "capabilities",
         summary = "Get capabilities",
@@ -177,6 +178,7 @@ pub(super) async fn capabilities(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "create_namespace",
         path = "/v0/namespaces",
         tag = "namespaces",
         summary = "Create namespace",
@@ -208,6 +210,7 @@ pub(super) async fn create_namespace(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "get_namespace",
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Get namespace",
@@ -223,7 +226,7 @@ pub(super) async fn create_namespace(
         )
     )
 )]
-pub(super) async fn namespace_status(
+pub(super) async fn get_namespace(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
@@ -232,7 +235,7 @@ pub(super) async fn namespace_status(
     let namespace_id = namespace_id_path.into_id()?;
     let namespace = state
         .reader
-        .namespace_status(&namespace_id)
+        .get_namespace(&namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(namespace))
@@ -242,6 +245,7 @@ pub(super) async fn namespace_status(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "get_namespace_diagnostics",
         path = "/v0/admin/namespaces/{namespace_id}/diagnostics",
         tag = "admin",
         summary = "Get namespace diagnostics",
@@ -257,7 +261,7 @@ pub(super) async fn namespace_status(
         )
     )
 )]
-pub(super) async fn namespace_diagnostics(
+pub(super) async fn get_namespace_diagnostics(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
@@ -266,7 +270,7 @@ pub(super) async fn namespace_diagnostics(
     let namespace_id = namespace_id_path.into_id()?;
     let diagnostics = state
         .admin
-        .namespace_diagnostics(&namespace_id)
+        .get_namespace_diagnostics(&namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(diagnostics))
@@ -276,6 +280,7 @@ pub(super) async fn namespace_diagnostics(
     feature = "openapi",
     utoipa::path(
         delete,
+        operation_id = "delete_namespace",
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Delete namespace",
@@ -327,6 +332,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "fork_namespace",
         path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
         summary = "Fork namespace",
@@ -362,6 +368,7 @@ pub(super) async fn fork_namespace(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "create_checkpoint",
         path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
         tag = "admin",
         summary = "Create checkpoint",
@@ -403,6 +410,7 @@ pub(super) async fn create_checkpoint(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "list_checkpoints",
         path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
         tag = "admin",
         summary = "List checkpoints",
@@ -461,6 +469,7 @@ pub(super) async fn list_checkpoints(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "release_checkpoint",
         path = "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
         tag = "admin",
         summary = "Release checkpoint",
@@ -516,6 +525,7 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "maintenance_step",
         path = "/v0/admin/namespaces/{namespace_id}/maintenance/step",
         tag = "admin",
         summary = "Run maintenance step",

@@ -301,7 +301,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
     assert_eq!(
         harness
             .client
-            .namespace_status(&namespace)
+            .get_namespace(&namespace)
             .await
             .expect("status")
             .head_seq,
@@ -354,7 +354,7 @@ async fn an_empty_operation_list_is_rejected() {
     assert_eq!(
         harness
             .client
-            .namespace_status(&namespace)
+            .get_namespace(&namespace)
             .await
             .expect("status")
             .head_seq,
@@ -480,7 +480,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
     assert_eq!(
         harness
             .client
-            .namespace_status(&namespace)
+            .get_namespace(&namespace)
             .await
             .expect("status")
             .head_seq,
@@ -569,7 +569,7 @@ async fn a_batch_replays_under_its_commit_id() {
     assert_eq!(
         harness
             .client
-            .namespace_status(&namespace)
+            .get_namespace(&namespace)
             .await
             .expect("status")
             .head_seq,
@@ -696,7 +696,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
     assert_eq!(
         harness
             .client
-            .namespace_status(&namespace)
+            .get_namespace(&namespace)
             .await
             .expect("status")
             .head_seq,

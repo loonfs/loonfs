@@ -77,7 +77,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .await
             .expect("stat namespace root");
         reader
-            .namespace_status(&namespace_id)
+            .get_namespace(&namespace_id)
             .await
             .expect("read namespace state");
 
@@ -86,7 +86,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .build()
             .await
             .expect("build admin")
-            .namespace_diagnostics(&namespace_id)
+            .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("read namespace diagnostics");
     });
@@ -96,8 +96,8 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
     for span_name in [
         "loonfs.create_namespace",
         "loonfs.stat",
-        "loonfs.namespace_status",
-        "loonfs.namespace_diagnostics",
+        "loonfs.get_namespace",
+        "loonfs.get_namespace_diagnostics",
     ] {
         let span = log
             .lines()

@@ -293,7 +293,7 @@ async fn namespace_check(
         ));
         return;
     };
-    let result = target.namespace_status(&namespace).await;
+    let result = target.get_namespace(&namespace).await;
     checks.push(check_from_backend_result(
         DOCTOR_CHECK_NAMES[8],
         format!("namespace `{namespace}` is reachable"),

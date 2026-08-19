@@ -470,8 +470,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .map(|root| root.manifest_state().clone()))
     }
 
-    /// Returns the public lifecycle summary for the durable grep root.
-    pub async fn index_status(
+    /// Returns the grep index's state and maintenance progress.
+    pub async fn get_grep_index_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndexStatusResponse> {

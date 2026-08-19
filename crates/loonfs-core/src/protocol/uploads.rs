@@ -1213,12 +1213,11 @@ impl AbandonedUpload {
     }
 }
 
-/// Reads an upload session and returns a fresh receipt when the session is
-/// completed.
+/// Returns an upload session and a new receipt when the upload is complete.
 ///
 /// A caller that lost the original completion response can recover the
 /// receipt without uploading the content again.
-pub(crate) async fn read_upload_status<S: ObjectStore + ?Sized>(
+pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
@@ -1966,7 +1965,7 @@ mod tests {
             staged_session(&store, &setup).await;
 
         let (open, receipt) =
-            read_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 1_500)
+            get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 1_500)
                 .await
                 .expect("status of an open session");
         assert!(matches!(open.status, UploadSessionStatus::Open { .. }));
@@ -1982,7 +1981,7 @@ mod tests {
         .await
         .expect("complete");
         let (completed, receipt) =
-            read_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 2_500)
+            get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 2_500)
                 .await
                 .expect("status of a completed session");
         assert!(matches!(
@@ -2012,7 +2011,7 @@ mod tests {
         )
         .await
         .expect("abort");
-        let (aborted, receipt) = read_upload_status(
+        let (aborted, receipt) = get_upload_status(
             &store,
             &namespace_id,
             &content_store_id,
@@ -2053,7 +2052,7 @@ mod tests {
         // Long after the first receipt would have expired, the durable
         // session still answers with a usable one.
         let much_later = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS - 1;
-        let (_, receipt) = read_upload_status(
+        let (_, receipt) = get_upload_status(
             &store,
             &namespace_id,
             &content_store_id,
@@ -2066,7 +2065,7 @@ mod tests {
 
         let past = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;
         let (status, receipt) =
-            read_upload_status(&store, &namespace_id, &content_store_id, &upload_id, past)
+            get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, past)
                 .await
                 .expect("status past the receipt window");
         let completed = match status.status {

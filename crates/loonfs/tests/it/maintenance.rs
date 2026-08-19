@@ -807,7 +807,7 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_release_available() 
         ErrorCode::InvalidRequest,
     );
     assert_core_error_kind(
-        block_on(admin.namespace_diagnostics(&source)),
+        block_on(admin.get_namespace_diagnostics(&source)),
         ErrorCode::NamespaceDeleted,
     );
     assert_core_error_kind(

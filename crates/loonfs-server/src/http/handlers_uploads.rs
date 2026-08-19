@@ -101,6 +101,7 @@ pub(super) struct UploadPathParams {
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "begin_upload",
         path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
@@ -285,6 +286,7 @@ async fn begin_direct_multipart_upload(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "sign_upload_parts",
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
         tag = "uploads",
         summary = "Sign multipart parts",
@@ -520,6 +522,7 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
     feature = "openapi",
     utoipa::path(
         put,
+        operation_id = "upload_content",
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
         tag = "uploads",
         summary = "Upload content",
@@ -580,6 +583,7 @@ pub(super) async fn upload_content(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "complete_upload",
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
@@ -783,10 +787,11 @@ mod completion_body_tests {
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "get_upload_status",
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
-        summary = "Read upload session",
-        description = "Reads one upload session. A completed session answers with a freshly minted content token, so a client that lost a commit response can commit again without re-uploading anything.",
+        summary = "Get upload session",
+        description = "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
@@ -801,7 +806,7 @@ mod completion_body_tests {
         )
     )
 )]
-pub(super) async fn read_upload_status(
+pub(super) async fn get_upload_status(
     State(state): State<AppState>,
     headers: HeaderMap,
     namespace_id_path: NamespaceIdPath,
@@ -815,7 +820,7 @@ pub(super) async fn read_upload_status(
     let upload_id = parse_upload_id(&upload_id)?;
     let (response, receipt) = state
         .writer
-        .read_upload_status(&namespace_id, &upload_id)
+        .get_upload_status(&namespace_id, &upload_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(with_content_token(
@@ -829,6 +834,7 @@ pub(super) async fn read_upload_status(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "abort_upload",
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
         tag = "uploads",
         summary = "Abort upload",

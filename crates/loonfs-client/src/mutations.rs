@@ -145,13 +145,11 @@ impl Client {
         .await
     }
 
-    /// Commits content an upload session already completed, for a caller
-    /// that finished the transfer and was interrupted before the commit.
+    /// Commits content after an upload completed but its file commit did not.
     ///
-    /// The reference and the token come from
-    /// [`Self::read_upload_status`] reporting the session `Completed`: the
-    /// bytes are in object storage and admitted, so the only thing left to
-    /// do is name them at a path. Nothing is re-uploaded.
+    /// Call [`Self::get_upload_status`] to recover the content reference and
+    /// token. This method then commits the existing content without uploading
+    /// it again.
     pub async fn commit_completed_upload(
         &self,
         spec: &NamespacePath,
@@ -590,7 +588,7 @@ mod tests {
         })
         .expect("valid client config");
         let error = retrying
-            .namespace_status(&namespace_id)
+            .get_namespace(&namespace_id)
             .await
             .expect_err("dropped connections must fail");
         assert!(matches!(error, ClientError::Http(_)), "{error:?}");
@@ -607,7 +605,7 @@ mod tests {
         })
         .expect("valid client config");
         single_shot
-            .namespace_status(&namespace_id)
+            .get_namespace(&namespace_id)
             .await
             .expect_err("dropped connection must fail without retry");
         assert_eq!(transport.attempts(), 1);
@@ -712,7 +710,7 @@ mod tests {
         let client = retry_policy_client();
 
         let actual = client
-            .namespace_status(&namespace_id)
+            .get_namespace(&namespace_id)
             .await
             .expect("read should retry");
         assert_eq!(actual, response);

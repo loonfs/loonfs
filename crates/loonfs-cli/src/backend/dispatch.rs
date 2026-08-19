@@ -162,13 +162,13 @@ impl ResolvedTarget {
     }
 
     /// Summarizes a namespace's current head state.
-    pub(crate) async fn namespace_status(
+    pub(crate) async fn get_namespace(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<Namespace, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.namespace_status(namespace_id).await,
-            Self::Remote(target) => Ok(target.client.namespace_status(namespace_id).await?),
+            Self::Embedded(target) => target.backend.get_namespace(namespace_id).await,
+            Self::Remote(target) => Ok(target.client.get_namespace(namespace_id).await?),
         }
     }
 
@@ -365,13 +365,13 @@ impl ResolvedTarget {
     }
 
     /// Reads the namespace's grep-index lifecycle (admin plane).
-    pub(crate) async fn grep_index_status(
+    pub(crate) async fn get_grep_index_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndexStatusResponse, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.grep_index_status(namespace_id).await,
-            Self::Remote(target) => Ok(target.client.grep_index_status(namespace_id).await?),
+            Self::Embedded(target) => target.backend.get_grep_index_status(namespace_id).await,
+            Self::Remote(target) => Ok(target.client.get_grep_index_status(namespace_id).await?),
         }
     }
 
@@ -413,7 +413,7 @@ impl ResolvedTarget {
                 loop {
                     let lifecycle = target
                         .client
-                        .grep_index_status(namespace_id)
+                        .get_grep_index_status(namespace_id)
                         .await?
                         .lifecycle;
                     let reached = lifecycle.is_built_through(target_seq);
@@ -534,7 +534,7 @@ impl ResolvedTarget {
     }
 
     /// Reads what became of an upload session a previous run opened.
-    pub(crate) async fn read_upload_status(
+    pub(crate) async fn get_upload_status(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -543,7 +543,7 @@ impl ResolvedTarget {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
             Self::Remote(target) => Ok(target
                 .client
-                .read_upload_status(namespace_id, upload_id)
+                .get_upload_status(namespace_id, upload_id)
                 .await?),
         }
     }

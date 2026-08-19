@@ -72,7 +72,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
     }
     harness
         .client
-        .namespace_status(&namespace)
+        .get_namespace(&namespace)
         .await
         .expect("still alive after failed precondition");
 
@@ -88,7 +88,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
     // deleted, and the id is retired.
     let status = harness
         .client
-        .namespace_status(&namespace)
+        .get_namespace(&namespace)
         .await
         .expect_err("deleted namespace has no status");
     match status {
@@ -291,7 +291,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 
     let status = harness
         .client
-        .namespace_status(&namespace_id("demo"))
+        .get_namespace(&namespace_id("demo"))
         .await
         .expect("namespace status");
     assert_eq!(status.namespace_id.as_str(), "demo");
@@ -299,7 +299,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 
     let missing = harness
         .client
-        .namespace_status(&namespace_id("absent"))
+        .get_namespace(&namespace_id("absent"))
         .await
         .expect_err("missing namespace status");
     match missing {

@@ -802,10 +802,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Reads an upload session. For a completed upload, it also creates a new
-    /// receipt so the caller can retry publication without uploading the content
-    /// again.
-    pub async fn read_upload_status(
+    /// Returns an upload session. Completed uploads include a new receipt so
+    /// the caller can retry publication without uploading the content again.
+    pub async fn get_upload_status(
         &self,
         upload_id: &UploadId,
     ) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
@@ -814,7 +813,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             &self.namespace_id,
         )
         .await?;
-        crate::protocol::read_upload_status(
+        crate::protocol::get_upload_status(
             &self.store,
             &self.namespace_id,
             &content_store_id,
@@ -1059,7 +1058,7 @@ mod tests {
             namespace_id,
         );
         let (status, receipt) = reader
-            .read_upload_status(begun.upload_id())
+            .get_upload_status(begun.upload_id())
             .await
             .expect("reader engine reads upload status");
 

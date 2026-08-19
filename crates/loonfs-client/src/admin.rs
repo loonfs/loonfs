@@ -59,7 +59,7 @@ impl CheckpointsPager {
 
 impl Client {
     /// Returns namespace state and storage details used by maintenance.
-    pub async fn namespace_diagnostics(
+    pub async fn get_namespace_diagnostics(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceDiagnostics> {
@@ -179,10 +179,9 @@ impl Client {
         self.request_json(self.post(&url), Some(request)).await
     }
 
-    /// Reads the namespace's grep-index lifecycle (admin plane): disabled,
-    /// backfilling toward a captured sequence, or active at a watermark.
-    /// One grep root read on the server, with no side effects.
-    pub async fn grep_index_status(
+    /// Returns whether the namespace's grep index is disabled, being built,
+    /// or active. This operation does not change the index.
+    pub async fn get_grep_index_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndexStatusResponse> {

@@ -270,7 +270,7 @@ impl Client {
     }
 
     /// Returns the namespace's current state.
-    pub async fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
+    pub async fn get_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
         // Validated namespace ids are URL-safe by construction, like the
         // other parsed id segments interpolated into paths here and below.
         let url = format!("{}/v0/namespaces/{namespace_id}", self.base_url);
