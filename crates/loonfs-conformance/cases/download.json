@@ -1,8 +1,6 @@
 {
-  "version": 1,
   "name": "download",
   "intent": "Checks direct download length, checksum, and content.",
-  "family": "download",
   "request": {
     "namespace_id": "conf-download",
     "path": "/download.txt",

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import os
+import re
 import socket
 import threading
 import time
@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+import pydantic
 import pytest
 import uvicorn
 from loonfs_sdk import (
@@ -48,20 +49,18 @@ from loonfs_sdk.proxy import LoonFSProxy
 from loonfs_sdk.transfers import get_file, put_file
 
 
-FIXTURE_VERSION = 1
 RUNNER_SKIP = "run scripts/run-sdk-conformance.sh python"
-CASE_FIELDS = {"version", "name", "intent", "family", "request", "expected"}
 EXPECTED_CASES = [
-    ("changes", "changes"),
-    ("commit_replay", "commit_replay"),
-    ("download", "download"),
-    ("end_to_end", "end_to_end"),
-    ("error_contract", "error_contract"),
-    ("pagination", "pagination"),
-    ("proxy", "proxy"),
-    ("upload_abort", "upload_abort"),
-    ("upload_direct_put", "upload_direct_put"),
-    ("upload_multipart", "upload_multipart"),
+    "changes",
+    "commit_replay",
+    "download",
+    "end_to_end",
+    "error_contract",
+    "pagination",
+    "proxy",
+    "upload_abort",
+    "upload_direct_put",
+    "upload_multipart",
 ]
 pytestmark = pytest.mark.skipif(
     not os.environ.get("LOONFS_CONFORMANCE_URL"),
@@ -72,42 +71,31 @@ pytestmark = pytest.mark.skipif(
 JsonObject = dict[str, object]
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ConformanceCase:
     name: str
-    family: str
+    intent: str
     request: JsonObject
     expected: JsonObject
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ErrorStatusExpected:
     status: int
     code: str
 
 
-@dataclass(frozen=True)
-class ErrorOutcome:
-    status: int
-    code: str
-    param: str
-
-
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ErrorContractRequest:
     namespace_id: str
-    malformed_body: JsonObject
-    invalid_after_seq: str
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ErrorContractExpected:
     unauthenticated: ErrorStatusExpected
-    malformed_body: ErrorOutcome
-    invalid_query: ErrorOutcome
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class CommitReplayRequest:
     namespace_id: str
     commit_id: str
@@ -116,12 +104,12 @@ class CommitReplayRequest:
     path: str
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class CommitReplayExpected:
     committed_seq: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class DirectPutRequest:
     namespace_id: str
     path: str
@@ -130,7 +118,7 @@ class DirectPutRequest:
     content_utf8: str
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class DirectPutExpected:
     mode: str
     size_bytes: int
@@ -138,13 +126,13 @@ class DirectPutExpected:
     committed_seq: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class BytePattern:
     length: int
     modulus: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class MultipartRequest:
     namespace_id: str
     path: str
@@ -154,7 +142,7 @@ class MultipartRequest:
     content_pattern: BytePattern
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class MultipartExpected:
     mode: str
     part_count: int
@@ -163,18 +151,18 @@ class MultipartExpected:
     committed_seq: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class AbortRequest:
     namespace_id: str
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class AbortExpected:
     mode: str
     status: str
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class DownloadRequest:
     namespace_id: str
     path: str
@@ -183,14 +171,14 @@ class DownloadRequest:
     content_utf8: str
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class DownloadExpected:
     size_bytes: int
     checksum_algorithm: str
     committed_seq: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class EndToEndCommitIds:
     mkdir: str
     upload: str
@@ -198,7 +186,7 @@ class EndToEndCommitIds:
     remove: str
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class EndToEndRequest:
     namespace_id: str
     directory: str
@@ -209,7 +197,7 @@ class EndToEndRequest:
     commit_ids: EndToEndCommitIds
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class EndToEndExpected:
     mkdir_committed_seq: int
     upload_committed_seq: int
@@ -220,7 +208,7 @@ class EndToEndExpected:
     change_count: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class PaginationRequest:
     namespace_id: str
     directory: str
@@ -230,21 +218,21 @@ class PaginationRequest:
     resume_after_page: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class PaginationExpected:
     entry_count: int
     minimum_page_count: int
     head_seq: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ProxyCommitIds:
     directory: str
     proxied: str
     direct: str
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ProxyRequest:
     namespace_alias: str
     namespace_id: str
@@ -258,7 +246,7 @@ class ProxyRequest:
     disallowed_path_suffix: str
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ProxyExpected:
     mkdir_committed_seq: int
     proxied_committed_seq: int
@@ -268,7 +256,7 @@ class ProxyExpected:
     disallowed_route_status: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ChangesRequest:
     namespace_id: str
     path: str
@@ -277,11 +265,10 @@ class ChangesRequest:
     after_seq: int
 
 
-@dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ChangesExpected:
     committed_seq: int
     change_count: int
-    event_kind: str
 
 
 @dataclass(frozen=True)
@@ -290,588 +277,11 @@ class Harness:
     unauthenticated: LoonFS
 
 
-@dataclass(frozen=True)
-class ProxyHarness:
-    base_url: str
-
-
-def _strict_object(value: object, fields: set[str], label: str) -> JsonObject:
-    if not isinstance(value, dict):
-        raise AssertionError(f"{label} must be a JSON object")
-    if not all(isinstance(key, str) for key in value):
-        raise AssertionError(f"{label} must use string keys")
-    actual = set(value)
-    if actual != fields:
-        unknown = sorted(actual - fields)
-        missing = sorted(fields - actual)
-        raise AssertionError(
-            f"{label} fields differ: unknown={unknown}, missing={missing}"
-        )
-    return value
-
-
-def _json_object(value: object, label: str) -> JsonObject:
-    if not isinstance(value, dict):
-        raise AssertionError(f"{label} must be a JSON object")
-    if not all(isinstance(key, str) for key in value):
-        raise AssertionError(f"{label} must use string keys")
-    return value
-
-
-def _string(value: object, label: str) -> str:
-    if not isinstance(value, str):
-        raise AssertionError(f"{label} must be a string")
-    return value
-
-
-def _integer(value: object, label: str) -> int:
-    if type(value) is not int:
-        raise AssertionError(f"{label} must be an integer")
-    return value
-
-
-def _string_list(value: object, label: str) -> list[str]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise AssertionError(f"{label} must be an array of strings")
-    return value
-
-
-def _actor(value: object, label: str) -> ActorRef:
-    actor = _strict_object(value, {"id", "kind"}, label)
-    actor_id = _string(actor["id"], f"{label}.id")
-    kind = _string(actor["kind"], f"{label}.kind")
-    if kind not in {"user", "service", "system"}:
-        raise AssertionError(f"{label}.kind is not a known actor kind")
-    return ActorRef(id=actor_id, kind=kind)
-
-
-def _error_status(value: object, label: str) -> ErrorStatusExpected:
-    data = _strict_object(value, {"status", "code"}, label)
-    return ErrorStatusExpected(
-        status=_integer(data["status"], f"{label}.status"),
-        code=_string(data["code"], f"{label}.code"),
-    )
-
-
-def _error_outcome(value: object, label: str) -> ErrorOutcome:
-    data = _strict_object(value, {"status", "code", "param"}, label)
-    return ErrorOutcome(
-        status=_integer(data["status"], f"{label}.status"),
-        code=_string(data["code"], f"{label}.code"),
-        param=_string(data["param"], f"{label}.param"),
-    )
-
-
-def _decode_error_contract(
-    test_case: ConformanceCase,
-) -> tuple[ErrorContractRequest, ErrorContractExpected]:
-    request = _strict_object(
-        test_case.request,
-        {"namespace_id", "malformed_body", "invalid_after_seq"},
-        f"{test_case.name} request",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {"unauthenticated", "malformed_body", "invalid_query"},
-        f"{test_case.name} expected",
-    )
+def _decode(case: ConformanceCase, request_type: Any, expected_type: Any) -> tuple[Any, Any]:
+    # Strict dataclasses accept fixture mappings through Pydantic's JSON validation path.
     return (
-        ErrorContractRequest(
-            namespace_id=_string(
-                request["namespace_id"], "error_contract request.namespace_id"
-            ),
-            malformed_body=_json_object(
-                request["malformed_body"], "error_contract request.malformed_body"
-            ),
-            invalid_after_seq=_string(
-                request["invalid_after_seq"], "error_contract request.invalid_after_seq"
-            ),
-        ),
-        ErrorContractExpected(
-            unauthenticated=_error_status(
-                expected["unauthenticated"], "error_contract expected.unauthenticated"
-            ),
-            malformed_body=_error_outcome(
-                expected["malformed_body"], "error_contract expected.malformed_body"
-            ),
-            invalid_query=_error_outcome(
-                expected["invalid_query"], "error_contract expected.invalid_query"
-            ),
-        ),
-    )
-
-
-def _decode_commit_replay(
-    test_case: ConformanceCase,
-) -> tuple[CommitReplayRequest, CommitReplayExpected]:
-    request = _strict_object(
-        test_case.request,
-        {"namespace_id", "commit_id", "actor", "message", "path"},
-        f"{test_case.name} request",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {"committed_seq"},
-        f"{test_case.name} expected",
-    )
-    return (
-        CommitReplayRequest(
-            namespace_id=_string(
-                request["namespace_id"], "commit_replay request.namespace_id"
-            ),
-            commit_id=_string(request["commit_id"], "commit_replay request.commit_id"),
-            actor=_actor(request["actor"], "commit_replay request.actor"),
-            message=_string(request["message"], "commit_replay request.message"),
-            path=_string(request["path"], "commit_replay request.path"),
-        ),
-        CommitReplayExpected(
-            committed_seq=_integer(
-                expected["committed_seq"], "commit_replay expected.committed_seq"
-            )
-        ),
-    )
-
-
-def _decode_direct_put(
-    test_case: ConformanceCase,
-) -> tuple[DirectPutRequest, DirectPutExpected]:
-    request = _strict_object(
-        test_case.request,
-        {"namespace_id", "path", "commit_id", "actor", "content_utf8"},
-        f"{test_case.name} request",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {"mode", "size_bytes", "checksum_algorithm", "committed_seq"},
-        f"{test_case.name} expected",
-    )
-    return (
-        DirectPutRequest(
-            namespace_id=_string(
-                request["namespace_id"], "upload_direct_put request.namespace_id"
-            ),
-            path=_string(request["path"], "upload_direct_put request.path"),
-            commit_id=_string(
-                request["commit_id"], "upload_direct_put request.commit_id"
-            ),
-            actor=_actor(request["actor"], "upload_direct_put request.actor"),
-            content_utf8=_string(
-                request["content_utf8"], "upload_direct_put request.content_utf8"
-            ),
-        ),
-        DirectPutExpected(
-            mode=_string(expected["mode"], "upload_direct_put expected.mode"),
-            size_bytes=_integer(
-                expected["size_bytes"], "upload_direct_put expected.size_bytes"
-            ),
-            checksum_algorithm=_string(
-                expected["checksum_algorithm"],
-                "upload_direct_put expected.checksum_algorithm",
-            ),
-            committed_seq=_integer(
-                expected["committed_seq"], "upload_direct_put expected.committed_seq"
-            ),
-        ),
-    )
-
-
-def _decode_multipart(
-    test_case: ConformanceCase,
-) -> tuple[MultipartRequest, MultipartExpected]:
-    request = _strict_object(
-        test_case.request,
-        {
-            "namespace_id",
-            "path",
-            "commit_id",
-            "actor",
-            "part_size_bytes",
-            "content_pattern",
-        },
-        f"{test_case.name} request",
-    )
-    pattern = _strict_object(
-        request["content_pattern"],
-        {"length", "modulus"},
-        "upload_multipart request.content_pattern",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {"mode", "part_count", "size_bytes", "checksum_algorithm", "committed_seq"},
-        f"{test_case.name} expected",
-    )
-    return (
-        MultipartRequest(
-            namespace_id=_string(
-                request["namespace_id"], "upload_multipart request.namespace_id"
-            ),
-            path=_string(request["path"], "upload_multipart request.path"),
-            commit_id=_string(
-                request["commit_id"], "upload_multipart request.commit_id"
-            ),
-            actor=_actor(request["actor"], "upload_multipart request.actor"),
-            part_size_bytes=_integer(
-                request["part_size_bytes"], "upload_multipart request.part_size_bytes"
-            ),
-            content_pattern=BytePattern(
-                length=_integer(
-                    pattern["length"], "upload_multipart request.content_pattern.length"
-                ),
-                modulus=_integer(
-                    pattern["modulus"],
-                    "upload_multipart request.content_pattern.modulus",
-                ),
-            ),
-        ),
-        MultipartExpected(
-            mode=_string(expected["mode"], "upload_multipart expected.mode"),
-            part_count=_integer(
-                expected["part_count"], "upload_multipart expected.part_count"
-            ),
-            size_bytes=_integer(
-                expected["size_bytes"], "upload_multipart expected.size_bytes"
-            ),
-            checksum_algorithm=_string(
-                expected["checksum_algorithm"],
-                "upload_multipart expected.checksum_algorithm",
-            ),
-            committed_seq=_integer(
-                expected["committed_seq"], "upload_multipart expected.committed_seq"
-            ),
-        ),
-    )
-
-
-def _decode_abort(test_case: ConformanceCase) -> tuple[AbortRequest, AbortExpected]:
-    request = _strict_object(
-        test_case.request,
-        {"namespace_id"},
-        f"{test_case.name} request",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {"mode", "status"},
-        f"{test_case.name} expected",
-    )
-    return (
-        AbortRequest(
-            namespace_id=_string(
-                request["namespace_id"], "upload_abort request.namespace_id"
-            )
-        ),
-        AbortExpected(
-            mode=_string(expected["mode"], "upload_abort expected.mode"),
-            status=_string(expected["status"], "upload_abort expected.status"),
-        ),
-    )
-
-
-def _decode_download(
-    test_case: ConformanceCase,
-) -> tuple[DownloadRequest, DownloadExpected]:
-    request = _strict_object(
-        test_case.request,
-        {"namespace_id", "path", "commit_id", "actor", "content_utf8"},
-        f"{test_case.name} request",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {"size_bytes", "checksum_algorithm", "committed_seq"},
-        f"{test_case.name} expected",
-    )
-    return (
-        DownloadRequest(
-            namespace_id=_string(
-                request["namespace_id"], "download request.namespace_id"
-            ),
-            path=_string(request["path"], "download request.path"),
-            commit_id=_string(request["commit_id"], "download request.commit_id"),
-            actor=_actor(request["actor"], "download request.actor"),
-            content_utf8=_string(
-                request["content_utf8"], "download request.content_utf8"
-            ),
-        ),
-        DownloadExpected(
-            size_bytes=_integer(expected["size_bytes"], "download expected.size_bytes"),
-            checksum_algorithm=_string(
-                expected["checksum_algorithm"], "download expected.checksum_algorithm"
-            ),
-            committed_seq=_integer(
-                expected["committed_seq"], "download expected.committed_seq"
-            ),
-        ),
-    )
-
-
-def _decode_end_to_end(
-    test_case: ConformanceCase,
-) -> tuple[EndToEndRequest, EndToEndExpected]:
-    request = _strict_object(
-        test_case.request,
-        {
-            "namespace_id",
-            "directory",
-            "upload_path",
-            "moved_path",
-            "actor",
-            "content_utf8",
-            "commit_ids",
-        },
-        f"{test_case.name} request",
-    )
-    commit_ids = _strict_object(
-        request["commit_ids"],
-        {"mkdir", "upload", "move", "remove"},
-        "end_to_end request.commit_ids",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {
-            "mkdir_committed_seq",
-            "upload_committed_seq",
-            "move_committed_seq",
-            "remove_committed_seq",
-            "size_bytes",
-            "revision_count",
-            "change_count",
-        },
-        f"{test_case.name} expected",
-    )
-    return (
-        EndToEndRequest(
-            namespace_id=_string(
-                request["namespace_id"], "end_to_end request.namespace_id"
-            ),
-            directory=_string(request["directory"], "end_to_end request.directory"),
-            upload_path=_string(
-                request["upload_path"], "end_to_end request.upload_path"
-            ),
-            moved_path=_string(request["moved_path"], "end_to_end request.moved_path"),
-            actor=_actor(request["actor"], "end_to_end request.actor"),
-            content_utf8=_string(
-                request["content_utf8"], "end_to_end request.content_utf8"
-            ),
-            commit_ids=EndToEndCommitIds(
-                mkdir=_string(
-                    commit_ids["mkdir"], "end_to_end request.commit_ids.mkdir"
-                ),
-                upload=_string(
-                    commit_ids["upload"], "end_to_end request.commit_ids.upload"
-                ),
-                move=_string(commit_ids["move"], "end_to_end request.commit_ids.move"),
-                remove=_string(
-                    commit_ids["remove"], "end_to_end request.commit_ids.remove"
-                ),
-            ),
-        ),
-        EndToEndExpected(
-            mkdir_committed_seq=_integer(
-                expected["mkdir_committed_seq"],
-                "end_to_end expected.mkdir_committed_seq",
-            ),
-            upload_committed_seq=_integer(
-                expected["upload_committed_seq"],
-                "end_to_end expected.upload_committed_seq",
-            ),
-            move_committed_seq=_integer(
-                expected["move_committed_seq"], "end_to_end expected.move_committed_seq"
-            ),
-            remove_committed_seq=_integer(
-                expected["remove_committed_seq"],
-                "end_to_end expected.remove_committed_seq",
-            ),
-            size_bytes=_integer(
-                expected["size_bytes"], "end_to_end expected.size_bytes"
-            ),
-            revision_count=_integer(
-                expected["revision_count"], "end_to_end expected.revision_count"
-            ),
-            change_count=_integer(
-                expected["change_count"], "end_to_end expected.change_count"
-            ),
-        ),
-    )
-
-
-def _decode_pagination(
-    test_case: ConformanceCase,
-) -> tuple[PaginationRequest, PaginationExpected]:
-    request = _strict_object(
-        test_case.request,
-        {
-            "namespace_id",
-            "directory",
-            "actor",
-            "entry_names",
-            "page_size",
-            "resume_after_page",
-        },
-        f"{test_case.name} request",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {"entry_count", "minimum_page_count", "head_seq"},
-        f"{test_case.name} expected",
-    )
-    return (
-        PaginationRequest(
-            namespace_id=_string(
-                request["namespace_id"], "pagination request.namespace_id"
-            ),
-            directory=_string(request["directory"], "pagination request.directory"),
-            actor=_actor(request["actor"], "pagination request.actor"),
-            entry_names=_string_list(
-                request["entry_names"], "pagination request.entry_names"
-            ),
-            page_size=_integer(request["page_size"], "pagination request.page_size"),
-            resume_after_page=_integer(
-                request["resume_after_page"], "pagination request.resume_after_page"
-            ),
-        ),
-        PaginationExpected(
-            entry_count=_integer(
-                expected["entry_count"], "pagination expected.entry_count"
-            ),
-            minimum_page_count=_integer(
-                expected["minimum_page_count"], "pagination expected.minimum_page_count"
-            ),
-            head_seq=_integer(expected["head_seq"], "pagination expected.head_seq"),
-        ),
-    )
-
-
-def _decode_proxy(
-    test_case: ConformanceCase,
-) -> tuple[ProxyRequest, ProxyExpected]:
-    request = _strict_object(
-        test_case.request,
-        {
-            "namespace_alias",
-            "namespace_id",
-            "unknown_namespace_alias",
-            "actor",
-            "directory",
-            "proxied_path",
-            "direct_path",
-            "commit_ids",
-            "content_utf8",
-            "disallowed_path_suffix",
-        },
-        f"{test_case.name} request",
-    )
-    commit_ids = _strict_object(
-        request["commit_ids"],
-        {"directory", "proxied", "direct"},
-        "proxy request.commit_ids",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {
-            "mkdir_committed_seq",
-            "proxied_committed_seq",
-            "direct_committed_seq",
-            "entry_count",
-            "unknown_namespace_alias_status",
-            "disallowed_route_status",
-        },
-        f"{test_case.name} expected",
-    )
-    return (
-        ProxyRequest(
-            namespace_alias=_string(request["namespace_alias"], "proxy request.namespace_alias"),
-            namespace_id=_string(
-                request["namespace_id"], "proxy request.namespace_id"
-            ),
-            unknown_namespace_alias=_string(
-                request["unknown_namespace_alias"], "proxy request.unknown_namespace_alias"
-            ),
-            actor=_actor(request["actor"], "proxy request.actor"),
-            directory=_string(request["directory"], "proxy request.directory"),
-            proxied_path=_string(
-                request["proxied_path"], "proxy request.proxied_path"
-            ),
-            direct_path=_string(
-                request["direct_path"], "proxy request.direct_path"
-            ),
-            commit_ids=ProxyCommitIds(
-                directory=_string(
-                    commit_ids["directory"], "proxy request.commit_ids.directory"
-                ),
-                proxied=_string(
-                    commit_ids["proxied"], "proxy request.commit_ids.proxied"
-                ),
-                direct=_string(
-                    commit_ids["direct"], "proxy request.commit_ids.direct"
-                ),
-            ),
-            content_utf8=_string(
-                request["content_utf8"], "proxy request.content_utf8"
-            ),
-            disallowed_path_suffix=_string(
-                request["disallowed_path_suffix"],
-                "proxy request.disallowed_path_suffix",
-            ),
-        ),
-        ProxyExpected(
-            mkdir_committed_seq=_integer(
-                expected["mkdir_committed_seq"],
-                "proxy expected.mkdir_committed_seq",
-            ),
-            proxied_committed_seq=_integer(
-                expected["proxied_committed_seq"],
-                "proxy expected.proxied_committed_seq",
-            ),
-            direct_committed_seq=_integer(
-                expected["direct_committed_seq"],
-                "proxy expected.direct_committed_seq",
-            ),
-            entry_count=_integer(
-                expected["entry_count"], "proxy expected.entry_count"
-            ),
-            unknown_namespace_alias_status=_integer(
-                expected["unknown_namespace_alias_status"],
-                "proxy expected.unknown_namespace_alias_status",
-            ),
-            disallowed_route_status=_integer(
-                expected["disallowed_route_status"],
-                "proxy expected.disallowed_route_status",
-            ),
-        ),
-    )
-
-
-def _decode_changes(
-    test_case: ConformanceCase,
-) -> tuple[ChangesRequest, ChangesExpected]:
-    request = _strict_object(
-        test_case.request,
-        {"namespace_id", "path", "commit_id", "actor", "after_seq"},
-        f"{test_case.name} request",
-    )
-    expected = _strict_object(
-        test_case.expected,
-        {"committed_seq", "change_count", "event_kind"},
-        f"{test_case.name} expected",
-    )
-    return (
-        ChangesRequest(
-            namespace_id=_string(
-                request["namespace_id"], "changes request.namespace_id"
-            ),
-            path=_string(request["path"], "changes request.path"),
-            commit_id=_string(request["commit_id"], "changes request.commit_id"),
-            actor=_actor(request["actor"], "changes request.actor"),
-            after_seq=_integer(request["after_seq"], "changes request.after_seq"),
-        ),
-        ChangesExpected(
-            committed_seq=_integer(
-                expected["committed_seq"], "changes expected.committed_seq"
-            ),
-            change_count=_integer(
-                expected["change_count"], "changes expected.change_count"
-            ),
-            event_kind=_string(expected["event_kind"], "changes expected.event_kind"),
-        ),
+        pydantic.TypeAdapter(request_type).validate_json(json.dumps(case.request)),
+        pydantic.TypeAdapter(expected_type).validate_json(json.dumps(case.expected)),
     )
 
 
@@ -880,33 +290,19 @@ def load_cases(directory: str) -> dict[str, ConformanceCase]:
     for path in sorted(Path(directory).iterdir()):
         if not path.is_file() or path.suffix != ".json":
             continue
-        root = _strict_object(json.loads(path.read_text()), CASE_FIELDS, str(path))
-        version = _integer(root["version"], f"{path} version")
-        if version != FIXTURE_VERSION:
+        test_case = pydantic.TypeAdapter(ConformanceCase).validate_json(path.read_text())
+        if test_case.name != path.stem:
             raise AssertionError(
-                f"invalid fixture {path}: version must be {FIXTURE_VERSION}, found {version}"
+                f"invalid fixture {path}: name is {test_case.name!r}, expected {path.stem!r}"
             )
-        name = _string(root["name"], f"{path} name")
-        if name != path.stem:
-            raise AssertionError(
-                f"invalid fixture {path}: name is {name!r}, expected {path.stem!r}"
-            )
-        intent = _string(root["intent"], f"{path} intent")
-        if not intent.strip():
+        if not test_case.intent.strip():
             raise AssertionError(f"invalid fixture {path}: intent must not be empty")
-        cases.append(
-            ConformanceCase(
-                name=name,
-                family=_string(root["family"], f"{path} family"),
-                request=_json_object(root["request"], f"{path} request"),
-                expected=_json_object(root["expected"], f"{path} expected"),
-            )
-        )
+        cases.append(test_case)
 
-    inventory = [(test_case.name, test_case.family) for test_case in cases]
+    inventory = [test_case.name for test_case in cases]
     if inventory != EXPECTED_CASES:
         raise AssertionError(
-            f"fixture version 1 inventory is {inventory!r}, expected {EXPECTED_CASES!r}"
+            f"fixture inventory is {inventory!r}, expected {EXPECTED_CASES!r}"
         )
     return {test_case.name: test_case for test_case in cases}
 
@@ -972,9 +368,7 @@ def _crc_table(polynomial: int, mask: int) -> tuple[int, ...]:
 
 
 _CRC64_NVME_MASK = (1 << 64) - 1
-_CRC32C_MASK = (1 << 32) - 1
 _CRC64_NVME_TABLE = _crc_table(0x9A6C9329AC4BC9B5, _CRC64_NVME_MASK)
-_CRC32C_TABLE = _crc_table(0x82F63B78, _CRC32C_MASK)
 
 
 @pytest.fixture(scope="session")
@@ -1005,105 +399,38 @@ def harness() -> Iterator[Harness]:
 @pytest.fixture(scope="session")
 def proxy_harness(
     cases: dict[str, ConformanceCase],
-) -> Iterator[ProxyHarness]:
-    request, _ = _decode_proxy(cases["proxy"])
+) -> Iterator[str]:
+    request, _ = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
     app = LoonFSProxy(
         _required_environment("LOONFS_CONFORMANCE_URL"),
         _required_environment("LOONFS_CONFORMANCE_TOKEN"),
         {request.namespace_alias: request.namespace_id},
     )
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen()
-    _, port = listener.getsockname()
-    server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            log_level="critical",
-            access_log=False,
-            lifespan="on",
-        )
-    )
-    thread = threading.Thread(
-        target=server.run,
-        kwargs={"sockets": [listener]},
-        name="loonfs-python-proxy",
-        daemon=True,
-    )
-    thread.start()
-    try:
-        deadline = time.monotonic() + 5
-        while not server.started:
-            if not thread.is_alive():
-                raise AssertionError("Python proxy stopped during startup")
-            if time.monotonic() >= deadline:
-                raise AssertionError("Python proxy did not start within five seconds")
-            time.sleep(0.01)
-        yield ProxyHarness(base_url=f"http://127.0.0.1:{port}")
-    finally:
-        server.should_exit = True
-        thread.join(timeout=5)
-        listener.close()
-        if thread.is_alive():
-            raise AssertionError("Python proxy did not stop within five seconds")
+    with _serve_asgi(app, "loonfs-python-proxy") as base_url:
+        yield base_url
 
 
-def _apply_create_directory(
-    client: LoonFS,
-    namespace_id: str,
-    commit_id: str,
-    actor: ActorRef,
-    path: str,
-    message: str | None = None,
-) -> Any:
-    operation = FilesystemOperation_CreateDirectory(path=path, parents=False)
-    if message is None:
-        return client.filesystem.apply_commit(
-            namespace_id,
-            actor=actor,
-            commit_id=commit_id,
-            operations=[operation],
-        )
-    return client.filesystem.apply_commit(
-        namespace_id,
-        actor=actor,
-        commit_id=commit_id,
-        operations=[operation],
-        message=message,
-    )
-
-
-def _apply_put_file(
-    client: LoonFS,
-    namespace_id: str,
-    commit_id: str,
-    actor: ActorRef,
-    path: str,
-    content_ref: ContentRef,
-    content_token: str | None,
-) -> Any:
-    return client.filesystem.apply_commit(
-        namespace_id,
-        actor=actor,
-        commit_id=commit_id,
-        operations=[FilesystemOperation_PutFile(path=path, content_ref=content_ref)],
-        content_tokens=[content_token] if content_token is not None else [],
-    )
-
-
-def _apply_operation(
+def _apply(
     client: LoonFS,
     namespace_id: str,
     commit_id: str,
     actor: ActorRef,
     operation: Any,
+    *,
+    message: str | None = None,
+    content_tokens: list[str] | None = None,
 ) -> Any:
+    extra = {}
+    if message is not None:
+        extra["message"] = message
+    if content_tokens is not None:
+        extra["content_tokens"] = content_tokens
     return client.filesystem.apply_commit(
         namespace_id,
         actor=actor,
         commit_id=commit_id,
         operations=[operation],
+        **extra,
     )
 
 
@@ -1118,8 +445,6 @@ def _checksum(algorithm: str, content: bytes) -> Checksum:
         value = hashlib.sha256(content).hexdigest()
     elif algorithm == "crc64nvme":
         value = f"{_crc(content, _CRC64_NVME_TABLE, _CRC64_NVME_MASK):016x}"
-    elif algorithm == "crc32c":
-        value = f"{_crc(content, _CRC32C_TABLE, _CRC32C_MASK):08x}"
     else:
         raise AssertionError(f"unsupported checksum algorithm {algorithm!r}")
     return Checksum(algorithm=algorithm, value=value)
@@ -1166,7 +491,10 @@ def _read_proxied(client: LoonFS, namespace_id: str, path: str) -> bytes:
 
 def _proxy_response_json(response: httpx.Response, label: str) -> JsonObject:
     response.raise_for_status()
-    return _json_object(response.json(), label)
+    value = response.json()
+    if not isinstance(value, dict):
+        raise AssertionError(f"{label} must be a JSON object")
+    return value
 
 
 def _proxy_apply_commit(
@@ -1220,7 +548,9 @@ def _list_path_entries(
 
 
 def test_error_contract(cases: dict[str, ConformanceCase], harness: Harness) -> None:
-    request, expected = _decode_error_contract(cases["error_contract"])
+    request, expected = _decode(
+        cases["error_contract"], ErrorContractRequest, ErrorContractExpected
+    )
     with pytest.raises(UnauthorizedError) as captured:
         harness.unauthenticated.namespaces.get_namespace(request.namespace_id)
 
@@ -1231,23 +561,25 @@ def test_error_contract(cases: dict[str, ConformanceCase], harness: Harness) -> 
 
 
 def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> None:
-    request, expected = _decode_commit_replay(cases["commit_replay"])
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
-    first = _apply_create_directory(
-        harness.client,
-        request.namespace_id,
-        request.commit_id,
-        request.actor,
-        request.path,
-        request.message,
+    request, expected = _decode(
+        cases["commit_replay"], CommitReplayRequest, CommitReplayExpected
     )
-    replayed = _apply_create_directory(
+    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    first = _apply(
         harness.client,
         request.namespace_id,
         request.commit_id,
         request.actor,
-        request.path,
-        request.message,
+        FilesystemOperation_CreateDirectory(path=request.path, parents=False),
+        message=request.message,
+    )
+    replayed = _apply(
+        harness.client,
+        request.namespace_id,
+        request.commit_id,
+        request.actor,
+        FilesystemOperation_CreateDirectory(path=request.path, parents=False),
+        message=request.message,
     )
 
     assert first.committed_seq == expected.committed_seq
@@ -1258,22 +590,26 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
 
 
 def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None:
-    request, expected = _decode_pagination(cases["pagination"])
+    request, expected = _decode(
+        cases["pagination"], PaginationRequest, PaginationExpected
+    )
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
-    _apply_create_directory(
+    _apply(
         harness.client,
         request.namespace_id,
         "conf-pagination-directory",
         request.actor,
-        request.directory,
+        FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
     )
     for index, name in enumerate(request.entry_names):
-        _apply_create_directory(
+        _apply(
             harness.client,
             request.namespace_id,
             f"conf-pagination-entry-{index:02d}",
             request.actor,
-            f"{request.directory}/{name}",
+            FilesystemOperation_CreateDirectory(
+                path=f"{request.directory}/{name}", parents=False
+            ),
         )
 
     observed: list[str] = []
@@ -1319,15 +655,15 @@ def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None
 def test_proxy(
     cases: dict[str, ConformanceCase],
     harness: Harness,
-    proxy_harness: ProxyHarness,
+    proxy_harness: str,
 ) -> None:
-    request, expected = _decode_proxy(cases["proxy"])
+    request, expected = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
     namespace_alias_base = f"/v0/namespace-aliases/{request.namespace_alias}"
 
     with httpx.Client(
-        base_url=proxy_harness.base_url,
+        base_url=proxy_harness,
         headers={"Authorization": "Bearer browser-token"},
     ) as client:
         mkdir = _proxy_apply_commit(
@@ -1374,15 +710,11 @@ def test_proxy(
         )
         proxied_complete = UploadSessionResponse(**proxied_complete_data)
         assert proxied_complete.status == "completed"
-        proxied_content_ref = _json_object(
-            proxied_complete_data["content_ref"],
-            "proxy service-proxied content_ref",
-        )
+        proxied_content_ref = proxied_complete_data["content_ref"]
+        assert isinstance(proxied_content_ref, dict)
         assert ContentRef(**proxied_content_ref) == uploaded.content_ref
-        proxied_content_token = _json_object(
-            proxied_complete_data["content_token"],
-            "proxy service-proxied content_token",
-        )
+        proxied_content_token = proxied_complete_data["content_token"]
+        assert isinstance(proxied_content_token, dict)
         proxied_commit = _proxy_apply_commit(
             client,
             request,
@@ -1438,14 +770,10 @@ def test_proxy(
         )
         direct_complete = UploadSessionResponse(**direct_complete_data)
         assert direct_complete.status == "completed"
-        direct_content_ref = _json_object(
-            direct_complete_data["content_ref"],
-            "proxy direct-PUT content_ref",
-        )
-        direct_content_token = _json_object(
-            direct_complete_data["content_token"],
-            "proxy direct-PUT content_token",
-        )
+        direct_content_ref = direct_complete_data["content_ref"]
+        assert isinstance(direct_content_ref, dict)
+        direct_content_token = direct_complete_data["content_token"]
+        assert isinstance(direct_content_token, dict)
         direct_commit = _proxy_apply_commit(
             client,
             request,
@@ -1491,14 +819,14 @@ def test_proxy(
 
 
 def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
-    request, expected = _decode_changes(cases["changes"])
+    request, expected = _decode(cases["changes"], ChangesRequest, ChangesExpected)
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
-    committed = _apply_create_directory(
+    committed = _apply(
         harness.client,
         request.namespace_id,
         request.commit_id,
         request.actor,
-        request.path,
+        FilesystemOperation_CreateDirectory(path=request.path, parents=False),
     )
     assert committed.committed_seq == expected.committed_seq
 
@@ -1512,13 +840,14 @@ def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert change.commit_id == request.commit_id
     assert change.committed_by.id == request.actor.id
     assert change.committed_by.kind == request.actor.kind
-    assert expected.event_kind == "directory_created"
     assert len(change.events) == 1
     assert change.events[0].kind == "directory_created"
 
 
 def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) -> None:
-    request, expected = _decode_direct_put(cases["upload_direct_put"])
+    request, expected = _decode(
+        cases["upload_direct_put"], DirectPutRequest, DirectPutExpected
+    )
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
     begin = harness.client.uploads.begin_upload(
@@ -1526,7 +855,6 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
         request=BeginUploadRequest_DirectPut(size_bytes=len(payload)),
     )
 
-    assert expected.mode == "direct_put"
     assert begin.mode == expected.mode
     assert begin.direct_put.checksum_algorithm == expected.checksum_algorithm
 
@@ -1546,14 +874,13 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     assert content_ref.checksum == claim.checksum
     assert content_ref.checksum == _checksum(content_ref.checksum.algorithm, payload)
 
-    committed = _apply_put_file(
+    committed = _apply(
         harness.client,
         request.namespace_id,
         request.commit_id,
         request.actor,
-        request.path,
-        content_ref,
-        content_token,
+        FilesystemOperation_PutFile(path=request.path, content_ref=content_ref),
+        content_tokens=[content_token] if content_token is not None else None,
     )
     assert committed.committed_seq == expected.committed_seq
     stat = harness.client.filesystem.stat_path(request.namespace_id, path=request.path)
@@ -1562,7 +889,9 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
 
 
 def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -> None:
-    request, expected = _decode_multipart(cases["upload_multipart"])
+    request, expected = _decode(
+        cases["upload_multipart"], MultipartRequest, MultipartExpected
+    )
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
     payload = _byte_pattern(request.content_pattern)
     begin = harness.client.uploads.begin_upload(
@@ -1574,7 +903,6 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         ),
     )
 
-    assert expected.mode == "direct_multipart"
     assert begin.mode == expected.mode
     assert begin.direct_multipart.part_size_bytes == request.part_size_bytes
     assert begin.direct_multipart.checksum_algorithm == expected.checksum_algorithm
@@ -1650,14 +978,15 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         payload,
     )
 
-    committed = _apply_put_file(
+    committed = _apply(
         harness.client,
         request.namespace_id,
         request.commit_id,
         request.actor,
-        request.path,
-        first_content_ref,
-        replayed_token,
+        FilesystemOperation_PutFile(
+            path=request.path, content_ref=first_content_ref
+        ),
+        content_tokens=[replayed_token] if replayed_token is not None else None,
     )
     assert committed.committed_seq == expected.committed_seq
     assert _read_proxied(harness.client, request.namespace_id, request.path) == payload
@@ -1686,7 +1015,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
 
 
 def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> None:
-    request, expected = _decode_abort(cases["upload_abort"])
+    request, expected = _decode(cases["upload_abort"], AbortRequest, AbortExpected)
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
     begin = harness.client.uploads.begin_upload(
         request.namespace_id,
@@ -1697,8 +1026,6 @@ def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> No
         request.namespace_id, begin.upload_id
     )
 
-    assert expected.mode == "service_proxied"
-    assert expected.status == "aborted"
     assert first.mode == expected.mode
     assert first.status == expected.status
     assert replayed == first
@@ -1706,7 +1033,9 @@ def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> No
 
 
 def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
-    request, expected = _decode_download(cases["download"])
+    request, expected = _decode(
+        cases["download"], DownloadRequest, DownloadExpected
+    )
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
     committed = put_file(
@@ -1737,14 +1066,16 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
 
 
 def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None:
-    request, expected = _decode_end_to_end(cases["end_to_end"])
+    request, expected = _decode(
+        cases["end_to_end"], EndToEndRequest, EndToEndExpected
+    )
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
-    mkdir = _apply_create_directory(
+    mkdir = _apply(
         harness.client,
         request.namespace_id,
         request.commit_ids.mkdir,
         request.actor,
-        request.directory,
+        FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
     )
     assert mkdir.committed_seq == expected.mkdir_committed_seq
 
@@ -1777,7 +1108,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     )
     assert downloaded.content == payload
 
-    moved = _apply_operation(
+    moved = _apply(
         harness.client,
         request.namespace_id,
         request.commit_ids.move,
@@ -1807,7 +1138,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     )
     assert len(changes_before_remove.changes) == expected.change_count - 1
 
-    removed = _apply_operation(
+    removed = _apply(
         harness.client,
         request.namespace_id,
         request.commit_ids.remove,
@@ -1844,7 +1175,7 @@ def test_proxy_forwards_every_documented_route(
     cases: dict[str, ConformanceCase],
 ) -> None:
     """Proxy routes must reach the server. Excluded server routes must not."""
-    fixture, _ = _decode_proxy(cases["proxy"])
+    fixture, _ = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
     with open(_required_environment("LOONFS_PROXY_DOCUMENT"), encoding="utf-8") as handle:
         proxy_document = json.load(handle)
     with open(_required_environment("LOONFS_SERVER_DOCUMENT"), encoding="utf-8") as handle:

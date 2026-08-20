@@ -1,8 +1,6 @@
 {
-  "version": 1,
   "name": "proxy",
   "intent": "A proxy maps each namespace alias to a namespace, adds server credentials, streams request and response bodies, and rejects routes outside the proxy API.",
-  "family": "proxy",
   "request": {
     "namespace_alias": "team-files",
     "namespace_id": "conf-proxy-namespace",

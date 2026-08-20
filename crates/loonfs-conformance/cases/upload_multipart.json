@@ -1,8 +1,6 @@
 {
-  "version": 1,
   "name": "upload_multipart",
   "intent": "Checks that repeating complete_upload after a multipart upload returns the stored result.",
-  "family": "upload_multipart",
   "request": {
     "namespace_id": "conf-upload-multipart",
     "path": "/multipart.bin",

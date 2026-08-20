@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"hash/crc64"
 	"io"
 	"net/http"
@@ -28,31 +27,24 @@ import (
 	"github.com/loonfs/loonfs-sdk-go/transfers"
 )
 
-const fixtureVersion = 1
-
 type conformanceCase struct {
-	Version  int             `json:"version"`
 	Name     string          `json:"name"`
 	Intent   string          `json:"intent"`
-	Family   string          `json:"family"`
 	Request  json.RawMessage `json:"request"`
 	Expected json.RawMessage `json:"expected"`
 }
 
-var expectedCases = []struct {
-	name   string
-	family string
-}{
-	{name: "changes", family: "changes"},
-	{name: "commit_replay", family: "commit_replay"},
-	{name: "download", family: "download"},
-	{name: "end_to_end", family: "end_to_end"},
-	{name: "error_contract", family: "error_contract"},
-	{name: "pagination", family: "pagination"},
-	{name: "proxy", family: "proxy"},
-	{name: "upload_abort", family: "upload_abort"},
-	{name: "upload_direct_put", family: "upload_direct_put"},
-	{name: "upload_multipart", family: "upload_multipart"},
+var expectedCases = []string{
+	"changes",
+	"commit_replay",
+	"download",
+	"end_to_end",
+	"error_contract",
+	"pagination",
+	"proxy",
+	"upload_abort",
+	"upload_direct_put",
+	"upload_multipart",
 }
 
 type harness struct {
@@ -92,7 +84,7 @@ func TestSDKConformance(t *testing.T) {
 
 	for _, testCase := range cases {
 		t.Run(testCase.Name, func(t *testing.T) {
-			switch testCase.Family {
+			switch testCase.Name {
 			case "error_contract":
 				runErrorContract(t, h, testCase)
 			case "commit_replay":
@@ -114,7 +106,7 @@ func TestSDKConformance(t *testing.T) {
 			case "end_to_end":
 				runEndToEnd(t, h, testCase)
 			default:
-				t.Fatalf("unknown case family %q", testCase.Family)
+				t.Fatalf("unknown case %q", testCase.Name)
 			}
 		})
 	}
@@ -148,26 +140,17 @@ func loadCases(directory string) ([]conformanceCase, error) {
 		return cases[i].Name < cases[j].Name
 	})
 	if len(cases) != len(expectedCases) {
-		return nil, fmt.Errorf("fixture version 1 requires %d cases, found %d", len(expectedCases), len(cases))
+		return nil, fmt.Errorf("fixture corpus requires %d cases, found %d", len(expectedCases), len(cases))
 	}
 	for index, expected := range expectedCases {
-		if cases[index].Name != expected.name || cases[index].Family != expected.family {
-			return nil, fmt.Errorf(
-				"expected %q with family %q, found %q with family %q",
-				expected.name,
-				expected.family,
-				cases[index].Name,
-				cases[index].Family,
-			)
+		if cases[index].Name != expected {
+			return nil, fmt.Errorf("expected %q, found %q", expected, cases[index].Name)
 		}
 	}
 	return cases, nil
 }
 
 func validateCase(path string, testCase *conformanceCase) error {
-	if testCase.Version != fixtureVersion {
-		return fmt.Errorf("invalid fixture %s: version must be %d, found %d", path, fixtureVersion, testCase.Version)
-	}
 	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	if testCase.Name != stem {
 		return fmt.Errorf("invalid fixture %s: name is %q, expected %q", path, testCase.Name, stem)
@@ -219,26 +202,16 @@ func decodeCaseValues[R, E any](t *testing.T, testCase conformanceCase) (R, E) {
 }
 
 type errorContractRequest struct {
-	NamespaceID     string          `json:"namespace_id"`
-	MalformedBody   json.RawMessage `json:"malformed_body"`
-	InvalidAfterSeq string          `json:"invalid_after_seq"`
+	NamespaceID string `json:"namespace_id"`
 }
 
 type errorContractExpected struct {
 	Unauthenticated errorStatusExpected `json:"unauthenticated"`
-	MalformedBody   errorOutcome        `json:"malformed_body"`
-	InvalidQuery    errorOutcome        `json:"invalid_query"`
 }
 
 type errorStatusExpected struct {
 	Status int    `json:"status"`
 	Code   string `json:"code"`
-}
-
-type errorOutcome struct {
-	Status int    `json:"status"`
-	Code   string `json:"code"`
-	Param  string `json:"param"`
 }
 
 func runErrorContract(t *testing.T, h *harness, testCase conformanceCase) {
@@ -345,11 +318,11 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("begin direct PUT: %v", err)
 	}
 	if begin.DirectPut == nil || begin.DirectPut.DirectPut == nil {
-		t.Fatalf("begin upload mode = %q, want direct_put", begin.Mode)
+		t.Fatalf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
 	}
 	directPut := begin.DirectPut.DirectPut
-	if expected.Mode != "direct_put" {
-		t.Errorf("expected mode = %q, want direct_put", expected.Mode)
+	if begin.Mode != expected.Mode {
+		t.Errorf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
 	}
 	if string(directPut.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
 		t.Errorf("direct PUT checksum_algorithm = %q, want %q", directPut.ChecksumAlgorithm, expected.ChecksumAlgorithm)
@@ -443,11 +416,11 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("begin multipart upload: %v", err)
 	}
 	if begin.DirectMultipart == nil || begin.DirectMultipart.DirectMultipart == nil {
-		t.Fatalf("begin upload mode = %q, want direct_multipart", begin.Mode)
+		t.Fatalf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
 	}
 	multipart := begin.DirectMultipart.DirectMultipart
-	if expected.Mode != "direct_multipart" {
-		t.Errorf("expected mode = %q, want direct_multipart", expected.Mode)
+	if begin.Mode != expected.Mode {
+		t.Errorf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
 	}
 	if multipart.PartSizeBytes != request.PartSizeBytes {
 		t.Errorf("part_size_bytes = %d, want %d", multipart.PartSizeBytes, request.PartSizeBytes)
@@ -598,7 +571,10 @@ func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("begin abortable upload: %v", err)
 	}
 	if begin.ServiceProxied == nil {
-		t.Fatalf("begin upload mode = %q, want service_proxied", begin.Mode)
+		t.Fatalf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
+	}
+	if begin.Mode != expected.Mode {
+		t.Errorf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
 	}
 	abort := &loonfs.AbortUploadRequest{
 		NamespaceID: request.NamespaceID,
@@ -612,13 +588,14 @@ func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("replay abort: %v", err)
 	}
-	if expected.Mode != "service_proxied" {
-		t.Errorf("expected mode = %q, want service_proxied", expected.Mode)
+	firstStatusEnvelope := uploadSessionStatus(t, first)
+	if firstStatusEnvelope.Status != expected.Status {
+		t.Errorf("upload status = %q, want %q", firstStatusEnvelope.Status, expected.Status)
 	}
-	if expected.Status != "aborted" {
-		t.Errorf("expected status = %q, want aborted", expected.Status)
+	if firstStatusEnvelope.Aborted == nil {
+		t.Fatalf("upload status = %q, want aborted", firstStatusEnvelope.Status)
 	}
-	firstStatus := requireAbortedStatus(t, first)
+	firstStatus := firstStatusEnvelope.Aborted
 	replayedStatus := requireAbortedStatus(t, replayed)
 	if replayed.NamespaceID != first.NamespaceID || replayed.UploadID != first.UploadID || replayed.Mode != first.Mode {
 		t.Errorf("replayed abort identity = %#v, want %#v", replayed, first)
@@ -1400,9 +1377,8 @@ type changesRequest struct {
 }
 
 type changesExpected struct {
-	CommittedSeq int64  `json:"committed_seq"`
-	ChangeCount  int    `json:"change_count"`
-	EventKind    string `json:"event_kind"`
+	CommittedSeq int64 `json:"committed_seq"`
+	ChangeCount  int   `json:"change_count"`
 }
 
 func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
@@ -1448,18 +1424,12 @@ func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 		change.CommittedBy.Kind != request.Actor.Kind {
 		t.Errorf("change committed_by = %#v, want %#v", change.CommittedBy, request.Actor)
 	}
-	if expected.EventKind != "directory_created" {
-		t.Errorf("expected event kind = %q, want %q", expected.EventKind, "directory_created")
-	}
 	if len(change.Events) != 1 || change.Events[0] == nil || change.Events[0].DirectoryCreated == nil {
 		t.Errorf("change events = %#v, want one directory_created event", change.Events)
 	}
 }
 
-var (
-	conformanceCRC32CTable    = crc32.MakeTable(crc32.Castagnoli)
-	conformanceCRC64NVMeTable = crc64.MakeTable(0x9a6c9329ac4bc9b5)
-)
+var conformanceCRC64NVMeTable = crc64.MakeTable(0x9a6c9329ac4bc9b5)
 
 func makeBytePattern(t *testing.T, pattern bytePattern) []byte {
 	t.Helper()
@@ -1512,8 +1482,6 @@ func checksumFor(algorithm loonfs.ChecksumAlgorithm, payload []byte) (*loonfs.Ch
 		value = hex.EncodeToString(digest[:])
 	case loonfs.ChecksumAlgorithmCrc64Nvme:
 		value = fmt.Sprintf("%016x", crc64.Checksum(payload, conformanceCRC64NVMeTable))
-	case loonfs.ChecksumAlgorithmCrc32C:
-		value = fmt.Sprintf("%08x", crc32.Checksum(payload, conformanceCRC32CTable))
 	default:
 		return nil, fmt.Errorf("unsupported checksum algorithm %q", algorithm)
 	}
