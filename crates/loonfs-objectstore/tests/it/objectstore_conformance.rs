@@ -182,7 +182,7 @@ async fn cloudflare_r2_streamed_write_round_trips() {
 
 #[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
-async fn aws_s3_checksumless_put_stores_a_trustworthy_checksum() {
+async fn aws_s3_put_stores_a_trustworthy_checksum() {
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
     let store = S3CompatibleStore::aws_s3(AwsS3StoreConfig {
@@ -196,7 +196,7 @@ async fn aws_s3_checksumless_put_stores_a_trustworthy_checksum() {
         force_path_style: false,
     })
     .expect("create AWS S3 object store");
-    assert_checksumless_put_stores_a_trustworthy_checksum(&store, "aws-s3").await;
+    assert_put_stores_a_trustworthy_checksum(&store, "aws-s3").await;
 }
 
 #[tokio::test]
@@ -213,7 +213,7 @@ async fn cloudflare_r2_checksumless_put_stores_a_trustworthy_checksum() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
-    assert_checksumless_put_stores_a_trustworthy_checksum(&store, "cloudflare-r2").await;
+    assert_put_stores_a_trustworthy_checksum(&store, "cloudflare-r2").await;
 }
 
 #[tokio::test]
@@ -227,7 +227,7 @@ async fn gcp_gcs_checksumless_put_stores_a_trustworthy_checksum() {
         key_prefix: Some(config.prefix),
     })
     .expect("create GCP GCS object store");
-    assert_checksumless_put_stores_a_trustworthy_checksum(&store, "gcp-gcs").await;
+    assert_put_stores_a_trustworthy_checksum(&store, "gcp-gcs").await;
 }
 
 #[test]
@@ -468,8 +468,8 @@ fn probe_report_lines(report: &StoreProbeReport) -> String {
         .join("\n")
 }
 
-/// The content key the checksum-less PUT evidence writes to and cleans up.
-fn checksumless_put_key() -> String {
+/// Returns the object key used by the stored-checksum test.
+fn stored_checksum_test_key() -> String {
     content_blob(
         &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
             .expect("valid content store id"),
@@ -477,16 +477,9 @@ fn checksumless_put_key() -> String {
     )
 }
 
-/// The streaming-checksum plan's provider evidence: after a PUT that carries
-/// no checksum header, the provider must report a stored full-object checksum
-/// through the same head the completion path uses, and it must describe the
-/// uploaded bytes exactly. A provider that cannot do this must not advertise
-/// the checksum-less form of direct PUT.
-async fn assert_checksumless_put_stores_a_trustworthy_checksum<S: ObjectStore>(
-    store: &S,
-    provider: &str,
-) {
-    let key = checksumless_put_key();
+/// Verifies that provider metadata matches the uploaded bytes.
+async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, provider: &str) {
+    let key = stored_checksum_test_key();
     let _ = store.delete(&key).await;
 
     let payload: Vec<u8> = (0..1_000_003usize)
@@ -499,7 +492,7 @@ async fn assert_checksumless_put_stores_a_trustworthy_checksum<S: ObjectStore>(
             loonfs_objectstore::PutMode::CreateIfAbsent,
         )
         .await
-        .expect("checksum-less PUT");
+        .expect("upload object");
 
     let stored = store
         .head_stored_checksum(&key)
@@ -507,7 +500,7 @@ async fn assert_checksumless_put_stores_a_trustworthy_checksum<S: ObjectStore>(
         .expect("head the stored checksum");
     assert!(
         stored.is_some(),
-        "{provider}: no stored checksum reported after a checksum-less PUT"
+        "{provider}: no stored checksum reported after PUT"
     );
     let stored = stored.expect("stored checksum present");
     assert_eq!(
@@ -524,10 +517,7 @@ async fn assert_checksumless_put_stores_a_trustworthy_checksum<S: ObjectStore>(
         stored.checksum, local,
         "{provider}: stored checksum does not match the uploaded bytes"
     );
-    store
-        .delete(&key)
-        .await
-        .expect("delete the evidence object");
+    store.delete(&key).await.expect("delete the test object");
 }
 
 /// The content key a streamed-write exercise writes to and cleans up.
