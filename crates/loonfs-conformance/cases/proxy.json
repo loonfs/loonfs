@@ -1,12 +1,12 @@
 {
   "version": 1,
   "name": "proxy",
-  "intent": "A proxy maps each mount to a namespace, adds server credentials, streams request and response bodies, and rejects routes outside the proxy API.",
+  "intent": "A proxy maps each namespace alias to a namespace, adds server credentials, streams request and response bodies, and rejects routes outside the proxy API.",
   "family": "proxy",
   "request": {
-    "mount": "team-files",
+    "namespace_alias": "team-files",
     "namespace_id": "conf-proxy-namespace",
-    "unknown_mount": "no-such-mount",
+    "unknown_namespace_alias": "no-such-namespace-alias",
     "actor": {
       "kind": "user",
       "id": "conformance-proxy"
@@ -27,7 +27,7 @@
     "proxied_committed_seq": 2,
     "direct_committed_seq": 3,
     "entry_count": 2,
-    "unknown_mount_status": 404,
+    "unknown_namespace_alias_status": 404,
     "disallowed_route_status": 404
   }
 }

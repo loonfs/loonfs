@@ -32,7 +32,7 @@ pub enum CaseFamily {
     Download,
     /// Cursor pagination and resume.
     Pagination,
-    /// Mount-scoped requests through a proxy.
+    /// Namespace-alias-scoped requests through a proxy.
     Proxy,
     /// Change feed order and identity.
     Changes,

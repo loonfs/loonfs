@@ -215,9 +215,9 @@ interface ProxyCommitIds {
 }
 
 interface ProxyRequest {
-    mount: string;
+    namespaceAlias: string;
     namespaceId: string;
-    unknownMount: string;
+    unknownNamespaceAlias: string;
     actor: ActorValue;
     directory: string;
     proxiedPath: string;
@@ -232,7 +232,7 @@ interface ProxyExpected {
     proxiedCommittedSeq: number;
     directCommittedSeq: number;
     entryCount: number;
-    unknownMountStatus: number;
+    unknownNamespaceAliasStatus: number;
     disallowedRouteStatus: number;
 }
 
@@ -660,9 +660,9 @@ function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
     const request = strictObject(
         testCase.request,
         [
-            "mount",
+            "namespace_alias",
             "namespace_id",
-            "unknown_mount",
+            "unknown_namespace_alias",
             "actor",
             "directory",
             "proxied_path",
@@ -685,16 +685,22 @@ function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
             "proxied_committed_seq",
             "direct_committed_seq",
             "entry_count",
-            "unknown_mount_status",
+            "unknown_namespace_alias_status",
             "disallowed_route_status",
         ],
         `${testCase.name} expected`,
     );
     return [
         {
-            mount: stringValue(request.mount, "proxy request.mount"),
+            namespaceAlias: stringValue(
+                request.namespace_alias,
+                "proxy request.namespace_alias",
+            ),
             namespaceId: stringValue(request.namespace_id, "proxy request.namespace_id"),
-            unknownMount: stringValue(request.unknown_mount, "proxy request.unknown_mount"),
+            unknownNamespaceAlias: stringValue(
+                request.unknown_namespace_alias,
+                "proxy request.unknown_namespace_alias",
+            ),
             actor: actorValue(request.actor, "proxy request.actor"),
             directory: stringValue(request.directory, "proxy request.directory"),
             proxiedPath: stringValue(request.proxied_path, "proxy request.proxied_path"),
@@ -724,9 +730,9 @@ function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
                 "proxy expected.direct_committed_seq",
             ),
             entryCount: integerValue(expected.entry_count, "proxy expected.entry_count"),
-            unknownMountStatus: integerValue(
-                expected.unknown_mount_status,
-                "proxy expected.unknown_mount_status",
+            unknownNamespaceAliasStatus: integerValue(
+                expected.unknown_namespace_alias_status,
+                "proxy expected.unknown_namespace_alias_status",
             ),
             disallowedRouteStatus: integerValue(
                 expected.disallowed_route_status,
@@ -833,7 +839,7 @@ function fileCommit(
     return request;
 }
 
-function mountDirectoryCommit(
+function namespaceAliasDirectoryCommit(
     commitId: string,
     actor: ActorValue,
     path: string,
@@ -845,7 +851,7 @@ function mountDirectoryCommit(
     };
 }
 
-function mountFileCommit(
+function namespaceAliasFileCommit(
     commitId: string,
     actor: ActorValue,
     path: string,
@@ -949,7 +955,7 @@ async function readProxied(
 
 async function assertBrowserTransfer(
     client: BrowserLoonFSClient,
-    mount: string,
+    namespaceAlias: string,
     path: string,
     bytes: Uint8Array,
     actor: ActorValue,
@@ -957,7 +963,7 @@ async function assertBrowserTransfer(
     label: string,
 ): Promise<void> {
     const committed = await putBrowserFile(client, {
-        mount,
+        namespace_alias: namespaceAlias,
         path,
         bytes,
         actor,
@@ -965,7 +971,10 @@ async function assertBrowserTransfer(
     });
     assert.ok(committed.committed_seq > 0, `${label} commit sequence is not positive`);
 
-    const readback = await getBrowserFile(client, { mount, path });
+    const readback = await getBrowserFile(client, {
+        namespace_alias: namespaceAlias,
+        path,
+    });
     assert.deepEqual(readback.bytes, bytes);
     assert.equal(readback.content_ref.size_bytes, bytes.byteLength);
     const contentChecksum = readback.content_ref.checksum;
@@ -1354,9 +1363,9 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const proxyHandler = createProxyHandler({
         serverBaseUrl: activeHarness.serverBaseUrl,
         token: activeHarness.token,
-        mounts: { [request.mount]: request.namespaceId },
+        namespaceAliases: { [request.namespaceAlias]: request.namespaceId },
     });
-    const beginPath = `/v0/mounts/${encodeURIComponent(request.mount)}/uploads`;
+    const beginPath = `/v0/namespace-aliases/${encodeURIComponent(request.namespaceAlias)}/uploads`;
     const beginModes: string[] = [];
     const handler = async (incoming: Request): Promise<Response> => {
         if (incoming.method === "POST" && new URL(incoming.url).pathname === beginPath) {
@@ -1371,16 +1380,22 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     context.after(() => proxy.close());
 
     await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
-    const mountBase = `${proxy.baseUrl}/v0/mounts/${encodeURIComponent(request.mount)}`;
+    const namespaceAliasBase =
+        `${proxy.baseUrl}/v0/namespace-aliases/` +
+        encodeURIComponent(request.namespaceAlias);
     const payload = new TextEncoder().encode(request.contentUtf8);
 
     const mkdir = await proxyJson<LoonFS.CommitResponse>(
-        `${mountBase}/commits`,
+        `${namespaceAliasBase}/commits`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
-                mountDirectoryCommit(request.commitIds.directory, request.actor, request.directory),
+                namespaceAliasDirectoryCommit(
+                    request.commitIds.directory,
+                    request.actor,
+                    request.directory,
+                ),
             ),
         },
         "proxy directory commit",
@@ -1388,7 +1403,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(mkdir.committed_seq, expected.mkdirCommittedSeq);
 
     const proxiedBegin = await proxyJson<LoonFS.BeginUploadResponse>(
-        `${mountBase}/uploads`,
+        `${namespaceAliasBase}/uploads`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -1398,7 +1413,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(proxiedBegin.mode, "service_proxied");
     const contentResponse = await fetchThroughProxy(
-        `${mountBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/content`,
+        `${namespaceAliasBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/content`,
         {
             method: "PUT",
             headers: { "content-type": "application/octet-stream" },
@@ -1411,7 +1426,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(uploadedContent.content_ref.size_bytes, payload.byteLength);
     const proxiedCompleted = completedUpload(
         await proxyJson<LoonFS.UploadSessionResponse>(
-            `${mountBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/complete`,
+            `${namespaceAliasBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/complete`,
             {
                 method: "POST",
                 headers: { "content-type": "application/json" },
@@ -1422,12 +1437,12 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.deepEqual(proxiedCompleted.content_ref, uploadedContent.content_ref);
     const proxiedCommit = await proxyJson<LoonFS.CommitResponse>(
-        `${mountBase}/commits`,
+        `${namespaceAliasBase}/commits`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
-                mountFileCommit(
+                namespaceAliasFileCommit(
                     request.commitIds.proxied,
                     request.actor,
                     request.proxiedPath,
@@ -1440,7 +1455,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(proxiedCommit.committed_seq, expected.proxiedCommittedSeq);
 
     const directBegin = await proxyJson<LoonFS.BeginUploadResponse>(
-        `${mountBase}/uploads`,
+        `${namespaceAliasBase}/uploads`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -1456,7 +1471,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     };
     const directCompleted = completedUpload(
         await proxyJson<LoonFS.UploadSessionResponse>(
-            `${mountBase}/uploads/${encodeURIComponent(directBegin.upload_id)}/complete`,
+            `${namespaceAliasBase}/uploads/${encodeURIComponent(directBegin.upload_id)}/complete`,
             {
                 method: "POST",
                 headers: { "content-type": "application/json" },
@@ -1467,12 +1482,12 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.deepEqual(directCompleted.content_ref.checksum, directClaim.checksum);
     const directCommit = await proxyJson<LoonFS.CommitResponse>(
-        `${mountBase}/commits`,
+        `${namespaceAliasBase}/commits`,
         {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
-                mountFileCommit(
+                namespaceAliasFileCommit(
                     request.commitIds.direct,
                     request.actor,
                     request.directPath,
@@ -1484,7 +1499,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(directCommit.committed_seq, expected.directCommittedSeq);
 
-    const listUrl = new URL(`${mountBase}/filesystem/list`);
+    const listUrl = new URL(`${namespaceAliasBase}/filesystem/list`);
     listUrl.searchParams.set("path", request.directory);
     const listing = await proxyJson<LoonFS.ListPathEntriesResponse>(
         listUrl,
@@ -1493,22 +1508,24 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(listing.entries.length, expected.entryCount);
 
-    const readUrl = new URL(`${mountBase}/filesystem/content`);
+    const readUrl = new URL(`${namespaceAliasBase}/filesystem/content`);
     readUrl.searchParams.set("path", request.proxiedPath);
     const read = await fetchThroughProxy(readUrl);
     await requireSuccessfulResponse(read, "proxy file read");
     assert.deepEqual(new Uint8Array(await read.arrayBuffer()), payload);
 
-    const unknownMountUrl = new URL(
-        `/v0/mounts/${encodeURIComponent(request.unknownMount)}/filesystem/list`,
+    const unknownNamespaceAliasUrl = new URL(
+        `/v0/namespace-aliases/${encodeURIComponent(request.unknownNamespaceAlias)}/filesystem/list`,
         proxy.baseUrl,
     );
-    unknownMountUrl.searchParams.set("path", request.directory);
-    const unknownMount = await fetchThroughProxy(unknownMountUrl);
-    assert.equal(unknownMount.status, expected.unknownMountStatus);
-    assert.equal((await unknownMount.arrayBuffer()).byteLength, 0);
+    unknownNamespaceAliasUrl.searchParams.set("path", request.directory);
+    const unknownNamespaceAlias = await fetchThroughProxy(unknownNamespaceAliasUrl);
+    assert.equal(unknownNamespaceAlias.status, expected.unknownNamespaceAliasStatus);
+    assert.equal((await unknownNamespaceAlias.arrayBuffer()).byteLength, 0);
 
-    const disallowedRoute = await fetchThroughProxy(`${mountBase}${request.disallowedPathSuffix}`);
+    const disallowedRoute = await fetchThroughProxy(
+        `${namespaceAliasBase}${request.disallowedPathSuffix}`,
+    );
     assert.equal(disallowedRoute.status, expected.disallowedRouteStatus);
     assert.equal((await disallowedRoute.arrayBuffer()).byteLength, 0);
 
@@ -1517,7 +1534,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const browserPath = `${request.proxiedPath}-browser`;
     await assertBrowserTransfer(
         browserClient,
-        request.mount,
+        request.namespaceAlias,
         browserPath,
         payload,
         request.actor,
@@ -1535,7 +1552,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const directPutBytes = bytePattern({ length: directPutLength, modulus: 251 });
     await assertBrowserTransfer(
         browserClient,
-        request.mount,
+        request.namespaceAlias,
         `${request.directPath}-browser`,
         directPutBytes,
         request.actor,
@@ -1550,7 +1567,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     });
     await assertBrowserTransfer(
         browserClient,
-        request.mount,
+        request.namespaceAlias,
         `${request.directPath}-browser-multipart`,
         multipartBytes,
         request.actor,
@@ -1562,7 +1579,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     // The rig fails only at begin. No session exists then, so mid-flow cleanup is not covered.
     await assert.rejects(
         putBrowserFile(browserClient, {
-            mount: request.unknownMount,
+            namespace_alias: request.unknownNamespaceAlias,
             path: `${request.proxiedPath}-browser-failure`,
             bytes: payload,
             actor: request.actor,
@@ -1570,7 +1587,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         }),
         (error: unknown) => {
             assert.ok(error instanceof BrowserLoonFS.NotFoundError);
-            assert.equal(error.statusCode, expected.unknownMountStatus);
+            assert.equal(error.statusCode, expected.unknownNamespaceAliasStatus);
             return true;
         },
     );
@@ -1961,14 +1978,14 @@ test("proxy forwards every documented route", { skip: environmentSkip }, async (
     const handler = createProxyHandler({
         serverBaseUrl: stub.baseUrl,
         token: "recording-stub-token",
-        mounts: { [fixture.mount]: fixture.namespaceId },
+        namespaceAliases: { [fixture.namespaceAlias]: fixture.namespaceId },
     });
     const proxy = await startProxyServer(handler);
     context.after(() => proxy.close());
 
     const instantiate = (template: string): string =>
         template.replace(/\{([^/{}]+)\}/g, (_placeholder, name: string) =>
-            name === "mount" ? fixture.mount : "x",
+            name === "namespace_alias" ? fixture.namespaceAlias : "x",
         );
     const proxyTemplateForServer = (template: string): string => {
         const serverNamespacePrefix = "/v0/namespaces/{namespace_id}";
@@ -1976,7 +1993,10 @@ test("proxy forwards every documented route", { skip: environmentSkip }, async (
             template === serverNamespacePrefix ||
             template.startsWith(`${serverNamespacePrefix}/`)
         ) {
-            return template.replace(serverNamespacePrefix, "/v0/mounts/{mount}");
+            return template.replace(
+                serverNamespacePrefix,
+                "/v0/namespace-aliases/{namespace_alias}",
+            );
         }
         return template;
     };
@@ -1987,7 +2007,7 @@ test("proxy forwards every documented route", { skip: environmentSkip }, async (
             const method = documentedMethod.toUpperCase();
             const path = instantiate(template);
             const forwardedTemplate = template.replace(
-                "/v0/mounts/{mount}",
+                "/v0/namespace-aliases/{namespace_alias}",
                 `/v0/namespaces/${fixture.namespaceId}`,
             );
             expected.push(`${method} ${instantiate(forwardedTemplate)}`);

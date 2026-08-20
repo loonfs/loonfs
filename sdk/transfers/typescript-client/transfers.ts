@@ -17,7 +17,7 @@ const CRC32C_TABLE = makeCrc32cTable();
 const CRC64_NVME_TABLE = makeCrc64NvmeTable();
 
 export interface PutFileInput {
-    mount: string;
+    namespace_alias: string;
     path: LoonFS.AbsolutePath;
     bytes: Uint8Array;
     actor: LoonFS.ActorRef;
@@ -34,7 +34,7 @@ export interface PutFileResult {
 }
 
 export interface GetFileInput {
-    mount: string;
+    namespace_alias: string;
     path: LoonFS.AbsolutePath;
     revision_no?: LoonFS.RevisionNo;
 }
@@ -56,13 +56,13 @@ interface DirectPutBody {
 }
 
 /**
- * Uploads in-memory bytes and commits them at one mount path.
+ * Uploads in-memory bytes and commits them at one namespace alias path.
  * Streaming and resume are follow-ups.
  */
 export async function putFile(client: LoonFSClient, input: PutFileInput): Promise<PutFileResult> {
-    const staged = await stageBytes(client, input.mount, input.bytes);
+    const staged = await stageBytes(client, input.namespace_alias, input.bytes);
     const request: LoonFS.CommitRequest = {
-        mount: input.mount,
+        namespace_alias: input.namespace_alias,
         actor: input.actor,
         commit_id: input.commit_id,
         content_tokens: staged.contentToken === undefined ? [] : [staged.contentToken],
@@ -110,23 +110,23 @@ export async function getFile(client: LoonFSClient, input: GetFileInput): Promis
 
 async function stageBytes(
     client: LoonFSClient,
-    mount: string,
+    namespaceAlias: string,
     bytes: Uint8Array,
 ): Promise<StagedContent> {
     const capabilities = await client.capabilities();
     const beginRequest = selectBeginRequest(capabilities, bytes);
     const begin = await client.uploads.beginUpload({
-        mount,
+        namespace_alias: namespaceAlias,
         body: beginRequest,
     });
 
     switch (begin.mode) {
         case "direct_put":
-            return stageDirectPut(client, mount, bytes, begin);
+            return stageDirectPut(client, namespaceAlias, bytes, begin);
         case "direct_multipart":
-            return stageMultipart(client, mount, bytes, begin);
+            return stageMultipart(client, namespaceAlias, bytes, begin);
         case "service_proxied":
-            return stageServiceProxied(client, mount, bytes, begin);
+            return stageServiceProxied(client, namespaceAlias, bytes, begin);
     }
 }
 
@@ -164,28 +164,28 @@ function selectBeginRequest(
 
 async function stageServiceProxied(
     client: LoonFSClient,
-    mount: string,
+    namespaceAlias: string,
     bytes: Uint8Array,
     begin: LoonFS.BeginUploadResponse.ServiceProxied,
 ): Promise<StagedContent> {
     try {
-        await client.uploads.uploadContent(arrayBuffer(bytes), mount, begin.upload_id);
+        await client.uploads.uploadContent(arrayBuffer(bytes), namespaceAlias, begin.upload_id);
         return stagedContent(
             await client.uploads.completeUpload({
-                mount,
+                namespace_alias: namespaceAlias,
                 upload_id: begin.upload_id,
                 body: { mode: "service_proxied" },
             }),
         );
     } catch (error) {
-        await abortQuietly(client, mount, begin.upload_id);
+        await abortQuietly(client, namespaceAlias, begin.upload_id);
         throw error;
     }
 }
 
 async function stageDirectPut(
     client: LoonFSClient,
-    mount: string,
+    namespaceAlias: string,
     bytes: Uint8Array,
     begin: LoonFS.BeginUploadResponse.DirectPut,
 ): Promise<StagedContent> {
@@ -201,12 +201,12 @@ async function stageDirectPut(
         });
         requireSuccessfulResponse(response, "direct PUT");
     } catch (error) {
-        await abortQuietly(client, mount, begin.upload_id);
+        await abortQuietly(client, namespaceAlias, begin.upload_id);
         throw error;
     }
     const completed = completedUpload(
         await client.uploads.completeUpload({
-            mount,
+            namespace_alias: namespaceAlias,
             upload_id: begin.upload_id,
             body: { mode: "direct_put", content: upload.content },
         }),
@@ -216,7 +216,7 @@ async function stageDirectPut(
 
 async function stageMultipart(
     client: LoonFSClient,
-    mount: string,
+    namespaceAlias: string,
     bytes: Uint8Array,
     begin: LoonFS.BeginUploadResponse.DirectMultipart,
 ): Promise<StagedContent> {
@@ -239,7 +239,7 @@ async function stageMultipart(
     const completedParts: LoonFS.CompletedUploadPart[] = [];
     try {
         const signed = await client.uploads.signUploadParts({
-            mount,
+            namespace_alias: namespaceAlias,
             upload_id: begin.upload_id,
             parts: claims,
         });
@@ -268,13 +268,13 @@ async function stageMultipart(
             });
         }
     } catch (error) {
-        await abortQuietly(client, mount, begin.upload_id);
+        await abortQuietly(client, namespaceAlias, begin.upload_id);
         throw error;
     }
 
     return stagedContent(
         await client.uploads.completeUpload({
-            mount,
+            namespace_alias: namespaceAlias,
             upload_id: begin.upload_id,
             body: {
                 mode: "direct_multipart",
@@ -314,11 +314,14 @@ function stagedContent(response: LoonFS.UploadSessionResponse): StagedContent {
 
 async function abortQuietly(
     client: LoonFSClient,
-    mount: string,
+    namespaceAlias: string,
     uploadId: LoonFS.UploadId,
 ): Promise<void> {
     try {
-        await client.uploads.abortUpload({ mount, upload_id: uploadId });
+        await client.uploads.abortUpload({
+            namespace_alias: namespaceAlias,
+            upload_id: uploadId,
+        });
     } catch {
         // Preserve the transfer error.
     }

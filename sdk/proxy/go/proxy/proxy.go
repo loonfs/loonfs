@@ -11,16 +11,16 @@ import (
 
 // Config defines a proxy handler.
 type Config struct {
-	ServerBaseURL string
-	Token         string
-	Mounts        map[string]string
+	ServerBaseURL    string
+	Token            string
+	NamespaceAliases map[string]string
 }
 
 type handler struct {
-	mounts    map[string]string
-	target    *url.URL
-	token     string
-	transport http.RoundTripper
+	namespaceAliases map[string]string
+	target           *url.URL
+	token            string
+	transport        http.RoundTripper
 }
 
 type route struct {
@@ -31,21 +31,21 @@ type route struct {
 // These routes must match docs/specs/openapi-proxy.json.
 var routes = []route{
 	{method: http.MethodGet, pattern: "/v0/capabilities"},
-	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/changes"},
-	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/commits"},
-	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/content"},
-	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/filesystem/downloads"},
-	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/list"},
-	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/revisions"},
-	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/stat"},
-	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/trash"},
-	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/query/grep"},
-	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads"},
-	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/uploads/{upload_id}"},
-	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/abort"},
-	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/complete"},
-	{method: http.MethodPut, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/content"},
-	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/parts"},
+	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/changes"},
+	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/commits"},
+	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/content"},
+	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/downloads"},
+	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/list"},
+	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/revisions"},
+	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/stat"},
+	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/trash"},
+	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/query/grep"},
+	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads"},
+	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}"},
+	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort"},
+	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/complete"},
+	{method: http.MethodPut, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/content"},
+	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/parts"},
 }
 
 var hopByHopHeaders = []string{
@@ -70,15 +70,15 @@ func NewHandler(config Config) (http.Handler, error) {
 		return nil, fmt.Errorf("proxy: token is required")
 	}
 
-	mounts := make(map[string]string, len(config.Mounts))
-	for mount, namespaceID := range config.Mounts {
-		if mount == "" || strings.Contains(mount, "/") {
-			return nil, fmt.Errorf("proxy: mount %q must be one non-empty path segment", mount)
+	namespaceAliases := make(map[string]string, len(config.NamespaceAliases))
+	for namespaceAlias, namespaceID := range config.NamespaceAliases {
+		if namespaceAlias == "" || strings.Contains(namespaceAlias, "/") {
+			return nil, fmt.Errorf("proxy: namespace alias %q must be one non-empty path segment", namespaceAlias)
 		}
 		if !validNamespaceID(namespaceID) {
-			return nil, fmt.Errorf("proxy: namespace id %q for mount %q is invalid", namespaceID, mount)
+			return nil, fmt.Errorf("proxy: namespace id %q for namespace alias %q is invalid", namespaceID, namespaceAlias)
 		}
-		mounts[mount] = namespaceID
+		namespaceAliases[namespaceAlias] = namespaceID
 	}
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -88,10 +88,10 @@ func NewHandler(config Config) (http.Handler, error) {
 	transport.DisableCompression = true
 
 	return &handler{
-		mounts:    mounts,
-		target:    target,
-		token:     config.Token,
-		transport: transport,
+		namespaceAliases: namespaceAliases,
+		target:           target,
+		token:            config.Token,
+		transport:        transport,
 	}, nil
 }
 
@@ -178,18 +178,18 @@ func (h *handler) rewritePath(method, path string) (string, bool) {
 		if candidate.method != method {
 			continue
 		}
-		mount, ok := matchPattern(candidate.pattern, path)
+		namespaceAlias, ok := matchPattern(candidate.pattern, path)
 		if !ok {
 			continue
 		}
-		if mount == "" {
+		if namespaceAlias == "" {
 			return path, true
 		}
-		namespaceID, ok := h.mounts[mount]
+		namespaceID, ok := h.namespaceAliases[namespaceAlias]
 		if !ok {
 			return "", false
 		}
-		prefix := "/v0/mounts/" + mount
+		prefix := "/v0/namespace-aliases/" + namespaceAlias
 		return "/v0/namespaces/" + namespaceID + strings.TrimPrefix(path, prefix), true
 	}
 	return "", false
@@ -202,15 +202,15 @@ func matchPattern(pattern, path string) (string, bool) {
 		return "", false
 	}
 
-	var mount string
+	var namespaceAlias string
 	for index, patternSegment := range patternSegments {
 		pathSegment := pathSegments[index]
 		switch patternSegment {
-		case "{mount}":
+		case "{namespace_alias}":
 			if pathSegment == "" {
 				return "", false
 			}
-			mount = pathSegment
+			namespaceAlias = pathSegment
 		case "{upload_id}":
 			if pathSegment == "" {
 				return "", false
@@ -221,7 +221,7 @@ func matchPattern(pattern, path string) (string, bool) {
 			}
 		}
 	}
-	return mount, true
+	return namespaceAlias, true
 }
 
 func joinPath(basePath, requestPath string) string {
