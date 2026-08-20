@@ -6,7 +6,7 @@
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
-use loonfs_api::v0::{CompleteMultipartUploadRequest, UploadContentClaim};
+use loonfs_api::v0::CompleteMultipartUploadRequest;
 use loonfs_api::{
     wire::control::{ControlObjectKind, UploadSessionState, UploadSessionTransport},
     ContentRef, DestinationBehavior, NamespaceId, UploadId,
@@ -38,20 +38,12 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
 async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    claim: UploadContentClaim,
+    checksum_algorithm: ChecksumAlgorithm,
     context: &MutationContext,
 ) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .begin_direct_put_upload_target(claim)
+        .begin_direct_put_upload_target(checksum_algorithm)
         .await
-}
-
-/// What a well-behaved direct-put client would send for these bytes.
-fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {
-    UploadContentClaim {
-        size_bytes: bytes.len() as u64,
-        checksum: Checksum::sha256(bytes),
-    }
 }
 
 async fn upload_content<S: ObjectStore + ?Sized>(
@@ -140,68 +132,35 @@ async fn begin_direct_put_mints_the_target_object_up_front() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    let bytes = b"direct put payload";
-
     let first =
-        begin_direct_put_upload_target(&store, &namespace_id, direct_put_claim(bytes), &context)
+        begin_direct_put_upload_target(&store, &namespace_id, ChecksumAlgorithm::Sha256, &context)
             .await
             .expect("first direct put target");
     let second =
-        begin_direct_put_upload_target(&store, &namespace_id, direct_put_claim(bytes), &context)
+        begin_direct_put_upload_target(&store, &namespace_id, ChecksumAlgorithm::Sha256, &context)
             .await
             .expect("second direct put target");
 
-    let content_ref = &first.target.content_ref;
-    assert_eq!(content_ref.size_bytes, bytes.len() as u64);
-    assert_eq!(
-        content_ref.checksum,
-        Checksum::sha256(bytes),
-        "the signed checksum is the client's claim, verified again at completion"
-    );
-    assert!(first
+    assert_eq!(first.target.checksum_algorithm, ChecksumAlgorithm::Sha256);
+    let first_content_id = first
         .target
         .object_key
-        .ends_with(content_ref.content_id.as_str()));
+        .rsplit('/')
+        .next()
+        .expect("content id");
+    assert!(first_content_id.starts_with("con_"));
     // Same bytes, two sessions, two objects: nothing is shared, so neither
     // upload can observe the other.
     assert_ne!(
-        first.target.content_ref.content_id,
-        second.target.content_ref.content_id
+        first_content_id,
+        second
+            .target
+            .object_key
+            .rsplit('/')
+            .next()
+            .expect("content id")
     );
     assert_ne!(first.target.object_key, second.target.object_key);
-}
-
-#[tokio::test]
-async fn begin_direct_put_rejects_a_malformed_claim_without_creating_a_session() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-
-    // The client no longer names an object, so the only thing left to
-    // reject is a malformed claim about its own bytes.
-    let claim = UploadContentClaim {
-        size_bytes: 5,
-        checksum: Checksum {
-            algorithm: ChecksumAlgorithm::Sha256,
-            value: "not-a-sha256".to_owned(),
-        },
-    };
-    let error = begin_direct_put_upload_target(&store, &namespace_id, claim, &context)
-        .await
-        .expect_err("malformed direct_put claim");
-
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    assert_eq!(
-        store
-            .list_prefix(&upload_session_prefix(&namespace_id))
-            .await
-            .expect("list upload sessions"),
-        Vec::<String>::new()
-    );
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@ Streaming and resume are follow-ups. AsyncLoonFS support is a follow-up.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 
 import httpx
@@ -38,11 +38,6 @@ __all__ = ["GetFileResult", "PutFileResult", "get_file", "put_file"]
 _MULTIPART_MIN_BYTES = 8 * 1024 * 1024
 _DIRECT_MULTIPART_FEATURE = "core.uploads.direct_multipart"
 _DIRECT_PUT_FEATURE = "core.uploads.direct_put"
-_DIRECT_PUT_CHECKSUM_FEATURES = (
-    ("sha256", "core.uploads.direct_put.checksum.sha256"),
-    ("crc64nvme", "core.uploads.direct_put.checksum.crc64nvme"),
-    ("crc32c", "core.uploads.direct_put.checksum.crc32c"),
-)
 _PROXY_UPLOAD_LIMIT = "upload.max_content_bytes"
 _DIRECT_PUT_LIMIT = "upload.direct_put_max_content_bytes"
 
@@ -61,6 +56,68 @@ _CRC64_NVME_MASK = (1 << 64) - 1
 _CRC32C_MASK = (1 << 32) - 1
 _CRC64_NVME_TABLE = _crc_table(0x9A6C9329AC4BC9B5, _CRC64_NVME_MASK)
 _CRC32C_TABLE = _crc_table(0x82F63B78, _CRC32C_MASK)
+
+
+class _ChecksumAccumulator:
+    def __init__(self, algorithm: str) -> None:
+        self._algorithm = algorithm
+        self._sha256 = hashlib.sha256() if algorithm == "sha256" else None
+        if algorithm == "crc64nvme":
+            self._crc_table = _CRC64_NVME_TABLE
+            self._crc_mask = _CRC64_NVME_MASK
+        elif algorithm == "crc32c":
+            self._crc_table = _CRC32C_TABLE
+            self._crc_mask = _CRC32C_MASK
+        elif algorithm == "sha256":
+            self._crc_table = None
+            self._crc_mask = None
+        else:
+            raise RuntimeError(f"unsupported checksum algorithm {algorithm!r}")
+        self._crc_value = self._crc_mask
+
+    def update(self, content: bytes) -> None:
+        if self._sha256 is not None:
+            self._sha256.update(content)
+            return
+        assert self._crc_table is not None
+        assert self._crc_value is not None
+        for byte in content:
+            self._crc_value = (
+                self._crc_table[(self._crc_value ^ byte) & 0xFF]
+                ^ (self._crc_value >> 8)
+            )
+
+    def finish(self) -> Checksum:
+        if self._sha256 is not None:
+            value = self._sha256.hexdigest()
+        else:
+            assert self._crc_mask is not None
+            assert self._crc_value is not None
+            width = 16 if self._crc_mask == _CRC64_NVME_MASK else 8
+            value = f"{self._crc_value ^ self._crc_mask:0{width}x}"
+        return Checksum(algorithm=self._algorithm, value=value)
+
+
+class _UploadBody:
+    def __init__(self, algorithm: str, content: bytes) -> None:
+        self._content = content
+        self._checksum = _ChecksumAccumulator(algorithm)
+        self._size_bytes = 0
+        self._started = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        if self._started:
+            raise RuntimeError("direct PUT body cannot be replayed")
+        self._started = True
+        self._checksum.update(self._content)
+        self._size_bytes += len(self._content)
+        yield self._content
+
+    def claim(self) -> UploadContentClaim:
+        return UploadContentClaim(
+            size_bytes=self._size_bytes,
+            checksum=self._checksum.finish(),
+        )
 
 
 @dataclass(frozen=True)
@@ -191,30 +248,16 @@ def _begin_upload(client: LoonFS, namespace_id: str, content: bytes):
             multipart=DirectMultipartUploadOptions()
         )
     else:
-        direct_put_algorithm = next(
-            (
-                algorithm
-                for algorithm, feature in _DIRECT_PUT_CHECKSUM_FEATURES
-                if features.get(_DIRECT_PUT_FEATURE, False)
-                and features.get(feature, False)
-            ),
-            None,
-        )
         proxy_limit = limits.get(_PROXY_UPLOAD_LIMIT)
         fits_proxy = proxy_limit is None or size_bytes <= proxy_limit
         direct_put_limit = limits.get(_DIRECT_PUT_LIMIT)
         fits_direct_put = direct_put_limit is None or size_bytes <= direct_put_limit
         if (
-            direct_put_algorithm is not None
+            features.get(_DIRECT_PUT_FEATURE, False)
             and fits_direct_put
             and (size_bytes >= _MULTIPART_MIN_BYTES or not fits_proxy)
         ):
-            request = BeginUploadRequest_DirectPut(
-                content=UploadContentClaim(
-                    size_bytes=size_bytes,
-                    checksum=_checksum(direct_put_algorithm, content),
-                )
-            )
+            request = BeginUploadRequest_DirectPut(size_bytes=size_bytes)
         elif fits_proxy:
             request = BeginUploadRequest_ServiceProxied()
         else:
@@ -245,20 +288,14 @@ def _stage_upload(
             raise
         return _completed_content(completion)
     if begin.mode == "direct_put":
-        expected = begin.direct_put.content_ref
-        if (
-            expected.size_bytes != len(content)
-            or _checksum(expected.checksum.algorithm, content) != expected.checksum
-        ):
-            raise RuntimeError(
-                "direct PUT response did not describe the requested content"
-            )
+        upload_body = _UploadBody(begin.direct_put.checksum_algorithm, content)
         try:
             _send_presigned(
                 transfer_client,
                 begin.direct_put.access,
                 "PUT",
-                content=content,
+                content=upload_body,
+                content_length=len(content),
             )
         except Exception:
             _abort_quietly(client, namespace_id, begin.upload_id)
@@ -266,14 +303,9 @@ def _stage_upload(
         completion = client.uploads.complete_upload(
             namespace_id,
             begin.upload_id,
-            request=CompleteUploadRequest_DirectPut(),
+            request=CompleteUploadRequest_DirectPut(content=upload_body.claim()),
         )
-        staged = _completed_content(completion)
-        if staged.content_ref != expected:
-            raise RuntimeError(
-                "direct PUT completion returned a different content reference"
-            )
-        return staged
+        return _completed_content(completion)
     if begin.mode == "direct_multipart":
         return _stage_multipart(
             client,
@@ -363,16 +395,20 @@ def _send_presigned(
     access: ObjectTransferAccess,
     expected_method: str,
     *,
-    content: bytes | None = None,
+    content: bytes | Iterable[bytes] | None = None,
+    content_length: int | None = None,
 ) -> httpx.Response:
     if access.method.upper() != expected_method:
         raise RuntimeError(
             f"presigned access uses {access.method!r}, expected {expected_method!r}"
         )
+    headers = httpx.Headers(access.headers or {})
+    if content_length is not None and "content-length" not in headers:
+        headers["content-length"] = str(content_length)
     response = client.request(
         expected_method,
         access.url,
-        headers=access.headers or {},
+        headers=headers,
         content=content,
     )
     response.raise_for_status()
@@ -407,19 +443,6 @@ def _abort_quietly(client: LoonFS, namespace_id: str, upload_id: str) -> None:
 
 
 def _checksum(algorithm: str, content: bytes) -> Checksum:
-    if algorithm == "sha256":
-        value = hashlib.sha256(content).hexdigest()
-    elif algorithm == "crc64nvme":
-        value = f"{_crc(content, _CRC64_NVME_TABLE, _CRC64_NVME_MASK):016x}"
-    elif algorithm == "crc32c":
-        value = f"{_crc(content, _CRC32C_TABLE, _CRC32C_MASK):08x}"
-    else:
-        raise RuntimeError(f"unsupported checksum algorithm {algorithm!r}")
-    return Checksum(algorithm=algorithm, value=value)
-
-
-def _crc(content: bytes, table: tuple[int, ...], mask: int) -> int:
-    value = mask
-    for byte in content:
-        value = table[(value ^ byte) & 0xFF] ^ (value >> 8)
-    return value ^ mask
+    accumulator = _ChecksumAccumulator(algorithm)
+    accumulator.update(content)
+    return accumulator.finish()

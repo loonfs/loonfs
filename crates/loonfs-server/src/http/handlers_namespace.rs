@@ -21,7 +21,7 @@ use loonfs_api::{
     LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0, UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
 };
 
 /// Advertises a feature, or removes the key: an absent key and an
@@ -96,18 +96,6 @@ pub(super) async fn capabilities(
         FEATURE_DOWNLOADS_DIRECT_GET,
         state.direct_transfers.is_some(),
     );
-    // A direct-put client has to fold the provider's own whole-object
-    // checksum while staging, so the deployment names which one it is —
-    // read from the issuer, the same authority the begin handler validates
-    // a claim against.
-    let advertised_algorithm = direct_put.map(|issuer| issuer.checksum_algorithm());
-    for (algorithm, feature) in UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES {
-        set_feature(
-            &mut capabilities,
-            feature,
-            advertised_algorithm == Some(algorithm),
-        );
-    }
     if let Some(issuer) = direct_put {
         capabilities.limits.insert(
             LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES.to_owned(),

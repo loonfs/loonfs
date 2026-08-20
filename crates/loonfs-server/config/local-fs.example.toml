@@ -48,8 +48,9 @@ writer_id = "loonfs-server-local"
 #max_concurrent_maintenance = 2
 
 # Direct-put needs no configuration. It is offered only where the adapter can
-# presign a create-only, checksum-bound PUT and the endpoint is a first-party
-# AWS S3 or Cloudflare R2 domain, so it is unavailable on this local-fs store.
+# presign a create-only PUT and report a durable checksum, and the endpoint is
+# a first-party AWS S3 or Cloudflare R2 domain, so it is unavailable on this
+# local-fs store.
 # Clients gate on `core.uploads.direct_put` in the capability document.
 
 # Optional runtime cache overrides; omitted fields keep the runtime defaults.

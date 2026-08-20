@@ -14,22 +14,14 @@ use http::Uri;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Provider domain families validated by the live direct-transfer
-/// conformance suite.
-///
-/// Direct completion depends on the provider enforcing the signed checksum and
-/// create-if-absent condition. Endpoint overrides outside these domain
-/// families are not covered by that validation.
+/// Provider domains covered by live direct-transfer tests.
 pub(crate) const AWS_S3_PROVEN_DOMAINS: &[&str] = &["amazonaws.com", "amazonaws.com.cn"];
 pub(crate) const CLOUDFLARE_R2_PROVEN_DOMAINS: &[&str] = &["r2.cloudflarestorage.com"];
 
-/// Enables GCS direct transfers after live provider validation.
+/// Whether live provider tests have validated GCS direct transfers.
 ///
-/// Set this only when the credentialed conformance suite has confirmed that
-/// GCS enforces signed checksums and create-if-absent requests. The current
-/// value is supported by the live validation recorded on 2026-08-02. Until a
-/// provider is validated, deployments must proxy transfers through the
-/// server.
+/// Enable this only after the credentialed tests confirm create-only writes
+/// and stored CRC-32C checksums.
 const GCS_DIRECT_TRANSFERS_PROVEN: bool = true;
 
 /// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
@@ -268,10 +260,7 @@ mod tests {
     use crate::ObjectStore;
     use crate::ObjectStoreError;
     use bytes::Bytes;
-    use loonfs_api::Checksum;
     use loonfs_api::ChecksumAlgorithm;
-    use loonfs_api::ContentId;
-    use loonfs_api::ContentRef;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -339,13 +328,11 @@ mod tests {
             transfers.multipart.is_none(),
             "this adapter signs no multipart for GCS, which is spelled as an absent signer"
         );
-        assert_eq!(put.checksum_algorithm(), ChecksumAlgorithm::Crc32c);
+        assert_eq!(put.stored_checksum_algorithm(), ChecksumAlgorithm::Crc32c);
         assert_eq!(put.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
     }
 
-    /// The write GCS authorizes is addressed beneath the configured prefix and
-    /// carries the create-only precondition and the checksum in its
-    /// signature, exactly as the S3-compatible bundle's does.
+    /// GCS signs the configured prefix and create-only precondition.
     #[test]
     fn the_gcs_bundle_signs_native_generation_preconditions() {
         let issuer = proven_gcs_store()
@@ -358,7 +345,6 @@ mod tests {
                 PresignedPutRequest {
                     object_key:
                         "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef",
-                    content_ref: &crc32c_content_ref(),
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -375,10 +361,7 @@ mod tests {
                 .map(String::as_str),
             Some("0")
         );
-        assert!(signed
-            .headers
-            .get("x-goog-hash")
-            .is_some_and(|value| value.starts_with("crc32c=")));
+        assert!(!signed.headers.contains_key("x-goog-hash"));
         // The S3 family's spellings never appear on a native GCS capability.
         assert!(!signed.headers.contains_key("if-none-match"));
         assert!(!signed.url.contains("X-Amz-"));
@@ -457,7 +440,10 @@ mod tests {
         let s3 = aws_s3_store(None).direct_transfers().expect("s3 transfers");
         let s3_put = s3.put.expect("s3 signs whole-object writes");
         assert!(s3.multipart.is_some());
-        assert_eq!(s3_put.checksum_algorithm(), ChecksumAlgorithm::Sha256);
+        assert_eq!(
+            s3_put.stored_checksum_algorithm(),
+            ChecksumAlgorithm::Crc64nvme
+        );
         assert_eq!(s3_put.max_content_bytes(), AWS_S3_MAX_DIRECT_PUT_BYTES);
 
         let r2 = r2_store("https://account.r2.cloudflarestorage.com")
@@ -538,14 +524,6 @@ mod tests {
         )
     }
 
-    /// A reference whose checksum is the CRC-32C GCS enforces.
-    fn crc32c_content_ref() -> ContentRef {
-        ContentRef {
-            checksum: Checksum::crc32c(b"hello"),
-            ..ContentRef::blob_v1(ContentId::generate(), b"hello")
-        }
-    }
-
     fn r2_store(endpoint_url: &str) -> ConfiguredObjectStore {
         ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
             bucket: "bucket".to_owned(),
@@ -579,7 +557,6 @@ mod tests {
                 PresignedPutRequest {
                     object_key:
                         "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef",
-                    content_ref: &ContentRef::blob_v1(ContentId::generate(), b"hello"),
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),

@@ -3152,7 +3152,7 @@
           "uploads"
         ],
         "summary": "Complete upload",
-        "description": "Completes an upload. The request mode must match the mode used to start the session. Direct-multipart requests also include the content claim and completed parts.",
+        "description": "Completes an upload. The request mode must match the mode used to start the session. Direct uploads include a content claim; multipart also includes completed parts.",
         "operationId": "complete_upload",
         "parameters": [
           {
@@ -4193,7 +4193,7 @@
             "$ref": "#/components/schemas/CompleteUploadDirectMultipart"
           }
         ],
-        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Service-proxied and\ndirect-PUT uploads need no other fields. Direct multipart uploads also\ninclude the completed parts and the expected content details.",
+        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Direct uploads\ninclude the expected content details. Multipart also includes its parts.",
         "discriminator": {
           "propertyName": "mode",
           "mapping": {
@@ -4404,7 +4404,7 @@
       },
       "DirectMultipartUpload": {
         "type": "object",
-        "description": "Part geometry returned for a direct multipart upload.\n\nThe begin response does not include a content reference or part count\nbecause the final payload is not known yet. The server owns the provider\nupload id and returns the content reference only after completion.",
+        "description": "Settings returned for a direct multipart upload.",
         "required": [
           "part_size_bytes",
           "checksum_algorithm"
@@ -4412,7 +4412,7 @@
         "properties": {
           "checksum_algorithm": {
             "$ref": "#/components/schemas/ChecksumAlgorithm",
-            "description": "Checksum algorithm every part and the complete assembled payload must\nuse for this session."
+            "description": "Checksum algorithm for every part and for the complete payload."
           },
           "part_size_bytes": {
             "type": "integer",
@@ -4424,7 +4424,7 @@
       },
       "DirectMultipartUploadOptions": {
         "type": "object",
-        "description": "What a `direct_multipart` client asks for when it opens a session.\n\nA begin request declares no length and no digest: the session exists to\nreceive bytes whose length may not be known yet. All it settles is the\ngeometry the client cuts to.",
+        "description": "Options for starting a direct multipart upload.",
         "properties": {
           "part_size_bytes": {
             "type": [
@@ -4432,7 +4432,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Byte length of every part except the last, or `None` for the\nserver's default.\n\nThe value bounds the object: a provider accepts at most 10,000\nparts, so this session can carry at most `part_size_bytes × 10_000`\nbytes. A client that knows its payload is very large asks for a\nlarger part size; one that does not know its length at all takes the\ndefault and keeps asking for part URLs until its stream ends.",
+            "description": "Byte length of every part except the last, or `None` for the\nserver's default.\n\nProviders accept at most 10,000 parts, so this value also limits the\nmaximum upload size. Clients can request larger parts for large files.",
             "minimum": 0
           }
         },
@@ -4440,19 +4440,19 @@
       },
       "DirectPutUpload": {
         "type": "object",
-        "description": "Presigned direct_put upload details. The raw object key is intentionally not public.",
+        "description": "Details for a direct PUT upload.",
         "required": [
-          "content_ref",
+          "checksum_algorithm",
           "access"
         ],
         "properties": {
           "access": {
             "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "Short-lived write capability the client uses without learning the raw object key."
+            "description": "Short-lived permission to write the object."
           },
-          "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "Immutable object identity the server minted, plus the byte length and\nchecksum covered by the signed request. Completion and the later\ncommit both name exactly this reference."
+          "checksum_algorithm": {
+            "$ref": "#/components/schemas/ChecksumAlgorithm",
+            "description": "Checksum algorithm the client must use for its completion claim."
           }
         }
       },
@@ -5539,7 +5539,7 @@
             "items": {
               "$ref": "#/components/schemas/UploadPartChecksumClaim"
             },
-            "description": "Parts to authorize, each with the checksum the provider will enforce\non it. Asking again for a part already uploaded is how a client\nretries one: a repeated part is last-write-wins at the provider."
+            "description": "Parts to authorize and the checksum for each part. Requesting a part\nagain replaces the previous upload for that part number."
           }
         },
         "additionalProperties": false
@@ -5698,7 +5698,7 @@
       },
       "UploadContentClaim": {
         "type": "object",
-        "description": "What an upload client claims about a complete payload.\n\nThe server mints the content object's identity — a client cannot name a\nkey it has not been given — so a direct upload declares only what it can\nknow about its own bytes. Direct PUT binds the claim into the provider\nwrite; multipart verifies it against the assembled object at completion.\n\nThe digest names its own algorithm because providers do not agree on one:\neach binds into a presigned write whatever its API can enforce. The\ndeployment advertises which it is, and a claim in any other algorithm is\nrefused at begin rather than signed into a write the provider would\nreject.",
+        "description": "Size and checksum reported by the client for a complete payload.\n\nDirect uploads provide this at completion. The server verifies it against\nthe object stored by the provider.",
         "required": [
           "size_bytes",
           "checksum"
@@ -5711,7 +5711,7 @@
           "size_bytes": {
             "type": "integer",
             "format": "int64",
-            "description": "Complete byte length the client will write.",
+            "description": "Complete payload size in bytes.",
             "minimum": 0
           }
         },
@@ -5938,21 +5938,22 @@
       },
       "BeginUploadDirectPut": {
         "type": "object",
-        "description": "Write the whole object through one presigned request. The server\nsigns exactly these bytes into the write it authorizes, so the claim\nis required.",
+        "description": "Write the whole object through one presigned request.",
         "required": [
-          "content",
           "mode"
         ],
         "properties": {
-          "content": {
-            "$ref": "#/components/schemas/UploadContentClaim",
-            "description": "Byte length and digest of the payload about to be written."
-          },
           "mode": {
             "type": "string",
             "enum": [
               "direct_put"
             ]
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Advisory byte length for an early provider-limit check.",
+            "minimum": 0
           }
         }
       },
@@ -5971,7 +5972,7 @@
           },
           "multipart": {
             "$ref": "#/components/schemas/DirectMultipartUploadOptions",
-            "description": "Selects the part geometry; absent takes the server's default.\nA multipart upload claims its content at completion, so nothing\nabout the payload is declared here."
+            "description": "Part size options. The server uses its default when omitted."
           }
         }
       },
@@ -6119,9 +6120,14 @@
         "type": "object",
         "description": "Complete a direct-PUT upload.",
         "required": [
+          "content",
           "mode"
         ],
         "properties": {
+          "content": {
+            "$ref": "#/components/schemas/UploadContentClaim",
+            "description": "Expected length and checksum of the stored object."
+          },
           "mode": {
             "type": "string",
             "enum": [

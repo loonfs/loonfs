@@ -2,7 +2,6 @@
 //! profiles and feature keys a deployment advertises, which clients gate
 //! on instead of guessing from the backend kind.
 
-use crate::ChecksumAlgorithm;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -38,47 +37,6 @@ pub const FEATURE_UPLOADS_DIRECT_MULTIPART: &str = "core.uploads.direct_multipar
 /// because letting a client write an object too large to proxy back means
 /// being able to hand it back.
 pub const FEATURE_DOWNLOADS_DIRECT_GET: &str = "core.downloads.direct_get";
-
-/// `direct_put` with a SHA-256 whole-object checksum.
-pub const FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256: &str =
-    "core.uploads.direct_put.checksum.sha256";
-/// `direct_put` with a CRC-64/NVME whole-object checksum.
-pub const FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC64NVME: &str =
-    "core.uploads.direct_put.checksum.crc64nvme";
-/// `direct_put` with a CRC-32C whole-object checksum.
-pub const FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC32C: &str =
-    "core.uploads.direct_put.checksum.crc32c";
-
-/// Every `direct_put` checksum feature, paired with the algorithm it names.
-///
-/// Providers do not agree on the whole-object checksum they can bind into a
-/// presigned write, and a client has to fold the right one over its payload
-/// while staging — so the deployment names it rather than the client
-/// guessing from the backend. At most one of these keys is ever advertised
-/// true, and only alongside [`FEATURE_UPLOADS_DIRECT_PUT`].
-pub const UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES: [(ChecksumAlgorithm, &str); 3] = [
-    (
-        ChecksumAlgorithm::Sha256,
-        FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256,
-    ),
-    (
-        ChecksumAlgorithm::Crc64nvme,
-        FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC64NVME,
-    ),
-    (
-        ChecksumAlgorithm::Crc32c,
-        FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC32C,
-    ),
-];
-/// The feature key that names one `direct_put` checksum algorithm, or the
-/// parent [`FEATURE_UPLOADS_DIRECT_PUT`] key when no dedicated one is
-/// registered for it.
-pub fn direct_put_checksum_feature(algorithm: ChecksumAlgorithm) -> &'static str {
-    UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES
-        .iter()
-        .find(|(candidate, _)| *candidate == algorithm)
-        .map_or(FEATURE_UPLOADS_DIRECT_PUT, |(_, feature)| *feature)
-}
 
 /// Gates grep-index content search: the serving half of the capability;
 /// the namespace's verified active grep root is the data half.
@@ -200,20 +158,6 @@ impl CapabilityDocument {
     /// unsupported.
     pub fn supports(&self, feature: &str) -> bool {
         self.features.get(feature).copied().unwrap_or(false)
-    }
-
-    /// The whole-object checksum a `direct_put` client folds over its
-    /// payload here, or `None` when this deployment does not offer
-    /// `direct_put` — or offers it in an algorithm this build has no name
-    /// for, which a client must treat the same way.
-    pub fn direct_put_checksum_algorithm(&self) -> Option<ChecksumAlgorithm> {
-        if !self.supports(FEATURE_UPLOADS_DIRECT_PUT) {
-            return None;
-        }
-        UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES
-            .iter()
-            .find(|(_, feature)| self.supports(feature))
-            .map(|(algorithm, _)| *algorithm)
     }
 
     /// The largest object this deployment's provider accepts in one

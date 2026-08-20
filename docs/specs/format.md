@@ -275,11 +275,10 @@ The surrounding field defines coverage. `ContentRef.checksum` and
 one multipart upload part. A `checksum_algorithm` field selects an algorithm
 but does not contain a checksum.
 
-Service-proxied uploads produce SHA-256. Direct PUT uses the algorithm
-advertised by `core.uploads.direct_put.checksum.<algorithm>`. Direct multipart
-uses the algorithm stored in the session, currently CRC-64/NVME. For direct
-uploads, LoonFS accepts a client checksum only after the provider enforces it
-and completion verifies the stored object.
+Service-proxied uploads produce SHA-256. Direct PUT uses the algorithm returned
+when the session begins. Direct multipart uses the algorithm stored in the
+session, currently CRC-64/NVME. For direct uploads, LoonFS accepts a client
+checksum only after completion verifies the provider's stored object.
 
 Metadata materialization tables include canonical metadata families and
 validated derived families. The canonical families are `inodes`,
@@ -1738,89 +1737,45 @@ Examples include:
 v0 uses upload sessions for resumable uploads. It does not define read
 sessions or put intents.
 
-A durable upload session has three states and one transition:
+A durable upload session has three states:
 
-- `open { expires_at_ms }` — the only live state. A session may stage bytes
-  and complete only while open. The expiry is a lease carried in the record,
-  so no session transition depends on an object's provider timestamp. Unlike
-  a namespace, a session *is* a lease, so reclaiming an expired one on age
-  alone is the correct reading rather than a guess about the client.
-- `completed { completed_at_ms, content_ref }` — terminal. The reference is
-  verified before the transition is written, and it is what every idempotent
-  completion retry and every later read answers with.
-- `aborted { aborted_at_ms }` — terminal. The session will never select
-  content.
+- `open { expires_at_ms }`: accepts upload work until its lease expires.
+- `completed { completed_at_ms, content_ref }`: contains the verified content
+  reference and cannot change again.
+- `aborted { aborted_at_ms }`: cannot be completed or reopened.
 
-Two rules make this decidable under concurrency:
+Completion and abort use compare-and-swap. Only one terminal transition can
+succeed. Completion verifies the object before changing the state. Abort
+changes the state before deleting the object. This prevents cleanup from
+deleting an object for a session that is still open. Cleanup is safe to retry.
 
-1. **The durable compare-and-swap is the serialization point.** Whichever of
-   the two terminal transitions lands is what happened. The loser reports a
-   terminal error rather than undoing anything: a completion that finds the
-   session aborted reports `upload_not_found`, because an aborted session is
-   logically absent and will never select content — the same code the
-   subsequent physical deletion produces; an abort that finds the session
-   completed reports `upload_already_completed`, because the content may
-   already be published.
-2. **Provider state follows the durable transition, never precedes it.**
-   Completion verifies the object first and only then swaps. An abort swaps
-   first and only then deletes the object the session owned. A crash in
-   between therefore leaves an object the next garbage-collection pass
-   reclaims from the terminal record — never an object deleted out from
-   under a session that is still open. Cleanup is idempotent and may be
-   repeated freely.
+Each session has `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, a
+tagged `transport`, and a tagged `state`. The content identity is assigned when
+the session begins.
 
-Nothing returns a session to `open`, and no state records consumption: a
-client that wants another attempt begins another session, which mints its own
-content identity, and publication never writes back to a session record.
+The transport does not change:
 
-A session record is an identity, a transport, and a state. It carries
-`namespace_id`, `upload_id`, `content_id`, and `created_at_ms`, then a
-`transport` object and a `state` object, each tagged by a `kind`. The content
-identity is allocated when the session opens, before any byte is read, so the
-object's final key is known from birth and belongs to exactly one session.
+- `service_proxied` stores a `staging` state: `idle`, `claimed`, or
+  `staged { content_ref }`.
+- `direct_put` stores the provider's whole-object `checksum_algorithm`. The
+  client sends the final size and checksum at completion.
+- `direct_multipart` stores `provider_upload_id`, `part_size_bytes`, and
+  `checksum_algorithm`.
 
-The session chooses a `transport` when it opens and never changes it:
+Multipart part progress remains on the client. The session stores the part
+size and checksum algorithm so a resumed upload uses the original settings.
 
-- `service_proxied`: `staging`, the staging sub-state for the bytes the service
-  receives. It is `idle`, `claimed` while one request owns the upload, or
-  `staged { content_ref }` after validation. The upload-session lease bounds
-  an abandoned claim.
-- `direct_put`: `promised_content`, the content reference the presigned write
-  is signed against. The provider enforces its checksum, and completion
-  verifies the stored object against the same reference.
-- `direct_multipart`: `provider_upload_id`, `part_size_bytes`, and
-  `checksum_algorithm`. The algorithm applies to part signing and completion.
+The following invariants are checked when a record is read:
 
-A multipart session has no content reference until completion because its
-complete size and checksum may not be known when it begins. The client keeps
-part progress; the session stores no per-part records. It stores the part size
-and checksum algorithm so a resumed upload uses the original settings rather
-than current process configuration. Cleanup uses `provider_upload_id` after
-the session has made its durable state transition.
-
-The `state` carries what its own phase of the lifecycle needs. `open` carries
-`expires_at_ms`; `completed` carries `completed_at_ms` and the verified
-`content_ref`; `aborted` carries `aborted_at_ms`. Staging progress is part of
-the service-proxied transport because no other transport can stage through
-the service, and its enum makes an idle, claimed, and staged session mutually
-exclusive states.
-
-Three invariants are checked when the record is read, because the shape cannot
-express them:
-
-- Every content reference the record holds — the transport's promise or
-  staged reference, and the completed reference — names the record's own
-  `content_id`. A record that disagrees with itself describes two objects and
-  could verify one while publishing the other.
+- Every staged or completed content reference uses the session's
+  `content_id`.
 - The record carries a `transport` and a `state`. Neither has a default and
   neither may be omitted.
-- A `direct_put` session's `completed` reference equals its
-  `promised_content` in full, which is the reference the provider enforced
-  and completion read back.
+- A completed `direct_put` session's checksum uses the transport's stored
+  `checksum_algorithm`.
 
 A record that fails any invariant is rejected as corrupt. Upload sessions use
-control-object format version 1. Intermediate pre-release encodings are not
-supported.
+control-object format version 1.
 
 Three rules apply:
 
@@ -1886,7 +1841,7 @@ Two rules make these envelopes evolvable:
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
 | Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
-| Upload session | `upload_session` | JSON, uncompressed | 2 |
+| Upload session | `upload_session` | JSON, uncompressed | 1 |
 | Compaction lease | `compaction_lease` | JSON, uncompressed | 1 |
 
 JSON families keep their payload inline as raw JSON so manifests and control

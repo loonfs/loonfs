@@ -139,19 +139,10 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     Ok(PreparedContent::from_admission(admission))
 }
 
-/// Verifies the object a reference names against that reference, from the
-/// provider's own stored checksum and size.
+/// Compares a content reference with the size and checksum stored by the provider.
 ///
-/// This is the completion check for bytes that never passed through the
-/// LoonFS server. It verifies rather than trusts: the presigned write is
-/// checksum-bound, but a provider that accepts a wrong claim at assembly
-/// time (Cloudflare R2 does, at multipart completion) would otherwise leave
-/// a corrupt object publishable. One `HeadObject` with checksum mode enabled
-/// answers both questions and moves no payload.
-///
-/// A caller that gets a mismatch owns the repair: the object sits at a
-/// random id nothing references yet, so deleting it costs nothing and
-/// leaving it would leak.
+/// This verifies direct uploads without downloading the object. Callers must
+/// delete the unpublished object when the values do not match.
 pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,

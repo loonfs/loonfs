@@ -15,9 +15,6 @@ loonfs-api.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Spools a non-rewindable source during a direct-put upload's first pass, so
-# the second pass can read the bytes back without holding them in memory.
-tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
@@ -26,6 +23,7 @@ urlencoding.workspace = true
 
 [dev-dependencies]
 loonfs-test-support.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]

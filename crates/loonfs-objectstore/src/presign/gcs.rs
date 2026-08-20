@@ -1,9 +1,8 @@
 //! Presigner for Google Cloud Storage's native V4 signed URLs.
 //!
-//! GCS's S3-interoperability surface is not an option here: live conformance
-//! proved it silently ignores preconditions (see [`GcpGcsStore`]). Its native
-//! XML API conditions on object generations and validates CRC-32C, and this
-//! module signs that API directly with `GOOG4-RSA-SHA256`.
+//! This uses the native GCS XML API because the S3-compatible API did not
+//! enforce write preconditions in live tests. The native API supports object
+//! generation checks and stores CRC-32C checksums.
 //!
 //! [`GcpGcsStore`]: crate::gcs::GcpGcsStore
 
@@ -19,8 +18,8 @@ use crate::presign::v4::{
 };
 use crate::ObjectStoreError;
 use base64::Engine as _;
-use loonfs_api::wire::hex::{hex_decode_bytes, hex_encode_bytes};
-use loonfs_api::{Checksum, ChecksumAlgorithm, ContentRef, ContentRefKind};
+use loonfs_api::wire::hex::hex_encode_bytes;
+use loonfs_api::{Checksum, ChecksumAlgorithm};
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use sha2::{Digest, Sha256};
@@ -29,22 +28,12 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime};
 
-/// Google's own signed-URL host, and the only one this module addresses.
-///
-/// The GCS store configuration carries no endpoint override, so the endpoint
-/// trust rule that gates the S3-compatible providers has nothing to decide
-/// here: every capability this module issues is `https` to Google.
+/// Host used for every GCS signed URL.
 const GCS_HOST: &str = "storage.googleapis.com";
 
-/// Create-only precondition. A generation of zero means "only if the object
-/// does not currently exist", which is GCS's spelling of the guarantee the
-/// S3 family gets from `if-none-match: *`.
+/// A generation of zero makes the request create-only.
 const GCS_GENERATION_MATCH_HEADER: &str = "x-goog-if-generation-match";
 const GCS_CREATE_ONLY_GENERATION: &str = "0";
-
-/// Carries a checksum GCS validates the uploaded body against on a write, and
-/// reports the stored one back on a read.
-const GCS_HASH_HEADER: &str = "x-goog-hash";
 
 /// The signing scheme, written into both the algorithm query parameter and
 /// the first line of the string to sign.
@@ -55,30 +44,11 @@ const GCS_SIGNING_ALGORITHM: &str = "GOOG4-RSA-SHA256";
 /// own client libraries write, so a deployment never has to configure one.
 const GCS_CREDENTIAL_SCOPE_SUFFIX: &str = "auto/storage/goog4_request";
 
-/// Google Cloud Storage's documented maximum for a single-request upload:
-/// 5 TiB.
-///
-/// Cloud Storage documents one object-size maximum and no separate
-/// single-request one -- Cloud Storage, "Object uploads": you can upload and
-/// store any MIME type of data up to 5 TiB in size, and a single-request
-/// upload is described there as a PUT whose body is the whole object. The
-/// object ceiling is therefore the request ceiling.
-///
-/// This is three orders of magnitude above the S3 family's 5 GiB single-PUT
-/// ceiling, which is what lets this adapter carry large objects without
-/// signing multipart at all: there is no size at which the whole-object
-/// write stops being expressible. Google does document an XML API multipart
-/// upload, and documents it as S3-compatible; this adapter does not
-/// implement it, because it belongs to the same interoperability surface
-/// whose precondition handling conformance found unsound, and because the
-/// large-object path GCS is headed for is the native resumable upload.
+/// Maximum GCS object size. GCS does not document a smaller limit for a
+/// single-request upload.
 pub const GCP_GCS_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
-/// Supplies the service-account key and key scoping for native GCS signed URLs.
-///
-/// The key path is the one the GCS store already loads to authenticate its
-/// provider client; signing reads the same file rather than asking an
-/// operator for a second credential.
+/// Configuration for native GCS signed URLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcsPresignerConfig {
     /// Bucket incorporated into the signed request target.
@@ -89,8 +59,7 @@ pub struct GcsPresignerConfig {
     pub key_prefix: Option<String>,
 }
 
-/// Issues checksum-bound, create-only `GOOG4-RSA-SHA256` capabilities for
-/// Google Cloud Storage.
+/// Creates native GCS V4 signed URLs.
 pub struct GcsV4Presigner {
     bucket: String,
     key_prefix: Option<String>,
@@ -302,10 +271,7 @@ impl GcsV4Presigner {
 }
 
 impl DirectPutIssuer for GcsV4Presigner {
-    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
-        // The digest the signed `x-goog-hash` header binds a body to. GCS
-        // validates CRC-32C and MD5 and nothing else, and MD5 is not a
-        // checksum this format names.
+    fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
         ChecksumAlgorithm::Crc32c
     }
 
@@ -318,16 +284,10 @@ impl DirectPutIssuer for GcsV4Presigner {
         request: PresignedPutRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let required_headers = BTreeMap::from([
-            (
-                GCS_GENERATION_MATCH_HEADER.to_owned(),
-                GCS_CREATE_ONLY_GENERATION.to_owned(),
-            ),
-            (
-                GCS_HASH_HEADER.to_owned(),
-                gcs_hash_header(request.content_ref)?,
-            ),
-        ]);
+        let required_headers = BTreeMap::from([(
+            GCS_GENERATION_MATCH_HEADER.to_owned(),
+            GCS_CREATE_ONLY_GENERATION.to_owned(),
+        )]);
         self.presign(
             "PUT",
             request.object_key,
@@ -358,38 +318,6 @@ impl DirectGetIssuer for GcsV4Presigner {
             now,
         )
     }
-}
-
-/// Builds the complete `x-goog-hash` value the write is signed against.
-///
-/// The whole header rides the signature, not just the digest inside it, so a
-/// client can neither drop the checksum nor swap the algorithm it names.
-fn gcs_hash_header(content_ref: &ContentRef) -> Result<String> {
-    if content_ref.kind != ContentRefKind::BlobV1 {
-        return Err(invalid_direct_put_content(
-            "direct_put only supports blob_v1 content refs",
-        ));
-    }
-    if content_ref.checksum.algorithm != ChecksumAlgorithm::Crc32c {
-        return Err(invalid_direct_put_content(
-            "direct_put on GCS requires a crc32c checksum",
-        ));
-    }
-    Ok(format!("crc32c={}", base64_crc32c(&content_ref.checksum)?))
-}
-
-/// Converts a CRC-32C from the lowercase hex this format stores into the
-/// big-endian base64 GCS reads and writes.
-///
-/// The two spellings meet here and nowhere else: every layer above holds the
-/// hex form, and the provider's is confined to this adapter.
-fn base64_crc32c(checksum: &Checksum) -> Result<String> {
-    checksum
-        .validate()
-        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
-    let raw = hex_decode_bytes(&checksum.value)
-        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 
 /// Reads the stored CRC-32C out of a GCS `x-goog-hash` header value.
@@ -445,10 +373,6 @@ fn pkcs8_der(private_key_pem: &str) -> Result<Vec<u8>> {
         })
 }
 
-fn invalid_direct_put_content(message: &str) -> ObjectStoreError {
-    ObjectStoreError::InvalidContentRef(message.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{stored_crc32c, GcsPresignerConfig, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
@@ -458,7 +382,7 @@ mod tests {
     };
     use crate::test_support::{gcs_fixture_service_account_key_file, GCS_FIXTURE_CLIENT_EMAIL};
     use crate::ObjectStoreError;
-    use loonfs_api::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind};
+    use loonfs_api::ChecksumAlgorithm;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CONTENT_KEY: &str =
@@ -470,7 +394,6 @@ mod tests {
     /// CRC-32C of `b"hello"`, in the lowercase hex this format stores and in
     /// the big-endian base64 GCS reads.
     const HELLO_CRC32C_HEX: &str = "9a71bb4c";
-    const HELLO_CRC32C_BASE64: &str = "mnG7TA==";
 
     /// The query prefix every expected URL shares: the algorithm, the
     /// credential scope, and the request timestamp.
@@ -486,10 +409,10 @@ mod tests {
     // recorded back: a construction bug here -- a wrong credential scope, a
     // dropped signed header, a mis-encoded path -- changes the signature and
     // fails these tests.
-    const PUT_PREFIXED_SIGNATURE: &str = "966829ea3141ec468614f5472381de24f864cd92be0f69d929d53e163dec9d2146f87acfa957f9b9e7e2e598f7ad9b1aaff7a1f456bea1451b487925dbcda72415d38cb40541e964ccd719184d7400b40c268b50ce92ac0c183ade437e0ba4009cff02f683c325f95cccb83ee8836683ce6b7dc473f02e54b928fe63c9b723da8835e414a8d1d14aa235432b1827056f49abf2fde1c927920fd90026b0dc344b0f68198e86acfafa4744708cec4f9899540b7900bfb9e0fb188bedcf8a85f43a7b88d067c2d48cc7f95f8744e84397cc23ec46433fb5e8e9a0bc249f248b92b7a1c6b7797bbccbbd9a4fcb9ee978bef3dd15d215aabf2f8ddc95818a64396f8e";
+    const PUT_PREFIXED_SIGNATURE: &str = "83f8dbb6139d451909bb06f6fdcac0bc4fe0f3343266af7244cfb896d1230c0942962db84554a7cac021eb9cde6a81279f031bdd4735e10c9915c684357452df2f0844e7ad2ded8d69f3e63b7f678330213564093a2668a371227b4aceab01364cdf5f12ee6661a8d95cd76b35cea7eacc80eb950caa3bd96a99c6b5a1fc73e59d9c026528ffe7362c3228038a8e57a71dd9f0706010ba0327dbdeac39f6d0281860a0918cbb9ef564c8a05c14a79d3b9266ef8e466be901ea1a539cb483f50590ca6dac5a038498a5a74d591b22c25739ee9eb994ec9186c4d7b47d6871fec10881d031d8c1aba6acdc488980921db54c412a974ca1fc91805d76dc05a9ec11";
     const GET_PREFIXED_SIGNATURE: &str = "0a3a4a24c04a97eafee5fc2038c2a5d774f8246d8a69a1cca83a9c0c3585cd4a0516f2727d4c270112b1a8fd9f7d9c274ba42a27d81898266752233c877a61b7c1e4d47a9126033347382242a8b10e29656e28188492bede3f5108da056d77e572193633e7d28a075282c0b99f96437d13f674532b9a078114130b45789d427d8f5d108efacf07c27ebcbe1a460af18470c8f8289929c4fb60049b6ff0c7ed7cfa95f2b4063980faf342a75a2cead80d4e21d9cd9ee152779c0b549ad16d650a211c938e1febbbbb77d943e77344eb9ed89e0a3971d2ef89075971dae7a3be163fcec135f2036f3d31b15121773fb1f9f2307d0a6b5b4bbdf18d236d7742e89a";
     const HEAD_PREFIXED_SIGNATURE: &str = "19357d0b1acda281239c83d61e360fad813d2ae5323cc1803d6669f6665062cf6dd639382d1ba37e9ae46f53c166908da32314a1b68c3af9adae8e2bd405af49f5b7e9ea6c096a32a7def051f925bcde9f972470e50398eb4787ec7fef560926c3bf5a1baf7efbf57201a0d2cfb593654680e3122f807e4e7452adc04e142fb8ccd9aa126a28400acca5dbb2f08de129edd1a4608fb116f9ae11efbfed83f762d4d1b9765a8c8c4ebbbe3de3bc8ffffcc370aaaba40ee6f01e6bc59bd053a41e1714f1bbb3ae061847ff6b4c3ece7532cf3b6568024c3705cd568876e3a1c2547958e188146be944915657923614257cb857db1691718efaf16d2b88a0afebdd";
-    const PUT_UNPREFIXED_SIGNATURE: &str = "0f43f56a0e2bd7e41d91240d2d401dd783cd882af218f263fd7083b4b2288e5bbeba3bcb587df6271d91d7e724efa851ee64de8b94d45252c7c2321a54d2c022f8eb493d2b62b8677c631b8507cb8f91fde5f0d51be1773dce672a3102308aa9268cab57ca8862f07ff7aac44b640286f3c839c3ee850b9a8b790577bd0c489d8992a36f4426b04f643bda515b7fedd900ef78f4d60980cf0ac5fea12fa56921beb356c3b153b0f8a437c0444ff3d463dee360e914407302bc813477bd9fc6cecfb340bab4f66e054f1a9d53e0266607b8a0a2b93c4e918587e6c3b88c8a6b554273ace7e82f0d14fac90a748496d2ab8b1ee62c33c9332bb1ffaf7042efbf3c";
+    const PUT_UNPREFIXED_SIGNATURE: &str = "9d6513f548d0462b2ce600d888135635da7e9f63ec715a71b2db7931a395a76f259dfa926e2dbe215009154aa33373cae2c29ca3d5fe3c0c42b143cea0c73b02c1325d8d88e001a5d13f123c2eaed8af4a98a3c15e411543775476457c1926146f50f92db72b16c39a0042b8f0486939e2d8c9bb43e174aaf14ef4db73663c07cbf679e92f92290ea97450c3c1335a4c7d9753ef9e1760634021f5480d127fe21a8e94f264b5bcd703f1e8fff99bf469240ec5e83fde4149b400be6a3d7856e99a646146fc7554b495c3abf4d59c1d3e8e3bf28c04028202f7117a0a6a3ee68d00cd23de762aa3fa0fb78f8fc2160c06393c089254a59dfad57f28cffb246048";
     const GET_ESCAPED_SIGNATURE: &str = "32a9b708f6681f2725b500fd65776c471170a8c52bf912473f69c029264303d07c8e33619300384a175c5390ba89b12aeaa127dac514a19d0d6c53a4d39794b65dd85c0842662be728b9437454767352969a6f588c70525fb5306fc5463663ab364bdcd1a85469e9a7bb8fa5d87073b97f028809836cbac7ebd056104d847cd4c59bf8ea27b7116b8b3116ad93b3ff8b2ef73e0c5b5afc8a19312c5a042b2659fbe991f5ee0b4c7d36af73ed428266c8be2c6766370332afadbfc342a5c4dde67805fa2517cd2ae1eab4e77579fb4e8df3f53b38788de706e28253d55ed47c873c4556691f377c84a613de67ac8f977f743bfdaa7ff61e3ae4227254b9e7d536";
 
     fn signing_time() -> SystemTime {
@@ -507,27 +430,11 @@ mod tests {
         .expect("signer")
     }
 
-    /// A reference whose checksum is the CRC-32C GCS enforces, which
-    /// is what a `direct_put` claim carries on this provider.
-    fn crc32c_content_ref() -> ContentRef {
-        ContentRef {
-            kind: ContentRefKind::BlobV1,
-            content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
-                .expect("valid content id"),
-            size_bytes: 5,
-            checksum: Checksum {
-                algorithm: ChecksumAlgorithm::Crc32c,
-                value: HELLO_CRC32C_HEX.to_owned(),
-            },
-        }
-    }
-
     fn presign_put(signer: &GcsV4Presigner) -> crate::presign::PresignedUrl {
         signer
             .presign_put(
                 PresignedPutRequest {
                     object_key: CONTENT_KEY,
-                    content_ref: &crc32c_content_ref(),
                     expires_in: EXPIRES_IN,
                 },
                 signing_time(),
@@ -535,11 +442,9 @@ mod tests {
             .expect("presign put")
     }
 
-    /// The whole write contract in one signature: the scoped object path, the
-    /// create-only precondition, the complete `x-goog-hash` value, and the
-    /// signed-header set that binds both headers to it.
+    /// The signature covers the object path and create-only precondition.
     #[test]
-    fn presigned_put_binds_the_scoped_path_checksum_and_create_only_precondition() {
+    fn presigned_put_binds_the_scoped_path_and_create_only_precondition() {
         let signed = presign_put(&presigner(Some("tenant-a")));
 
         assert_eq!(signed.method, "PUT");
@@ -550,15 +455,12 @@ mod tests {
                 .map(String::as_str),
             Some("0")
         );
-        assert_eq!(
-            signed.headers.get("x-goog-hash").map(String::as_str),
-            Some(format!("crc32c={HELLO_CRC32C_BASE64}").as_str())
-        );
+        assert!(!signed.headers.contains_key("x-goog-hash"));
         assert_eq!(
             signed.url,
             format!(
                 "https://storage.googleapis.com/bucket/tenant-a/{CONTENT_KEY}?{EXPECTED_CREDENTIAL}\
-                 &X-Goog-SignedHeaders=host%3Bx-goog-hash%3Bx-goog-if-generation-match\
+                 &X-Goog-SignedHeaders=host%3Bx-goog-if-generation-match\
                  &X-Goog-Signature={PUT_PREFIXED_SIGNATURE}"
             )
         );
@@ -628,7 +530,7 @@ mod tests {
             unprefixed.url,
             format!(
                 "https://storage.googleapis.com/bucket/{CONTENT_KEY}?{EXPECTED_CREDENTIAL}\
-                 &X-Goog-SignedHeaders=host%3Bx-goog-hash%3Bx-goog-if-generation-match\
+                 &X-Goog-SignedHeaders=host%3Bx-goog-if-generation-match\
                  &X-Goog-Signature={PUT_UNPREFIXED_SIGNATURE}"
             )
         );
@@ -744,45 +646,12 @@ mod tests {
     #[test]
     fn gcs_advertises_crc32c_and_googles_documented_single_request_ceiling() {
         let signer = presigner(None);
-        assert_eq!(signer.checksum_algorithm(), ChecksumAlgorithm::Crc32c);
+        assert_eq!(
+            signer.stored_checksum_algorithm(),
+            ChecksumAlgorithm::Crc32c
+        );
         assert_eq!(signer.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
         assert_eq!(GCP_GCS_MAX_DIRECT_PUT_BYTES, 5 * 1024 * 1024 * 1024 * 1024);
-    }
-
-    /// A checksum GCS cannot enforce is refused at issuance rather than
-    /// signed into a write the provider would accept without checking.
-    #[test]
-    fn presigned_put_rejects_content_refs_it_cannot_bind_to_the_write() {
-        let signer = presigner(None);
-        let unsupported_kind = ContentRef {
-            kind: ContentRefKind::Unsupported("future_kind".to_owned()),
-            ..crc32c_content_ref()
-        };
-        let sha256_only = ContentRef {
-            checksum: Checksum::sha256(b"hello"),
-            ..crc32c_content_ref()
-        };
-        let malformed_crc = ContentRef {
-            checksum: Checksum {
-                algorithm: ChecksumAlgorithm::Crc32c,
-                value: "nothex!!".to_owned(),
-            },
-            ..crc32c_content_ref()
-        };
-
-        for content_ref in [unsupported_kind, sha256_only, malformed_crc] {
-            let error = signer
-                .presign_put(
-                    PresignedPutRequest {
-                        object_key: CONTENT_KEY,
-                        content_ref: &content_ref,
-                        expires_in: EXPIRES_IN,
-                    },
-                    signing_time(),
-                )
-                .expect_err("unsignable content ref");
-            assert!(matches!(error, ObjectStoreError::InvalidContentRef(_)));
-        }
     }
 
     #[test]

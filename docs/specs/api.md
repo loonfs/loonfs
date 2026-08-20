@@ -129,7 +129,7 @@ Registered limit keys:
 | `pagination.default_limit` | Default page size applied when a paged request omits `limit`. An explicit `limit=0` is rejected with 400 `invalid_request`. |
 | `pagination.max_limit` | Largest accepted page size for paged requests. A `limit` greater than this value is rejected with 400 `invalid_request`. |
 | `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `core.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
-| `upload.direct_put_max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.max_content_bytes`, which bounds what the service buffers on a client's behalf; this one is the provider's own single-request ceiling and is typically far larger. A claim above it answers `content_too_large` at begin, rather than being signed into a write the provider would refuse. Advertised only alongside `core.uploads.direct_put`. |
+| `upload.direct_put_max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.max_content_bytes`, which bounds service-proxied uploads. A size hint above this limit returns `content_too_large` at begin, and completion checks the actual stored size. Advertised only alongside `core.uploads.direct_put`. |
 | `upload.completion_max_body_bytes` | Largest JSON body accepted by `POST .../uploads/{upload_id}/complete`. Larger requests return `content_too_large`. |
 | `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. A file past this limit is read through the corresponding path or inode download grant when `core.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
@@ -157,8 +157,7 @@ hoc.
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/stat` and `GET /filesystem/list`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
-| `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the deployment's provider can sign a write that binds a whole-object checksum and a create-only precondition, on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
-| `core.uploads.direct_put.checksum.<algorithm>` | Nothing on its own; it names the whole-object checksum a `direct_put` claim must carry. | Exactly one is advertised, alongside `core.uploads.direct_put`, and only ever `true`. Registered algorithms are `sha256`, `crc64nvme`, and `crc32c`, matching the `checksum.algorithm` spellings. Providers do not agree on what they can bind into a presigned write, so the deployment names it and the client folds that digest while staging; a claim in any other algorithm answers `invalid_request` at begin. |
+| `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
@@ -365,10 +364,10 @@ The surrounding field defines what the checksum covers. Checksums in
 checksum covers one multipart upload part. A `checksum_algorithm` field selects
 an algorithm but does not contain a checksum value.
 
-Service-proxied uploads use `sha256`. Direct PUT uses the algorithm advertised
-by `core.uploads.direct_put.checksum.<algorithm>`. Direct multipart uses the
-`checksum_algorithm` returned when the session begins, currently
-`crc64nvme`. Reads verify the algorithm stored in the content reference.
+Service-proxied uploads use `sha256`. Direct PUT and direct multipart use the
+`checksum_algorithm` returned when the session begins. Direct multipart
+currently uses `crc64nvme`. Reads verify the algorithm stored in the content
+reference.
 
 ## 5. Minimal upload, commit, and change-feed model
 
@@ -1031,30 +1030,23 @@ content reference stores the server-computed SHA-256 in `checksum`.
 
 #### Direct single-PUT upload
 
-For `direct_put`, the client supplies the content size and checksum when the
-session begins. The server chooses the object identity and returns a presigned
-upload capability. The provider enforces the checksum included in the signed
-request.
-
-The checksum algorithm must match
-`core.uploads.direct_put.checksum.<algorithm>`. Any other algorithm fails with
-`invalid_request`. Because the checksum is part of the signed request, the
-client must calculate it before uploading.
+For `direct_put`, the server chooses the object identity and returns a
+presigned upload capability with the provider's stored checksum algorithm.
+The client counts and hashes the bytes while sending them, then supplies the
+content facts at completion.
 
 ```json
 {
   "mode": "direct_put",
-  "content": {
-    "size_bytes": 1234,
-    "checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" }
-  }
+  "size_bytes": 1234
 }
 ```
 
-`size_bytes` must be at most `upload.direct_put_max_content_bytes`, the
-provider's own single-request ceiling; a larger claim answers
-`content_too_large` at begin. Content past it moves as
-`direct_multipart` where that is advertised.
+`size_bytes` is optional and advisory. When present, the server compares it
+with `upload.direct_put_max_content_bytes`, the provider's single-request
+ceiling, and answers `content_too_large` before issuing a capability when it
+is too large. The stored size is checked again at completion. Content past the
+limit moves as `direct_multipart` where that is advertised.
 
 The response includes only a short-lived transfer capability, never raw object-store credentials or a caller-managed object key. Required headers are provider-issued and must be echoed by the client; for example, an S3-compatible deployment may return:
 
@@ -1064,19 +1056,13 @@ The response includes only a short-lived transfer capability, never raw object-s
   "upload_id": "upl_...",
   "mode": "direct_put",
   "direct_put": {
-    "content_ref": {
-      "kind": "blob_v1",
-      "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
-      "size_bytes": 1234,
-      "checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" }
-    },
+    "checksum_algorithm": "crc64nvme",
     "access": {
       "kind": "presigned_url",
       "method": "PUT",
       "url": "https://...",
       "headers": {
-        "if-none-match": "*",
-        "x-amz-checksum-sha256": "..."
+        "if-none-match": "*"
       },
       "expires_at_ms": 1780000000000
     }
@@ -1085,55 +1071,61 @@ The response includes only a short-lived transfer capability, never raw object-s
 ```
 
 The signed headers are part of the transfer capability. In the S3-compatible
-example, `if-none-match: *` keeps the immutable object create-only, and
-`x-amz-checksum-sha256` binds the object-store write to the SHA-256 the client
-declared. Because both requirements ride the signature, the provider rejects
-any body that does not hash to it, and a client cannot drop or edit either
-requirement without invalidating the capability; a deployment only
-advertises `core.uploads.direct_put` when its provider profile proves this or
-the operator explicitly accepts an unproven endpoint. Arbitrary
-S3-compatible gateways are unproven because HMAC interoperability does not
-prove that the gateway enforces signed checksum and create-only
-preconditions; gateways have been observed silently ignoring preconditions.
-Without an explicit opt-in, the feature key is absent and beginning
-`direct_put` answers `not_supported` with
+example, `if-none-match: *` keeps the immutable object create-only. A client
+cannot drop or edit that requirement without invalidating the capability.
+Arbitrary S3-compatible gateways are unproven because HMAC interoperability
+does not prove that the gateway enforces create-only requests or reports the
+stored checksum. The feature key is absent on unproven endpoints, and
+beginning `direct_put` answers `not_supported` with
 `feature = "core.uploads.direct_put"`. The server-mediated upload path remains
 available and is the default.
 
-The reference server offers `direct_put` only where its adapter can presign the
-required create-only, checksum-bound request *and* the live conformance suite
-has been run against that provider. AWS S3 and Cloudflare R2 qualify today,
-through SigV4 on their own domain families. The Google Cloud Storage adapter
-signs the same guarantees natively with `GOOG4-RSA-SHA256` — not through GCS's
-S3-interoperability surface, which conformance proved ignores preconditions —
-but withholds the capability until a run against a live bucket is recorded, so
-a GCS deployment currently advertises no direct transfer. Custom S3-compatible
-endpoints, Azure Blob Storage, and the local filesystem are not offered
-`direct_put`, and there is no configuration override. Other implementations may
-use different headers or decline `direct_put` support.
+The reference server offers `direct_put` only where its adapter can presign a
+create-only request, read back the stored checksum, and has passed the live
+provider suite. AWS S3 and Cloudflare R2 qualify through SigV4 on their own
+domain families. Google Cloud Storage qualifies through its native
+`GOOG4-RSA-SHA256` API, not through the S3-interoperability surface that did
+not preserve preconditions. Custom S3-compatible endpoints, Azure Blob
+Storage, and the local filesystem are not offered `direct_put`, and there is
+no configuration override. Other implementations may use different headers
+or decline `direct_put` support.
 
-The signed request's shape is the provider's, not a fixed one, and the
-deployment names the digest it binds in
-`core.uploads.direct_put.checksum.<algorithm>`. A client folds that algorithm
-over its payload and never infers one from the backend.
+The response names the provider's stored checksum algorithm. S3-family
+issuers return `crc64nvme`; the GCS issuer returns `crc32c`. The client
+calculates that checksum while sending the bytes.
 
 `direct_put` and `direct_multipart` are separate offers, and a deployment may
 advertise the first and not the second — the reference server's Google Cloud
 Storage adapter is built that way, signing whole-object writes and reads while
-implementing no multipart signing. A client's transport ladder falls
-from parts to one whole-object write before it falls back to the proxy, and a
-source whose length is unknown takes the whole-object write wherever one is
-offered: that transport measures the payload before sending a byte, and the
-measurement is what routes it.
+implementing no multipart signing. A client's transport ladder falls from
+parts to one whole-object write before it falls back to the proxy. A source
+whose length is unknown can take the whole-object write and report its exact
+size after the one-pass transfer.
 
 A browser calling a presigned URL is talking to the provider, not to LoonFS,
 so cross-origin access is governed by the bucket's or container's own CORS
 configuration rather than by anything this API sets.
 
 After uploading to the presigned URL, the client completes the session with
-`{"mode":"direct_put"}`. The server reads the expected size and checksum from
-the session and compares them with the object in storage. If they do not
-match, completion fails and the server deletes the unpublished object.
+the same content-claim grammar used by direct multipart:
+
+```json
+{
+  "mode": "direct_put",
+  "content": {
+    "size_bytes": 1234,
+    "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" }
+  }
+}
+```
+
+The checksum algorithm must match the session's `checksum_algorithm`; a
+difference answers `invalid_request`. The server builds the final content
+reference from the session's content identity and the completion claim. It
+then compares the claimed size and checksum with the object in storage. A
+mismatch makes the session unusable, and the server deletes the unpublished
+object. The provider-stored size must also be at most
+`upload.direct_put_max_content_bytes`.
 If the provider metadata request fails, the server returns `server_error`
 without changing the object or session, so the client can retry. The server
 does not download the object during this check.
@@ -1159,10 +1151,10 @@ session supports at most 10,000 parts, so larger objects require larger parts.
 A client that does not know the total size can request parts until its stream
 ends.
 
-Direct PUT requires the complete checksum at the beginning because it is part
-of the signed request. Multipart uploads provide one checksum per part and the
-complete checksum at completion. This supports one-pass uploads and streams
-whose total size is initially unknown.
+Direct PUT and multipart uploads provide the complete checksum at completion.
+Multipart also provides one checksum per part before each part is signed.
+Both transports support one-pass uploads and streams whose total size is
+initially unknown.
 
 The response records the part size and checksum algorithm for the session:
 
@@ -1211,9 +1203,9 @@ resulting content reference stores that complete-object checksum.
 ```
 
 The request lists every part once in ascending order. The server returns the
-content reference after completion. Service-proxied and direct-PUT completion
-requests include only `{"mode":"service_proxied"}` or `{"mode":"direct_put"}`.
-The session already contains the other required information.
+content reference after completion. Service-proxied completion contains only
+`{"mode":"service_proxied"}`. Direct PUT completion includes the final size
+and checksum, as shown in the previous section.
 
 The server asks the provider to assemble the object, then reads its stored size
 and checksum and compares them with the completion request. This read is
@@ -1921,8 +1913,7 @@ The semantic rule is:
 
 - `PUT /content` stores the immutable whole-file object and records the staged
   `content_ref`;
-- `complete` finalizes the upload session from the content facts frozen in the
-  durable session; and
+- `complete` verifies the upload and records its final `content_ref`; and
 - the returned completed session's `content_ref` is then safe to reference
   from a commit. Remote servers may also return an opaque `content_token` that
   remote create/replace mutations carry back as their content-preparation
@@ -1933,25 +1924,26 @@ only the fields for that mode:
 
 ```json
 { "mode": "service_proxied" }
-{ "mode": "direct_put", "content": { "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } } }
+{ "mode": "direct_put", "size_bytes": 1234 }
 { "mode": "direct_multipart", "multipart": { "part_size_bytes": 8388608 } }
 ```
 
-`service_proxied` has no additional fields. `direct_put` requires `content`.
-`direct_multipart` accepts an optional `multipart` object and otherwise uses
-the default part size.
+`service_proxied` has no additional fields. `direct_put` accepts an optional
+size hint. `direct_multipart` accepts an optional `multipart` object and uses
+the default part size when it is omitted.
 
 Completion requests use the same `mode` values as begin requests:
 
 ```json
 { "mode": "service_proxied" }
-{ "mode": "direct_put" }
+{ "mode": "direct_put", "content": { "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" } } }
 { "mode": "direct_multipart", "content": { "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" } }, "parts": [] }
 ```
 
-The request mode must match the upload session. Multipart requests require
-`content` and `parts`. The other two modes do not accept additional fields.
-Unknown fields, missing fields, and mode mismatches return `invalid_request`.
+The request mode must match the upload session. Direct PUT requires `content`.
+Multipart requires `content` and `parts`. Service-proxied completion has no
+additional fields. Unknown fields, missing fields, and mode mismatches return
+`invalid_request`.
 
 The begin-upload *response* is tagged the same way, in the same `mode`, and
 carries its transport's field and no other's: `service_proxied` carries
@@ -1973,7 +1965,7 @@ final (format spec, section 3.10). What that means at the API:
 
 - `GET /uploads/{upload_id}`, `POST /uploads/{upload_id}/complete`, and
   `POST /uploads/{upload_id}/abort` all return one flat upload-session object.
-  Its `mode` is the transport frozen when the session began, and `status` is
+  Its `mode` is the transport chosen when the session began, and `status` is
   `open`, `completed`, or `aborted`. The status-specific fields are siblings
   of that tag rather than a nested object:
 
@@ -2021,8 +2013,8 @@ it does not have to:
    discovered. The claim arrives here because this is the first moment a
    one-pass uploader can produce it.
 
-A session whose upload fails partway is aborted rather than abandoned; it
-owns an object nothing will finish writing.
+A session whose upload fails partway is aborted so its incomplete object can
+be deleted.
 
 Two bounds are worth planning for. A provider assembles at most 10,000
 parts, so a session carries at most `part_size_bytes × 10_000` bytes and a
@@ -2039,35 +2031,27 @@ down the transports its deployment advertises:
 2. `direct_put`, where advertised and `size_bytes` is at most
    `upload.direct_put_max_content_bytes`. This is the rung a provider that
    can sign a write but has no multipart API to open offers. It is the one
-   transport that reads the payload twice, because the digest is signed into
-   the write and so must be complete before the first body byte: one pass
-   folds the digest and counts the bytes, the second sends them. Neither pass
-   has to hold the payload — a file is simply re-opened, and any other source
-   is spooled to disk as the first pass reads it.
+   transport that sends one whole object directly. The client counts and
+   hashes the bytes while sending them, then reports both values at completion.
+   The source is read once and does not have to be held in memory.
 3. `PUT /content` as a streaming request body, where `size_bytes` is at most
    `upload.max_content_bytes`. The server hashes the payload as it forwards
    it on. A body whose length is unknown is sent with chunked transfer
    encoding, and the server's incremental accounting is what bounds it.
 
-Every rung is judged against the advertised limits, never against an assumed
-one: a payload under one part is not thereby known to fit
+Every rung with a known size is judged against the advertised limits, never
+against an assumed one: a payload under one part is not thereby known to fit
 `upload.max_content_bytes`, since a deployment may set that cap anywhere. A
 payload that none of the three can carry should be refused by the client,
 naming the limits it passed, rather than sent into the proxy to be refused
 there.
 
-**A declared length is a hint, and only a measured one may refuse.** A source
-may state its length up front, and that is what picks the rung — but it is
-not a promise, and a client that refused an upload on a wrong hint would turn
-a bad guess into a failed transfer. So a refusal, and the `size_bytes` a
-`direct_put` claim carries, come only from bytes the client has actually
-counted. Where the hint says nothing can carry the payload and a whole-object
-write is on offer, that transport is still the right one to try: its first
-pass measures the payload without sending anything, and whatever follows —
-the upload, a different rung, or a refusal — is decided on what it found. A
-source whose length is unknown cannot be checked against any limit up front,
-so it takes `direct_multipart` where that is advertised and `PUT /content`
-otherwise, and both discover the length as they send.
+**A declared length is only a hint.** File metadata and other size hints may be
+stale, so the client does not reject an upload based only on a hint. Direct PUT
+counts the bytes while sending them and reports the measured size at
+completion. The server compares that size with the provider limit and the
+stored object. A source with no size hint can use direct multipart or direct
+PUT; both determine the final size while uploading.
 
 **Receipt expiry and re-minting.** The `content_token` is the
 upload's receipt: it is minted only from a session the store already says is

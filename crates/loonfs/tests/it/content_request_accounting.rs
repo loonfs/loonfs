@@ -551,14 +551,10 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .writer
         .begin_direct_put_upload_target(
             &harness.namespace_id,
-            loonfs::UploadContentClaim {
-                size_bytes: bytes.len() as u64,
-                checksum: loonfs_api::Checksum::sha256(bytes),
-            },
+            loonfs_api::ChecksumAlgorithm::Sha256,
         )
         .await
         .expect("begin direct put");
-    let content_ref = begin.target.content_ref.clone();
     harness.recording.reset();
 
     harness
@@ -571,9 +567,22 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
 
     let completed = harness
         .writer
-        .complete_upload_prepared(&harness.namespace_id, &begin.upload_id)
+        .complete_upload_prepared_for_mode(&harness.namespace_id, &begin.upload_id, |_| {
+            Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
+                content: loonfs::UploadContentClaim {
+                    size_bytes: bytes.len() as u64,
+                    checksum: loonfs_api::Checksum::sha256(bytes),
+                },
+                max_content_bytes: u64::MAX,
+            })
+        })
         .await
         .expect("complete direct put with proof");
+    let content_ref = completed
+        .response
+        .content_ref()
+        .expect("completed content ref")
+        .clone();
     let prepared = completed.prepared;
     assert_eq!(completed.response.content_ref(), Some(&content_ref));
     // The session path reuses the runtime-resolved immutable store binding

@@ -5,15 +5,15 @@
 // Fixture assertions panic for precise diagnostics, as the test modules do.
 
 use loonfs::publish::{CommitCandidate, CommitRequest};
-use loonfs::UploadContentClaim;
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
-    BeginUploadResponse, ChangeSeq, ChangesResponse, Checkpoint, CommitResponse, ContentRef,
-    CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder,
-    ListChangesOptions, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceResponse,
-    MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions,
-    RuntimeError, SharedObjectStore, UploadContentResponse, UploadId, UploadSessionResponse,
+    BeginUploadResponse, ChangeSeq, ChangesResponse, Checkpoint, ChecksumAlgorithm, CommitResponse,
+    ContentRef, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader,
+    FsWriter, FsWriterBuilder, ListChangesOptions, MaintenancePlan, MaintenanceStepResponse,
+    MetadataMaintenanceResponse, MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest,
+    PaginationPolicy, PutFileOptions, RuntimeError, SharedObjectStore, UploadContentResponse,
+    UploadId, UploadSessionResponse,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -246,11 +246,28 @@ impl TestRuntime {
     pub(crate) async fn begin_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
-        claim: UploadContentClaim,
+        checksum_algorithm: ChecksumAlgorithm,
     ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
         self.writer
-            .begin_direct_put_upload_target(namespace_id, claim)
+            .begin_direct_put_upload_target(namespace_id, checksum_algorithm)
             .await
+    }
+
+    pub(crate) async fn complete_direct_put(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        content: loonfs::UploadContentClaim,
+    ) -> loonfs::Result<UploadSessionResponse> {
+        self.writer
+            .complete_upload_prepared_for_mode(namespace_id, upload_id, |_| {
+                Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
+                    content,
+                    max_content_bytes: u64::MAX,
+                })
+            })
+            .await
+            .map(|completed| completed.response)
     }
 
     pub(crate) fn runtime_cache_stats(&self) -> loonfs::RuntimeCacheStats {

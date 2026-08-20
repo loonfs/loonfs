@@ -575,14 +575,8 @@ pub enum UploadSessionTransport {
     },
     /// The client writes the whole object through one presigned request.
     DirectPut {
-        /// The reference that signed write is minted for.
-        ///
-        /// A direct-put client declares its byte length and SHA-256 before
-        /// the write is authorized, because both are signed into the
-        /// request and the provider refuses any body that does not match.
-        /// Completion reads the stored object back against this same
-        /// reference rather than believing it.
-        promised_content: ContentRef,
+        /// Checksum algorithm chosen when the session began.
+        checksum_algorithm: ChecksumAlgorithm,
     },
     /// The client uploads parts and the provider assembles the object.
     ///
@@ -602,8 +596,8 @@ pub enum UploadSessionTransport {
         /// from here rather than being told a second, possibly different,
         /// one. Zero is not a geometry, so it is not representable.
         part_size_bytes: NonZeroU64,
-        /// Checksum algorithm frozen when the session began. Part signing
-        /// and completion must use this decision after any process restart.
+        /// Checksum algorithm chosen when the session began. Part signing and
+        /// completion continue to use it after a restart.
         checksum_algorithm: ChecksumAlgorithm,
     },
 }
@@ -612,11 +606,12 @@ impl UploadSessionTransport {
     /// The content reference this transport names, when it names one.
     fn content_ref(&self) -> Option<&ContentRef> {
         match self {
-            Self::DirectPut { promised_content } => Some(promised_content),
             Self::ServiceProxied {
                 staging: ProxiedStaging::Staged(content_ref),
             } => Some(content_ref),
-            Self::ServiceProxied { .. } | Self::DirectMultipart { .. } => None,
+            Self::ServiceProxied { .. } | Self::DirectPut { .. } | Self::DirectMultipart { .. } => {
+                None
+            }
         }
     }
 }
@@ -723,10 +718,6 @@ impl UploadSessionState {
     /// objects and cannot be acted on — a completion would verify one key
     /// and publish another.
     ///
-    /// A direct-put session must also settle on exactly the reference its
-    /// write was signed against, because that reference is what the provider
-    /// enforced and what completion read back. A record that says otherwise
-    /// describes an upload that did not happen.
     fn validate(&self) -> Result<(), String> {
         for content_ref in self
             .transport
@@ -747,16 +738,20 @@ impl UploadSessionState {
                 ));
             }
         }
-        match (&self.transport, &self.state) {
-            (
-                UploadSessionTransport::DirectPut { promised_content },
-                UploadSessionLifecycle::Completed { content_ref, .. },
-            ) if content_ref != promised_content => Err(format!(
-                "upload session `{}` completed on content its direct write never promised",
-                self.upload_id
-            )),
-            _ => Ok(()),
+        if let (
+            UploadSessionTransport::DirectPut { checksum_algorithm },
+            UploadSessionLifecycle::Completed { content_ref, .. },
+        ) = (&self.transport, &self.state)
+        {
+            if content_ref.checksum.algorithm != *checksum_algorithm {
+                return Err(format!(
+                    "upload session `{}` requires `{checksum_algorithm}` but its completed \
+                     content uses `{}`",
+                    self.upload_id, content_ref.checksum.algorithm
+                ));
+            }
         }
+        Ok(())
     }
 }
 
@@ -780,7 +775,7 @@ enum StrictUploadSessionTransport {
         staging: StrictProxiedStaging,
     },
     DirectPut {
-        promised_content: StrictContentRef,
+        checksum_algorithm: ChecksumAlgorithm,
     },
     DirectMultipart {
         provider_upload_id: String,
@@ -795,9 +790,9 @@ impl From<StrictUploadSessionTransport> for UploadSessionTransport {
             StrictUploadSessionTransport::ServiceProxied { staging } => Self::ServiceProxied {
                 staging: staging.into(),
             },
-            StrictUploadSessionTransport::DirectPut { promised_content } => Self::DirectPut {
-                promised_content: promised_content.into(),
-            },
+            StrictUploadSessionTransport::DirectPut { checksum_algorithm } => {
+                Self::DirectPut { checksum_algorithm }
+            }
             StrictUploadSessionTransport::DirectMultipart {
                 provider_upload_id,
                 part_size_bytes,

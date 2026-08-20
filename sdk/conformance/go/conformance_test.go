@@ -323,14 +323,11 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	request, expected := decodeCaseValues[directPutRequest, directPutExpected](t, testCase)
 	createNamespace(t, h.client, request.NamespaceID)
 	payload := []byte(request.ContentUTF8)
-	claim := &loonfs.UploadContentClaim{
-		Checksum:  mustChecksum(t, loonfs.ChecksumAlgorithmSha256, payload),
-		SizeBytes: int64(len(payload)),
-	}
+	sizeBytes := int64(len(payload))
 	begin, err := h.client.Uploads.BeginUpload(context.Background(), &loonfs.BeginUploadBody{
 		NamespaceID: request.NamespaceID,
 		Body: &loonfs.BeginUploadRequest{
-			DirectPut: &loonfs.BeginUploadDirectPut{Content: claim},
+			DirectPut: &loonfs.BeginUploadDirectPut{SizeBytes: &sizeBytes},
 		},
 	})
 	if err != nil {
@@ -343,30 +340,34 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	if expected.Mode != "direct_put" {
 		t.Errorf("expected mode = %q, want direct_put", expected.Mode)
 	}
-	if directPut.ContentRef == nil {
-		t.Fatal("direct PUT has no content_ref")
+	if string(directPut.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
+		t.Errorf("direct PUT checksum_algorithm = %q, want %q", directPut.ChecksumAlgorithm, expected.ChecksumAlgorithm)
 	}
-	if directPut.ContentRef.SizeBytes != expected.SizeBytes {
-		t.Errorf("direct PUT size_bytes = %d, want %d", directPut.ContentRef.SizeBytes, expected.SizeBytes)
-	}
-	if directPut.ContentRef.Checksum == nil || string(directPut.ContentRef.Checksum.Algorithm) != expected.ChecksumAlgorithm {
-		t.Errorf("direct PUT checksum = %#v, want algorithm %q", directPut.ContentRef.Checksum, expected.ChecksumAlgorithm)
-	}
-	assertChecksum(t, directPut.ContentRef.Checksum, payload)
 
 	putPresigned(t, directPut.Access, payload, false)
+	claim := &loonfs.UploadContentClaim{
+		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
+		SizeBytes: int64(len(payload)),
+	}
 	completed, err := h.client.Uploads.CompleteUpload(context.Background(), &loonfs.CompleteUploadBody{
 		NamespaceID: request.NamespaceID,
 		UploadID:    string(begin.DirectPut.UploadID),
 		Body: &loonfs.CompleteUploadRequest{
-			DirectPut: &loonfs.CompleteUploadDirectPut{},
+			DirectPut: &loonfs.CompleteUploadDirectPut{Content: claim},
 		},
 	})
 	if err != nil {
 		t.Fatalf("complete direct PUT: %v", err)
 	}
 	completedStatus := requireCompletedStatus(t, completed)
-	assertContentRefEqual(t, completedStatus.ContentRef, directPut.ContentRef)
+	if completedStatus.ContentRef.SizeBytes != expected.SizeBytes {
+		t.Errorf("direct PUT size_bytes = %d, want %d", completedStatus.ContentRef.SizeBytes, expected.SizeBytes)
+	}
+	if completedStatus.ContentRef.Checksum == nil || string(completedStatus.ContentRef.Checksum.Algorithm) != expected.ChecksumAlgorithm {
+		t.Errorf("direct PUT checksum = %#v, want algorithm %q", completedStatus.ContentRef.Checksum, expected.ChecksumAlgorithm)
+	}
+	assertChecksumEqual(t, completedStatus.ContentRef.Checksum, claim.Checksum)
+	assertChecksum(t, completedStatus.ContentRef.Checksum, payload)
 
 	committed := commitCompletedFile(
 		t,
@@ -383,7 +384,7 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	stat := statPath(t, h.client, request.NamespaceID, request.Path)
 	file := requireFileProjection(t, stat)
-	assertContentRefEqual(t, file.ContentRef, directPut.ContentRef)
+	assertContentRefEqual(t, file.ContentRef, completedStatus.ContentRef)
 	readback := getFile(t, h.client, request.NamespaceID, request.Path)
 	if !bytes.Equal(readback.Bytes, payload) {
 		t.Error("direct PUT readback did not match payload")

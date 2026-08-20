@@ -24,14 +24,14 @@ use crate::time::current_time_ms;
 use loonfs_api::options::{ListPathEntriesOptions, StatPathOptions};
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
-    CompleteMultipartUploadRequest, DirectMultipartUploadOptions, UploadContentClaim,
-    UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSessionResponse,
+    CompleteMultipartUploadRequest, DirectMultipartUploadOptions, UploadContentResponse,
+    UploadMode, UploadPartChecksumClaim, UploadSessionResponse,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
+    CheckpointId, ChecksumAlgorithm, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
     DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
     Namespace, NamespaceId, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo, TrashEntry,
     TrashPageCursor, UploadId,
@@ -554,16 +554,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Mints a direct_put upload target: a fresh content identity, the
-    /// reference that names it, and the internal object key to sign.
+    /// Starts a direct PUT upload and assigns its content identity.
     pub async fn begin_direct_put_upload_target(
         &self,
-        claim: UploadContentClaim,
+        checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         crate::protocol::begin_direct_put_upload_target(
             &self.store,
             &self.namespace_id,
-            claim,
+            checksum_algorithm,
             &self.mutation_context()?,
         )
         .await

@@ -1,39 +1,24 @@
-//! Upload-session shapes for the v0 HTTP API: transport modes, session
-//! begin/append/complete requests and responses, and the direct-put
-//! presigned-access envelope. Content moves through these shapes; the
-//! metadata that later references it commits through [`super::commits`].
+//! Upload requests and responses for the v0 HTTP API.
 
 use crate::{Checksum, ChecksumAlgorithm, ContentRef, NamespaceId, UploadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// What an upload client claims about a complete payload.
+/// Size and checksum reported by the client for a complete payload.
 ///
-/// The server mints the content object's identity — a client cannot name a
-/// key it has not been given — so a direct upload declares only what it can
-/// know about its own bytes. Direct PUT binds the claim into the provider
-/// write; multipart verifies it against the assembled object at completion.
-///
-/// The digest names its own algorithm because providers do not agree on one:
-/// each binds into a presigned write whatever its API can enforce. The
-/// deployment advertises which it is, and a claim in any other algorithm is
-/// refused at begin rather than signed into a write the provider would
-/// reject.
+/// Direct uploads provide this at completion. The server verifies it against
+/// the object stored by the provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UploadContentClaim {
-    /// Complete byte length the client will write.
+    /// Complete payload size in bytes.
     pub size_bytes: u64,
     /// Whole-payload checksum in the algorithm required by this operation.
     pub checksum: Checksum,
 }
 
-/// What a `direct_multipart` client asks for when it opens a session.
-///
-/// A begin request declares no length and no digest: the session exists to
-/// receive bytes whose length may not be known yet. All it settles is the
-/// geometry the client cuts to.
+/// Options for starting a direct multipart upload.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -41,11 +26,8 @@ pub struct DirectMultipartUploadOptions {
     /// Byte length of every part except the last, or `None` for the
     /// server's default.
     ///
-    /// The value bounds the object: a provider accepts at most 10,000
-    /// parts, so this session can carry at most `part_size_bytes × 10_000`
-    /// bytes. A client that knows its payload is very large asks for a
-    /// larger part size; one that does not know its length at all takes the
-    /// default and keeps asking for part URLs until its stream ends.
+    /// Providers accept at most 10,000 parts, so this value also limits the
+    /// maximum upload size. Clients can request larger parts for large files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_size_bytes: Option<u64>,
 }
@@ -60,9 +42,7 @@ pub enum UploadMode {
     ServiceProxied,
     /// The service mints a short-lived presigned PUT URL for the content object.
     DirectPut,
-    /// The service opens a provider multipart upload for the content object
-    /// and signs one PUT per part, so a large object crosses the network
-    /// once, in parallel, without passing through the server.
+    /// The client uploads parts directly to object storage.
     DirectMultipart,
 }
 
@@ -79,20 +59,18 @@ pub enum BeginUploadRequest {
     /// Send the bytes to the service, which writes the content object.
     #[cfg_attr(feature = "openapi", schema(title = "BeginUploadServiceProxied"))]
     ServiceProxied {},
-    /// Write the whole object through one presigned request. The server
-    /// signs exactly these bytes into the write it authorizes, so the claim
-    /// is required.
+    /// Write the whole object through one presigned request.
     #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectPut"))]
     DirectPut {
-        /// Byte length and digest of the payload about to be written.
-        content: UploadContentClaim,
+        /// Advisory byte length for an early provider-limit check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        size_bytes: Option<u64>,
     },
     /// Write the object in parts through presigned part uploads.
     #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectMultipart"))]
     DirectMultipart {
-        /// Selects the part geometry; absent takes the server's default.
-        /// A multipart upload claims its content at completion, so nothing
-        /// about the payload is declared here.
+        /// Part size options. The server uses its default when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         multipart: Option<DirectMultipartUploadOptions>,
@@ -133,31 +111,24 @@ pub enum ObjectTransferAccess {
     },
 }
 
-/// Presigned direct_put upload details. The raw object key is intentionally not public.
+/// Details for a direct PUT upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectPutUpload {
-    /// Immutable object identity the server minted, plus the byte length and
-    /// checksum covered by the signed request. Completion and the later
-    /// commit both name exactly this reference.
-    pub content_ref: ContentRef,
-    /// Short-lived write capability the client uses without learning the raw object key.
+    /// Checksum algorithm the client must use for its completion claim.
+    pub checksum_algorithm: ChecksumAlgorithm,
+    /// Short-lived permission to write the object.
     pub access: ObjectTransferAccess,
 }
 
-/// Part geometry returned for a direct multipart upload.
-///
-/// The begin response does not include a content reference or part count
-/// because the final payload is not known yet. The server owns the provider
-/// upload id and returns the content reference only after completion.
+/// Settings returned for a direct multipart upload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectMultipartUpload {
     /// Byte length of every part except the last. At most 10,000 parts may
     /// be uploaded, so this bounds the object at `part_size_bytes × 10_000`.
     pub part_size_bytes: u64,
-    /// Checksum algorithm every part and the complete assembled payload must
-    /// use for this session.
+    /// Checksum algorithm for every part and for the complete payload.
     pub checksum_algorithm: ChecksumAlgorithm,
 }
 
@@ -178,9 +149,8 @@ pub struct UploadPartChecksumClaim {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SignUploadPartsRequest {
-    /// Parts to authorize, each with the checksum the provider will enforce
-    /// on it. Asking again for a part already uploaded is how a client
-    /// retries one: a repeated part is last-write-wins at the provider.
+    /// Parts to authorize and the checksum for each part. Requesting a part
+    /// again replaces the previous upload for that part number.
     pub parts: Vec<UploadPartChecksumClaim>,
 }
 
@@ -323,9 +293,8 @@ pub struct UploadContentResponse {
 
 /// Request to complete an upload session.
 ///
-/// `mode` must match the mode used to start the session. Service-proxied and
-/// direct-PUT uploads need no other fields. Direct multipart uploads also
-/// include the completed parts and the expected content details.
+/// `mode` must match the mode used to start the session. Direct uploads
+/// include the expected content details. Multipart also includes its parts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -335,7 +304,10 @@ pub enum CompleteUploadRequest {
     ServiceProxied {},
     /// Complete a direct-PUT upload.
     #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadDirectPut"))]
-    DirectPut {},
+    DirectPut {
+        /// Expected length and checksum of the stored object.
+        content: UploadContentClaim,
+    },
     /// Complete a direct multipart upload.
     #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadDirectMultipart"))]
     DirectMultipart {
@@ -351,7 +323,7 @@ impl CompleteUploadRequest {
     pub const fn mode(&self) -> UploadMode {
         match self {
             Self::ServiceProxied {} => UploadMode::ServiceProxied,
-            Self::DirectPut {} => UploadMode::DirectPut,
+            Self::DirectPut { .. } => UploadMode::DirectPut,
             Self::DirectMultipart { .. } => UploadMode::DirectMultipart,
         }
     }
@@ -478,8 +450,7 @@ mod tests {
             r#"{"mode":"service_proxied","multipart":{"part_size_bytes":8388608}}"#,
             r#"{"mode":"service_proxied","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
             r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
-            // A direct put with nothing to sign is not a direct put.
-            r#"{"mode":"direct_put"}"#,
+            r#"{"mode":"direct_put","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
         ] {
             assert!(
                 serde_json::from_str::<BeginUploadRequest>(body).is_err(),
@@ -496,14 +467,26 @@ mod tests {
                 .expect("decode proxied completion"),
             CompleteUploadRequest::ServiceProxied {}
         );
+        let direct_put = CompleteUploadRequest::DirectPut {
+            content: UploadContentClaim {
+                size_bytes: 5,
+                checksum: Checksum::crc32c(b"hello"),
+            },
+        };
         assert_eq!(
-            serde_json::to_string(&CompleteUploadRequest::DirectPut {})
-                .expect("encode direct-put completion"),
-            r#"{"mode":"direct_put"}"#
+            serde_json::to_value(&direct_put).expect("encode direct-put completion"),
+            serde_json::json!({
+                "mode": "direct_put",
+                "content": {
+                    "size_bytes": 5,
+                    "checksum": Checksum::crc32c(b"hello"),
+                },
+            })
         );
         for body in [
             r#"{}"#,
             r#"{"mode":"service_proxied","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}},"parts":[]}"#,
+            r#"{"mode":"direct_put"}"#,
             r#"{"mode":"direct_multipart"}"#,
         ] {
             assert!(
@@ -539,23 +522,17 @@ mod tests {
     }
 
     #[test]
-    fn direct_put_response_exposes_only_presigned_access() {
+    fn direct_put_response_exposes_the_algorithm_and_presigned_access() {
         let response = BeginUploadResponse::DirectPut {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             upload_id: UploadId::parse("upl_00000000000000000000000000000001")
                 .expect("valid upload id"),
             direct_put: DirectPutUpload {
-                content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
+                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
                 access: ObjectTransferAccess::PresignedUrl {
                     method: "PUT".to_owned(),
                     url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
-                    headers: BTreeMap::from([
-                        ("if-none-match".to_owned(), "*".to_owned()),
-                        (
-                            "x-provider-checksum".to_owned(),
-                            "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=".to_owned(),
-                        ),
-                    ]),
+                    headers: BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]),
                     expires_at_ms: 1,
                 },
             },
@@ -574,8 +551,6 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let upload_id =
             UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id");
-        let sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-
         assert_eq!(
             serde_json::to_value(BeginUploadResponse::ServiceProxied {
                 namespace_id: namespace_id.clone(),
@@ -594,11 +569,7 @@ mod tests {
                 namespace_id: namespace_id.clone(),
                 upload_id: upload_id.clone(),
                 direct_put: DirectPutUpload {
-                    content_ref: ContentRef::blob_v1(
-                        ContentId::parse("con_0123456789abcdef0123456789abcdef")
-                            .expect("content id"),
-                        b"hello",
-                    ),
+                    checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
                     access: ObjectTransferAccess::PresignedUrl {
                         method: "PUT".to_owned(),
                         url: "https://bucket.example/object".to_owned(),
@@ -613,12 +584,7 @@ mod tests {
                 "namespace_id": "demo",
                 "upload_id": "upl_00000000000000000000000000000001",
                 "direct_put": {
-                    "content_ref": {
-                        "kind": "blob_v1",
-                        "content_id": "con_0123456789abcdef0123456789abcdef",
-                        "size_bytes": 5,
-                        "checksum": { "algorithm": "sha256", "value": sha256 }
-                    },
+                    "checksum_algorithm": "crc64nvme",
                     "access": {
                         "kind": "presigned_url",
                         "method": "PUT",
@@ -668,26 +634,22 @@ mod tests {
         );
     }
 
-    /// A direct-put client declares what it is about to write; it cannot
-    /// declare *where*, because the server owns content identity.
+    /// A direct-put begin may carry an advisory length but no content claim.
     #[test]
     fn an_upload_content_claim_names_only_size_and_checksum() {
-        let request: BeginUploadRequest = serde_json::from_str(
-            r#"{"mode":"direct_put","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
-        )
-        .expect("decode direct-put begin request");
+        let request: BeginUploadRequest =
+            serde_json::from_str(r#"{"mode":"direct_put","size_bytes":5}"#)
+                .expect("decode direct-put begin request");
         assert_eq!(
             request,
             BeginUploadRequest::DirectPut {
-                content: UploadContentClaim {
-                    size_bytes: 5,
-                    checksum: Checksum {
-                        algorithm: ChecksumAlgorithm::Sha256,
-                        value: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-                            .to_owned(),
-                    },
-                },
+                size_bytes: Some(5),
             }
+        );
+        assert_eq!(
+            serde_json::from_str::<BeginUploadRequest>(r#"{"mode":"direct_put"}"#)
+                .expect("decode direct-put begin without a size"),
+            BeginUploadRequest::DirectPut { size_bytes: None }
         );
 
         assert!(
