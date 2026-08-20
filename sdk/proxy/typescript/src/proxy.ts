@@ -5,7 +5,6 @@ export interface ProxyConfig {
 }
 
 interface ProxyRoute {
-    operation: string;
     method: "GET" | "POST" | "PUT";
     pattern: RegExp;
     mountScoped: boolean;
@@ -29,29 +28,28 @@ const HOP_BY_HOP_HEADERS = [
 ] as const;
 
 // These routes must match docs/specs/openapi-proxy.json.
-export interface ProxyRouteTemplate {
-    operation: string;
+interface ProxyRouteTemplate {
     method: "GET" | "POST" | "PUT";
     template: string;
 }
 
-export const PROXY_ROUTE_TABLE: readonly ProxyRouteTemplate[] = [
-    { operation: "capabilities", method: "GET", template: "/v0/capabilities" },
-    { operation: "list_changes", method: "GET", template: "/v0/mounts/{mount}/changes" },
-    { operation: "apply_commit", method: "POST", template: "/v0/mounts/{mount}/commits" },
-    { operation: "get_file_bytes", method: "GET", template: "/v0/mounts/{mount}/filesystem/content" },
-    { operation: "begin_download", method: "POST", template: "/v0/mounts/{mount}/filesystem/downloads" },
-    { operation: "list_path_entries", method: "GET", template: "/v0/mounts/{mount}/filesystem/list" },
-    { operation: "list_file_revisions", method: "GET", template: "/v0/mounts/{mount}/filesystem/revisions" },
-    { operation: "stat_path", method: "GET", template: "/v0/mounts/{mount}/filesystem/stat" },
-    { operation: "list_trash", method: "GET", template: "/v0/mounts/{mount}/filesystem/trash" },
-    { operation: "grep", method: "GET", template: "/v0/mounts/{mount}/query/grep" },
-    { operation: "begin_upload", method: "POST", template: "/v0/mounts/{mount}/uploads" },
-    { operation: "get_upload_status", method: "GET", template: "/v0/mounts/{mount}/uploads/{upload_id}" },
-    { operation: "abort_upload", method: "POST", template: "/v0/mounts/{mount}/uploads/{upload_id}/abort" },
-    { operation: "complete_upload", method: "POST", template: "/v0/mounts/{mount}/uploads/{upload_id}/complete" },
-    { operation: "upload_content", method: "PUT", template: "/v0/mounts/{mount}/uploads/{upload_id}/content" },
-    { operation: "sign_upload_parts", method: "POST", template: "/v0/mounts/{mount}/uploads/{upload_id}/parts" },
+const PROXY_ROUTE_TABLE: readonly ProxyRouteTemplate[] = [
+    { method: "GET", template: "/v0/capabilities" },
+    { method: "GET", template: "/v0/mounts/{mount}/changes" },
+    { method: "POST", template: "/v0/mounts/{mount}/commits" },
+    { method: "GET", template: "/v0/mounts/{mount}/filesystem/content" },
+    { method: "POST", template: "/v0/mounts/{mount}/filesystem/downloads" },
+    { method: "GET", template: "/v0/mounts/{mount}/filesystem/list" },
+    { method: "GET", template: "/v0/mounts/{mount}/filesystem/revisions" },
+    { method: "GET", template: "/v0/mounts/{mount}/filesystem/stat" },
+    { method: "GET", template: "/v0/mounts/{mount}/filesystem/trash" },
+    { method: "GET", template: "/v0/mounts/{mount}/query/grep" },
+    { method: "POST", template: "/v0/mounts/{mount}/uploads" },
+    { method: "GET", template: "/v0/mounts/{mount}/uploads/{upload_id}" },
+    { method: "POST", template: "/v0/mounts/{mount}/uploads/{upload_id}/abort" },
+    { method: "POST", template: "/v0/mounts/{mount}/uploads/{upload_id}/complete" },
+    { method: "PUT", template: "/v0/mounts/{mount}/uploads/{upload_id}/content" },
+    { method: "POST", template: "/v0/mounts/{mount}/uploads/{upload_id}/parts" },
 ];
 
 function patternFor(template: string): RegExp {
@@ -71,7 +69,6 @@ function patternFor(template: string): RegExp {
 }
 
 const PROXY_ROUTES: readonly ProxyRoute[] = PROXY_ROUTE_TABLE.map((entry) => ({
-    operation: entry.operation,
     method: entry.method,
     pattern: patternFor(entry.template),
     mountScoped: entry.template.includes("{mount}"),

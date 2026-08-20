@@ -24,49 +24,28 @@ type handler struct {
 }
 
 type route struct {
-	operation string
-	method    string
-	pattern   string
-}
-
-// Route describes one proxied operation.
-type Route struct {
-	Operation string
-	Method    string
-	Template  string
-}
-
-// Routes returns the operations allowed by the proxy API.
-func Routes() []Route {
-	table := make([]Route, 0, len(routes))
-	for _, entry := range routes {
-		table = append(table, Route{
-			Operation: entry.operation,
-			Method:    entry.method,
-			Template:  entry.pattern,
-		})
-	}
-	return table
+	method  string
+	pattern string
 }
 
 // These routes must match docs/specs/openapi-proxy.json.
 var routes = []route{
-	{operation: "capabilities", method: http.MethodGet, pattern: "/v0/capabilities"},
-	{operation: "list_changes", method: http.MethodGet, pattern: "/v0/mounts/{mount}/changes"},
-	{operation: "apply_commit", method: http.MethodPost, pattern: "/v0/mounts/{mount}/commits"},
-	{operation: "get_file_bytes", method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/content"},
-	{operation: "begin_download", method: http.MethodPost, pattern: "/v0/mounts/{mount}/filesystem/downloads"},
-	{operation: "list_path_entries", method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/list"},
-	{operation: "list_file_revisions", method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/revisions"},
-	{operation: "stat_path", method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/stat"},
-	{operation: "list_trash", method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/trash"},
-	{operation: "grep", method: http.MethodGet, pattern: "/v0/mounts/{mount}/query/grep"},
-	{operation: "begin_upload", method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads"},
-	{operation: "get_upload_status", method: http.MethodGet, pattern: "/v0/mounts/{mount}/uploads/{upload_id}"},
-	{operation: "abort_upload", method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/abort"},
-	{operation: "complete_upload", method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/complete"},
-	{operation: "upload_content", method: http.MethodPut, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/content"},
-	{operation: "sign_upload_parts", method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/parts"},
+	{method: http.MethodGet, pattern: "/v0/capabilities"},
+	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/changes"},
+	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/commits"},
+	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/content"},
+	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/filesystem/downloads"},
+	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/list"},
+	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/revisions"},
+	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/stat"},
+	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/filesystem/trash"},
+	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/query/grep"},
+	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads"},
+	{method: http.MethodGet, pattern: "/v0/mounts/{mount}/uploads/{upload_id}"},
+	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/abort"},
+	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/complete"},
+	{method: http.MethodPut, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/content"},
+	{method: http.MethodPost, pattern: "/v0/mounts/{mount}/uploads/{upload_id}/parts"},
 }
 
 var hopByHopHeaders = []string{

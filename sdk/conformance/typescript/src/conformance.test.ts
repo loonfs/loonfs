@@ -17,7 +17,7 @@ import {
     getFile as getBrowserFile,
     putFile as putBrowserFile,
 } from "../../../generated/typescript-client/transfers.js";
-import { createProxyHandler, PROXY_ROUTE_TABLE } from "../../../proxy/typescript/src/proxy.js";
+import { createProxyHandler } from "../../../proxy/typescript/src/proxy.js";
 
 
 const FIXTURE_VERSION = 1;
@@ -246,6 +246,10 @@ interface Harness {
 interface RunningProxy {
     baseUrl: string;
     close: () => Promise<void>;
+}
+
+interface RunningRecordingServer extends RunningProxy {
+    requests: string[];
 }
 
 type StreamingRequestInit = RequestInit & { duplex?: "half" };
@@ -1104,6 +1108,46 @@ async function startProxyServer(
     };
 }
 
+async function startRecordingServer(): Promise<RunningRecordingServer> {
+    const requests: string[] = [];
+    const server = createServer((incoming, outgoing) => {
+        const method = incoming.method ?? "GET";
+        const path = new URL(incoming.url ?? "/", "http://127.0.0.1").pathname;
+        requests.push(`${method} ${path}`);
+        incoming.resume();
+        outgoing.writeHead(200, {
+            "content-type": "application/json",
+            "content-length": "2",
+        });
+        outgoing.end("{}");
+    });
+    await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error): void => reject(error);
+        server.once("error", onError);
+        server.listen(0, "127.0.0.1", () => {
+            server.off("error", onError);
+            resolve();
+        });
+    });
+    const address = server.address();
+    assert.ok(address !== null && typeof address !== "string");
+    return {
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        requests,
+        close: () =>
+            new Promise<void>((resolve, reject) => {
+                server.close((error) => {
+                    if (error === undefined) {
+                        resolve();
+                    } else {
+                        reject(error);
+                    }
+                });
+                server.closeIdleConnections();
+            }),
+    };
+}
+
 async function serveProxyRequest(
     handler: (request: Request) => Promise<Response>,
     incoming: IncomingMessage,
@@ -1890,19 +1934,83 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     assert.equal(removedEntry.deletion_seq, removed.committed_seq);
 });
 
-// The route table cannot drift from the proxy document unnoticed.
-test("proxy route table matches the document", { skip: environmentSkip }, async () => {
+// Every proxy route must reach the server.
+// Every excluded server route must stop at the proxy.
+test("proxy forwards every documented route", { skip: environmentSkip }, async (context) => {
+    assert.ok(cases != null);
+    const [fixture] = decodeProxy(caseNamed(cases, "proxy"));
     const documentPath = process.env.LOONFS_PROXY_DOCUMENT;
     assert.ok(documentPath, "LOONFS_PROXY_DOCUMENT is not set");
-    const document = JSON.parse(readFileSync(documentPath, "utf8")) as {
+    const proxyDocument = JSON.parse(readFileSync(documentPath, "utf8")) as {
         paths: Record<string, Record<string, unknown>>;
     };
-    const documented = new Set<string>();
-    for (const [path, item] of Object.entries(document.paths)) {
-        for (const method of Object.keys(item)) {
-            documented.add(`${method.toUpperCase()} ${path}`);
+    const serverDocumentPath = process.env.LOONFS_SERVER_DOCUMENT;
+    assert.ok(serverDocumentPath, "LOONFS_SERVER_DOCUMENT is not set");
+    const serverDocument = JSON.parse(readFileSync(serverDocumentPath, "utf8")) as {
+        paths: Record<string, Record<string, unknown>>;
+    };
+    const proxyRoutes = new Set<string>();
+    for (const [template, item] of Object.entries(proxyDocument.paths)) {
+        for (const documentedMethod of Object.keys(item)) {
+            proxyRoutes.add(`${documentedMethod.toUpperCase()} ${template}`);
         }
     }
-    const table = new Set(PROXY_ROUTE_TABLE.map((route) => `${route.method} ${route.template}`));
-    assert.deepEqual([...table].sort(), [...documented].sort());
+
+    const stub = await startRecordingServer();
+    context.after(() => stub.close());
+    const handler = createProxyHandler({
+        serverBaseUrl: stub.baseUrl,
+        token: "recording-stub-token",
+        mounts: { [fixture.mount]: fixture.namespaceId },
+    });
+    const proxy = await startProxyServer(handler);
+    context.after(() => proxy.close());
+
+    const instantiate = (template: string): string =>
+        template.replace(/\{([^/{}]+)\}/g, (_placeholder, name: string) =>
+            name === "mount" ? fixture.mount : "x",
+        );
+    const proxyTemplateForServer = (template: string): string => {
+        const serverNamespacePrefix = "/v0/namespaces/{namespace_id}";
+        if (
+            template === serverNamespacePrefix ||
+            template.startsWith(`${serverNamespacePrefix}/`)
+        ) {
+            return template.replace(serverNamespacePrefix, "/v0/mounts/{mount}");
+        }
+        return template;
+    };
+
+    const expected: string[] = [];
+    for (const [template, item] of Object.entries(proxyDocument.paths)) {
+        for (const documentedMethod of Object.keys(item)) {
+            const method = documentedMethod.toUpperCase();
+            const path = instantiate(template);
+            const forwardedTemplate = template.replace(
+                "/v0/mounts/{mount}",
+                `/v0/namespaces/${fixture.namespaceId}`,
+            );
+            expected.push(`${method} ${instantiate(forwardedTemplate)}`);
+            const response = await fetchThroughProxy(`${proxy.baseUrl}${path}`, { method });
+            assert.equal(response.status, 200);
+            await response.arrayBuffer();
+        }
+    }
+    assert.deepEqual([...stub.requests].sort(), expected.sort());
+
+    const observedBefore = [...stub.requests];
+    for (const [serverTemplate, item] of Object.entries(serverDocument.paths)) {
+        const proxyTemplate = proxyTemplateForServer(serverTemplate);
+        for (const documentedMethod of Object.keys(item)) {
+            const method = documentedMethod.toUpperCase();
+            if (proxyRoutes.has(`${method} ${proxyTemplate}`)) {
+                continue;
+            }
+            const path = instantiate(proxyTemplate);
+            const response = await fetchThroughProxy(`${proxy.baseUrl}${path}`, { method });
+            assert.equal(response.status, 404, `${method} ${path}`);
+            await response.arrayBuffer();
+        }
+    }
+    assert.deepEqual(stub.requests, observedBefore);
 });
