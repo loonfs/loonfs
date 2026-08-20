@@ -34,6 +34,7 @@ use tokio::task::JoinHandle;
 pub const AUTH_TOKEN: &str = "conformance-test-token";
 
 const DIRECT_PUT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const PROXY_UPLOAD_MAX_BYTES: u64 = 6 * 1024 * 1024;
 
 /// A running conformance API and transfer service.
 #[derive(Debug)]
@@ -120,6 +121,7 @@ fn write_server_config(path: &Path, store_root: &Path) -> io::Result<()> {
 auth_token = "{AUTH_TOKEN}"
 content_token_secret = "conformance-content-token-secret"
 writer_id = "loonfs-conformance"
+max_upload_bytes = {PROXY_UPLOAD_MAX_BYTES}
 
 [store]
 kind = "local-fs"

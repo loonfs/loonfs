@@ -9,6 +9,14 @@ import { test } from "node:test";
 
 import { LoonFS, LoonFSClient } from "../../../generated/typescript/index.js";
 import { getFile, putFile } from "../../../generated/typescript/transfers.js";
+import {
+    LoonFS as BrowserLoonFS,
+    LoonFSClient as BrowserLoonFSClient,
+} from "../../../generated/typescript-client/index.js";
+import {
+    getFile as getBrowserFile,
+    putFile as putBrowserFile,
+} from "../../../generated/typescript-client/transfers.js";
 import { createProxyHandler, PROXY_ROUTE_TABLE } from "../../../proxy/typescript/src/proxy.js";
 
 
@@ -17,6 +25,8 @@ const RUNNER_SKIP = "run scripts/run-sdk-conformance.sh typescript";
 const CRC32C_POLYNOMIAL = 0x82f63b78;
 const CRC64_NVME_POLYNOMIAL = 0x9a6c9329ac4bc9b5n;
 const CRC64_MASK = 0xffffffffffffffffn;
+const BROWSER_MULTIPART_MIN_BYTES = 8 * 1024 * 1024;
+const PROXY_UPLOAD_MAX_BYTES = "upload.max_content_bytes";
 const CASE_FIELDS = ["expected", "family", "intent", "name", "request", "version"];
 const EXPECTED_CASES = [
     ["changes", "changes"],
@@ -933,6 +943,33 @@ async function readProxied(
     return new Uint8Array(await response.arrayBuffer());
 }
 
+async function assertBrowserTransfer(
+    client: BrowserLoonFSClient,
+    mount: string,
+    path: string,
+    bytes: Uint8Array,
+    actor: ActorValue,
+    commitId: string,
+    label: string,
+): Promise<void> {
+    const committed = await putBrowserFile(client, {
+        mount,
+        path,
+        bytes,
+        actor,
+        commit_id: commitId,
+    });
+    assert.ok(committed.committed_seq > 0, `${label} commit sequence is not positive`);
+
+    const readback = await getBrowserFile(client, { mount, path });
+    assert.deepEqual(readback.bytes, bytes);
+    assert.equal(readback.content_ref.size_bytes, bytes.byteLength);
+    const contentChecksum = readback.content_ref.checksum;
+    if (contentChecksum !== undefined) {
+        assert.deepEqual(checksum(contentChecksum.algorithm, bytes), contentChecksum);
+    }
+}
+
 function completedUpload(response: LoonFS.UploadSessionResponse): CompletedUpload {
     const completed = response as CompletedUpload;
     assert.equal(completed.status, "completed");
@@ -1270,11 +1307,22 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.ok(cases != null);
     const activeHarness = harness;
     const [request, expected] = decodeProxy(caseNamed(cases, "proxy"));
-    const handler = createProxyHandler({
+    const proxyHandler = createProxyHandler({
         serverBaseUrl: activeHarness.serverBaseUrl,
         token: activeHarness.token,
         mounts: { [request.mount]: request.namespaceId },
     });
+    const beginPath = `/v0/mounts/${encodeURIComponent(request.mount)}/uploads`;
+    const beginModes: string[] = [];
+    const handler = async (incoming: Request): Promise<Response> => {
+        if (incoming.method === "POST" && new URL(incoming.url).pathname === beginPath) {
+            const body = (await incoming.clone().json()) as { mode?: unknown };
+            if (typeof body.mode === "string") {
+                beginModes.push(body.mode);
+            }
+        }
+        return proxyHandler(incoming);
+    };
     const proxy = await startProxyServer(handler);
     context.after(() => proxy.close());
 
@@ -1419,6 +1467,69 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const disallowedRoute = await fetchThroughProxy(`${mountBase}${request.disallowedPathSuffix}`);
     assert.equal(disallowedRoute.status, expected.disallowedRouteStatus);
     assert.equal((await disallowedRoute.arrayBuffer()).byteLength, 0);
+
+    beginModes.length = 0;
+    const browserClient = new BrowserLoonFSClient({ environment: proxy.baseUrl });
+    const browserPath = `${request.proxiedPath}-browser`;
+    await assertBrowserTransfer(
+        browserClient,
+        request.mount,
+        browserPath,
+        payload,
+        request.actor,
+        `${request.commitIds.proxied}-browser`,
+        "browser service-proxied transfer",
+    );
+    assert.deepEqual(beginModes, ["service_proxied"]);
+
+    const capabilities = await browserClient.capabilities();
+    const proxyUploadMaxBytes = capabilities.limits?.[PROXY_UPLOAD_MAX_BYTES];
+    assert.ok(proxyUploadMaxBytes !== undefined, "browser proxy upload limit is not advertised");
+    assert.ok(Number.isSafeInteger(proxyUploadMaxBytes) && proxyUploadMaxBytes >= 0);
+    const directPutLength = proxyUploadMaxBytes + 1;
+    assert.ok(directPutLength < BROWSER_MULTIPART_MIN_BYTES);
+    const directPutBytes = bytePattern({ length: directPutLength, modulus: 251 });
+    await assertBrowserTransfer(
+        browserClient,
+        request.mount,
+        `${request.directPath}-browser`,
+        directPutBytes,
+        request.actor,
+        `${request.commitIds.direct}-browser`,
+        "browser direct-PUT transfer",
+    );
+    assert.deepEqual(beginModes, ["service_proxied", "direct_put"]);
+
+    const multipartBytes = bytePattern({
+        length: BROWSER_MULTIPART_MIN_BYTES + 1,
+        modulus: 251,
+    });
+    await assertBrowserTransfer(
+        browserClient,
+        request.mount,
+        `${request.directPath}-browser-multipart`,
+        multipartBytes,
+        request.actor,
+        `${request.commitIds.direct}-browser-multipart`,
+        "browser multipart transfer",
+    );
+    assert.deepEqual(beginModes, ["service_proxied", "direct_put", "direct_multipart"]);
+
+    // The rig fails only at begin. No session exists then, so mid-flow cleanup is not covered.
+    await assert.rejects(
+        putBrowserFile(browserClient, {
+            mount: request.unknownMount,
+            path: `${request.proxiedPath}-browser-failure`,
+            bytes: payload,
+            actor: request.actor,
+            commit_id: `${request.commitIds.proxied}-browser-failure`,
+        }),
+        (error: unknown) => {
+            assert.ok(error instanceof BrowserLoonFS.NotFoundError);
+            assert.equal(error.statusCode, expected.unknownMountStatus);
+            return true;
+        },
+    );
 });
 
 conformanceTest("changes", async (activeHarness, testCase) => {
