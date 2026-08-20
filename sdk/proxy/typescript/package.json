@@ -1,0 +1,29 @@
+{
+  "name": "@loonfs/sdk-proxy",
+  "version": "0.1.0",
+  "description": "Fetch-compatible proxy handler for the LoonFS browser client",
+  "license": "Apache-2.0",
+  "repository": "github:loonfs/loonfs-sdk-typescript",
+  "type": "module",
+  "main": "./dist/proxy.js",
+  "types": "./dist/proxy.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/proxy.d.ts",
+      "default": "./dist/proxy.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^18.19.0"
+  }
+}
