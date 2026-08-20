@@ -129,6 +129,17 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-sdk-conformance-
       - run: scripts/run-sdk-conformance.sh typescript
 
+  sdk-client-typescript:
+    name: SDK browser client (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: scripts/generate-sdks.sh typescript-client
+      - run: cd sdk/client-check && npm install --no-fund --no-audit && npm run check
+
   # Checks the declared minimum supported Rust version actually builds the
   # workspace. Keep the toolchain here in sync with `rust-version` in the
   # workspace Cargo.toml.

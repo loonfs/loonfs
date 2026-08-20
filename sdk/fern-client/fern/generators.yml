@@ -1,0 +1,15 @@
+# Generates the browser client from docs/specs/openapi-proxy.json with a
+# pinned generator version. Output is written locally through Docker.
+api:
+  specs:
+    - openapi: ../../../docs/specs/openapi-proxy.json
+groups:
+  typescript-client:
+    generators:
+      - name: fernapi/fern-typescript-sdk
+        version: 3.88.0
+        config:
+          namespaceExport: LoonFS
+        output:
+          location: local-file-system
+          path: ../../generated/typescript-client

@@ -1,0 +1,12 @@
+{
+  "name": "@loonfs/sdk-client-check",
+  "private": true,
+  "description": "Compiles the generated browser client without node types at runtime scope.",
+  "scripts": {
+    "check": "tsc -p ."
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^18.19.0"
+  }
+}
