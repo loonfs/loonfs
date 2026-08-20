@@ -71,8 +71,12 @@ The GCS adapter uses native V4 signed URLs. It does not use the GCS
 S3-interoperability API or implement multipart uploads, even though GCS
 documents an XML multipart API.[^46]
 
-Browser clients must configure CORS on the bucket because the browser sends
-the transfer request directly to the provider.
+Browser clients send direct transfers to the provider. Bucket CORS must allow
+the application origin. Allowed methods must include `PUT` and `GET`. Allowed
+request headers must include `if-none-match` and `x-amz-checksum-crc64nvme`
+for the S3 family, and `x-goog-if-generation-match` for GCS. The response must
+expose `ETag`. Browser multipart reads each part's `ETag` and fails when the
+header is not exposed.
 
 ## 4. Incremental writes and where they are real
 
