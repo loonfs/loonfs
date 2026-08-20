@@ -1,7 +1,7 @@
 {
   "name": "@loonfs/sdk-client-check",
   "private": true,
-  "description": "Compiles the generated browser client without node types at runtime scope.",
+  "description": "Checks the generated TypeScript client with strict browser-facing settings.",
   "scripts": {
     "check": "tsc -p ."
   },

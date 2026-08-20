@@ -1,5 +1,4 @@
-# Generates the browser client from docs/specs/openapi-proxy.json with a
-# pinned generator version. Output is written locally through Docker.
+# Generates the TypeScript client from the proxy OpenAPI document.
 api:
   specs:
     - openapi: ../../../docs/specs/openapi-proxy.json

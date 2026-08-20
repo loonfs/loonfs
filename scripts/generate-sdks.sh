@@ -1,11 +1,10 @@
 #!/bin/sh
-# Generates SDKs from docs/specs/openapi.json with the pinned Fern versions.
+# Generates SDKs from the checked-in OpenAPI documents using pinned Fern versions.
 # Requires Docker. Output is written to the untracked sdk/generated directory.
 #
 # Usage: scripts/generate-sdks.sh [go|python|typescript|typescript-client]
-# With no argument, validates the documents and generates every SDK.
-# The typescript-client group is the browser client, generated from the proxy
-# document through its own workspace in sdk/fern-client.
+# With no argument, validates both Fern workspaces and generates every SDK.
+# The browser client uses the proxy document and the sdk/fern-client workspace.
 # Handwritten files under sdk/transfers/<language> are copied into each SDK
 # after generation.
 
