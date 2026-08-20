@@ -1,9 +1,8 @@
 //! Presigner for Google Cloud Storage's native V4 signed URLs.
 //!
-//! GCS's S3-interoperability surface is not an option here: live conformance
-//! proved it silently ignores preconditions (see [`GcpGcsStore`]). Its native
-//! XML API conditions on object generations and stores CRC-32C, and this
-//! module signs that API directly with `GOOG4-RSA-SHA256`.
+//! This uses the native GCS XML API because the S3-compatible API did not
+//! enforce write preconditions in live tests. The native API supports object
+//! generation checks and stores CRC-32C checksums.
 //!
 //! [`GcpGcsStore`]: crate::gcs::GcpGcsStore
 
@@ -29,16 +28,10 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime};
 
-/// Google's own signed-URL host, and the only one this module addresses.
-///
-/// The GCS store configuration carries no endpoint override, so the endpoint
-/// trust rule that gates the S3-compatible providers has nothing to decide
-/// here: every capability this module issues is `https` to Google.
+/// Host used for every GCS signed URL.
 const GCS_HOST: &str = "storage.googleapis.com";
 
-/// Create-only precondition. A generation of zero means "only if the object
-/// does not currently exist", which is GCS's spelling of the guarantee the
-/// S3 family gets from `if-none-match: *`.
+/// A generation of zero makes the request create-only.
 const GCS_GENERATION_MATCH_HEADER: &str = "x-goog-if-generation-match";
 const GCS_CREATE_ONLY_GENERATION: &str = "0";
 
@@ -51,30 +44,11 @@ const GCS_SIGNING_ALGORITHM: &str = "GOOG4-RSA-SHA256";
 /// own client libraries write, so a deployment never has to configure one.
 const GCS_CREDENTIAL_SCOPE_SUFFIX: &str = "auto/storage/goog4_request";
 
-/// Google Cloud Storage's documented maximum for a single-request upload:
-/// 5 TiB.
-///
-/// Cloud Storage documents one object-size maximum and no separate
-/// single-request one -- Cloud Storage, "Object uploads": you can upload and
-/// store any MIME type of data up to 5 TiB in size, and a single-request
-/// upload is described there as a PUT whose body is the whole object. The
-/// object ceiling is therefore the request ceiling.
-///
-/// This is three orders of magnitude above the S3 family's 5 GiB single-PUT
-/// ceiling, which is what lets this adapter carry large objects without
-/// signing multipart at all: there is no size at which the whole-object
-/// write stops being expressible. Google does document an XML API multipart
-/// upload, and documents it as S3-compatible; this adapter does not
-/// implement it, because it belongs to the same interoperability surface
-/// whose precondition handling conformance found unsound, and because the
-/// large-object path GCS is headed for is the native resumable upload.
+/// Maximum GCS object size. GCS does not document a smaller limit for a
+/// single-request upload.
 pub const GCP_GCS_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
-/// Supplies the service-account key and key scoping for native GCS signed URLs.
-///
-/// The key path is the one the GCS store already loads to authenticate its
-/// provider client; signing reads the same file rather than asking an
-/// operator for a second credential.
+/// Configuration for native GCS signed URLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcsPresignerConfig {
     /// Bucket incorporated into the signed request target.
@@ -85,8 +59,7 @@ pub struct GcsPresignerConfig {
     pub key_prefix: Option<String>,
 }
 
-/// Issues create-only `GOOG4-RSA-SHA256` capabilities for Google Cloud
-/// Storage.
+/// Creates native GCS V4 signed URLs.
 pub struct GcsV4Presigner {
     bucket: String,
     key_prefix: Option<String>,
@@ -469,8 +442,7 @@ mod tests {
             .expect("presign put")
     }
 
-    /// The whole write contract in one signature: the scoped object path and
-    /// the create-only generation precondition.
+    /// The signature covers the object path and create-only precondition.
     #[test]
     fn presigned_put_binds_the_scoped_path_and_create_only_precondition() {
         let signed = presign_put(&presigner(Some("tenant-a")));

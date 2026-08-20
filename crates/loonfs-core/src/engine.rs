@@ -554,7 +554,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Mints a direct_put upload target with a fresh content identity.
+    /// Starts a direct PUT upload and assigns its content identity.
     pub async fn begin_direct_put_upload_target(
         &self,
         checksum_algorithm: ChecksumAlgorithm,

@@ -14,22 +14,14 @@ use http::Uri;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Provider domain families validated by the live direct-transfer
-/// conformance suite.
-///
-/// Direct completion depends on the provider enforcing create-if-absent and
-/// reporting a durable checksum. Endpoint overrides outside these domain
-/// families are not covered by that validation.
+/// Provider domains covered by live direct-transfer tests.
 pub(crate) const AWS_S3_PROVEN_DOMAINS: &[&str] = &["amazonaws.com", "amazonaws.com.cn"];
 pub(crate) const CLOUDFLARE_R2_PROVEN_DOMAINS: &[&str] = &["r2.cloudflarestorage.com"];
 
-/// Enables GCS direct transfers after live provider validation.
+/// Whether live provider tests have validated GCS direct transfers.
 ///
-/// Set this only when the credentialed conformance suite has confirmed that
-/// GCS enforces create-if-absent requests and reports durable CRC-32C. The
-/// current value is supported by the live validation recorded on 2026-08-02.
-/// Until a provider is validated, deployments must proxy transfers through
-/// the server.
+/// Enable this only after the credentialed tests confirm create-only writes
+/// and stored CRC-32C checksums.
 const GCS_DIRECT_TRANSFERS_PROVEN: bool = true;
 
 /// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
@@ -340,8 +332,7 @@ mod tests {
         assert_eq!(put.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
     }
 
-    /// The write GCS authorizes is addressed beneath the configured prefix and
-    /// carries the create-only precondition in its signature.
+    /// GCS signs the configured prefix and create-only precondition.
     #[test]
     fn the_gcs_bundle_signs_native_generation_preconditions() {
         let issuer = proven_gcs_store()

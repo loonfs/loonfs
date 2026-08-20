@@ -261,7 +261,7 @@ fn completed(content_ref: ContentRef) -> Outcome {
 }
 
 #[tokio::test]
-async fn a_direct_put_observes_the_dictated_checksum_over_the_stream_sent() {
+async fn a_direct_put_uses_the_checksum_algorithm_returned_at_begin() {
     let first = Bytes::from_static(b"one ");
     let second = Bytes::from_static(b"pass");
     let source = PayloadSource::stream(
@@ -638,10 +638,7 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
     );
 }
 
-/// The reviewer's case: a payload the service will not buffer, on a
-/// deployment with no multipart API. Being under one part says nothing
-/// about whether the service would take it, so the whole-object write is
-/// what carries it — the fast path may not assume a cap it never read.
+/// A payload above the proxy limit uses direct PUT when multipart is absent.
 #[tokio::test]
 async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
     let payload = payload(1_025);
@@ -677,14 +674,7 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
     assert_eq!(object_write.body_bytes(), payload.len());
 }
 
-/// The reviewer's case: a payload nobody measured, on a deployment that
-/// signs no multipart — which is what the GCS adapter is.
-///
-/// A length nobody knows is not a reason to fall to the service. The
-/// whole-object write counts and hashes the source while sending it. Falling
-/// straight to the proxy here would stream an unmeasured payload — a pipe, a
-/// `tar` on stdin — at a cap it does not fit, with the direct transport never
-/// attempted.
+/// An unknown-length payload can use direct PUT without multipart support.
 #[tokio::test]
 async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     let payload = payload(64 * 1024);
@@ -693,8 +683,7 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     assert_eq!(source.size_bytes(), None);
 
     let transport = test_transport::script(vec![
-        // A GCS-shaped deployment: crc32c whole-object writes, no multipart
-        // API, and a proxy that would refuse this payload.
+        // GCS supports CRC-32C direct PUTs but not multipart uploads.
         capabilities_for(Advertised {
             direct_put: Some(ChecksumAlgorithm::Crc32c),
             direct_multipart: false,
@@ -722,7 +711,6 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
         .find(|sent| sent.url.starts_with("http://object.invalid/"))
         .expect("the payload went straight to object storage");
     assert_eq!(object_write.body_bytes(), payload.len());
-    // The source was consumed once and never held in full.
     assert_eq!(retention.total_bytes(), payload.len() as u64);
     assert!(
         retention.peak_live_bytes() <= 8 * 1024,
@@ -770,8 +758,7 @@ async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
     assert_eq!(object_write.body_bytes(), payload.len());
 }
 
-/// A direct-put payload crosses the network in bounded pieces. The same pass
-/// counts, hashes, and sends it without holding the complete payload.
+/// Direct PUT streams, counts, and hashes a payload in one pass.
 #[tokio::test]
 async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
     let payload = payload(TEST_PAYLOAD_BYTES);
@@ -799,7 +786,6 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
         .await
         .expect("a large streamed direct put should land");
 
-    // The source's own chunks were folded and sent once, never accumulated.
     assert_eq!(retention.total_bytes(), TEST_PAYLOAD_BYTES as u64);
     assert!(
         retention.peak_live_bytes() <= 2 * TEST_PART_BYTES,
@@ -807,8 +793,6 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
         retention.peak_live_bytes()
     );
 
-    // The request body arrived in many bounded pieces, so no single
-    // allocation held the payload.
     let object_write = transport
         .sent()
         .into_iter()

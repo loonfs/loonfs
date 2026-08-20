@@ -18,8 +18,7 @@ impl Client {
 
     /// Starts a direct upload of bytes the caller already has.
     ///
-    /// A known length is advisory and lets the server reject an oversized
-    /// single PUT before issuing access.
+    /// A size hint lets the server reject an oversized PUT before signing it.
     pub async fn begin_direct_put(
         &self,
         namespace_id: &NamespaceId,

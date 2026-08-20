@@ -23,134 +23,56 @@ This document is a non-normative reference: provider limits and performance data
 
 ## 3. Proven providers and direct-put
 
-Direct-put hands a presigned PUT to the client, then trusts the object-store
-provider to preserve a create-only precondition and report a durable checksum.
-Create-only behavior prevents a client from replacing an immutable content
-object. Completion compares the client's byte count and checksum with the
-provider's stored facts before the object can be published. HMAC-compatible
-gateways have been observed ignoring preconditions, so signature compatibility
-alone is not enough.
+Direct PUT is enabled only when the provider can do both of these things:
 
-LoonFS represents every checksum as
-`{"algorithm":"sha256","value":"<64 lowercase hex>"}`. The surrounding
-object says whether the checksum covers complete content or one upload part.
-Adapters convert provider formats, including base64 headers, to lowercase hex.
+1. Enforce a create-only upload, so a client cannot replace an existing
+   content object.
+2. Return a durable checksum for the stored object.
 
-Two things must both hold for direct-put to be available, and
-`ConfiguredObjectStore::direct_transfers` is the code that decides — building
-the bundle *is* the decision, so nothing above the object-store crate asks
-configuration the question a second time:
+At completion, LoonFS compares the client's byte count and checksum with the
+provider metadata. The object cannot be published unless they match. S3 API
+compatibility is not enough by itself because some compatible gateways ignore
+write preconditions.
 
-1. **The adapter can presign a create-only request and read back a stored
-   checksum.** The S3-compatible adapters (AWS S3 and Cloudflare R2) sign
-   `if-none-match: *` and read the stored CRC-64/NVME after the PUT. Google
-   Cloud Storage signs `x-goog-if-generation-match: 0` through its native
-   `GOOG4-RSA-SHA256` API and reads the stored CRC-32C. Azure Blob and the local
-   filesystem do not offer this direct-transfer contract.
+Direct transfers are limited to endpoints covered by live provider tests:
 
-   GCS's *S3-interoperability* surface is banned outright and is not the
-   route here. Live conformance proved it accepts the signature and then
-   silently ignores HTTP preconditions — it overwrites where it should fail —
-   so the native API is the only correct backend, and the native V4 signer is
-   the only thing that signs GCS transfers.
-2. **The endpoint is one the live conformance suite has actually run against,
-   reached over TLS.** An AWS S3 endpoint with no override, an override in
-   the `amazonaws.com` or `amazonaws.com.cn` domain family, and an R2
-   endpoint in the `r2.cloudflarestorage.com` family qualify. Any other
-   endpoint URL is some other implementation of the S3 API, is not covered by
-   those runs, and does not qualify. GCS has no endpoint to judge — its
-   configuration carries no override, so every capability it issues is
-   `https` to `storage.googleapis.com` — so it clears this bar the same way,
-   through a single flag that a credentialed run flips. Until that run is
-   recorded, GCS advertises no direct transfer and proxies every byte.
+- AWS S3 with its default endpoint or an HTTPS endpoint under
+  `amazonaws.com` or `amazonaws.com.cn`.
+- Cloudflare R2 with an HTTPS endpoint under `r2.cloudflarestorage.com`.
+- Google Cloud Storage through the native API at `storage.googleapis.com`.
 
-   The scheme is part of the test because a presigned URL is a bearer
-   capability to read or write one object: issued over `http`, it and its
-   signed headers would cross the network in cleartext for anyone on the path
-   to replay. So one of these domains on `http` earns no direct transfers,
-   and config validation rejects it outright, by name, saying https is
-   required — reaching a provider's own endpoint without TLS is a
-   misconfiguration rather than a choice. A private gateway on `http` is
-   left alone: it is a legitimate setup that simply earns no direct
-   transfers, for reason 2 above.
+Other S3-compatible endpoints do not receive direct-transfer capabilities.
+There is no configuration override. The service-proxied upload path remains
+available.
 
-Where both hold, the server advertises `core.uploads.direct_put` in its
-capability document and accepts the mode. Everywhere else the feature key is
-absent and beginning that mode answers `not_supported`. There is no override:
-a provider that has not been proven does not get the capability, because the
-provider — not LoonFS — is being trusted to preserve the precondition and
-report stored facts. An implementation passing its own unit tests is not that
-evidence; only a run against the live provider is.
+LoonFS represents checksums as an algorithm and a lowercase hexadecimal value.
+The direct-PUT begin response returns the required algorithm. The client
+calculates that checksum while uploading and sends it at completion. AWS S3
+and R2 use CRC-64/NVME; GCS uses CRC-32C.
 
-The stored digest is provider-specific. The direct-PUT begin response names
-the algorithm, and the client folds it over the bytes while uploading. A
-completion claim in another algorithm is refused. GCS reports CRC-32C; the S3
-family reports CRC-64/NVME. The provider's single-request ceiling is advertised
-as `upload.direct_put_max_content_bytes` — 5 GiB on
-AWS S3, 5 MiB less than that on R2, which documents the smaller single-part
-maximum of the two, and 5 TiB on GCS, which documents one object-size
-maximum and no separate single-request one.[^1]
+The capability document also returns the provider's single-request limit as
+`upload.direct_put_max_content_bytes`. The current limits are 5 GiB for AWS
+S3, 5 MiB less for R2, and 5 TiB for GCS.[^1]
 
-A deployment's `direct_put` issuer and its stored-checksum readback have to
-name the same algorithm, because completion compares one against the other.
-The issuer reports the algorithm directly, and a provider that cannot report a
-stored checksum cannot offer `direct_put`.
+Every provider that supports direct writes also supports direct reads. This
+ensures that an object too large for a proxied upload can also be downloaded
+without passing through the server.
 
-Browser callers reading or writing through these URLs need CORS configured on
-the bucket or container itself; LoonFS issues the capability and the provider
-serves the request, so the provider's CORS rules are the ones that apply.
-
-This never weakens ordinary uploads. The server-mediated upload path is
-available on every supported store and is the default wherever direct-put is
-not offered.
-
-**Direct reads travel with direct writes, and the rule is symmetry.** A
-deployment must be able to serve back whatever it let a client create. A
-proxied read buffers the whole file for one response and refuses anything
-past `download.max_content_bytes`, so a store that can presign writes and
-not reads could hold an object it had no way to return. That is why the read
-is not optional in the bundle a provider constructs: any deployment offering
-a direct write offers `core.downloads.direct_get` too, and one offering no
-direct transfer at all cannot presign an upload either, so nothing larger
-than it will proxy can be created through it. A presigned read binds nothing
-beyond the object key; a client checks the arriving bytes against the content
-reference the grant carried.
-
-| Provider | `direct_get` | `direct_put` | `direct_multipart` | Signed write | Proven endpoints |
+| Provider | `direct_get` | `direct_put` | `direct_multipart` | Direct PUT contract | Proven endpoints |
 | --- | --- | --- | --- | --- | --- |
-| AWS S3 | Yes | Yes | Yes | SigV4, SHA-256, `if-none-match: *` | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
-| Cloudflare R2 | Yes | Yes | Yes | SigV4, SHA-256, `if-none-match: *` | `r2.cloudflarestorage.com` |
+| AWS S3 | Yes | Yes | Yes | SigV4, `if-none-match: *`, stored CRC-64/NVME | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
+| Cloudflare R2 | Yes | Yes | Yes | SigV4, `if-none-match: *`, stored CRC-64/NVME | `r2.cloudflarestorage.com` |
 | Other S3-compatible endpoints | No | No | No | n/a | None — unproven |
-| Google Cloud Storage | Yes[^47] | Yes[^47] | No | GOOG4-RSA-SHA256, CRC-32C, generation 0 | `storage.googleapis.com` (no override exists) |
+| Google Cloud Storage | Yes[^47] | Yes[^47] | No | GOOG4-RSA-SHA256, generation 0, stored CRC-32C | `storage.googleapis.com` (no override exists) |
 | Azure Blob Storage | No | No | No | n/a | n/a |
 | Local filesystem | No | No | No | n/a | n/a |
 
-The three transfer columns are separate because they are separate offers.
-`direct_get` comes with the bundle existing at all, and the two write
-directions are independent of each other: GCS is the case that makes this
-concrete, signing whole-object writes and reads while advertising
-`direct_put` and not `direct_multipart`.
+The GCS adapter uses native V4 signed URLs. It does not use the GCS
+S3-interoperability API or implement multipart uploads, even though GCS
+documents an XML multipart API.[^46]
 
-That is a decision about this adapter, not a gap in the provider. Google
-does document an XML API multipart upload, and documents it as compatible
-with the S3 multipart API.[^46] This adapter does not implement it, for two
-reasons:
-
-- It is part of the same S3-interoperability surface whose precondition
-  handling conformance found unsound. Nothing has been run to show that
-  *this* corner of it behaves, and the create-only and checksum guarantees
-  direct transfers rest on are exactly what was wrong on the surface next to
-  it. It would need its own conformance run to earn the same trust the
-  native path is earning.
-- The large-object path GCS is headed for is the native resumable upload,
-  not S3-style parts. Implementing the interop multipart now would be
-  building the transport we intend to replace.
-
-Nothing is stranded meanwhile: GCS's single-request ceiling is 1000x the S3
-family's, so there is no object size at which the whole-object write stops
-being expressible. A client's upload ladder falls from parts, to one
-whole-object write, to the proxy, and refuses a payload none of them can
-carry rather than pushing it into the capped proxy.
+Browser clients must configure CORS on the bucket because the browser sends
+the transfer request directly to the provider.
 
 ## 4. Incremental writes and where they are real
 

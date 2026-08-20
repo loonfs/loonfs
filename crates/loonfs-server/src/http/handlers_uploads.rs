@@ -650,7 +650,6 @@ fn upload_mode_name(mode: UploadMode) -> &'static str {
 }
 
 #[cfg(test)]
-// Keep the private decoder tests beside the decoder. Route handlers continue below.
 #[allow(clippy::items_after_test_module)]
 mod completion_body_tests {
     use super::*;

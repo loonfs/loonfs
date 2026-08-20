@@ -1,33 +1,24 @@
-//! Upload-session shapes for the v0 HTTP API: transport modes, session
-//! begin/append/complete requests and responses, and the direct-put
-//! presigned-access envelope. Content moves through these shapes; the
-//! metadata that later references it commits through [`super::commits`].
+//! Upload requests and responses for the v0 HTTP API.
 
 use crate::{Checksum, ChecksumAlgorithm, ContentRef, NamespaceId, UploadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// What an upload client claims about a complete payload.
+/// Size and checksum reported by the client for a complete payload.
 ///
-/// The server mints the content object's identity — a client cannot name a
-/// key it has not been given — so a direct upload declares only what it can
-/// know about its own bytes. Direct uploads submit this claim at completion,
-/// when the server verifies it against the stored object.
+/// Direct uploads provide this at completion. The server verifies it against
+/// the object stored by the provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UploadContentClaim {
-    /// Complete byte length the client will write.
+    /// Complete payload size in bytes.
     pub size_bytes: u64,
     /// Whole-payload checksum in the algorithm required by this operation.
     pub checksum: Checksum,
 }
 
-/// What a `direct_multipart` client asks for when it opens a session.
-///
-/// A begin request declares no length and no digest: the session exists to
-/// receive bytes whose length may not be known yet. All it settles is the
-/// geometry the client cuts to.
+/// Options for starting a direct multipart upload.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -35,11 +26,8 @@ pub struct DirectMultipartUploadOptions {
     /// Byte length of every part except the last, or `None` for the
     /// server's default.
     ///
-    /// The value bounds the object: a provider accepts at most 10,000
-    /// parts, so this session can carry at most `part_size_bytes × 10_000`
-    /// bytes. A client that knows its payload is very large asks for a
-    /// larger part size; one that does not know its length at all takes the
-    /// default and keeps asking for part URLs until its stream ends.
+    /// Providers accept at most 10,000 parts, so this value also limits the
+    /// maximum upload size. Clients can request larger parts for large files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_size_bytes: Option<u64>,
 }
@@ -54,9 +42,7 @@ pub enum UploadMode {
     ServiceProxied,
     /// The service mints a short-lived presigned PUT URL for the content object.
     DirectPut,
-    /// The service opens a provider multipart upload for the content object
-    /// and signs one PUT per part, so a large object crosses the network
-    /// once, in parallel, without passing through the server.
+    /// The client uploads parts directly to object storage.
     DirectMultipart,
 }
 
@@ -84,9 +70,7 @@ pub enum BeginUploadRequest {
     /// Write the object in parts through presigned part uploads.
     #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectMultipart"))]
     DirectMultipart {
-        /// Selects the part geometry; absent takes the server's default.
-        /// A multipart upload claims its content at completion, so nothing
-        /// about the payload is declared here.
+        /// Part size options. The server uses its default when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         multipart: Option<DirectMultipartUploadOptions>,
@@ -127,29 +111,24 @@ pub enum ObjectTransferAccess {
     },
 }
 
-/// Presigned direct_put upload details. The raw object key is intentionally not public.
+/// Details for a direct PUT upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectPutUpload {
     /// Checksum algorithm the client must use for its completion claim.
     pub checksum_algorithm: ChecksumAlgorithm,
-    /// Short-lived write capability the client uses without learning the raw object key.
+    /// Short-lived permission to write the object.
     pub access: ObjectTransferAccess,
 }
 
-/// Part geometry returned for a direct multipart upload.
-///
-/// The begin response does not include a content reference or part count
-/// because the final payload is not known yet. The server owns the provider
-/// upload id and returns the content reference only after completion.
+/// Settings returned for a direct multipart upload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectMultipartUpload {
     /// Byte length of every part except the last. At most 10,000 parts may
     /// be uploaded, so this bounds the object at `part_size_bytes × 10_000`.
     pub part_size_bytes: u64,
-    /// Checksum algorithm every part and the complete assembled payload must
-    /// use for this session.
+    /// Checksum algorithm for every part and for the complete payload.
     pub checksum_algorithm: ChecksumAlgorithm,
 }
 
@@ -170,9 +149,8 @@ pub struct UploadPartChecksumClaim {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SignUploadPartsRequest {
-    /// Parts to authorize, each with the checksum the provider will enforce
-    /// on it. Asking again for a part already uploaded is how a client
-    /// retries one: a repeated part is last-write-wins at the provider.
+    /// Parts to authorize and the checksum for each part. Requesting a part
+    /// again replaces the previous upload for that part number.
     pub parts: Vec<UploadPartChecksumClaim>,
 }
 

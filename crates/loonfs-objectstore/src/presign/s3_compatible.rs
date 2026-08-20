@@ -23,11 +23,10 @@ use std::time::{Duration, SystemTime};
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
 const S3_CRC64NVME_CHECKSUM_HEADER: &str = "x-amz-checksum-crc64nvme";
 const S3_CHECKSUM_ALGORITHM_HEADER: &str = "x-amz-checksum-algorithm";
-/// Pins every multipart upload LoonFS opens to a whole-object checksum.
+/// Requests a full-object checksum for multipart uploads.
 ///
-/// Full-object coverage is established here, at creation, rather than read
-/// back later: Cloudflare R2 never reports `x-amz-checksum-type`, so a
-/// reader could not tell a full-object checksum from a composite one.
+/// Cloudflare R2 does not return `x-amz-checksum-type`, so the checksum type
+/// must be set when the multipart upload starts.
 const S3_CHECKSUM_TYPE_HEADER: &str = "x-amz-checksum-type";
 const S3_FULL_OBJECT_CHECKSUM_TYPE: &str = "FULL_OBJECT";
 const S3_CRC64NVME_ALGORITHM: &str = "CRC64NVME";
@@ -76,20 +75,17 @@ pub struct S3PresignerConfig {
     pub direct_put_max_content_bytes: u64,
 }
 
-/// Issues create-only SigV4 PUT capabilities for S3-compatible providers.
+/// Creates SigV4 signed URLs for S3-compatible providers.
 #[derive(Debug, Clone)]
 pub struct S3CompatiblePresigner {
     config: S3PresignerConfig,
 }
 
 impl S3CompatiblePresigner {
-    /// Creates a presigner after validating required bucket, region, and credential values.
+    /// Creates a presigner after validating its configuration.
     ///
-    /// The key prefix is normalized here, through the same helper the
-    /// provider client uses, so the two resolve an object key to the same
-    /// string. They must: a signed write that lands outside the keyspace the
-    /// store reads, lists, and collects creates an object that is committed,
-    /// invisible, and unreclaimable.
+    /// The presigner and provider client use the same key-prefix normalization
+    /// so they address the same object.
     ///
     /// Blank required values and an unusable key prefix fail immediately;
     /// endpoint, content, expiry, and signing-time failures surface when

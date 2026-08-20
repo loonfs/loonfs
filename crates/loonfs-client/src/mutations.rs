@@ -76,11 +76,9 @@ impl Client {
     /// Direct multipart uploads support at most 10,000 parts. Payloads larger
     /// than `part_size_bytes × 10_000` require a larger configured part size.
     ///
-    /// Retrying with a `commit_id` that already committed is safe here in
-    /// the same way it is for [`Self::put_file_bytes`], and by the same
-    /// evidence: this pass measured the payload's length and folded its
-    /// digest, which is what the reconciliation compares. Direct transports
-    /// use the algorithm returned when their upload session begins.
+    /// Retrying with a previously committed `commit_id` is safe for the same
+    /// reason as [`Self::put_file_bytes`]: the client measures the payload and
+    /// calculates the checksum used for reconciliation.
     pub async fn put_file_stream(
         &self,
         spec: &NamespacePath,
@@ -91,13 +89,10 @@ impl Client {
             .await
     }
 
-    /// [`Self::put_file_stream`] for a caller that intends to survive an
-    /// interruption.
+    /// Uploads a stream with optional multipart resume state.
     ///
-    /// For direct multipart, `journal` records the session and each completed
-    /// part. `resume` supplies the state from an earlier attempt so only
-    /// missing parts are uploaded. Proxied and direct-PUT uploads ignore both
-    /// values; direct PUT has no part state and remains a one-pass transfer.
+    /// For multipart uploads, `journal` records completed parts and `resume`
+    /// restores that state. Proxied and direct-PUT uploads ignore both values.
     ///
     /// A resumed multipart attempt still receives the source from the
     /// beginning because the final checksum covers the complete object.

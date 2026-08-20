@@ -76,14 +76,12 @@ impl PayloadSource {
         self.size_bytes
     }
 
-    /// Splits the source into the stream to read and the length it
-    /// declared, for a caller that has to restate it in another crate's
-    /// terms.
+    /// Returns the byte stream and its optional size hint.
     pub fn into_stream(self) -> (PayloadStream, Option<u64>) {
         (self.stream, self.size_bytes)
     }
 
-    /// Replaces the byte stream while preserving its length hint.
+    /// Wraps the byte stream without changing its size hint.
     pub fn map_stream(self, wrap: impl FnOnce(PayloadStream) -> PayloadStream) -> Self {
         Self {
             stream: wrap(self.stream),

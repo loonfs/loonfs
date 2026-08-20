@@ -1,12 +1,4 @@
-//! Issuer contracts and values for presigned direct transfers, in both
-//! directions: the create-only writes `direct_put` authorizes, the parts
-//! `direct_multipart` authorizes, and the reads `direct_get` authorizes.
-//!
-//! Each direction is its own trait, and a store offers the ones it can
-//! actually sign. A provider that signs whole-object writes and reads but
-//! has no S3-style multipart API is spelled by leaving
-//! [`DirectTransferIssuers::multipart`] empty — absence, never a method that
-//! exists and fails.
+//! Interfaces for issuing presigned reads and writes.
 
 use crate::object_store::Result;
 use loonfs_api::{Checksum, ChecksumAlgorithm};
@@ -23,13 +15,7 @@ pub struct PresignedPutRequest<'a> {
     pub expires_in: Duration,
 }
 
-/// Describes one read of an existing content object to authorize for a client.
-///
-/// There is nothing to bind but the key. A write also carries a create-only
-/// precondition because the bytes do not exist yet and the provider is the
-/// only party that can prevent replacement. A read is of bytes this
-/// deployment already verified, and the reader checks what arrives against
-/// the reference it was handed.
+/// Describes one read of an existing content object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresignedGetRequest<'a> {
     /// Logical unscoped object key that the issuer resolves beneath its configured prefix.
@@ -66,7 +52,7 @@ pub struct PresignedUrl {
     pub expires_at_ms: u64,
 }
 
-/// Issues whole-object create-only write capabilities.
+/// Issues create-only write permissions for complete objects.
 ///
 /// - The signed request must be create-only, so an existing object is never
 ///   replaced through a transfer capability (S3-family: a signed
@@ -79,15 +65,14 @@ pub struct PresignedUrl {
 pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
     /// The whole-object checksum this provider stores for a single PUT.
     ///
-    /// The begin response dictates this algorithm to the client. Completion
-    /// compares the client's claim with the provider's stored checksum.
+    /// The begin response returns this algorithm to the client. Completion
+    /// compares the client checksum with the checksum stored by the provider.
     fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm;
 
     /// The largest object this provider accepts in one presigned request.
     ///
-    /// A payload past it has to move some other way, so the deployment
-    /// advertises the number. The begin handler refuses an advisory size over
-    /// it, and completion checks the stored size authoritatively.
+    /// The server can reject a size hint above this limit at begin. Completion
+    /// always checks the actual stored size.
     fn max_content_bytes(&self) -> u64;
 
     /// Issues a create-only write capability for the requested object key.
@@ -106,13 +91,9 @@ pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
 pub trait DirectGetIssuer: Send + Sync + std::fmt::Debug {
     /// Issues a read capability for one content object.
     ///
-    /// One capability serves the whole transfer, however many requests the
-    /// client makes with it. A presigned URL signs a named set of headers,
-    /// and `Range` is not among them — so a reader may range, resume after
-    /// a broken connection, or fetch in parallel windows on the one URL,
-    /// and the signature is unaffected. Implementors must keep it that way:
-    /// signing a `Range` header would bind a capability to one window and
-    /// turn every resumption into another round trip to this server.
+    /// One capability may be used for ranged, resumed, or parallel reads.
+    /// Implementations must not sign the `Range` header, because doing so
+    /// would restrict the capability to one byte range.
     ///
     /// Issuance fails for invalid keys, invalid expiry policy, unusable
     /// signing time, or malformed provider configuration.
@@ -123,21 +104,12 @@ pub trait DirectGetIssuer: Send + Sync + std::fmt::Debug {
     ) -> Result<PresignedUrl>;
 }
 
-/// Issues write capabilities for the parts of an open provider multipart
-/// upload.
-///
-/// Only a provider with an S3-style multipart API — one this server opens,
-/// signs parts against, and completes — implements this. Whole-object
-/// direct writes do not depend on it.
+/// Issues write permissions for an open multipart upload.
 pub trait DirectMultipartIssuer: Send + Sync + std::fmt::Debug {
     /// Issues a write capability for one part of an open multipart upload.
     ///
-    /// A part is not the object, so this one is not create-only: re-issuing
-    /// a part is how a client retries a transfer that failed halfway, and
-    /// the provider takes the last write. What still rides the signature is
-    /// the part's checksum, which both providers enforce on the way in — so
-    /// no part of the eventual object is ever bytes the client did not
-    /// declare.
+    /// Multipart parts are replaceable so clients can retry them. The signed
+    /// request includes the checksum that the provider must enforce.
     fn presign_multipart_part(
         &self,
         request: PresignedPartRequest<'_>,
@@ -145,18 +117,10 @@ pub trait DirectMultipartIssuer: Send + Sync + std::fmt::Debug {
     ) -> Result<PresignedUrl>;
 }
 
-/// What one deployment's store can authorize a client to do directly.
+/// Direct transfers supported by one configured object store.
 ///
-/// A store either offers direct transfers or it does not, and a store that
-/// offers them can always sign a read: a deployment that lets a client write
-/// an object too large to proxy back has to be able to hand that object
-/// back. That is why `get` is not optional here — the symmetry is the type,
-/// not a rule someone has to remember.
-///
-/// The two write directions are independent of it and of each other. A
-/// provider may sign whole-object writes without having an S3-style
-/// multipart API, or serve reads while signing no writes at all; each
-/// feature is advertised from its own field.
+/// Direct reads are required whenever any direct transfer is enabled. Direct
+/// PUT and multipart support are independent and may be absent.
 #[derive(Debug, Clone)]
 pub struct DirectTransferIssuers {
     /// Signs reads of content objects. Always present.

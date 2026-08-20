@@ -26,26 +26,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const AUTH_TOKEN: &str = "test-token";
 const CONTENT_TOKEN_SECRET: &str = "test-content-token-secret";
-/// The part size the reference server hands out. A live payload is cut to
-/// this so it lands on a known part count; the assertions check the server
-/// still says so.
+/// Multipart part size returned by the reference server.
 const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 
-/// The proxy caps the GCS capability suite narrows its deployment to.
-///
-/// Small on purpose: what makes an object one this deployment will not proxy
-/// is the cap rather than the byte count, so the behavior is identical at a
-/// megabyte and at 256 MiB and this suite does not push the larger figure
-/// through a real provider on every run.
+/// Small proxy limit used to test direct transfers with modest payloads.
 const PROXY_CAP_BYTES: u64 = 1024 * 1024;
 
-/// The provider-specific spellings a signed write carries.
-///
-/// Provider-specific create-only spelling and stored checksum algorithm.
+/// Provider-specific create-only header and stored checksum algorithm.
 #[derive(Debug, Clone, Copy)]
 struct SignedWriteHeaders {
     create_only: &'static str,
-    /// The whole-object digest this provider stores.
+    /// Checksum stored for the complete object.
     checksum_algorithm: ChecksumAlgorithm,
 }
 
@@ -61,8 +52,7 @@ const GCS_SIGNED_WRITE: SignedWriteHeaders = SignedWriteHeaders {
     checksum_algorithm: ChecksumAlgorithm::Crc32c,
 };
 
-/// What a direct-put client declares about bytes it is holding, in the
-/// algorithm this deployment advertised.
+/// Builds the completion claim for a direct PUT.
 fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> UploadContentClaim {
     UploadContentClaim {
         size_bytes: bytes.len() as u64,
@@ -70,7 +60,7 @@ fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> UploadContent
     }
 }
 
-/// The presigned write a `direct_put` begin answered with.
+/// Returns the direct PUT details from a begin response.
 fn direct_put_of(begin: &BeginUploadResponse) -> &DirectPutUpload {
     match begin {
         BeginUploadResponse::DirectPut { direct_put, .. } => direct_put,
@@ -359,11 +349,7 @@ async fn assert_wrong_direct_put_bytes_rejected(
     );
 }
 
-/// Verifies that direct uploads reject a missing or changed create-only header.
-///
-/// The provider includes these headers when it verifies the request
-/// signature. Test omission and modification separately because providers
-/// may validate them through different paths.
+/// Verifies that providers reject missing or modified create-only headers.
 async fn assert_direct_put_requires_its_signed_headers(
     client: &Client,
     namespace_id: &NamespaceId,
@@ -652,21 +638,7 @@ fn direct_put_prefix(provider: &str, base_prefix: Option<String>) -> String {
     )
 }
 
-/// The same round trip on Google Cloud Storage, through its native V4 signed
-/// URLs rather than the banned S3-interoperability surface.
-///
-/// Everything above the object-store adapter is the same code path the S3
-/// providers take: the client learns `crc32c` from the capability document,
-/// the begin handler refuses any other algorithm, and completion compares a
-/// stored checksum to a promised one. Only the header spellings differ, and
-/// those are the parameter.
-///
-/// This suite and its sibling below are what earns GCS its capabilities, so
-/// they run before the deployment advertises any: set
-/// `GCS_DIRECT_TRANSFERS_PROVEN` in `loonfs-objectstore`'s `configured.rs`
-/// to `true`, run these against a real bucket, and commit the flip with what
-/// they showed. Against the default build they fail at the capability
-/// assertion, which is the gate working.
+/// Runs the direct PUT round trip through native GCS V4 signed URLs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_direct_put_real_provider_round_trip() {
@@ -683,8 +655,7 @@ async fn gcp_gcs_direct_put_real_provider_round_trip() {
     .await;
 }
 
-/// The GCS proofs the shared round trip does not reach: what the provider
-/// does with capabilities that are scoped, replayed, expired, or ranged.
+/// Tests GCS capability scope, replay protection, expiry, and ranged reads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
@@ -696,10 +667,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
         CONTENT_TOKEN_SECRET,
         "gcs-signed-capabilities",
     );
-    // Narrow both proxy caps so a modest payload is genuinely past them.
-    // What makes an object "too big to proxy" is the cap, not the byte
-    // count, so this suite proves the behavior without moving a gigabyte
-    // through a real provider on every run.
+    // Keep the test payload above both proxy limits without uploading a large file.
     server_config.max_upload_bytes = PROXY_CAP_BYTES;
     server_config.max_download_bytes = PROXY_CAP_BYTES;
     let harness = start_server(server_config).await;

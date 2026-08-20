@@ -1044,8 +1044,6 @@ fn upload_sessions_reject_a_reference_to_another_content_object() {
     );
 }
 
-/// Direct-put session records from before completion claims moved to the
-/// completion request fail with the retired field named in the error.
 #[test]
 fn direct_put_sessions_reject_the_pre_completion_claim_record() {
     let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
@@ -1067,7 +1065,7 @@ fn direct_put_sessions_reject_the_pre_completion_claim_record() {
 }
 
 #[test]
-fn completed_direct_put_sessions_require_the_dictated_algorithm() {
+fn completed_direct_put_sessions_require_the_session_algorithm() {
     let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
@@ -1084,12 +1082,7 @@ fn completed_direct_put_sessions_require_the_dictated_algorithm() {
     );
 }
 
-/// Each transport carries its own details, and carries all of them. A
-/// direct-put session that never recorded its checksum algorithm could not
-/// validate a completion claim; a multipart session missing
-/// its provider upload could not assemble or clean up, and one missing its
-/// checksum algorithm could not safely sign or complete after a restart.
-/// None is a record that decodes.
+/// Rejects upload sessions that omit required transport fields.
 #[test]
 fn upload_sessions_reject_a_transport_missing_its_own_fields() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(

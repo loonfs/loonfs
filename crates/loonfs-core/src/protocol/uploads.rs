@@ -92,7 +92,7 @@ pub struct BeginDirectMultipartUploadTargetResponse {
 pub enum ResolvedUploadCompletion {
     /// The session already contains all required content information.
     KnownContent,
-    /// Direct-PUT content information supplied at completion.
+    /// Content claim supplied when a direct PUT completes.
     DirectPut {
         content: UploadContentClaim,
         max_content_bytes: u64,
@@ -152,7 +152,7 @@ fn upload_mode_name(mode: UploadMode) -> &'static str {
     }
 }
 
-/// Creates the object identity for a direct upload.
+/// Starts a direct PUT session and assigns its content identity.
 pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1366,10 +1366,9 @@ fn already_completed_outcome(
 
 /// What a completion attempt established about the session's content.
 enum CompletionOutcome {
-    /// The object at the session's key matches the completion claim.
+    /// The stored object matches the completion claim.
     Verified(ContentRef),
-    /// The session can never produce valid content. The caller
-    /// makes the session terminal and reports the reason.
+    /// The upload is invalid and must be aborted.
     Unusable(String),
 }
 
@@ -1411,11 +1410,7 @@ fn upload_mode(transport: &UploadSessionTransport) -> UploadMode {
     }
 }
 
-/// Validates a completion request against the upload session's transport.
-///
-/// Direct sessions receive their size and checksum claim at completion while
-/// retaining the server-chosen object identity. The durable session
-/// determines which request form is valid.
+/// Validates a completion request against the session transport.
 fn completion_plan<'a>(
     session: &'a UploadSessionState,
     completion: &'a ResolvedUploadCompletion,
@@ -1744,7 +1739,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_direct_put_requires_its_dictated_algorithm_and_replays_completion() {
+    async fn a_direct_put_requires_the_session_algorithm_and_replays_completion() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");

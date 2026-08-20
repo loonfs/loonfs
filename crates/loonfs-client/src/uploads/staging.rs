@@ -1,4 +1,4 @@
-//! Upload transport selection, multipart driving, and resumable staging state.
+//! Upload transport selection and resumable multipart state.
 
 use super::super::*;
 use futures::StreamExt as _;
@@ -30,7 +30,7 @@ pub struct MultipartUploadResume {
     /// Required part size. A resumed upload must preserve the original
     /// boundaries so new parts align with completed parts.
     pub part_size_bytes: u64,
-    /// Checksum algorithm frozen into the upload session when it began.
+    /// Checksum algorithm chosen when the upload session began.
     pub checksum_algorithm: ChecksumAlgorithm,
     /// Metadata for parts that have already been uploaded.
     pub parts: Vec<CompletedUploadPart>,
@@ -114,7 +114,7 @@ impl DirectPutBody<'_> {
     }
 }
 
-/// Size and checksum observed from the exact stream sent in one direct PUT.
+/// Size and checksum of the bytes sent in one direct PUT.
 struct DirectPutObservation {
     size_bytes: u64,
     checksum: Option<StreamingChecksum>,
@@ -340,9 +340,7 @@ impl Client {
         }
     }
 
-    /// Stages a streamed payload through one presigned whole-object write.
-    ///
-    /// The source is checksummed as the presigned request consumes it.
+    /// Streams a payload through one presigned PUT while calculating its checksum.
     async fn stage_source_via_direct_put(
         &self,
         namespace_id: &NamespaceId,
@@ -354,8 +352,8 @@ impl Client {
 
     /// Selects an initial transport from an optional size hint.
     ///
-    /// Size hints never reject an upload locally. Direct PUT and proxied
-    /// upload let the server enforce their limits.
+    /// Size hints do not cause local rejection. The server checks the final
+    /// size for direct PUT and proxied uploads.
     async fn provisional_transport(&self, size_hint: Option<u64>) -> Result<UploadTransport> {
         let capabilities = self.capabilities().await?;
         Ok(match Self::transport_for(&capabilities, size_hint) {
@@ -443,8 +441,6 @@ impl Client {
     }
 
     /// Uploads in-memory bytes directly to object storage.
-    ///
-    /// The completion claim describes the bytes sent in the request.
     async fn stage_bytes_via_direct_put(
         &self,
         namespace_id: &NamespaceId,
@@ -456,8 +452,7 @@ impl Client {
 
     /// Opens a `direct_put` session, writes its object, and completes it.
     ///
-    /// A failed transfer aborts the session so it does not remain open for
-    /// garbage collection.
+    /// Aborts the session if the transfer fails.
     async fn direct_put_transfer(
         &self,
         namespace_id: &NamespaceId,

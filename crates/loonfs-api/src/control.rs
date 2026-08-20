@@ -575,7 +575,7 @@ pub enum UploadSessionTransport {
     },
     /// The client writes the whole object through one presigned request.
     DirectPut {
-        /// Checksum algorithm frozen when the session began.
+        /// Checksum algorithm chosen when the session began.
         checksum_algorithm: ChecksumAlgorithm,
     },
     /// The client uploads parts and the provider assembles the object.
@@ -596,8 +596,8 @@ pub enum UploadSessionTransport {
         /// from here rather than being told a second, possibly different,
         /// one. Zero is not a geometry, so it is not representable.
         part_size_bytes: NonZeroU64,
-        /// Checksum algorithm frozen when the session began. Part signing
-        /// and completion must use this decision after any process restart.
+        /// Checksum algorithm chosen when the session began. Part signing and
+        /// completion continue to use it after a restart.
         checksum_algorithm: ChecksumAlgorithm,
     },
 }
