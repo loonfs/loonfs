@@ -28,8 +28,7 @@ const HOP_BY_HOP_HEADERS = [
     "upgrade",
 ] as const;
 
-// Source: docs/specs/openapi-proxy.json, derived from PROXY_OPERATIONS in
-// crates/loonfs-server/src/bin/loonfs-openapi/openapi_postprocess.rs.
+// These routes must match docs/specs/openapi-proxy.json.
 export interface ProxyRouteTemplate {
     operation: string;
     method: "GET" | "POST" | "PUT";
@@ -78,9 +77,7 @@ const PROXY_ROUTES: readonly ProxyRoute[] = PROXY_ROUTE_TABLE.map((entry) => ({
     mountScoped: entry.template.includes("{mount}"),
 }));
 
-/**
- * Creates a fetch-compatible handler for the browser-facing LoonFS proxy API.
- */
+/** Creates a fetch-compatible handler for LoonFS browser requests. */
 export function createProxyHandler(config: ProxyConfig): (request: Request) => Promise<Response> {
     const serverBaseUrl = new URL(config.serverBaseUrl);
     serverBaseUrl.search = "";
@@ -181,10 +178,10 @@ function forwardedHeaders(source: Headers, extra: readonly string[]): Headers {
     return headers;
 }
 
-// Application cookies never cross into LoonFS requests.
+// Do not forward application cookies to LoonFS.
 const REQUEST_STRIPPED_HEADERS = ["cookie"] as const;
-// fetch decompresses upstream bodies, so the encoding and length headers no
-// longer describe the forwarded stream; session cookies never cross back.
+// Fetch decompresses responses, so remove the old encoding and length headers.
+// Do not forward LoonFS cookies to the application.
 const RESPONSE_STRIPPED_HEADERS = ["content-encoding", "content-length", "set-cookie"] as const;
 
 function notFound(): Response {

@@ -1,4 +1,4 @@
-"""Framework-free ASGI proxy for mount-scoped LoonFS requests."""
+"""ASGI handler for forwarding LoonFS browser requests."""
 
 from __future__ import annotations
 
@@ -29,8 +29,7 @@ _HOP_BY_HOP_HEADERS = frozenset(
     }
 )
 
-# Source: docs/specs/openapi-proxy.json, whose operation set comes from
-# PROXY_OPERATIONS in openapi_postprocess.rs.
+# These routes must match docs/specs/openapi-proxy.json.
 ROUTES: tuple[tuple[str, str, str], ...] = (
     ("capabilities", "GET", "/v0/capabilities"),
     ("list_changes", "GET", "/v0/mounts/{mount}/changes"),
@@ -78,10 +77,9 @@ def _connection_headers(headers: list[tuple[bytes, bytes]]) -> set[bytes]:
     return names
 
 
-# The host belongs to the configured server, and application cookies never
-# cross into LoonFS requests.
+# Remove the browser-facing host and application cookies before forwarding.
 _REQUEST_EXCLUDED_HEADERS = frozenset({b"host", b"cookie"})
-# Session cookies never cross back to the application.
+# Do not forward LoonFS cookies to the application.
 _RESPONSE_EXCLUDED_HEADERS = frozenset({b"set-cookie"})
 
 
@@ -117,7 +115,7 @@ async def _request_body(receive: _Receive) -> AsyncIterator[bytes]:
 
 
 class LoonFSProxy:
-    """Map approved mount routes to namespace routes and forward them."""
+    """Forward allowed browser routes to their configured namespaces."""
 
     def __init__(
         self,

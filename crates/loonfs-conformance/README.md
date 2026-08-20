@@ -17,9 +17,8 @@ The ten cases cover:
 - an end-to-end filesystem workflow
 - mount-scoped requests through a proxy
 
-The proxy implementations live in the SDK languages, so the proxy case runs in
-each language harness against that language's proxy. The Rust harness checks
-only that the fixture parses.
+Each SDK test harness runs the proxy case against its own proxy implementation.
+The Rust harness only checks that the fixture is valid.
 
 ## JSON format
 

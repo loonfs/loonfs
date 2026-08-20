@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "proxy",
-  "intent": "A proxy terminates mount-scoped requests, maps the mount to its namespace, injects credentials, streams bodies through, and serves only the proxy operations.",
+  "intent": "A proxy maps each mount to a namespace, adds server credentials, streams request and response bodies, and rejects routes outside the proxy API.",
   "family": "proxy",
   "request": {
     "mount": "team-files",
@@ -19,7 +19,7 @@
       "proxied": "conf-proxy-upload-proxied",
       "direct": "conf-proxy-upload-direct"
     },
-    "content_utf8": "proxy conformance payload: bytes that cross two hops unchanged",
+    "content_utf8": "proxy conformance payload",
     "disallowed_path_suffix": "/checkpoints"
   },
   "expected": {

@@ -1,4 +1,4 @@
-// Package proxy forwards the browser proxy API to a LoonFS server.
+// Package proxy forwards LoonFS browser requests to a LoonFS server.
 package proxy
 
 import (
@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Config describes one proxy handler.
+// Config defines a proxy handler.
 type Config struct {
 	ServerBaseURL string
 	Token         string
@@ -29,14 +29,14 @@ type route struct {
 	pattern   string
 }
 
-// Route is one proxied operation: its id, HTTP method, and path template.
+// Route describes one proxied operation.
 type Route struct {
 	Operation string
 	Method    string
 	Template  string
 }
 
-// Routes returns the proxied operations, matching docs/specs/openapi-proxy.json.
+// Routes returns the operations allowed by the proxy API.
 func Routes() []Route {
 	table := make([]Route, 0, len(routes))
 	for _, entry := range routes {
@@ -49,7 +49,7 @@ func Routes() []Route {
 	return table
 }
 
-// Source: docs/specs/openapi-proxy.json.
+// These routes must match docs/specs/openapi-proxy.json.
 var routes = []route{
 	{operation: "capabilities", method: http.MethodGet, pattern: "/v0/capabilities"},
 	{operation: "list_changes", method: http.MethodGet, pattern: "/v0/mounts/{mount}/changes"},
@@ -81,7 +81,7 @@ var hopByHopHeaders = []string{
 	"Upgrade",
 }
 
-// NewHandler validates config and constructs a proxy handler.
+// NewHandler validates the config and returns a proxy handler.
 func NewHandler(config Config) (http.Handler, error) {
 	target, err := validateTarget(config.ServerBaseURL)
 	if err != nil {
@@ -170,8 +170,7 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 	outgoing.Close = false
 	outgoing.Header = request.Header.Clone()
 	removeHopByHopHeaders(outgoing.Header)
-	// The host belongs to the configured server, and application cookies
-	// never cross into LoonFS requests.
+	// Remove the browser-facing host and application cookies before forwarding.
 	outgoing.Header.Del("Host")
 	outgoing.Header.Del("Cookie")
 	outgoing.Header.Set("Authorization", "Bearer "+h.token)
@@ -188,7 +187,7 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 
 	responseHeaders := response.Header.Clone()
 	removeHopByHopHeaders(responseHeaders)
-	// Session cookies never cross back to the application.
+	// Do not forward LoonFS cookies to the application.
 	responseHeaders.Del("Set-Cookie")
 	copyHeaders(responseWriter.Header(), responseHeaders)
 	responseWriter.WriteHeader(response.StatusCode)
