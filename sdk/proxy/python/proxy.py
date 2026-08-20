@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import Any, Dict
 from urllib.parse import quote
 
 import httpx
@@ -12,8 +12,10 @@ import httpx
 __all__ = ["LoonFSProxy", "ROUTES"]
 
 
-_Receive = Callable[[], Awaitable[dict[str, Any]]]
-_Send = Callable[[dict[str, Any]], Awaitable[None]]
+# typing.Dict keeps these runtime-evaluated aliases importable on Python 3.8;
+# builtin generics in aliases need 3.9.
+_Receive = Callable[[], Awaitable[Dict[str, Any]]]
+_Send = Callable[[Dict[str, Any]], Awaitable[None]]
 
 _HOP_BY_HOP_HEADERS = frozenset(
     {
