@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 import httpx
 
-__all__ = ["LoonFSProxy", "ROUTES"]
+__all__ = ["LoonFSProxy"]
 
 
 _Receive = Callable[[], Awaitable[dict[str, Any]]]
@@ -30,7 +30,7 @@ _HOP_BY_HOP_HEADERS = frozenset(
 )
 
 # These routes must match docs/specs/openapi-proxy.json.
-ROUTES: tuple[tuple[str, str, str], ...] = (
+_ROUTE_TEMPLATES: tuple[tuple[str, str, str], ...] = (
     ("capabilities", "GET", "/v0/capabilities"),
     ("list_changes", "GET", "/v0/mounts/{mount}/changes"),
     ("apply_commit", "POST", "/v0/mounts/{mount}/commits"),
@@ -64,7 +64,7 @@ def _pattern_for(template: str) -> re.Pattern[str]:
 
 _COMPILED_ROUTES = tuple(
     (operation, method, _pattern_for(template))
-    for operation, method, template in ROUTES
+    for operation, method, template in _ROUTE_TEMPLATES
 )
 
 

@@ -29,26 +29,6 @@ type route struct {
 	pattern   string
 }
 
-// Route describes one proxied operation.
-type Route struct {
-	Operation string
-	Method    string
-	Template  string
-}
-
-// Routes returns the operations allowed by the proxy API.
-func Routes() []Route {
-	table := make([]Route, 0, len(routes))
-	for _, entry := range routes {
-		table = append(table, Route{
-			Operation: entry.operation,
-			Method:    entry.method,
-			Template:  entry.pattern,
-		})
-	}
-	return table
-}
-
 // These routes must match docs/specs/openapi-proxy.json.
 var routes = []route{
 	{operation: "capabilities", method: http.MethodGet, pattern: "/v0/capabilities"},

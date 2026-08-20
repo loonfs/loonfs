@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
@@ -1856,13 +1857,44 @@ func createDirectoryCommit(
 	}
 }
 
-// The handler's route table and the proxy document must agree exactly, so the
-// table cannot drift from docs/specs/openapi-proxy.json without CI noticing.
-func TestProxyRouteTableMatchesTheDocument(t *testing.T) {
+func instantiateProxyDocumentPath(template, mount string) string {
+	segments := strings.Split(template, "/")
+	for index, segment := range segments {
+		if segment == "{mount}" {
+			segments[index] = mount
+		} else if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
+			segments[index] = "x"
+		}
+	}
+	return strings.Join(segments, "/")
+}
+
+// Every documented route must reach the server with the expected path.
+func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 	documentPath := os.Getenv("LOONFS_PROXY_DOCUMENT")
 	if documentPath == "" {
 		t.Skip("run scripts/run-sdk-conformance.sh go")
 	}
+	casesDirectory := os.Getenv("LOONFS_CONFORMANCE_CASES")
+	if casesDirectory == "" {
+		t.Fatal("LOONFS_CONFORMANCE_CASES is not set")
+	}
+	testCases, err := loadCases(casesDirectory)
+	if err != nil {
+		t.Fatalf("load conformance cases: %v", err)
+	}
+	var proxyCase *conformanceCase
+	for index := range testCases {
+		if testCases[index].Name == "proxy" {
+			proxyCase = &testCases[index]
+			break
+		}
+	}
+	if proxyCase == nil {
+		t.Fatal("proxy conformance case is missing")
+	}
+	fixture, _ := decodeCaseValues[proxyCaseRequest, proxyExpected](t, *proxyCase)
+
 	data, err := os.ReadFile(documentPath)
 	if err != nil {
 		t.Fatalf("read proxy document: %v", err)
@@ -1873,24 +1905,98 @@ func TestProxyRouteTableMatchesTheDocument(t *testing.T) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		t.Fatalf("decode proxy document: %v", err)
 	}
-	documented := map[string]bool{}
-	for path, item := range document.Paths {
-		for method := range item {
-			documented[strings.ToUpper(method)+" "+path] = true
+
+	var observedMu sync.Mutex
+	observed := map[string]int{}
+	stub := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		observedMu.Lock()
+		observed[request.Method+" "+request.URL.Path]++
+		observedMu.Unlock()
+		responseWriter.Header().Set("Content-Type", "application/json")
+		responseWriter.WriteHeader(http.StatusOK)
+		_, _ = responseWriter.Write([]byte("{}"))
+	}))
+	defer stub.Close()
+
+	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
+		ServerBaseURL: stub.URL,
+		Token:         "recording-stub-token",
+		Mounts: map[string]string{
+			fixture.Mount: fixture.NamespaceID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create proxy handler: %v", err)
+	}
+	proxyServer := httptest.NewServer(proxyHandler)
+	defer proxyServer.Close()
+
+	expected := map[string]int{}
+	for template, item := range document.Paths {
+		for documentedMethod := range item {
+			method := strings.ToUpper(documentedMethod)
+			path := instantiateProxyDocumentPath(template, fixture.Mount)
+			forwardedTemplate := strings.Replace(
+				template,
+				"/v0/mounts/{mount}",
+				"/v0/namespaces/"+fixture.NamespaceID,
+				1,
+			)
+			forwardedPath := instantiateProxyDocumentPath(forwardedTemplate, fixture.Mount)
+			expected[method+" "+forwardedPath]++
+
+			forwardRequest, err := http.NewRequest(method, proxyServer.URL+path, nil)
+			if err != nil {
+				t.Fatalf("create request for %s %s: %v", method, path, err)
+			}
+			response, err := proxyServer.Client().Do(forwardRequest)
+			if err != nil {
+				t.Fatalf("send request for %s %s: %v", method, path, err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				t.Errorf("%s %s status = %d, want %d", method, path, response.StatusCode, http.StatusOK)
+			}
 		}
 	}
-	table := map[string]bool{}
-	for _, route := range loonfsproxy.Routes() {
-		table[route.Method+" "+route.Template] = true
+
+	observedMu.Lock()
+	recorded := make(map[string]int, len(observed))
+	for key, count := range observed {
+		recorded[key] = count
 	}
-	for key := range documented {
-		if !table[key] {
-			t.Errorf("proxy document route %q is missing from the handler table", key)
+	observedMu.Unlock()
+	for key, count := range expected {
+		if recorded[key] != count {
+			t.Errorf("stub observed %q %d times, want %d", key, recorded[key], count)
 		}
 	}
-	for key := range table {
-		if !documented[key] {
-			t.Errorf("handler route %q is not in the proxy document", key)
+	for key, count := range recorded {
+		if _, ok := expected[key]; !ok {
+			t.Errorf("stub observed unexpected request %q %d times", key, count)
 		}
+	}
+
+	observedBefore := 0
+	for _, count := range recorded {
+		observedBefore += count
+	}
+	undocumentedPath := "/v0/mounts/" + fixture.Mount + fixture.DisallowedPathSuffix
+	response, err := proxyServer.Client().Get(proxyServer.URL + undocumentedPath)
+	if err != nil {
+		t.Fatalf("send undocumented request: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Errorf("undocumented route status = %d, want %d", response.StatusCode, http.StatusNotFound)
+	}
+	observedMu.Lock()
+	observedAfter := 0
+	for _, count := range observed {
+		observedAfter += count
+	}
+	observedMu.Unlock()
+	if observedAfter != observedBefore {
+		t.Errorf("stub observed %d new requests for the undocumented route", observedAfter-observedBefore)
 	}
 }

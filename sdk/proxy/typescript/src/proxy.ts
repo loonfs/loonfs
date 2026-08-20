@@ -29,13 +29,13 @@ const HOP_BY_HOP_HEADERS = [
 ] as const;
 
 // These routes must match docs/specs/openapi-proxy.json.
-export interface ProxyRouteTemplate {
+interface ProxyRouteTemplate {
     operation: string;
     method: "GET" | "POST" | "PUT";
     template: string;
 }
 
-export const PROXY_ROUTE_TABLE: readonly ProxyRouteTemplate[] = [
+const PROXY_ROUTE_TABLE: readonly ProxyRouteTemplate[] = [
     { operation: "capabilities", method: "GET", template: "/v0/capabilities" },
     { operation: "list_changes", method: "GET", template: "/v0/mounts/{mount}/changes" },
     { operation: "apply_commit", method: "POST", template: "/v0/mounts/{mount}/commits" },

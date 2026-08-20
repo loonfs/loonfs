@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import socket
 import threading
 import time
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -40,7 +44,7 @@ from loonfs_sdk import (
     UploadPartChecksumClaim,
     UploadSessionResponse,
 )
-from loonfs_sdk.proxy import ROUTES as PROXY_ROUTES, LoonFSProxy
+from loonfs_sdk.proxy import LoonFSProxy
 from loonfs_sdk.transfers import get_file, put_file
 
 
@@ -912,6 +916,45 @@ def _required_environment(name: str) -> str:
     if not value:
         raise AssertionError(f"{name} is not set")
     return value
+
+
+@contextmanager
+def _serve_asgi(app: Any, thread_name: str) -> Iterator[str]:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    _, port = listener.getsockname()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            log_level="critical",
+            access_log=False,
+            lifespan="on",
+        )
+    )
+    thread = threading.Thread(
+        target=server.run,
+        kwargs={"sockets": [listener]},
+        name=thread_name,
+        daemon=True,
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not server.started:
+            if not thread.is_alive():
+                raise AssertionError("ASGI server stopped during startup")
+            if time.monotonic() >= deadline:
+                raise AssertionError("ASGI server did not start within five seconds")
+            time.sleep(0.01)
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        listener.close()
+        if thread.is_alive():
+            raise AssertionError("ASGI server did not stop within five seconds")
 
 
 def _remove_authorization(request: httpx.Request) -> None:
@@ -1797,17 +1840,81 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     assert removed_entry.deletion_seq == removed.committed_seq
 
 
-def test_proxy_route_table_matches_the_document() -> None:
-    """The route table cannot drift from the proxy document unnoticed."""
-    document_path = os.environ.get("LOONFS_PROXY_DOCUMENT")
-    if not document_path:
-        pytest.skip("run scripts/run-sdk-conformance.sh python")
-    with open(document_path, encoding="utf-8") as handle:
+def test_proxy_forwards_every_documented_route(
+    cases: dict[str, ConformanceCase],
+) -> None:
+    """Every documented route must reach the server with the expected path."""
+    fixture, _ = _decode_proxy(cases["proxy"])
+    with open(_required_environment("LOONFS_PROXY_DOCUMENT"), encoding="utf-8") as handle:
         document = json.load(handle)
-    documented = {
-        f"{method.upper()} {path}"
-        for path, item in document["paths"].items()
-        for method in item
-    }
-    table = {f"{method} {template}" for _operation, method, template in PROXY_ROUTES}
-    assert table == documented
+
+    observed: list[tuple[str, str]] = []
+
+    class RecordingHandler(BaseHTTPRequestHandler):
+        def _record(self) -> None:
+            observed.append((self.command, urlsplit(self.path).path))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        do_GET = _record
+        do_POST = _record
+        do_PUT = _record
+
+        def log_message(self, _format: str, *args: object) -> None:
+            pass
+
+    stub = HTTPServer(("127.0.0.1", 0), RecordingHandler)
+    stub_thread = threading.Thread(
+        target=stub.serve_forever,
+        name="loonfs-python-recording-stub",
+        daemon=True,
+    )
+    stub_thread.start()
+    stub_host, stub_port = stub.server_address
+    proxy = LoonFSProxy(
+        f"http://{stub_host}:{stub_port}",
+        "recording-stub-token",
+        {fixture.mount: fixture.namespace_id},
+    )
+
+    def instantiate(template: str) -> str:
+        return re.sub(
+            r"\{([^/{}]+)\}",
+            lambda match: fixture.mount if match.group(1) == "mount" else "x",
+            template,
+        )
+
+    try:
+        with _serve_asgi(proxy, "loonfs-python-drift-proxy") as proxy_base_url:
+            expected: list[tuple[str, str]] = []
+            with httpx.Client(base_url=proxy_base_url) as client:
+                for template, item in document["paths"].items():
+                    for documented_method in item:
+                        method = documented_method.upper()
+                        path = instantiate(template)
+                        forwarded_template = template.replace(
+                            "/v0/mounts/{mount}",
+                            f"/v0/namespaces/{fixture.namespace_id}",
+                        )
+                        expected.append((method, instantiate(forwarded_template)))
+                        response = client.request(method, path)
+                        assert response.status_code == 200
+
+                assert sorted(observed) == sorted(expected)
+
+                observed_before = list(observed)
+                undocumented_path = (
+                    f"/v0/mounts/{fixture.mount}{fixture.disallowed_path_suffix}"
+                )
+                response = client.get(undocumented_path)
+                assert response.status_code == 404
+                assert observed == observed_before
+    finally:
+        stub.shutdown()
+        stub.server_close()
+        stub_thread.join(timeout=5)
+        if stub_thread.is_alive():
+            raise AssertionError("recording stub did not stop within five seconds")
