@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 type Map = IndexMap<String, Value>;
 
@@ -15,72 +15,24 @@ enum Value {
     Object(Map),
 }
 
-/// Generated SDKs use operation IDs as method names. Keep this list sorted.
-pub(crate) const OPENAPI_OPERATION_IDS: &[&str] = &[
+/// Operations included in the browser proxy document. Keep this table sorted.
+pub(crate) const PROXY_OPERATIONS: &[&str] = &[
     "abort_upload",
     "apply_commit",
     "begin_download",
-    "begin_download_by_inode",
     "begin_upload",
     "capabilities",
     "complete_upload",
-    "create_checkpoint",
-    "create_namespace",
-    "delete_namespace",
-    "disable_grep_index",
-    "enable_grep_index",
-    "fork_namespace",
-    "gc_grep_index",
     "get_file_bytes",
-    "get_file_revision_bytes_by_inode",
-    "get_grep_index_status",
-    "get_metrics",
-    "get_namespace",
-    "get_namespace_diagnostics",
     "get_upload_status",
     "grep",
-    "health",
     "list_changes",
-    "list_checkpoints",
     "list_file_revisions",
-    "list_file_revisions_by_inode",
     "list_path_entries",
     "list_trash",
-    "maintenance_step",
-    "probe_store",
-    "readiness",
-    "release_checkpoint",
     "sign_upload_parts",
-    "stat_inode",
     "stat_path",
     "upload_content",
-];
-
-/// Whether a proxy operation uses a namespace alias path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProxyOperationScope {
-    Unscoped,
-    NamespaceAlias,
-}
-
-/// Operations included in the browser proxy document. Keep this table sorted.
-pub(crate) const PROXY_OPERATIONS: &[(&str, ProxyOperationScope)] = &[
-    ("abort_upload", ProxyOperationScope::NamespaceAlias),
-    ("apply_commit", ProxyOperationScope::NamespaceAlias),
-    ("begin_download", ProxyOperationScope::NamespaceAlias),
-    ("begin_upload", ProxyOperationScope::NamespaceAlias),
-    ("capabilities", ProxyOperationScope::Unscoped),
-    ("complete_upload", ProxyOperationScope::NamespaceAlias),
-    ("get_file_bytes", ProxyOperationScope::NamespaceAlias),
-    ("get_upload_status", ProxyOperationScope::NamespaceAlias),
-    ("grep", ProxyOperationScope::NamespaceAlias),
-    ("list_changes", ProxyOperationScope::NamespaceAlias),
-    ("list_file_revisions", ProxyOperationScope::NamespaceAlias),
-    ("list_path_entries", ProxyOperationScope::NamespaceAlias),
-    ("list_trash", ProxyOperationScope::NamespaceAlias),
-    ("sign_upload_parts", ProxyOperationScope::NamespaceAlias),
-    ("stat_path", ProxyOperationScope::NamespaceAlias),
-    ("upload_content", ProxyOperationScope::NamespaceAlias),
 ];
 
 /// Retry behavior for generated SDKs.
@@ -91,43 +43,18 @@ pub(crate) enum RetryClass {
     NewAttempt,
 }
 
-/// Pagination fields for cursor list operations. Keep this table sorted.
+/// Cursor list operations supported by generated SDK pagination. Keep this table sorted.
 ///
 /// `list_changes` is excluded because the pinned Go generator cannot combine
 /// its required `after_seq` request value with its optional `next_after_seq`
-/// response value. `gc_grep_index` is excluded because its cursor resumes a
-/// maintenance pass rather than paginating results.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PaginationOperation {
-    pub(crate) operation_id: &'static str,
-    pub(crate) results_field: &'static str,
-}
-
-pub(crate) const PAGINATION_OPERATIONS: &[PaginationOperation] = &[
-    PaginationOperation {
-        operation_id: "grep",
-        results_field: "matches",
-    },
-    PaginationOperation {
-        operation_id: "list_checkpoints",
-        results_field: "checkpoints",
-    },
-    PaginationOperation {
-        operation_id: "list_file_revisions",
-        results_field: "revisions",
-    },
-    PaginationOperation {
-        operation_id: "list_file_revisions_by_inode",
-        results_field: "revisions",
-    },
-    PaginationOperation {
-        operation_id: "list_path_entries",
-        results_field: "entries",
-    },
-    PaginationOperation {
-        operation_id: "list_trash",
-        results_field: "entries",
-    },
+/// response value.
+pub(crate) const PAGINATION_OPERATIONS: &[&str] = &[
+    "grep",
+    "list_checkpoints",
+    "list_file_revisions",
+    "list_file_revisions_by_inode",
+    "list_path_entries",
+    "list_trash",
 ];
 
 impl RetryClass {
@@ -158,12 +85,9 @@ pub(crate) enum OpenapiPostprocessError {
         property: String,
     },
     #[error(
-        "OpenAPI pagination operation `{operation_id}` response property `{results_field}` is not an array"
+        "OpenAPI pagination operation `{operation_id}` response: expected exactly one array property"
     )]
-    PaginationResultsNotArray {
-        operation_id: String,
-        results_field: String,
-    },
+    InvalidPaginationArrayProperties { operation_id: String },
     #[error(
         "OpenAPI operation `{operation_id}` has a `cursor` query parameter but no pagination metadata entry"
     )]
@@ -182,8 +106,6 @@ pub(crate) enum OpenapiPostprocessError {
         "proxy operation `{operation_id}` appears more than once in the full OpenAPI document"
     )]
     DuplicateProxyOperation { operation_id: String },
-    #[error("proxy operation `{operation_id}` has an unexpected path `{path}`")]
-    UnexpectedProxyPath { operation_id: String, path: String },
     #[error("proxy operation `{operation_id}` has no `namespace_id` path parameter")]
     MissingProxyNamespaceParameter { operation_id: String },
     #[error("proxy document references a missing OpenAPI component `{reference}`")]
@@ -272,7 +194,7 @@ pub(crate) fn openapi_json_pretty(
     let derived = serde_json::to_string(document)?;
     let mut document = serde_json::from_str(&derived)?;
     normalize_optional_schemas(&mut document);
-    add_union_discriminators(&mut document);
+    add_union_discriminators(&mut document, &mut Vec::new());
     extract_union_variants(&mut document)?;
     add_operation_retry_classes(&mut document)?;
     add_pagination_metadata(&mut document)?;
@@ -335,7 +257,11 @@ fn derive_proxy_paths(document: &mut Value) -> Result<(), OpenapiPostprocessErro
             .as_object()
             .expect("OpenAPI path item is not an object");
         let mut derived_path_item = Map::new();
-        let mut derived_path = None;
+        let derived_path = match path.strip_prefix(NAMESPACE_PATH_PREFIX) {
+            Some(suffix) => format!("{NAMESPACE_ALIAS_PATH_PREFIX}{suffix}"),
+            None => path.clone(),
+        };
+        let mut retained_operation = false;
 
         for (field, value) in path_item {
             if !HTTP_METHODS.contains(&field.as_str()) {
@@ -347,34 +273,22 @@ fn derive_proxy_paths(document: &mut Value) -> Result<(), OpenapiPostprocessErro
                 .get("operationId")
                 .and_then(Value::as_str)
                 .expect("OpenAPI operation has no operationId");
-            let Some((_, scope)) = PROXY_OPERATIONS
-                .iter()
-                .find(|(candidate, _)| *candidate == operation_id)
-            else {
+            if !PROXY_OPERATIONS.contains(&operation_id) {
                 continue;
-            };
+            }
             if !found_operations.insert(operation_id.to_owned()) {
                 return Err(OpenapiPostprocessError::DuplicateProxyOperation {
                     operation_id: operation_id.to_owned(),
                 });
             }
-
-            let operation_path = proxy_path(operation_id, path, *scope)?;
-            if let Some(existing) = &derived_path {
-                assert_eq!(
-                    existing, &operation_path,
-                    "one path item changed proxy scope"
-                );
-            } else {
-                derived_path = Some(operation_path);
-            }
+            retained_operation = true;
 
             let mut operation = value.clone();
             operation
                 .as_object_mut()
                 .expect("OpenAPI operation is not an object")
                 .shift_remove("security");
-            if *scope == ProxyOperationScope::NamespaceAlias
+            if path.starts_with(NAMESPACE_PATH_PREFIX)
                 && rewrite_namespace_parameters(&mut operation) == 0
             {
                 return Err(OpenapiPostprocessError::MissingProxyNamespaceParameter {
@@ -384,37 +298,20 @@ fn derive_proxy_paths(document: &mut Value) -> Result<(), OpenapiPostprocessErro
             derived_path_item.insert(field.clone(), operation);
         }
 
-        if let Some(derived_path) = derived_path {
+        if retained_operation {
             derived_paths.insert(derived_path, Value::Object(derived_path_item));
         }
     }
 
-    for (operation_id, _) in PROXY_OPERATIONS {
-        if !found_operations.contains(*operation_id) {
+    for &operation_id in PROXY_OPERATIONS {
+        if !found_operations.contains(operation_id) {
             return Err(OpenapiPostprocessError::MissingProxyOperation {
-                operation_id: (*operation_id).to_owned(),
+                operation_id: operation_id.to_owned(),
             });
         }
     }
     *paths = derived_paths;
     Ok(())
-}
-
-fn proxy_path(
-    operation_id: &str,
-    path: &str,
-    scope: ProxyOperationScope,
-) -> Result<String, OpenapiPostprocessError> {
-    match scope {
-        ProxyOperationScope::Unscoped => Ok(path.to_owned()),
-        ProxyOperationScope::NamespaceAlias => path
-            .strip_prefix(NAMESPACE_PATH_PREFIX)
-            .map(|suffix| format!("{NAMESPACE_ALIAS_PATH_PREFIX}{suffix}"))
-            .ok_or_else(|| OpenapiPostprocessError::UnexpectedProxyPath {
-                operation_id: operation_id.to_owned(),
-                path: path.to_owned(),
-            }),
-    }
 }
 
 fn rewrite_namespace_parameters(operation: &mut Value) -> usize {
@@ -592,21 +489,6 @@ fn decode_json_pointer_segment(segment: &str) -> String {
 
 /// Adds `x-loonfs-retry` to every OpenAPI operation.
 fn add_operation_retry_classes(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
-    assert_eq!(
-        OPENAPI_OPERATION_IDS.len(),
-        OPERATION_RETRY_CLASSES.len(),
-        "operation IDs and retry classes must have the same length"
-    );
-    for (registered, (classified, _)) in OPENAPI_OPERATION_IDS
-        .iter()
-        .zip(OPERATION_RETRY_CLASSES.iter())
-    {
-        assert_eq!(
-            registered, classified,
-            "operation IDs and retry classes must use the same order"
-        );
-    }
-
     let paths = document
         .as_object_mut()
         .and_then(|document| document.get_mut("paths"))
@@ -617,7 +499,7 @@ fn add_operation_retry_classes(document: &mut Value) -> Result<(), OpenapiPostpr
         let path_item = path_item
             .as_object_mut()
             .expect("OpenAPI path item is not an object");
-        for method in ["get", "post", "put", "delete", "patch"] {
+        for &method in HTTP_METHODS {
             let Some(operation) = path_item.get_mut(method) else {
                 continue;
             };
@@ -647,37 +529,31 @@ fn add_operation_retry_classes(document: &mut Value) -> Result<(), OpenapiPostpr
 
 /// Adds `x-fern-pagination` to each cursor list operation.
 fn add_pagination_metadata(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
-    validate_pagination_metadata(document)?;
+    let pagination_fields = validate_pagination_metadata(document)?;
 
-    let paths = document
+    let Some(paths) = document
         .as_object_mut()
         .and_then(|document| document.get_mut("paths"))
         .and_then(Value::as_object_mut)
-        .ok_or(OpenapiPostprocessError::InvalidPaginationDocument { location: "paths" })?;
+    else {
+        return Ok(());
+    };
 
-    for (path, path_item) in paths {
-        let path_item = path_item.as_object_mut().ok_or_else(|| {
-            OpenapiPostprocessError::InvalidPaginationPathItem { path: path.clone() }
-        })?;
+    for path_item in paths.values_mut() {
+        let Some(path_item) = path_item.as_object_mut() else {
+            continue;
+        };
         for &method in HTTP_METHODS {
             let Some(operation) = path_item.get_mut(method) else {
                 continue;
             };
-            let operation = operation.as_object_mut().ok_or_else(|| {
-                OpenapiPostprocessError::InvalidPaginationOperation {
-                    method,
-                    path: path.clone(),
-                }
-            })?;
-            let operation_id = operation
-                .get("operationId")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| OpenapiPostprocessError::InvalidPaginationOperation {
-                    method,
-                    path: path.clone(),
-                })?;
-            let Some(metadata) = pagination_operation(&operation_id) else {
+            let Some(operation) = operation.as_object_mut() else {
+                continue;
+            };
+            let Some(operation_id) = operation.get("operationId").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(results_property) = pagination_fields.get(operation_id) else {
                 continue;
             };
 
@@ -692,7 +568,7 @@ fn add_pagination_metadata(document: &mut Value) -> Result<(), OpenapiPostproces
             );
             extension.insert(
                 "results".to_owned(),
-                Value::String(format!("$response.{}", metadata.results_field)),
+                Value::String(format!("$response.{results_property}")),
             );
             operation.insert("x-fern-pagination".to_owned(), Value::Object(extension));
         }
@@ -701,7 +577,9 @@ fn add_pagination_metadata(document: &mut Value) -> Result<(), OpenapiPostproces
     Ok(())
 }
 
-fn validate_pagination_metadata(document: &Value) -> Result<(), OpenapiPostprocessError> {
+fn validate_pagination_metadata(
+    document: &Value,
+) -> Result<BTreeMap<String, String>, OpenapiPostprocessError> {
     let schemas = document
         .get("components")
         .and_then(|components| components.get("schemas"))
@@ -713,7 +591,7 @@ fn validate_pagination_metadata(document: &Value) -> Result<(), OpenapiPostproce
         .get("paths")
         .and_then(Value::as_object)
         .ok_or(OpenapiPostprocessError::InvalidPaginationDocument { location: "paths" })?;
-    let mut found_operations = BTreeSet::new();
+    let mut pagination_fields = BTreeMap::new();
 
     for (path, path_item) in paths {
         let path_item = path_item.as_object().ok_or_else(|| {
@@ -737,40 +615,34 @@ fn validate_pagination_metadata(document: &Value) -> Result<(), OpenapiPostproce
                     path: path.clone(),
                 })?;
             let has_cursor = has_query_parameter(operation, "cursor");
-            let Some(metadata) = pagination_operation(operation_id) else {
+            if !PAGINATION_OPERATIONS.contains(&operation_id) {
                 if has_cursor {
                     return Err(OpenapiPostprocessError::MissingPaginationMetadata {
                         operation_id: operation_id.to_owned(),
                     });
                 }
                 continue;
-            };
-            found_operations.insert(metadata.operation_id);
+            }
 
             if !has_cursor {
                 return Err(OpenapiPostprocessError::MissingPaginationCursorParameter {
                     operation_id: operation_id.to_owned(),
                 });
             }
-            validate_pagination_response(schemas, operation, metadata)?;
+            let results_property = validate_pagination_response(schemas, operation, operation_id)?;
+            pagination_fields.insert(operation_id.to_owned(), results_property);
         }
     }
 
-    for metadata in PAGINATION_OPERATIONS {
-        if !found_operations.contains(metadata.operation_id) {
+    for &operation_id in PAGINATION_OPERATIONS {
+        if !pagination_fields.contains_key(operation_id) {
             return Err(OpenapiPostprocessError::MissingPaginationOperation {
-                operation_id: metadata.operation_id.to_owned(),
+                operation_id: operation_id.to_owned(),
             });
         }
     }
 
-    Ok(())
-}
-
-fn pagination_operation(operation_id: &str) -> Option<&'static PaginationOperation> {
-    PAGINATION_OPERATIONS
-        .iter()
-        .find(|metadata| metadata.operation_id == operation_id)
+    Ok(pagination_fields)
 }
 
 fn has_query_parameter(operation: &Map, parameter_name: &str) -> bool {
@@ -788,8 +660,8 @@ fn has_query_parameter(operation: &Map, parameter_name: &str) -> bool {
 fn validate_pagination_response(
     schemas: &Map,
     operation: &Map,
-    metadata: &PaginationOperation,
-) -> Result<(), OpenapiPostprocessError> {
+    operation_id: &str,
+) -> Result<String, OpenapiPostprocessError> {
     let response_schema = operation
         .get("responses")
         .and_then(|responses| responses.get("200"))
@@ -802,7 +674,7 @@ fn validate_pagination_response(
         .and_then(Value::as_object)
         .ok_or_else(
             || OpenapiPostprocessError::MissingPaginationResponseSchema {
-                operation_id: metadata.operation_id.to_owned(),
+                operation_id: operation_id.to_owned(),
             },
         )?;
     let properties = response_schema
@@ -810,41 +682,32 @@ fn validate_pagination_response(
         .and_then(Value::as_object)
         .ok_or_else(
             || OpenapiPostprocessError::MissingPaginationResponseSchema {
-                operation_id: metadata.operation_id.to_owned(),
+                operation_id: operation_id.to_owned(),
             },
         )?;
 
-    for property in ["next_cursor", metadata.results_field] {
-        if !properties.contains_key(property) {
-            return Err(OpenapiPostprocessError::MissingPaginationResponseProperty {
-                operation_id: metadata.operation_id.to_owned(),
-                property: property.to_owned(),
-            });
-        }
-    }
-    if properties
-        .get(metadata.results_field)
-        .and_then(|property| property.get("type"))
-        .and_then(Value::as_str)
-        != Some("array")
-    {
-        return Err(OpenapiPostprocessError::PaginationResultsNotArray {
-            operation_id: metadata.operation_id.to_owned(),
-            results_field: metadata.results_field.to_owned(),
+    if !properties.contains_key("next_cursor") {
+        return Err(OpenapiPostprocessError::MissingPaginationResponseProperty {
+            operation_id: operation_id.to_owned(),
+            property: "next_cursor".to_owned(),
         });
     }
 
-    Ok(())
-}
+    let mut array_properties = properties.iter().filter_map(|(name, property)| {
+        (property.get("type").and_then(Value::as_str) == Some("array")).then_some(name)
+    });
+    let Some(results_property) = array_properties.next() else {
+        return Err(OpenapiPostprocessError::InvalidPaginationArrayProperties {
+            operation_id: operation_id.to_owned(),
+        });
+    };
+    if array_properties.next().is_some() {
+        return Err(OpenapiPostprocessError::InvalidPaginationArrayProperties {
+            operation_id: operation_id.to_owned(),
+        });
+    }
 
-/// Removes `null` from schemas for values that are omitted when absent.
-fn normalize_optional_schemas(document: &mut Value) {
-    normalize_optional_schemas_in(document);
-}
-
-/// Adds discriminators that utoipa 5.5 omits from tagged unions.
-fn add_union_discriminators(document: &mut Value) {
-    visit(document, &mut Vec::new());
+    Ok(results_property.to_owned())
 }
 
 /// Moves inline union variants into `components.schemas`.
@@ -970,7 +833,7 @@ fn fixed_discriminator_value(variant: &Value, property_name: &str) -> Option<Str
 
 fn component_schema_for_reference<'a>(schemas: &'a Map, reference: &str) -> Option<&'a Value> {
     let encoded_name = reference.strip_prefix("#/components/schemas/")?;
-    let schema_name = encoded_name.replace("~1", "/").replace("~0", "~");
+    let schema_name = decode_json_pointer_segment(encoded_name);
     schemas.get(&schema_name)
 }
 
@@ -995,7 +858,7 @@ fn pascal_case(value: &str) -> String {
         .collect()
 }
 
-fn normalize_optional_schemas_in(value: &mut Value) {
+fn normalize_optional_schemas(value: &mut Value) {
     match value {
         Value::Object(object) => {
             let required = object
@@ -1041,12 +904,12 @@ fn normalize_optional_schemas_in(value: &mut Value) {
             }
 
             for child in object.values_mut() {
-                normalize_optional_schemas_in(child);
+                normalize_optional_schemas(child);
             }
         }
         Value::Array(values) => {
             for child in values {
-                normalize_optional_schemas_in(child);
+                normalize_optional_schemas(child);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
@@ -1080,7 +943,7 @@ fn is_null_schema(value: &Value) -> bool {
     object.len() == 1 && object.get("type").and_then(Value::as_str) == Some("null")
 }
 
-fn visit(value: &mut Value, path: &mut Vec<String>) {
+fn add_union_discriminators(value: &mut Value, path: &mut Vec<String>) {
     match value {
         Value::Object(object) => {
             if let Some(discriminator) = discriminator_for(object, path) {
@@ -1089,14 +952,14 @@ fn visit(value: &mut Value, path: &mut Vec<String>) {
 
             for (name, child) in object {
                 path.push(name.clone());
-                visit(child, path);
+                add_union_discriminators(child, path);
                 path.pop();
             }
         }
         Value::Array(values) => {
             for (index, child) in values.iter_mut().enumerate() {
                 path.push(index.to_string());
-                visit(child, path);
+                add_union_discriminators(child, path);
                 path.pop();
             }
         }
@@ -1239,7 +1102,7 @@ mod tests {
             }
         }));
 
-        add_union_discriminators(&mut document);
+        add_union_discriminators(&mut document, &mut Vec::new());
         extract_union_variants(&mut document).expect("extract union variants");
         let actual = unordered(&document);
         assert_eq!(
@@ -1278,7 +1141,7 @@ mod tests {
         );
 
         let once = document.clone();
-        add_union_discriminators(&mut document);
+        add_union_discriminators(&mut document, &mut Vec::new());
         extract_union_variants(&mut document).expect("extract union variants again");
         assert_eq!(document, once);
     }
@@ -1300,7 +1163,7 @@ mod tests {
             }
         }));
 
-        add_union_discriminators(&mut document);
+        add_union_discriminators(&mut document, &mut Vec::new());
         let error = extract_union_variants(&mut document)
             .expect_err("different component content should fail generation");
         assert!(matches!(
@@ -1330,7 +1193,7 @@ mod tests {
             }
         }));
 
-        add_union_discriminators(&mut document);
+        add_union_discriminators(&mut document, &mut Vec::new());
         extract_union_variants(&mut document).expect("reuse identical component schema");
         assert_eq!(
             unordered(&document).pointer("/components/schemas/Choice/oneOf/0/$ref"),
@@ -1366,7 +1229,7 @@ mod tests {
 
         let error = add_pagination_metadata(&mut document)
             .expect_err("missing pagination operation should fail generation");
-        let expected_operation_id = PAGINATION_OPERATIONS[0].operation_id;
+        let expected_operation_id = PAGINATION_OPERATIONS[0];
         assert!(matches!(
             error,
             OpenapiPostprocessError::MissingPaginationOperation { operation_id }
@@ -1473,7 +1336,7 @@ mod tests {
             ]
         }));
 
-        add_union_discriminators(&mut document);
+        add_union_discriminators(&mut document, &mut Vec::new());
         assert!(document.get("discriminator").is_none());
     }
 }

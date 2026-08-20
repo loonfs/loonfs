@@ -2,7 +2,7 @@
 # Output is written locally through Docker.
 api:
   specs:
-    - openapi: ../../docs/specs/openapi.json
+    - openapi: ../../../../docs/specs/openapi.json
 groups:
   go:
     generators:
@@ -14,7 +14,7 @@ groups:
           packageName: loonfs
         output:
           location: local-file-system
-          path: ../generated/go
+          path: ../../../generated/go
   python:
     generators:
       - name: fernapi/fern-python-sdk
@@ -24,7 +24,7 @@ groups:
           package_name: loonfs_sdk
         output:
           location: local-file-system
-          path: ../generated/python
+          path: ../../../generated/python
   typescript:
     generators:
       - name: fernapi/fern-typescript-sdk
@@ -33,4 +33,4 @@ groups:
           namespaceExport: LoonFS
         output:
           location: local-file-system
-          path: ../generated/typescript
+          path: ../../../generated/typescript

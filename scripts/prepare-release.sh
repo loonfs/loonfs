@@ -102,7 +102,7 @@ mv "$chart.tmp" "$chart"
 # Regenerate both documents because they include the release version.
 # Cargo also refreshes Cargo.lock while building the OpenAPI generator.
 cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- \
-    --proxy-output "$proxy_spec" "$spec"
+    "$spec" "$proxy_spec"
 
 # Run the version checks used by the release workflow.
 resolved=$(cargo pkgid -p loonfs-cli | sed 's/.*#//')

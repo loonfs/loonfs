@@ -3,8 +3,8 @@
 # Requires Docker. Output is written to the untracked sdk/generated directory.
 #
 # Usage: scripts/generate-sdks.sh [go|python|typescript|typescript-client]
-# With no argument, validates both Fern workspaces and generates every SDK.
-# The browser client uses the proxy document and the sdk/fern-client workspace.
+# With no argument, validates both Fern APIs and generates every SDK.
+# The browser client uses the proxy document and the browser Fern API.
 # Handwritten files under sdk/transfers/<language> are copied into each SDK
 # after generation.
 
@@ -14,7 +14,6 @@ FERN_CLI_VERSION="5.98.3"
 cd "$(dirname "$0")/../sdk"
 
 npx --yes "fern-api@${FERN_CLI_VERSION}" check
-(cd fern-client && npx --yes "fern-api@${FERN_CLI_VERSION}" check)
 
 overlay_handwritten() {
     if [ -d "transfers/$1" ]; then
@@ -27,12 +26,10 @@ overlay_handwritten() {
 }
 
 generate_group() {
+    api=server
+    [ "$1" = "typescript-client" ] && api=browser
     rm -rf "generated/$1"
-    if [ "$1" = "typescript-client" ]; then
-        (cd fern-client && npx --yes "fern-api@${FERN_CLI_VERSION}" generate --force --local --group "$1")
-    else
-        npx --yes "fern-api@${FERN_CLI_VERSION}" generate --force --local --group "$1"
-    fi
+    npx --yes "fern-api@${FERN_CLI_VERSION}" generate --force --local --api "$api" --group "$1"
     overlay_handwritten "$1"
 }
 

@@ -54,17 +54,36 @@ jobs:
       - run: cargo test --all --locked
       - run: cargo test -p loonfs-server --features openapi --locked openapi
 
-  sdk-conformance-go:
-    name: SDK conformance (Go)
+  sdk-conformance:
+    name: SDK conformance (${{ matrix.display }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            display: Go
+          - language: python
+            display: Python
+          - language: typescript
+            display: TypeScript
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
+        if: matrix.language == 'go'
         with:
           go-version: 1.22.x
           cache: false
-      - run: scripts/generate-sdks.sh go
+      - uses: actions/setup-python@v5
+        if: matrix.language == 'python'
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        if: matrix.language == 'typescript'
+        with:
+          node-version: '20'
       - uses: actions/cache@v4
+        if: matrix.language == 'go'
         with:
           path: |
             ~/.cache/go-build
@@ -72,49 +91,13 @@ jobs:
           key: ${{ runner.os }}-go-sdk-conformance-${{ hashFiles('sdk/generated/go/go.sum', 'sdk/conformance/go/go.mod') }}
           restore-keys: ${{ runner.os }}-go-sdk-conformance-
       - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-sdk-conformance-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-sdk-conformance-
-      - run: scripts/run-sdk-conformance.sh go
-
-  sdk-conformance-python:
-    name: SDK conformance (Python)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: scripts/generate-sdks.sh python
-      - uses: actions/cache@v4
+        if: matrix.language == 'python'
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-python-sdk-conformance-${{ hashFiles('sdk/conformance/python/requirements.txt') }}
           restore-keys: ${{ runner.os }}-python-sdk-conformance-
       - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-sdk-conformance-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-sdk-conformance-
-      - run: scripts/run-sdk-conformance.sh python
-
-  sdk-conformance-typescript:
-    name: SDK conformance (TypeScript)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - run: scripts/generate-sdks.sh typescript
-      - uses: actions/cache@v4
+        if: matrix.language == 'typescript'
         with:
           path: ~/.npm
           key: ${{ runner.os }}-typescript-sdk-conformance-${{ hashFiles('sdk/conformance/typescript/package.json') }}
@@ -127,18 +110,8 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-sdk-conformance-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-sdk-conformance-
-      - run: scripts/run-sdk-conformance.sh typescript
-
-  sdk-client-typescript:
-    name: SDK browser client (TypeScript)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - run: scripts/generate-sdks.sh typescript-client
-      - run: cd sdk/client-check && npm install --no-fund --no-audit && npm run check
+      - run: scripts/generate-sdks.sh ${{ matrix.language }}
+      - run: scripts/run-sdk-conformance.sh ${{ matrix.language }}
 
   # Checks the declared minimum supported Rust version actually builds the
   # workspace. Keep the toolchain here in sync with `rust-version` in the
