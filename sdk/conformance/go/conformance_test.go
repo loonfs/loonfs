@@ -1857,7 +1857,7 @@ func createDirectoryCommit(
 	}
 }
 
-func instantiateProxyDocumentPath(template, mount string) string {
+func instantiateDocumentPath(template, mount string) string {
 	segments := strings.Split(template, "/")
 	for index, segment := range segments {
 		if segment == "{mount}" {
@@ -1869,11 +1869,25 @@ func instantiateProxyDocumentPath(template, mount string) string {
 	return strings.Join(segments, "/")
 }
 
-// Every documented route must reach the server with the expected path.
+func proxyTemplateForServer(template string) string {
+	const serverNamespacePrefix = "/v0/namespaces/{namespace_id}"
+	const proxyMountPrefix = "/v0/mounts/{mount}"
+	if template == serverNamespacePrefix || strings.HasPrefix(template, serverNamespacePrefix+"/") {
+		return proxyMountPrefix + strings.TrimPrefix(template, serverNamespacePrefix)
+	}
+	return template
+}
+
+// Every proxy route must reach the server.
+// Every excluded server route must stop at the proxy.
 func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
-	documentPath := os.Getenv("LOONFS_PROXY_DOCUMENT")
-	if documentPath == "" {
+	proxyDocumentPath := os.Getenv("LOONFS_PROXY_DOCUMENT")
+	if proxyDocumentPath == "" {
 		t.Skip("run scripts/run-sdk-conformance.sh go")
+	}
+	serverDocumentPath := os.Getenv("LOONFS_SERVER_DOCUMENT")
+	if serverDocumentPath == "" {
+		t.Fatal("LOONFS_SERVER_DOCUMENT is not set")
 	}
 	casesDirectory := os.Getenv("LOONFS_CONFORMANCE_CASES")
 	if casesDirectory == "" {
@@ -1895,15 +1909,25 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 	}
 	fixture, _ := decodeCaseValues[proxyCaseRequest, proxyExpected](t, *proxyCase)
 
-	data, err := os.ReadFile(documentPath)
+	data, err := os.ReadFile(proxyDocumentPath)
 	if err != nil {
 		t.Fatalf("read proxy document: %v", err)
 	}
-	var document struct {
+	var proxyDocument struct {
 		Paths map[string]map[string]json.RawMessage `json:"paths"`
 	}
-	if err := json.Unmarshal(data, &document); err != nil {
+	if err := json.Unmarshal(data, &proxyDocument); err != nil {
 		t.Fatalf("decode proxy document: %v", err)
+	}
+	data, err = os.ReadFile(serverDocumentPath)
+	if err != nil {
+		t.Fatalf("read server document: %v", err)
+	}
+	var serverDocument struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(data, &serverDocument); err != nil {
+		t.Fatalf("decode server document: %v", err)
 	}
 
 	var observedMu sync.Mutex
@@ -1932,17 +1956,19 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 	defer proxyServer.Close()
 
 	expected := map[string]int{}
-	for template, item := range document.Paths {
+	proxyRoutes := map[string]bool{}
+	for template, item := range proxyDocument.Paths {
 		for documentedMethod := range item {
 			method := strings.ToUpper(documentedMethod)
-			path := instantiateProxyDocumentPath(template, fixture.Mount)
+			proxyRoutes[method+" "+template] = true
+			path := instantiateDocumentPath(template, fixture.Mount)
 			forwardedTemplate := strings.Replace(
 				template,
 				"/v0/mounts/{mount}",
 				"/v0/namespaces/"+fixture.NamespaceID,
 				1,
 			)
-			forwardedPath := instantiateProxyDocumentPath(forwardedTemplate, fixture.Mount)
+			forwardedPath := instantiateDocumentPath(forwardedTemplate, fixture.Mount)
 			expected[method+" "+forwardedPath]++
 
 			forwardRequest, err := http.NewRequest(method, proxyServer.URL+path, nil)
@@ -1981,14 +2007,33 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 	for _, count := range recorded {
 		observedBefore += count
 	}
-	undocumentedPath := "/v0/mounts/" + fixture.Mount + fixture.DisallowedPathSuffix
-	response, err := proxyServer.Client().Get(proxyServer.URL + undocumentedPath)
-	if err != nil {
-		t.Fatalf("send undocumented request: %v", err)
-	}
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusNotFound {
-		t.Errorf("undocumented route status = %d, want %d", response.StatusCode, http.StatusNotFound)
+	for serverTemplate, item := range serverDocument.Paths {
+		proxyTemplate := proxyTemplateForServer(serverTemplate)
+		for documentedMethod := range item {
+			method := strings.ToUpper(documentedMethod)
+			if proxyRoutes[method+" "+proxyTemplate] {
+				continue
+			}
+			path := instantiateDocumentPath(proxyTemplate, fixture.Mount)
+			request, err := http.NewRequest(method, proxyServer.URL+path, nil)
+			if err != nil {
+				t.Fatalf("create excluded request for %s %s: %v", method, path, err)
+			}
+			response, err := proxyServer.Client().Do(request)
+			if err != nil {
+				t.Fatalf("send excluded request for %s %s: %v", method, path, err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusNotFound {
+				t.Errorf(
+					"excluded route %s %s status = %d, want %d",
+					method,
+					path,
+					response.StatusCode,
+					http.StatusNotFound,
+				)
+			}
+		}
 	}
 	observedMu.Lock()
 	observedAfter := 0
@@ -1997,6 +2042,6 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 	}
 	observedMu.Unlock()
 	if observedAfter != observedBefore {
-		t.Errorf("stub observed %d new requests for the undocumented route", observedAfter-observedBefore)
+		t.Errorf("stub observed %d requests for excluded server routes", observedAfter-observedBefore)
 	}
 }

@@ -1843,10 +1843,18 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
 def test_proxy_forwards_every_documented_route(
     cases: dict[str, ConformanceCase],
 ) -> None:
-    """Every documented route must reach the server with the expected path."""
+    """Proxy routes must reach the server. Excluded server routes must not."""
     fixture, _ = _decode_proxy(cases["proxy"])
     with open(_required_environment("LOONFS_PROXY_DOCUMENT"), encoding="utf-8") as handle:
-        document = json.load(handle)
+        proxy_document = json.load(handle)
+    with open(_required_environment("LOONFS_SERVER_DOCUMENT"), encoding="utf-8") as handle:
+        server_document = json.load(handle)
+
+    proxy_routes = {
+        (method.upper(), template)
+        for template, item in proxy_document["paths"].items()
+        for method in item
+    }
 
     observed: list[tuple[str, str]] = []
 
@@ -1860,6 +1868,7 @@ def test_proxy_forwards_every_documented_route(
             self.wfile.write(b"{}")
 
         do_GET = _record
+        do_DELETE = _record
         do_POST = _record
         do_PUT = _record
 
@@ -1887,11 +1896,23 @@ def test_proxy_forwards_every_documented_route(
             template,
         )
 
+    def proxy_template_for_server(template: str) -> str:
+        server_namespace_prefix = "/v0/namespaces/{namespace_id}"
+        if template == server_namespace_prefix or template.startswith(
+            f"{server_namespace_prefix}/"
+        ):
+            return template.replace(
+                server_namespace_prefix,
+                "/v0/mounts/{mount}",
+                1,
+            )
+        return template
+
     try:
         with _serve_asgi(proxy, "loonfs-python-drift-proxy") as proxy_base_url:
             expected: list[tuple[str, str]] = []
             with httpx.Client(base_url=proxy_base_url) as client:
-                for template, item in document["paths"].items():
+                for template, item in proxy_document["paths"].items():
                     for documented_method in item:
                         method = documented_method.upper()
                         path = instantiate(template)
@@ -1906,11 +1927,15 @@ def test_proxy_forwards_every_documented_route(
                 assert sorted(observed) == sorted(expected)
 
                 observed_before = list(observed)
-                undocumented_path = (
-                    f"/v0/mounts/{fixture.mount}{fixture.disallowed_path_suffix}"
-                )
-                response = client.get(undocumented_path)
-                assert response.status_code == 404
+                for server_template, item in server_document["paths"].items():
+                    proxy_template = proxy_template_for_server(server_template)
+                    for documented_method in item:
+                        method = documented_method.upper()
+                        if (method, proxy_template) in proxy_routes:
+                            continue
+                        path = instantiate(proxy_template)
+                        response = client.request(method, path)
+                        assert response.status_code == 404, f"{method} {path}"
                 assert observed == observed_before
     finally:
         stub.shutdown()

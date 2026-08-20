@@ -1934,15 +1934,27 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     assert.equal(removedEntry.deletion_seq, removed.committed_seq);
 });
 
-// Every documented route must reach the server with the expected path.
+// Every proxy route must reach the server.
+// Every excluded server route must stop at the proxy.
 test("proxy forwards every documented route", { skip: environmentSkip }, async (context) => {
     assert.ok(cases != null);
     const [fixture] = decodeProxy(caseNamed(cases, "proxy"));
     const documentPath = process.env.LOONFS_PROXY_DOCUMENT;
     assert.ok(documentPath, "LOONFS_PROXY_DOCUMENT is not set");
-    const document = JSON.parse(readFileSync(documentPath, "utf8")) as {
+    const proxyDocument = JSON.parse(readFileSync(documentPath, "utf8")) as {
         paths: Record<string, Record<string, unknown>>;
     };
+    const serverDocumentPath = process.env.LOONFS_SERVER_DOCUMENT;
+    assert.ok(serverDocumentPath, "LOONFS_SERVER_DOCUMENT is not set");
+    const serverDocument = JSON.parse(readFileSync(serverDocumentPath, "utf8")) as {
+        paths: Record<string, Record<string, unknown>>;
+    };
+    const proxyRoutes = new Set<string>();
+    for (const [template, item] of Object.entries(proxyDocument.paths)) {
+        for (const documentedMethod of Object.keys(item)) {
+            proxyRoutes.add(`${documentedMethod.toUpperCase()} ${template}`);
+        }
+    }
 
     const stub = await startRecordingServer();
     context.after(() => stub.close());
@@ -1958,9 +1970,19 @@ test("proxy forwards every documented route", { skip: environmentSkip }, async (
         template.replace(/\{([^/{}]+)\}/g, (_placeholder, name: string) =>
             name === "mount" ? fixture.mount : "x",
         );
+    const proxyTemplateForServer = (template: string): string => {
+        const serverNamespacePrefix = "/v0/namespaces/{namespace_id}";
+        if (
+            template === serverNamespacePrefix ||
+            template.startsWith(`${serverNamespacePrefix}/`)
+        ) {
+            return template.replace(serverNamespacePrefix, "/v0/mounts/{mount}");
+        }
+        return template;
+    };
 
     const expected: string[] = [];
-    for (const [template, item] of Object.entries(document.paths)) {
+    for (const [template, item] of Object.entries(proxyDocument.paths)) {
         for (const documentedMethod of Object.keys(item)) {
             const method = documentedMethod.toUpperCase();
             const path = instantiate(template);
@@ -1977,10 +1999,18 @@ test("proxy forwards every documented route", { skip: environmentSkip }, async (
     assert.deepEqual([...stub.requests].sort(), expected.sort());
 
     const observedBefore = [...stub.requests];
-    const undocumentedPath =
-        `/v0/mounts/${fixture.mount}${fixture.disallowedPathSuffix}`;
-    const response = await fetchThroughProxy(`${proxy.baseUrl}${undocumentedPath}`);
-    assert.equal(response.status, 404);
-    await response.arrayBuffer();
+    for (const [serverTemplate, item] of Object.entries(serverDocument.paths)) {
+        const proxyTemplate = proxyTemplateForServer(serverTemplate);
+        for (const documentedMethod of Object.keys(item)) {
+            const method = documentedMethod.toUpperCase();
+            if (proxyRoutes.has(`${method} ${proxyTemplate}`)) {
+                continue;
+            }
+            const path = instantiate(proxyTemplate);
+            const response = await fetchThroughProxy(`${proxy.baseUrl}${path}`, { method });
+            assert.equal(response.status, 404, `${method} ${path}`);
+            await response.arrayBuffer();
+        }
+    }
     assert.deepEqual(stub.requests, observedBefore);
 });
