@@ -9,6 +9,11 @@ import { test } from "node:test";
 
 import { LoonFS, LoonFSClient } from "../../../generated/typescript/index.js";
 import { getFile, putFile } from "../../../generated/typescript/transfers.js";
+import { LoonFSClient as BrowserLoonFSClient } from "../../../generated/typescript-client/index.js";
+import {
+    getFile as getBrowserFile,
+    putFile as putBrowserFile,
+} from "../../../generated/typescript-client/transfers.js";
 import { createProxyHandler, PROXY_ROUTE_TABLE } from "../../../proxy/typescript/src/proxy.js";
 
 
@@ -1419,6 +1424,22 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const disallowedRoute = await fetchThroughProxy(`${mountBase}${request.disallowedPathSuffix}`);
     assert.equal(disallowedRoute.status, expected.disallowedRouteStatus);
     assert.equal((await disallowedRoute.arrayBuffer()).byteLength, 0);
+
+    const browserClient = new BrowserLoonFSClient({ environment: proxy.baseUrl });
+    const browserPath = `${request.proxiedPath}-browser`;
+    const browserCommit = await putBrowserFile(browserClient, {
+        mount: request.mount,
+        path: browserPath,
+        bytes: payload,
+        actor: request.actor,
+        commit_id: `${request.commitIds.proxied}-browser`,
+    });
+    assert.ok(browserCommit.committed_seq > 0, "browser transfer commit sequence is not positive");
+    const browserFile = await getBrowserFile(browserClient, {
+        mount: request.mount,
+        path: browserPath,
+    });
+    assert.deepEqual(browserFile.bytes, payload);
 });
 
 conformanceTest("changes", async (activeHarness, testCase) => {

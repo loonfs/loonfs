@@ -23,6 +23,10 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 if [ ! -d "$REPO_ROOT/sdk/generated/$LANGUAGE" ]; then
     "$REPO_ROOT/scripts/generate-sdks.sh" "$LANGUAGE"
 fi
+# The TypeScript harness also compiles the browser client and its transfers.
+if [ "$LANGUAGE" = "typescript" ] && [ ! -d "$REPO_ROOT/sdk/generated/typescript-client" ]; then
+    "$REPO_ROOT/scripts/generate-sdks.sh" typescript-client
+fi
 
 cd "$REPO_ROOT"
 cargo build -p loonfs-conformance --bin conformance-server
