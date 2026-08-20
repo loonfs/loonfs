@@ -31,7 +31,7 @@ The specification lives in this folder:
 | `architecture.md` | Orientation | How the durable pieces and the runtime fit together. |
 | `object-storage-providers.md` | Non-normative reference | Provider limits and performance data points that inform the design. |
 | `openapi.json` | Generated reference | Static OpenAPI document for the current v0 HTTP API. |
-| `openapi-proxy.json` | Generated reference | OpenAPI document for browser clients that access namespaces through application mounts. |
+| `openapi-proxy.json` | Generated reference | OpenAPI document for browser clients that access namespaces by alias. |
 
 When something new needs a home: if other implementations must understand it to read or write a store correctly, it belongs in `format.md`. If it is an operation clients call, it belongs in `api.md`. How an implementation organizes its internal work — queues, schedulers, caches — is not specified at all.
 

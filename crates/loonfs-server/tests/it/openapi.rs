@@ -455,7 +455,7 @@ fn proxy_operation_ids_match_the_allowlist() {
 }
 
 #[test]
-fn proxy_paths_use_mounts_and_declare_no_security() {
+fn proxy_paths_use_namespace_aliases_and_declare_no_security() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
     )
@@ -463,7 +463,7 @@ fn proxy_paths_use_mounts_and_declare_no_security() {
     assert_eq!(spec["info"]["title"], "LoonFS Browser Proxy API");
     assert_eq!(
         spec["info"]["description"],
-        "API for browser clients that access namespaces through application mounts."
+        "API for browser clients that access namespaces by alias."
     );
     assert!(spec.get("security").is_none());
     assert!(spec.pointer("/components/securitySchemes").is_none());
@@ -519,16 +519,24 @@ fn proxy_paths_use_mounts_and_declare_no_security() {
                 openapi_postprocess::ProxyOperationScope::Unscoped => {
                     assert_eq!(path, "/v0/capabilities");
                 }
-                openapi_postprocess::ProxyOperationScope::Mount => {
-                    assert!(path.starts_with("/v0/mounts/{mount}/"));
-                    let mount = operation["parameters"]
+                openapi_postprocess::ProxyOperationScope::NamespaceAlias => {
+                    assert!(path.starts_with("/v0/namespace-aliases/{namespace_alias}/"));
+                    let namespace_alias = operation["parameters"]
                         .as_array()
                         .expect("proxy operation parameters")
                         .iter()
-                        .find(|parameter| parameter["in"] == "path" && parameter["name"] == "mount")
-                        .expect("proxy operation mount parameter");
-                    assert_eq!(mount["description"], "Application mount name");
-                    assert_eq!(mount["schema"], serde_json::json!({"type": "string"}));
+                        .find(|parameter| {
+                            parameter["in"] == "path" && parameter["name"] == "namespace_alias"
+                        })
+                        .expect("proxy operation namespace alias parameter");
+                    assert_eq!(
+                        namespace_alias["description"],
+                        "Application namespace alias"
+                    );
+                    assert_eq!(
+                        namespace_alias["schema"],
+                        serde_json::json!({"type": "string"})
+                    );
                 }
             }
         }

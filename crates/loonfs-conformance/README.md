@@ -15,7 +15,7 @@ The ten cases cover:
 - cursor pagination and resumption
 - change feed identity fields
 - an end-to-end filesystem workflow
-- mount-scoped requests through a proxy
+- namespace-alias-scoped requests through a proxy
 
 Each SDK test harness runs the proxy case against its own proxy implementation.
 The Rust harness only checks that the fixture is valid.

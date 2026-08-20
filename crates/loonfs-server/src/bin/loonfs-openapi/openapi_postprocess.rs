@@ -56,31 +56,31 @@ pub(crate) const OPENAPI_OPERATION_IDS: &[&str] = &[
     "upload_content",
 ];
 
-/// Whether a proxy operation uses a mount path.
+/// Whether a proxy operation uses a namespace alias path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProxyOperationScope {
     Unscoped,
-    Mount,
+    NamespaceAlias,
 }
 
 /// Operations included in the browser proxy document. Keep this table sorted.
 pub(crate) const PROXY_OPERATIONS: &[(&str, ProxyOperationScope)] = &[
-    ("abort_upload", ProxyOperationScope::Mount),
-    ("apply_commit", ProxyOperationScope::Mount),
-    ("begin_download", ProxyOperationScope::Mount),
-    ("begin_upload", ProxyOperationScope::Mount),
+    ("abort_upload", ProxyOperationScope::NamespaceAlias),
+    ("apply_commit", ProxyOperationScope::NamespaceAlias),
+    ("begin_download", ProxyOperationScope::NamespaceAlias),
+    ("begin_upload", ProxyOperationScope::NamespaceAlias),
     ("capabilities", ProxyOperationScope::Unscoped),
-    ("complete_upload", ProxyOperationScope::Mount),
-    ("get_file_bytes", ProxyOperationScope::Mount),
-    ("get_upload_status", ProxyOperationScope::Mount),
-    ("grep", ProxyOperationScope::Mount),
-    ("list_changes", ProxyOperationScope::Mount),
-    ("list_file_revisions", ProxyOperationScope::Mount),
-    ("list_path_entries", ProxyOperationScope::Mount),
-    ("list_trash", ProxyOperationScope::Mount),
-    ("sign_upload_parts", ProxyOperationScope::Mount),
-    ("stat_path", ProxyOperationScope::Mount),
-    ("upload_content", ProxyOperationScope::Mount),
+    ("complete_upload", ProxyOperationScope::NamespaceAlias),
+    ("get_file_bytes", ProxyOperationScope::NamespaceAlias),
+    ("get_upload_status", ProxyOperationScope::NamespaceAlias),
+    ("grep", ProxyOperationScope::NamespaceAlias),
+    ("list_changes", ProxyOperationScope::NamespaceAlias),
+    ("list_file_revisions", ProxyOperationScope::NamespaceAlias),
+    ("list_path_entries", ProxyOperationScope::NamespaceAlias),
+    ("list_trash", ProxyOperationScope::NamespaceAlias),
+    ("sign_upload_parts", ProxyOperationScope::NamespaceAlias),
+    ("stat_path", ProxyOperationScope::NamespaceAlias),
+    ("upload_content", ProxyOperationScope::NamespaceAlias),
 ];
 
 /// Retry behavior for generated SDKs.
@@ -303,7 +303,7 @@ pub(crate) fn proxy_openapi_json_pretty(
 
 const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch"];
 const NAMESPACE_PATH_PREFIX: &str = "/v0/namespaces/{namespace_id}";
-const MOUNT_PATH_PREFIX: &str = "/v0/mounts/{mount}";
+const NAMESPACE_ALIAS_PATH_PREFIX: &str = "/v0/namespace-aliases/{namespace_alias}";
 
 fn describe_proxy_document(document: &mut Value) {
     let info = document
@@ -317,9 +317,7 @@ fn describe_proxy_document(document: &mut Value) {
     );
     info.insert(
         "description".to_owned(),
-        Value::String(
-            "API for browser clients that access namespaces through application mounts.".to_owned(),
-        ),
+        Value::String("API for browser clients that access namespaces by alias.".to_owned()),
     );
 }
 
@@ -376,7 +374,7 @@ fn derive_proxy_paths(document: &mut Value) -> Result<(), OpenapiPostprocessErro
                 .as_object_mut()
                 .expect("OpenAPI operation is not an object")
                 .shift_remove("security");
-            if *scope == ProxyOperationScope::Mount
+            if *scope == ProxyOperationScope::NamespaceAlias
                 && rewrite_namespace_parameters(&mut operation) == 0
             {
                 return Err(OpenapiPostprocessError::MissingProxyNamespaceParameter {
@@ -409,9 +407,9 @@ fn proxy_path(
 ) -> Result<String, OpenapiPostprocessError> {
     match scope {
         ProxyOperationScope::Unscoped => Ok(path.to_owned()),
-        ProxyOperationScope::Mount => path
+        ProxyOperationScope::NamespaceAlias => path
             .strip_prefix(NAMESPACE_PATH_PREFIX)
-            .map(|suffix| format!("{MOUNT_PATH_PREFIX}{suffix}"))
+            .map(|suffix| format!("{NAMESPACE_ALIAS_PATH_PREFIX}{suffix}"))
             .ok_or_else(|| OpenapiPostprocessError::UnexpectedProxyPath {
                 operation_id: operation_id.to_owned(),
                 path: path.to_owned(),
@@ -441,10 +439,13 @@ fn rewrite_namespace_parameters(operation: &mut Value) -> usize {
         {
             continue;
         }
-        parameter.insert("name".to_owned(), Value::String("mount".to_owned()));
+        parameter.insert(
+            "name".to_owned(),
+            Value::String("namespace_alias".to_owned()),
+        );
         parameter.insert(
             "description".to_owned(),
-            Value::String("Application mount name".to_owned()),
+            Value::String("Application namespace alias".to_owned()),
         );
         parameter.insert(
             "schema".to_owned(),

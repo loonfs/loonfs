@@ -1,7 +1,7 @@
 # LoonFS TypeScript proxy
 
 `@loonfs/sdk-proxy` provides a fetch-compatible handler for LoonFS browser
-requests. It maps mount names to namespaces, adds the server credential, and
+requests. It maps namespace aliases to namespaces, adds the server credential, and
 forwards only the routes in the proxy API.
 
 The package requires Node 18 or newer and has no runtime dependencies.
@@ -26,7 +26,7 @@ import { createProxyHandler } from "@loonfs/sdk-proxy";
 const handle = createProxyHandler({
     serverBaseUrl: "https://loonfs.example.com",
     token: process.env.LOONFS_TOKEN!,
-    mounts: {
+    namespaceAliases: {
         "team-files": "namespace_123",
     },
 });

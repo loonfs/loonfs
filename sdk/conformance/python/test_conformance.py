@@ -246,9 +246,9 @@ class ProxyCommitIds:
 
 @dataclass(frozen=True)
 class ProxyRequest:
-    mount: str
+    namespace_alias: str
     namespace_id: str
-    unknown_mount: str
+    unknown_namespace_alias: str
     actor: ActorRef
     directory: str
     proxied_path: str
@@ -264,7 +264,7 @@ class ProxyExpected:
     proxied_committed_seq: int
     direct_committed_seq: int
     entry_count: int
-    unknown_mount_status: int
+    unknown_namespace_alias_status: int
     disallowed_route_status: int
 
 
@@ -746,9 +746,9 @@ def _decode_proxy(
     request = _strict_object(
         test_case.request,
         {
-            "mount",
+            "namespace_alias",
             "namespace_id",
-            "unknown_mount",
+            "unknown_namespace_alias",
             "actor",
             "directory",
             "proxied_path",
@@ -771,19 +771,19 @@ def _decode_proxy(
             "proxied_committed_seq",
             "direct_committed_seq",
             "entry_count",
-            "unknown_mount_status",
+            "unknown_namespace_alias_status",
             "disallowed_route_status",
         },
         f"{test_case.name} expected",
     )
     return (
         ProxyRequest(
-            mount=_string(request["mount"], "proxy request.mount"),
+            namespace_alias=_string(request["namespace_alias"], "proxy request.namespace_alias"),
             namespace_id=_string(
                 request["namespace_id"], "proxy request.namespace_id"
             ),
-            unknown_mount=_string(
-                request["unknown_mount"], "proxy request.unknown_mount"
+            unknown_namespace_alias=_string(
+                request["unknown_namespace_alias"], "proxy request.unknown_namespace_alias"
             ),
             actor=_actor(request["actor"], "proxy request.actor"),
             directory=_string(request["directory"], "proxy request.directory"),
@@ -828,9 +828,9 @@ def _decode_proxy(
             entry_count=_integer(
                 expected["entry_count"], "proxy expected.entry_count"
             ),
-            unknown_mount_status=_integer(
-                expected["unknown_mount_status"],
-                "proxy expected.unknown_mount_status",
+            unknown_namespace_alias_status=_integer(
+                expected["unknown_namespace_alias_status"],
+                "proxy expected.unknown_namespace_alias_status",
             ),
             disallowed_route_status=_integer(
                 expected["disallowed_route_status"],
@@ -1010,7 +1010,7 @@ def proxy_harness(
     app = LoonFSProxy(
         _required_environment("LOONFS_CONFORMANCE_URL"),
         _required_environment("LOONFS_CONFORMANCE_TOKEN"),
-        {request.mount: request.namespace_id},
+        {request.namespace_alias: request.namespace_id},
     )
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1184,7 +1184,7 @@ def _proxy_apply_commit(
     if content_token is not None:
         body["content_tokens"] = [content_token]
     response = client.post(
-        f"/v0/mounts/{request.mount}/commits",
+        f"/v0/namespace-aliases/{request.namespace_alias}/commits",
         json=body,
     )
     return CommitResponse(**_proxy_response_json(response, "proxy commit response"))
@@ -1324,7 +1324,7 @@ def test_proxy(
     request, expected = _decode_proxy(cases["proxy"])
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
-    mount_base = f"/v0/mounts/{request.mount}"
+    namespace_alias_base = f"/v0/namespace-aliases/{request.namespace_alias}"
 
     with httpx.Client(
         base_url=proxy_harness.base_url,
@@ -1343,7 +1343,7 @@ def test_proxy(
         assert mkdir.committed_seq == expected.mkdir_committed_seq
 
         proxied_begin_response = client.post(
-            f"{mount_base}/uploads",
+            f"{namespace_alias_base}/uploads",
             json={"mode": "service_proxied"},
         )
         proxied_begin = BeginUploadResponse_ServiceProxied(
@@ -1354,7 +1354,7 @@ def test_proxy(
         )
         split = len(payload) // 2
         uploaded_response = client.put(
-            f"{mount_base}/uploads/{proxied_begin.upload_id}/content",
+            f"{namespace_alias_base}/uploads/{proxied_begin.upload_id}/content",
             headers={"Content-Type": "application/octet-stream"},
             content=iter((payload[:split], payload[split:])),
         )
@@ -1365,7 +1365,7 @@ def test_proxy(
             )
         )
         proxied_complete_response = client.post(
-            f"{mount_base}/uploads/{proxied_begin.upload_id}/complete",
+            f"{namespace_alias_base}/uploads/{proxied_begin.upload_id}/complete",
             json={"mode": "service_proxied"},
         )
         proxied_complete_data = _proxy_response_json(
@@ -1397,7 +1397,7 @@ def test_proxy(
         assert proxied_commit.committed_seq == expected.proxied_committed_seq
 
         direct_begin_response = client.post(
-            f"{mount_base}/uploads",
+            f"{namespace_alias_base}/uploads",
             json={"mode": "direct_put", "size_bytes": len(payload)},
         )
         direct_begin = BeginUploadResponse_DirectPut(
@@ -1420,7 +1420,7 @@ def test_proxy(
             payload,
         )
         direct_complete_response = client.post(
-            f"{mount_base}/uploads/{direct_begin.upload_id}/complete",
+            f"{namespace_alias_base}/uploads/{direct_begin.upload_id}/complete",
             json={
                 "mode": "direct_put",
                 "content": {
@@ -1460,7 +1460,7 @@ def test_proxy(
         assert direct_commit.committed_seq == expected.direct_committed_seq
 
         listing_response = client.get(
-            f"{mount_base}/filesystem/list",
+            f"{namespace_alias_base}/filesystem/list",
             params={"path": request.directory},
         )
         listing = ListPathEntriesResponse(
@@ -1470,21 +1470,21 @@ def test_proxy(
 
         with client.stream(
             "GET",
-            f"{mount_base}/filesystem/content",
+            f"{namespace_alias_base}/filesystem/content",
             params={"path": request.proxied_path},
         ) as read_response:
             read_response.raise_for_status()
             assert b"".join(read_response.iter_raw()) == payload
 
-        unknown_mount = client.get(
-            f"/v0/mounts/{request.unknown_mount}/filesystem/list",
+        unknown_namespace_alias = client.get(
+            f"/v0/namespace-aliases/{request.unknown_namespace_alias}/filesystem/list",
             params={"path": request.directory},
         )
-        assert unknown_mount.status_code == expected.unknown_mount_status
-        assert unknown_mount.content == b""
+        assert unknown_namespace_alias.status_code == expected.unknown_namespace_alias_status
+        assert unknown_namespace_alias.content == b""
 
         disallowed_route = client.get(
-            f"{mount_base}{request.disallowed_path_suffix}"
+            f"{namespace_alias_base}{request.disallowed_path_suffix}"
         )
         assert disallowed_route.status_code == expected.disallowed_route_status
         assert disallowed_route.content == b""
@@ -1886,13 +1886,15 @@ def test_proxy_forwards_every_documented_route(
     proxy = LoonFSProxy(
         f"http://{stub_host}:{stub_port}",
         "recording-stub-token",
-        {fixture.mount: fixture.namespace_id},
+        {fixture.namespace_alias: fixture.namespace_id},
     )
 
     def instantiate(template: str) -> str:
         return re.sub(
             r"\{([^/{}]+)\}",
-            lambda match: fixture.mount if match.group(1) == "mount" else "x",
+            lambda match: fixture.namespace_alias
+            if match.group(1) == "namespace_alias"
+            else "x",
             template,
         )
 
@@ -1903,7 +1905,7 @@ def test_proxy_forwards_every_documented_route(
         ):
             return template.replace(
                 server_namespace_prefix,
-                "/v0/mounts/{mount}",
+                "/v0/namespace-aliases/{namespace_alias}",
                 1,
             )
         return template
@@ -1917,7 +1919,7 @@ def test_proxy_forwards_every_documented_route(
                         method = documented_method.upper()
                         path = instantiate(template)
                         forwarded_template = template.replace(
-                            "/v0/mounts/{mount}",
+                            "/v0/namespace-aliases/{namespace_alias}",
                             f"/v0/namespaces/{fixture.namespace_id}",
                         )
                         expected.append((method, instantiate(forwarded_template)))

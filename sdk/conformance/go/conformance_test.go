@@ -1034,16 +1034,16 @@ func equalStrings(left, right []string) bool {
 }
 
 type proxyCaseRequest struct {
-	Mount                string          `json:"mount"`
-	NamespaceID          string          `json:"namespace_id"`
-	UnknownMount         string          `json:"unknown_mount"`
-	Actor                loonfs.ActorRef `json:"actor"`
-	Directory            string          `json:"directory"`
-	ProxiedPath          string          `json:"proxied_path"`
-	DirectPath           string          `json:"direct_path"`
-	CommitIDs            proxyCommitIDs  `json:"commit_ids"`
-	ContentUTF8          string          `json:"content_utf8"`
-	DisallowedPathSuffix string          `json:"disallowed_path_suffix"`
+	NamespaceAlias        string          `json:"namespace_alias"`
+	NamespaceID           string          `json:"namespace_id"`
+	UnknownNamespaceAlias string          `json:"unknown_namespace_alias"`
+	Actor                 loonfs.ActorRef `json:"actor"`
+	Directory             string          `json:"directory"`
+	ProxiedPath           string          `json:"proxied_path"`
+	DirectPath            string          `json:"direct_path"`
+	CommitIDs             proxyCommitIDs  `json:"commit_ids"`
+	ContentUTF8           string          `json:"content_utf8"`
+	DisallowedPathSuffix  string          `json:"disallowed_path_suffix"`
 }
 
 type proxyCommitIDs struct {
@@ -1053,12 +1053,12 @@ type proxyCommitIDs struct {
 }
 
 type proxyExpected struct {
-	MkdirCommittedSeq   int64 `json:"mkdir_committed_seq"`
-	ProxiedCommittedSeq int64 `json:"proxied_committed_seq"`
-	DirectCommittedSeq  int64 `json:"direct_committed_seq"`
-	EntryCount          int   `json:"entry_count"`
-	UnknownMountStatus  int   `json:"unknown_mount_status"`
-	DisallowedStatus    int   `json:"disallowed_route_status"`
+	MkdirCommittedSeq           int64 `json:"mkdir_committed_seq"`
+	ProxiedCommittedSeq         int64 `json:"proxied_committed_seq"`
+	DirectCommittedSeq          int64 `json:"direct_committed_seq"`
+	EntryCount                  int   `json:"entry_count"`
+	UnknownNamespaceAliasStatus int   `json:"unknown_namespace_alias_status"`
+	DisallowedStatus            int   `json:"disallowed_route_status"`
 }
 
 func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
@@ -1067,8 +1067,8 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
 		ServerBaseURL: h.serverBaseURL,
 		Token:         h.serverToken,
-		Mounts: map[string]string{
-			request.Mount: request.NamespaceID,
+		NamespaceAliases: map[string]string{
+			request.NamespaceAlias: request.NamespaceID,
 		},
 	})
 	if err != nil {
@@ -1078,8 +1078,8 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	defer proxyServer.Close()
 
 	createNamespace(t, h.client, request.NamespaceID)
-	mountBaseURL := proxyServer.URL + "/v0/mounts/" + url.PathEscape(request.Mount)
-	mkdir := proxyApplyCommit(t, proxyServer.Client(), mountBaseURL, createDirectoryCommit(
+	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(request.NamespaceAlias)
+	mkdir := proxyApplyCommit(t, proxyServer.Client(), namespaceAliasBaseURL, createDirectoryCommit(
 		request.NamespaceID,
 		request.CommitIDs.Directory,
 		&request.Actor,
@@ -1091,7 +1091,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	payload := []byte(request.ContentUTF8)
-	proxiedBegin := proxyBeginUpload(t, proxyServer.Client(), mountBaseURL, &loonfs.BeginUploadRequest{
+	proxiedBegin := proxyBeginUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.BeginUploadRequest{
 		ServiceProxied: &loonfs.BeginUploadServiceProxied{},
 	})
 	if proxiedBegin.ServiceProxied == nil {
@@ -1102,7 +1102,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		t,
 		proxyServer.Client(),
 		http.MethodPut,
-		mountBaseURL+"/uploads/"+url.PathEscape(proxiedUploadID)+"/content",
+		namespaceAliasBaseURL+"/uploads/"+url.PathEscape(proxiedUploadID)+"/content",
 		bytes.NewReader(payload),
 		"application/octet-stream",
 	)
@@ -1113,7 +1113,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	proxiedCompletion := proxyCompleteUpload(
 		t,
 		proxyServer.Client(),
-		mountBaseURL,
+		namespaceAliasBaseURL,
 		proxiedUploadID,
 		&loonfs.CompleteUploadRequest{
 			ServiceProxied: &loonfs.CompleteUploadServiceProxied{},
@@ -1124,7 +1124,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	proxiedCommit := proxyCommitCompletedFile(
 		t,
 		proxyServer.Client(),
-		mountBaseURL,
+		namespaceAliasBaseURL,
 		request.NamespaceID,
 		request.ProxiedPath,
 		request.CommitIDs.Proxied,
@@ -1137,7 +1137,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	sizeBytes := int64(len(payload))
-	directBegin := proxyBeginUpload(t, proxyServer.Client(), mountBaseURL, &loonfs.BeginUploadRequest{
+	directBegin := proxyBeginUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.BeginUploadRequest{
 		DirectPut: &loonfs.BeginUploadDirectPut{SizeBytes: &sizeBytes},
 	})
 	if directBegin.DirectPut == nil || directBegin.DirectPut.DirectPut == nil {
@@ -1153,7 +1153,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	directCompletion := proxyCompleteUpload(
 		t,
 		proxyServer.Client(),
-		mountBaseURL,
+		namespaceAliasBaseURL,
 		directUploadID,
 		&loonfs.CompleteUploadRequest{
 			DirectPut: &loonfs.CompleteUploadDirectPut{Content: directClaim},
@@ -1163,7 +1163,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	directCommit := proxyCommitCompletedFile(
 		t,
 		proxyServer.Client(),
-		mountBaseURL,
+		namespaceAliasBaseURL,
 		request.NamespaceID,
 		request.DirectPath,
 		request.CommitIDs.Direct,
@@ -1180,7 +1180,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		t,
 		proxyServer.Client(),
 		http.MethodGet,
-		mountBaseURL+"/filesystem/list?"+listingQuery.Encode(),
+		namespaceAliasBaseURL+"/filesystem/list?"+listingQuery.Encode(),
 		nil,
 	)
 	if len(listing.Entries) != expected.EntryCount {
@@ -1192,7 +1192,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		t,
 		proxyServer.Client(),
 		http.MethodGet,
-		mountBaseURL+"/filesystem/content?"+readQuery.Encode(),
+		namespaceAliasBaseURL+"/filesystem/content?"+readQuery.Encode(),
 		nil,
 		"",
 	)
@@ -1209,15 +1209,15 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	unknownStatus := proxyResponseStatus(
 		t,
 		proxyServer.Client(),
-		proxyServer.URL+"/v0/mounts/"+url.PathEscape(request.UnknownMount)+"/filesystem/list",
+		proxyServer.URL+"/v0/namespace-aliases/"+url.PathEscape(request.UnknownNamespaceAlias)+"/filesystem/list",
 	)
-	if unknownStatus != expected.UnknownMountStatus {
-		t.Errorf("unknown mount status = %d, want %d", unknownStatus, expected.UnknownMountStatus)
+	if unknownStatus != expected.UnknownNamespaceAliasStatus {
+		t.Errorf("unknown namespace alias status = %d, want %d", unknownStatus, expected.UnknownNamespaceAliasStatus)
 	}
 	disallowedStatus := proxyResponseStatus(
 		t,
 		proxyServer.Client(),
-		mountBaseURL+request.DisallowedPathSuffix,
+		namespaceAliasBaseURL+request.DisallowedPathSuffix,
 	)
 	if disallowedStatus != expected.DisallowedStatus {
 		t.Errorf("disallowed route status = %d, want %d", disallowedStatus, expected.DisallowedStatus)
@@ -1227,7 +1227,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 func proxyBeginUpload(
 	t *testing.T,
 	httpClient *http.Client,
-	mountBaseURL string,
+	namespaceAliasBaseURL string,
 	request *loonfs.BeginUploadRequest,
 ) *loonfs.BeginUploadResponse {
 	t.Helper()
@@ -1235,7 +1235,7 @@ func proxyBeginUpload(
 		t,
 		httpClient,
 		http.MethodPost,
-		mountBaseURL+"/uploads",
+		namespaceAliasBaseURL+"/uploads",
 		request,
 	)
 }
@@ -1243,7 +1243,7 @@ func proxyBeginUpload(
 func proxyCompleteUpload(
 	t *testing.T,
 	httpClient *http.Client,
-	mountBaseURL string,
+	namespaceAliasBaseURL string,
 	uploadID string,
 	request *loonfs.CompleteUploadRequest,
 ) *loonfs.UploadSessionResponse {
@@ -1252,7 +1252,7 @@ func proxyCompleteUpload(
 		t,
 		httpClient,
 		http.MethodPost,
-		mountBaseURL+"/uploads/"+url.PathEscape(uploadID)+"/complete",
+		namespaceAliasBaseURL+"/uploads/"+url.PathEscape(uploadID)+"/complete",
 		request,
 	)
 }
@@ -1260,7 +1260,7 @@ func proxyCompleteUpload(
 func proxyCommitCompletedFile(
 	t *testing.T,
 	httpClient *http.Client,
-	mountBaseURL string,
+	namespaceAliasBaseURL string,
 	namespaceID string,
 	path string,
 	commitID string,
@@ -1274,7 +1274,7 @@ func proxyCommitCompletedFile(
 	if contentToken != nil {
 		contentTokens = []*loonfs.ContentToken{contentToken}
 	}
-	return proxyApplyCommit(t, httpClient, mountBaseURL, &loonfs.CommitRequest{
+	return proxyApplyCommit(t, httpClient, namespaceAliasBaseURL, &loonfs.CommitRequest{
 		NamespaceID:   namespaceID,
 		Actor:         actor,
 		CommitID:      loonfs.CommitID(commitID),
@@ -1294,7 +1294,7 @@ func proxyCommitCompletedFile(
 func proxyApplyCommit(
 	t *testing.T,
 	httpClient *http.Client,
-	mountBaseURL string,
+	namespaceAliasBaseURL string,
 	request *loonfs.CommitRequest,
 ) *loonfs.CommitResponse {
 	t.Helper()
@@ -1302,7 +1302,7 @@ func proxyApplyCommit(
 		t,
 		httpClient,
 		http.MethodPost,
-		mountBaseURL+"/commits",
+		namespaceAliasBaseURL+"/commits",
 		request,
 	)
 }
@@ -1857,11 +1857,11 @@ func createDirectoryCommit(
 	}
 }
 
-func instantiateDocumentPath(template, mount string) string {
+func instantiateDocumentPath(template, namespaceAlias string) string {
 	segments := strings.Split(template, "/")
 	for index, segment := range segments {
-		if segment == "{mount}" {
-			segments[index] = mount
+		if segment == "{namespace_alias}" {
+			segments[index] = namespaceAlias
 		} else if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
 			segments[index] = "x"
 		}
@@ -1871,9 +1871,9 @@ func instantiateDocumentPath(template, mount string) string {
 
 func proxyTemplateForServer(template string) string {
 	const serverNamespacePrefix = "/v0/namespaces/{namespace_id}"
-	const proxyMountPrefix = "/v0/mounts/{mount}"
+	const proxyNamespaceAliasPrefix = "/v0/namespace-aliases/{namespace_alias}"
 	if template == serverNamespacePrefix || strings.HasPrefix(template, serverNamespacePrefix+"/") {
-		return proxyMountPrefix + strings.TrimPrefix(template, serverNamespacePrefix)
+		return proxyNamespaceAliasPrefix + strings.TrimPrefix(template, serverNamespacePrefix)
 	}
 	return template
 }
@@ -1945,8 +1945,8 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
 		ServerBaseURL: stub.URL,
 		Token:         "recording-stub-token",
-		Mounts: map[string]string{
-			fixture.Mount: fixture.NamespaceID,
+		NamespaceAliases: map[string]string{
+			fixture.NamespaceAlias: fixture.NamespaceID,
 		},
 	})
 	if err != nil {
@@ -1961,14 +1961,14 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 		for documentedMethod := range item {
 			method := strings.ToUpper(documentedMethod)
 			proxyRoutes[method+" "+template] = true
-			path := instantiateDocumentPath(template, fixture.Mount)
+			path := instantiateDocumentPath(template, fixture.NamespaceAlias)
 			forwardedTemplate := strings.Replace(
 				template,
-				"/v0/mounts/{mount}",
+				"/v0/namespace-aliases/{namespace_alias}",
 				"/v0/namespaces/"+fixture.NamespaceID,
 				1,
 			)
-			forwardedPath := instantiateDocumentPath(forwardedTemplate, fixture.Mount)
+			forwardedPath := instantiateDocumentPath(forwardedTemplate, fixture.NamespaceAlias)
 			expected[method+" "+forwardedPath]++
 
 			forwardRequest, err := http.NewRequest(method, proxyServer.URL+path, nil)
@@ -2014,7 +2014,7 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 			if proxyRoutes[method+" "+proxyTemplate] {
 				continue
 			}
-			path := instantiateDocumentPath(proxyTemplate, fixture.Mount)
+			path := instantiateDocumentPath(proxyTemplate, fixture.NamespaceAlias)
 			request, err := http.NewRequest(method, proxyServer.URL+path, nil)
 			if err != nil {
 				t.Fatalf("create excluded request for %s %s: %v", method, path, err)
