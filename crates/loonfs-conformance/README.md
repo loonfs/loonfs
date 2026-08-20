@@ -4,7 +4,7 @@ This private crate contains shared JSON test cases and a Rust test harness.
 
 ## Cases
 
-The nine cases cover:
+The ten cases cover:
 
 - standard API errors
 - repeated commit requests
@@ -15,8 +15,11 @@ The nine cases cover:
 - cursor pagination and resumption
 - change feed identity fields
 - an end-to-end filesystem workflow
+- mount-scoped requests through a proxy
 
-Proxy cases are not included yet.
+The proxy implementations live in the SDK languages, so the proxy case runs in
+each language harness against that language's proxy. The Rust harness checks
+only that the fixture parses.
 
 ## JSON format
 

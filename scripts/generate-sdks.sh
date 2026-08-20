@@ -20,6 +20,10 @@ overlay_handwritten() {
     if [ -d "transfers/$1" ]; then
         cp -R "transfers/$1/." "generated/$1/"
     fi
+    # The TypeScript proxy is a standalone package beside the generated SDK.
+    if [ "$1" != "typescript" ] && [ -d "proxy/$1" ]; then
+        cp -R "proxy/$1/." "generated/$1/"
+    fi
 }
 
 generate_group() {
