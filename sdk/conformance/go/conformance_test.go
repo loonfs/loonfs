@@ -12,6 +12,8 @@ import (
 	"hash/crc64"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +23,7 @@ import (
 	loonfs "github.com/loonfs/loonfs-sdk-go"
 	"github.com/loonfs/loonfs-sdk-go/client"
 	"github.com/loonfs/loonfs-sdk-go/option"
+	loonfsproxy "github.com/loonfs/loonfs-sdk-go/proxy"
 	"github.com/loonfs/loonfs-sdk-go/transfers"
 )
 
@@ -45,6 +48,7 @@ var expectedCases = []struct {
 	{name: "end_to_end", family: "end_to_end"},
 	{name: "error_contract", family: "error_contract"},
 	{name: "pagination", family: "pagination"},
+	{name: "proxy", family: "proxy"},
 	{name: "upload_abort", family: "upload_abort"},
 	{name: "upload_direct_put", family: "upload_direct_put"},
 	{name: "upload_multipart", family: "upload_multipart"},
@@ -53,6 +57,8 @@ var expectedCases = []struct {
 type harness struct {
 	client          *client.Client
 	unauthenticated *client.Client
+	serverBaseURL   string
+	serverToken     string
 }
 
 func TestSDKConformance(t *testing.T) {
@@ -79,6 +85,8 @@ func TestSDKConformance(t *testing.T) {
 			option.WithToken(token),
 		),
 		unauthenticated: client.NewClient(option.WithBaseURL(baseURL)),
+		serverBaseURL:   baseURL,
+		serverToken:     token,
 	}
 
 	for _, testCase := range cases {
@@ -90,6 +98,8 @@ func TestSDKConformance(t *testing.T) {
 				runCommitReplay(t, h, testCase)
 			case "pagination":
 				runPagination(t, h, testCase)
+			case "proxy":
+				runProxy(t, h, testCase)
 			case "changes":
 				runChanges(t, h, testCase)
 			case "upload_direct_put":
@@ -1022,6 +1032,364 @@ func equalStrings(left, right []string) bool {
 	return true
 }
 
+type proxyCaseRequest struct {
+	Mount                string          `json:"mount"`
+	NamespaceID          string          `json:"namespace_id"`
+	UnknownMount         string          `json:"unknown_mount"`
+	Actor                loonfs.ActorRef `json:"actor"`
+	Directory            string          `json:"directory"`
+	ProxiedPath          string          `json:"proxied_path"`
+	DirectPath           string          `json:"direct_path"`
+	CommitIDs            proxyCommitIDs  `json:"commit_ids"`
+	ContentUTF8          string          `json:"content_utf8"`
+	DisallowedPathSuffix string          `json:"disallowed_path_suffix"`
+}
+
+type proxyCommitIDs struct {
+	Directory string `json:"directory"`
+	Proxied   string `json:"proxied"`
+	Direct    string `json:"direct"`
+}
+
+type proxyExpected struct {
+	MkdirCommittedSeq   int64 `json:"mkdir_committed_seq"`
+	ProxiedCommittedSeq int64 `json:"proxied_committed_seq"`
+	DirectCommittedSeq  int64 `json:"direct_committed_seq"`
+	EntryCount          int   `json:"entry_count"`
+	UnknownMountStatus  int   `json:"unknown_mount_status"`
+	DisallowedStatus    int   `json:"disallowed_route_status"`
+}
+
+func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[proxyCaseRequest, proxyExpected](t, testCase)
+	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
+		ServerBaseURL: h.serverBaseURL,
+		Token:         h.serverToken,
+		Mounts: map[string]string{
+			request.Mount: request.NamespaceID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create proxy handler: %v", err)
+	}
+	proxyServer := httptest.NewServer(proxyHandler)
+	defer proxyServer.Close()
+
+	createNamespace(t, h.client, request.NamespaceID)
+	mountBaseURL := proxyServer.URL + "/v0/mounts/" + url.PathEscape(request.Mount)
+	mkdir := proxyApplyCommit(t, proxyServer.Client(), mountBaseURL, createDirectoryCommit(
+		request.NamespaceID,
+		request.CommitIDs.Directory,
+		&request.Actor,
+		request.Directory,
+		nil,
+	))
+	if int64(mkdir.CommittedSeq) != expected.MkdirCommittedSeq {
+		t.Errorf("proxy mkdir committed_seq = %d, want %d", mkdir.CommittedSeq, expected.MkdirCommittedSeq)
+	}
+
+	payload := []byte(request.ContentUTF8)
+	proxiedBegin := proxyBeginUpload(t, proxyServer.Client(), mountBaseURL, &loonfs.BeginUploadRequest{
+		ServiceProxied: &loonfs.BeginUploadServiceProxied{},
+	})
+	if proxiedBegin.ServiceProxied == nil {
+		t.Fatalf("proxy begin upload mode = %q, want service_proxied", proxiedBegin.Mode)
+	}
+	proxiedUploadID := string(proxiedBegin.ServiceProxied.UploadID)
+	proxiedContentResponse := sendProxyRequest(
+		t,
+		proxyServer.Client(),
+		http.MethodPut,
+		mountBaseURL+"/uploads/"+url.PathEscape(proxiedUploadID)+"/content",
+		bytes.NewReader(payload),
+		"application/octet-stream",
+	)
+	proxiedContent := decodeProxyJSONResponse[loonfs.UploadContentResponse](t, proxiedContentResponse)
+	if proxiedContent.ContentRef == nil {
+		t.Fatal("proxy upload content response has no content_ref")
+	}
+	proxiedCompletion := proxyCompleteUpload(
+		t,
+		proxyServer.Client(),
+		mountBaseURL,
+		proxiedUploadID,
+		&loonfs.CompleteUploadRequest{
+			ServiceProxied: &loonfs.CompleteUploadServiceProxied{},
+		},
+	)
+	proxiedStatus := requireCompletedStatus(t, proxiedCompletion)
+	assertContentRefEqual(t, proxiedStatus.ContentRef, proxiedContent.ContentRef)
+	proxiedCommit := proxyCommitCompletedFile(
+		t,
+		proxyServer.Client(),
+		mountBaseURL,
+		request.NamespaceID,
+		request.ProxiedPath,
+		request.CommitIDs.Proxied,
+		&request.Actor,
+		proxiedStatus.ContentRef,
+		proxiedStatus.ContentToken,
+	)
+	if int64(proxiedCommit.CommittedSeq) != expected.ProxiedCommittedSeq {
+		t.Errorf("proxied upload committed_seq = %d, want %d", proxiedCommit.CommittedSeq, expected.ProxiedCommittedSeq)
+	}
+
+	sizeBytes := int64(len(payload))
+	directBegin := proxyBeginUpload(t, proxyServer.Client(), mountBaseURL, &loonfs.BeginUploadRequest{
+		DirectPut: &loonfs.BeginUploadDirectPut{SizeBytes: &sizeBytes},
+	})
+	if directBegin.DirectPut == nil || directBegin.DirectPut.DirectPut == nil {
+		t.Fatalf("proxy begin upload mode = %q, want direct_put", directBegin.Mode)
+	}
+	directUploadID := string(directBegin.DirectPut.UploadID)
+	directPut := directBegin.DirectPut.DirectPut
+	putPresigned(t, directPut.Access, payload, false)
+	directClaim := &loonfs.UploadContentClaim{
+		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
+		SizeBytes: sizeBytes,
+	}
+	directCompletion := proxyCompleteUpload(
+		t,
+		proxyServer.Client(),
+		mountBaseURL,
+		directUploadID,
+		&loonfs.CompleteUploadRequest{
+			DirectPut: &loonfs.CompleteUploadDirectPut{Content: directClaim},
+		},
+	)
+	directStatus := requireCompletedStatus(t, directCompletion)
+	directCommit := proxyCommitCompletedFile(
+		t,
+		proxyServer.Client(),
+		mountBaseURL,
+		request.NamespaceID,
+		request.DirectPath,
+		request.CommitIDs.Direct,
+		&request.Actor,
+		directStatus.ContentRef,
+		directStatus.ContentToken,
+	)
+	if int64(directCommit.CommittedSeq) != expected.DirectCommittedSeq {
+		t.Errorf("direct upload committed_seq = %d, want %d", directCommit.CommittedSeq, expected.DirectCommittedSeq)
+	}
+
+	listingQuery := url.Values{"path": []string{request.Directory}}
+	listing := proxyJSONRequest[loonfs.ListPathEntriesResponse](
+		t,
+		proxyServer.Client(),
+		http.MethodGet,
+		mountBaseURL+"/filesystem/list?"+listingQuery.Encode(),
+		nil,
+	)
+	if len(listing.Entries) != expected.EntryCount {
+		t.Errorf("proxy entry count = %d, want %d", len(listing.Entries), expected.EntryCount)
+	}
+
+	readQuery := url.Values{"path": []string{request.ProxiedPath}}
+	readResponse := sendProxyRequest(
+		t,
+		proxyServer.Client(),
+		http.MethodGet,
+		mountBaseURL+"/filesystem/content?"+readQuery.Encode(),
+		nil,
+		"",
+	)
+	defer readResponse.Body.Close()
+	requireProxySuccess(t, readResponse)
+	readback, err := io.ReadAll(readResponse.Body)
+	if err != nil {
+		t.Fatalf("read proxied file response: %v", err)
+	}
+	if !bytes.Equal(readback, payload) {
+		t.Error("proxied file readback did not match payload")
+	}
+
+	unknownStatus := proxyResponseStatus(
+		t,
+		proxyServer.Client(),
+		proxyServer.URL+"/v0/mounts/"+url.PathEscape(request.UnknownMount)+"/filesystem/list",
+	)
+	if unknownStatus != expected.UnknownMountStatus {
+		t.Errorf("unknown mount status = %d, want %d", unknownStatus, expected.UnknownMountStatus)
+	}
+	disallowedStatus := proxyResponseStatus(
+		t,
+		proxyServer.Client(),
+		mountBaseURL+request.DisallowedPathSuffix,
+	)
+	if disallowedStatus != expected.DisallowedStatus {
+		t.Errorf("disallowed route status = %d, want %d", disallowedStatus, expected.DisallowedStatus)
+	}
+}
+
+func proxyBeginUpload(
+	t *testing.T,
+	httpClient *http.Client,
+	mountBaseURL string,
+	request *loonfs.BeginUploadRequest,
+) *loonfs.BeginUploadResponse {
+	t.Helper()
+	return proxyJSONRequest[loonfs.BeginUploadResponse](
+		t,
+		httpClient,
+		http.MethodPost,
+		mountBaseURL+"/uploads",
+		request,
+	)
+}
+
+func proxyCompleteUpload(
+	t *testing.T,
+	httpClient *http.Client,
+	mountBaseURL string,
+	uploadID string,
+	request *loonfs.CompleteUploadRequest,
+) *loonfs.UploadSessionResponse {
+	t.Helper()
+	return proxyJSONRequest[loonfs.UploadSessionResponse](
+		t,
+		httpClient,
+		http.MethodPost,
+		mountBaseURL+"/uploads/"+url.PathEscape(uploadID)+"/complete",
+		request,
+	)
+}
+
+func proxyCommitCompletedFile(
+	t *testing.T,
+	httpClient *http.Client,
+	mountBaseURL string,
+	namespaceID string,
+	path string,
+	commitID string,
+	actor *loonfs.ActorRef,
+	contentRef *loonfs.ContentRef,
+	contentToken *loonfs.ContentToken,
+) *loonfs.CommitResponse {
+	t.Helper()
+	noReplace := loonfs.DestinationBehaviorNoReplace
+	contentTokens := []*loonfs.ContentToken(nil)
+	if contentToken != nil {
+		contentTokens = []*loonfs.ContentToken{contentToken}
+	}
+	return proxyApplyCommit(t, httpClient, mountBaseURL, &loonfs.CommitRequest{
+		NamespaceID:   namespaceID,
+		Actor:         actor,
+		CommitID:      loonfs.CommitID(commitID),
+		ContentTokens: contentTokens,
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				PutFile: &loonfs.FsOpPutFile{
+					Behavior:   &noReplace,
+					ContentRef: contentRef,
+					Path:       loonfs.AbsolutePath(path),
+				},
+			},
+		},
+	})
+}
+
+func proxyApplyCommit(
+	t *testing.T,
+	httpClient *http.Client,
+	mountBaseURL string,
+	request *loonfs.CommitRequest,
+) *loonfs.CommitResponse {
+	t.Helper()
+	return proxyJSONRequest[loonfs.CommitResponse](
+		t,
+		httpClient,
+		http.MethodPost,
+		mountBaseURL+"/commits",
+		request,
+	)
+}
+
+func proxyJSONRequest[T any](
+	t *testing.T,
+	httpClient *http.Client,
+	method string,
+	requestURL string,
+	body any,
+) *T {
+	t.Helper()
+	var requestBody io.Reader
+	contentType := ""
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("encode proxy request: %v", err)
+		}
+		requestBody = bytes.NewReader(payload)
+		contentType = "application/json"
+	}
+	response := sendProxyRequest(t, httpClient, method, requestURL, requestBody, contentType)
+	return decodeProxyJSONResponse[T](t, response)
+}
+
+func sendProxyRequest(
+	t *testing.T,
+	httpClient *http.Client,
+	method string,
+	requestURL string,
+	body io.Reader,
+	contentType string,
+) *http.Response {
+	t.Helper()
+	request, err := http.NewRequestWithContext(context.Background(), method, requestURL, body)
+	if err != nil {
+		t.Fatalf("build proxy request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer browser-token")
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
+	}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		t.Fatalf("send proxy request: %v", err)
+	}
+	return response
+}
+
+func decodeProxyJSONResponse[T any](t *testing.T, response *http.Response) *T {
+	t.Helper()
+	defer response.Body.Close()
+	requireProxySuccess(t, response)
+	var decoded T
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode proxy response: %v", err)
+	}
+	return &decoded
+}
+
+func requireProxySuccess(t *testing.T, response *http.Response) {
+	t.Helper()
+	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
+	detail := strings.TrimSpace(string(body))
+	if detail == "" {
+		t.Fatalf("proxy request returned %s", response.Status)
+	}
+	t.Fatalf("proxy request returned %s: %s", response.Status, detail)
+}
+
+func proxyResponseStatus(t *testing.T, httpClient *http.Client, requestURL string) int {
+	t.Helper()
+	response := sendProxyRequest(t, httpClient, http.MethodGet, requestURL, nil, "")
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read proxy routing response: %v", err)
+	}
+	if len(body) != 0 {
+		t.Errorf("proxy routing response body = %q, want empty", body)
+	}
+	return response.StatusCode
+}
+
 type changesRequest struct {
 	NamespaceID string          `json:"namespace_id"`
 	Path        string          `json:"path"`
@@ -1485,5 +1853,44 @@ func createDirectoryCommit(
 				},
 			},
 		},
+	}
+}
+
+// The handler's route table and the proxy document must agree exactly, so the
+// table cannot drift from docs/specs/openapi-proxy.json without CI noticing.
+func TestProxyRouteTableMatchesTheDocument(t *testing.T) {
+	documentPath := os.Getenv("LOONFS_PROXY_DOCUMENT")
+	if documentPath == "" {
+		t.Skip("run scripts/run-sdk-conformance.sh go")
+	}
+	data, err := os.ReadFile(documentPath)
+	if err != nil {
+		t.Fatalf("read proxy document: %v", err)
+	}
+	var document struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatalf("decode proxy document: %v", err)
+	}
+	documented := map[string]bool{}
+	for path, item := range document.Paths {
+		for method := range item {
+			documented[strings.ToUpper(method)+" "+path] = true
+		}
+	}
+	table := map[string]bool{}
+	for _, route := range loonfsproxy.Routes() {
+		table[route.Method+" "+route.Template] = true
+	}
+	for key := range documented {
+		if !table[key] {
+			t.Errorf("proxy document route %q is missing from the handler table", key)
+		}
+	}
+	for key := range table {
+		if !documented[key] {
+			t.Errorf("handler route %q is not in the proxy document", key)
+		}
 	}
 }

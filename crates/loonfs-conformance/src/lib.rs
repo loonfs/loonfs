@@ -32,6 +32,8 @@ pub enum CaseFamily {
     Download,
     /// Cursor pagination and resume.
     Pagination,
+    /// Mount-scoped requests through a proxy.
+    Proxy,
     /// Change feed order and identity.
     Changes,
     /// End-to-end filesystem workflow.
@@ -63,6 +65,7 @@ const EXPECTED_CASES: &[(&str, CaseFamily)] = &[
     ("end_to_end", CaseFamily::EndToEnd),
     ("error_contract", CaseFamily::ErrorContract),
     ("pagination", CaseFamily::Pagination),
+    ("proxy", CaseFamily::Proxy),
     ("upload_abort", CaseFamily::UploadAbort),
     ("upload_direct_put", CaseFamily::UploadDirectPut),
     ("upload_multipart", CaseFamily::UploadMultipart),

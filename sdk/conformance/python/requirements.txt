@@ -4,3 +4,4 @@ pydantic-core>=2.18.2
 typing_extensions>=4.0.0
 anyio>=3.5.0
 pytest>=8
+uvicorn>=0.30

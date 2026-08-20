@@ -64,7 +64,8 @@ LOONFS_CONFORMANCE_URL=$(printf '%s\n' "$SERVER_LINE" | \
 LOONFS_CONFORMANCE_TOKEN=$(printf '%s\n' "$SERVER_LINE" | \
     python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
 LOONFS_CONFORMANCE_CASES="$REPO_ROOT/crates/loonfs-conformance/cases"
-export LOONFS_CONFORMANCE_URL LOONFS_CONFORMANCE_TOKEN LOONFS_CONFORMANCE_CASES
+LOONFS_PROXY_DOCUMENT="$REPO_ROOT/docs/specs/openapi-proxy.json"
+export LOONFS_CONFORMANCE_URL LOONFS_CONFORMANCE_TOKEN LOONFS_CONFORMANCE_CASES LOONFS_PROXY_DOCUMENT
 
 case "$LANGUAGE" in
     go)

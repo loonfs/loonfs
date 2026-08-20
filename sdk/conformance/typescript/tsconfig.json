@@ -10,5 +10,9 @@
     "types": ["node"],
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts", "../../generated/typescript/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "../../generated/typescript/**/*.ts",
+    "../../proxy/typescript/src/**/*.ts"
+  ]
 }

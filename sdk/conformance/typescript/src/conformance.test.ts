@@ -1,11 +1,15 @@
 import * as assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename, extname, join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { test } from "node:test";
 
 import { LoonFS, LoonFSClient } from "../../../generated/typescript/index.js";
 import { getFile, putFile } from "../../../generated/typescript/transfers.js";
+import { createProxyHandler, PROXY_ROUTE_TABLE } from "../../../proxy/typescript/src/proxy.js";
 
 
 const FIXTURE_VERSION = 1;
@@ -21,6 +25,7 @@ const EXPECTED_CASES = [
     ["end_to_end", "end_to_end"],
     ["error_contract", "error_contract"],
     ["pagination", "pagination"],
+    ["proxy", "proxy"],
     ["upload_abort", "upload_abort"],
     ["upload_direct_put", "upload_direct_put"],
     ["upload_multipart", "upload_multipart"],
@@ -193,10 +198,47 @@ interface EndToEndExpected {
     changeCount: number;
 }
 
+interface ProxyCommitIds {
+    directory: string;
+    proxied: string;
+    direct: string;
+}
+
+interface ProxyRequest {
+    mount: string;
+    namespaceId: string;
+    unknownMount: string;
+    actor: ActorValue;
+    directory: string;
+    proxiedPath: string;
+    directPath: string;
+    commitIds: ProxyCommitIds;
+    contentUtf8: string;
+    disallowedPathSuffix: string;
+}
+
+interface ProxyExpected {
+    mkdirCommittedSeq: number;
+    proxiedCommittedSeq: number;
+    directCommittedSeq: number;
+    entryCount: number;
+    unknownMountStatus: number;
+    disallowedRouteStatus: number;
+}
+
 interface Harness {
     client: LoonFSClient;
     unauthenticated: LoonFSClient;
+    serverBaseUrl: string;
+    token: string;
 }
+
+interface RunningProxy {
+    baseUrl: string;
+    close: () => Promise<void>;
+}
+
+type StreamingRequestInit = RequestInit & { duplex?: "half" };
 
 type CompletedUpload = LoonFS.UploadSessionResponse & LoonFS.UploadSessionStatus.Completed;
 type AbortedUpload = LoonFS.UploadSessionResponse & LoonFS.UploadSessionStatus.Aborted;
@@ -600,6 +642,86 @@ function decodeEndToEnd(testCase: ConformanceCase): [EndToEndRequest, EndToEndEx
     ];
 }
 
+function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
+    const request = strictObject(
+        testCase.request,
+        [
+            "mount",
+            "namespace_id",
+            "unknown_mount",
+            "actor",
+            "directory",
+            "proxied_path",
+            "direct_path",
+            "commit_ids",
+            "content_utf8",
+            "disallowed_path_suffix",
+        ],
+        `${testCase.name} request`,
+    );
+    const commitIds = strictObject(
+        request.commit_ids,
+        ["directory", "proxied", "direct"],
+        "proxy request.commit_ids",
+    );
+    const expected = strictObject(
+        testCase.expected,
+        [
+            "mkdir_committed_seq",
+            "proxied_committed_seq",
+            "direct_committed_seq",
+            "entry_count",
+            "unknown_mount_status",
+            "disallowed_route_status",
+        ],
+        `${testCase.name} expected`,
+    );
+    return [
+        {
+            mount: stringValue(request.mount, "proxy request.mount"),
+            namespaceId: stringValue(request.namespace_id, "proxy request.namespace_id"),
+            unknownMount: stringValue(request.unknown_mount, "proxy request.unknown_mount"),
+            actor: actorValue(request.actor, "proxy request.actor"),
+            directory: stringValue(request.directory, "proxy request.directory"),
+            proxiedPath: stringValue(request.proxied_path, "proxy request.proxied_path"),
+            directPath: stringValue(request.direct_path, "proxy request.direct_path"),
+            commitIds: {
+                directory: stringValue(commitIds.directory, "proxy request.commit_ids.directory"),
+                proxied: stringValue(commitIds.proxied, "proxy request.commit_ids.proxied"),
+                direct: stringValue(commitIds.direct, "proxy request.commit_ids.direct"),
+            },
+            contentUtf8: stringValue(request.content_utf8, "proxy request.content_utf8"),
+            disallowedPathSuffix: stringValue(
+                request.disallowed_path_suffix,
+                "proxy request.disallowed_path_suffix",
+            ),
+        },
+        {
+            mkdirCommittedSeq: integerValue(
+                expected.mkdir_committed_seq,
+                "proxy expected.mkdir_committed_seq",
+            ),
+            proxiedCommittedSeq: integerValue(
+                expected.proxied_committed_seq,
+                "proxy expected.proxied_committed_seq",
+            ),
+            directCommittedSeq: integerValue(
+                expected.direct_committed_seq,
+                "proxy expected.direct_committed_seq",
+            ),
+            entryCount: integerValue(expected.entry_count, "proxy expected.entry_count"),
+            unknownMountStatus: integerValue(
+                expected.unknown_mount_status,
+                "proxy expected.unknown_mount_status",
+            ),
+            disallowedRouteStatus: integerValue(
+                expected.disallowed_route_status,
+                "proxy expected.disallowed_route_status",
+            ),
+        },
+    ];
+}
+
 function loadCases(directory: string): Map<string, ConformanceCase> {
     const cases = readdirSync(directory, { withFileTypes: true })
         .filter((entry) => entry.isFile() && extname(entry.name) === ".json")
@@ -693,6 +815,42 @@ function fileCommit(
     };
     if (contentToken !== undefined) {
         request.content_tokens = [contentToken];
+    }
+    return request;
+}
+
+function mountDirectoryCommit(
+    commitId: string,
+    actor: ActorValue,
+    path: string,
+): Omit<LoonFS.CommitRequest, "namespace_id"> {
+    return {
+        actor,
+        commit_id: commitId,
+        operations: [{ kind: "create_directory", parents: false, path }],
+    };
+}
+
+function mountFileCommit(
+    commitId: string,
+    actor: ActorValue,
+    path: string,
+    completed: CompletedUpload,
+): Omit<LoonFS.CommitRequest, "namespace_id"> {
+    const request: Omit<LoonFS.CommitRequest, "namespace_id"> = {
+        actor,
+        commit_id: commitId,
+        operations: [
+            {
+                kind: "put_file",
+                path,
+                content_ref: completed.content_ref,
+                behavior: "no_replace",
+            },
+        ],
+    };
+    if (completed.content_token !== undefined) {
+        request.content_tokens = [completed.content_token];
     }
     return request;
 }
@@ -804,6 +962,25 @@ function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
     return copy.buffer;
 }
 
+function streamedBytes(bytes: Uint8Array): ReadableStream<Uint8Array> {
+    const split = Math.floor(bytes.byteLength / 2);
+    const chunks = [bytes.subarray(0, split), bytes.subarray(split)].filter(
+        (chunk) => chunk.byteLength > 0,
+    );
+    let index = 0;
+    return new ReadableStream<Uint8Array>({
+        pull(controller) {
+            const chunk = chunks[index];
+            if (chunk === undefined) {
+                controller.close();
+                return;
+            }
+            controller.enqueue(chunk);
+            index += 1;
+        },
+    });
+}
+
 function makeCrc32cTable(): Uint32Array {
     const table = new Uint32Array(256);
     for (let index = 0; index < table.length; index += 1) {
@@ -853,6 +1030,102 @@ function listedNames(entries: LoonFS.AuthoritativePathEntry[]): string[] {
     });
 }
 
+async function startProxyServer(
+    handler: (request: Request) => Promise<Response>,
+): Promise<RunningProxy> {
+    const server = createServer((incoming, outgoing) => {
+        void serveProxyRequest(handler, incoming, outgoing).catch(() => {
+            if (!outgoing.headersSent) {
+                outgoing.writeHead(500);
+            }
+            outgoing.end();
+        });
+    });
+    await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error): void => reject(error);
+        server.once("error", onError);
+        server.listen(0, "127.0.0.1", () => {
+            server.off("error", onError);
+            resolve();
+        });
+    });
+    const address = server.address();
+    assert.ok(address !== null && typeof address !== "string");
+    return {
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        close: () =>
+            new Promise<void>((resolve, reject) => {
+                server.close((error) => {
+                    if (error === undefined) {
+                        resolve();
+                    } else {
+                        reject(error);
+                    }
+                });
+                server.closeIdleConnections();
+            }),
+    };
+}
+
+async function serveProxyRequest(
+    handler: (request: Request) => Promise<Response>,
+    incoming: IncomingMessage,
+    outgoing: ServerResponse,
+): Promise<void> {
+    const headers = new Headers();
+    for (let index = 0; index < incoming.rawHeaders.length; index += 2) {
+        headers.append(incoming.rawHeaders[index]!, incoming.rawHeaders[index + 1]!);
+    }
+    const method = incoming.method ?? "GET";
+    const init: StreamingRequestInit = { method, headers };
+    if (method !== "GET" && method !== "HEAD") {
+        init.body = Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>;
+        init.duplex = "half";
+    }
+    const host = incoming.headers.host ?? "127.0.0.1";
+    const response = await handler(new Request(`http://${host}${incoming.url ?? "/"}`, init));
+
+    outgoing.statusCode = response.status;
+    if (response.statusText !== "") {
+        outgoing.statusMessage = response.statusText;
+    }
+    response.headers.forEach((value, name) => outgoing.setHeader(name, value));
+    if (response.body === null) {
+        outgoing.end();
+        return;
+    }
+    const body = Readable.fromWeb(
+        response.body as unknown as import("node:stream/web").ReadableStream<Uint8Array>,
+    );
+    await pipeline(body, outgoing);
+}
+
+async function fetchThroughProxy(
+    url: string | URL,
+    init: StreamingRequestInit = {},
+): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set("authorization", "Bearer browser-credential");
+    return fetch(url, { ...init, headers });
+}
+
+async function proxyJson<T>(
+    url: string | URL,
+    init: StreamingRequestInit,
+    label: string,
+): Promise<T> {
+    const response = await fetchThroughProxy(url, init);
+    await requireSuccessfulResponse(response, label);
+    return (await response.json()) as T;
+}
+
+async function requireSuccessfulResponse(response: Response, label: string): Promise<void> {
+    if (!response.ok) {
+        const body = await response.text();
+        assert.fail(`${label} failed with HTTP ${response.status}: ${body}`);
+    }
+}
+
 
 const baseUrl = process.env.LOONFS_CONFORMANCE_URL;
 const environmentSkip = baseUrl == null || baseUrl === "" ? RUNNER_SKIP : undefined;
@@ -866,6 +1139,8 @@ if (environmentSkip === undefined) {
     harness = {
         client: new LoonFSClient({ environment: configuredBaseUrl, token }),
         unauthenticated: new LoonFSClient({ environment: configuredBaseUrl, token, auth: false }),
+        serverBaseUrl: configuredBaseUrl,
+        token,
     };
 }
 
@@ -988,6 +1263,162 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
     assert.deepEqual(observed, request.entryNames);
     assert.ok(resumeOffset <= request.entryNames.length);
     assert.deepEqual(resumed, request.entryNames.slice(resumeOffset));
+});
+
+test("proxy", { skip: environmentSkip }, async (context) => {
+    assert.ok(harness != null);
+    assert.ok(cases != null);
+    const activeHarness = harness;
+    const [request, expected] = decodeProxy(caseNamed(cases, "proxy"));
+    const handler = createProxyHandler({
+        serverBaseUrl: activeHarness.serverBaseUrl,
+        token: activeHarness.token,
+        mounts: { [request.mount]: request.namespaceId },
+    });
+    const proxy = await startProxyServer(handler);
+    context.after(() => proxy.close());
+
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
+    const mountBase = `${proxy.baseUrl}/v0/mounts/${encodeURIComponent(request.mount)}`;
+    const payload = new TextEncoder().encode(request.contentUtf8);
+
+    const mkdir = await proxyJson<LoonFS.CommitResponse>(
+        `${mountBase}/commits`,
+        {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(
+                mountDirectoryCommit(request.commitIds.directory, request.actor, request.directory),
+            ),
+        },
+        "proxy directory commit",
+    );
+    assert.equal(mkdir.committed_seq, expected.mkdirCommittedSeq);
+
+    const proxiedBegin = await proxyJson<LoonFS.BeginUploadResponse>(
+        `${mountBase}/uploads`,
+        {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: "service_proxied" }),
+        },
+        "proxy service upload begin",
+    );
+    assert.equal(proxiedBegin.mode, "service_proxied");
+    const contentResponse = await fetchThroughProxy(
+        `${mountBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/content`,
+        {
+            method: "PUT",
+            headers: { "content-type": "application/octet-stream" },
+            body: streamedBytes(payload),
+            duplex: "half",
+        },
+    );
+    await requireSuccessfulResponse(contentResponse, "proxy content upload");
+    const uploadedContent = (await contentResponse.json()) as LoonFS.UploadContentResponse;
+    assert.equal(uploadedContent.content_ref.size_bytes, payload.byteLength);
+    const proxiedCompleted = completedUpload(
+        await proxyJson<LoonFS.UploadSessionResponse>(
+            `${mountBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/complete`,
+            {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ mode: "service_proxied" }),
+            },
+            "proxy service upload completion",
+        ),
+    );
+    assert.deepEqual(proxiedCompleted.content_ref, uploadedContent.content_ref);
+    const proxiedCommit = await proxyJson<LoonFS.CommitResponse>(
+        `${mountBase}/commits`,
+        {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(
+                mountFileCommit(
+                    request.commitIds.proxied,
+                    request.actor,
+                    request.proxiedPath,
+                    proxiedCompleted,
+                ),
+            ),
+        },
+        "proxy service upload commit",
+    );
+    assert.equal(proxiedCommit.committed_seq, expected.proxiedCommittedSeq);
+
+    const directBegin = await proxyJson<LoonFS.BeginUploadResponse>(
+        `${mountBase}/uploads`,
+        {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: "direct_put", size_bytes: payload.byteLength }),
+        },
+        "proxy direct upload begin",
+    );
+    assert.equal(directBegin.mode, "direct_put");
+    await uploadPresigned(directBegin.direct_put.access, payload, "proxy direct PUT");
+    const directClaim: LoonFS.UploadContentClaim = {
+        size_bytes: payload.byteLength,
+        checksum: checksum(directBegin.direct_put.checksum_algorithm, payload),
+    };
+    const directCompleted = completedUpload(
+        await proxyJson<LoonFS.UploadSessionResponse>(
+            `${mountBase}/uploads/${encodeURIComponent(directBegin.upload_id)}/complete`,
+            {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ mode: "direct_put", content: directClaim }),
+            },
+            "proxy direct upload completion",
+        ),
+    );
+    assert.deepEqual(directCompleted.content_ref.checksum, directClaim.checksum);
+    const directCommit = await proxyJson<LoonFS.CommitResponse>(
+        `${mountBase}/commits`,
+        {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(
+                mountFileCommit(
+                    request.commitIds.direct,
+                    request.actor,
+                    request.directPath,
+                    directCompleted,
+                ),
+            ),
+        },
+        "proxy direct upload commit",
+    );
+    assert.equal(directCommit.committed_seq, expected.directCommittedSeq);
+
+    const listUrl = new URL(`${mountBase}/filesystem/list`);
+    listUrl.searchParams.set("path", request.directory);
+    const listing = await proxyJson<LoonFS.ListPathEntriesResponse>(
+        listUrl,
+        { method: "GET" },
+        "proxy directory listing",
+    );
+    assert.equal(listing.entries.length, expected.entryCount);
+
+    const readUrl = new URL(`${mountBase}/filesystem/content`);
+    readUrl.searchParams.set("path", request.proxiedPath);
+    const read = await fetchThroughProxy(readUrl);
+    await requireSuccessfulResponse(read, "proxy file read");
+    assert.deepEqual(new Uint8Array(await read.arrayBuffer()), payload);
+
+    const unknownMountUrl = new URL(
+        `/v0/mounts/${encodeURIComponent(request.unknownMount)}/filesystem/list`,
+        proxy.baseUrl,
+    );
+    unknownMountUrl.searchParams.set("path", request.directory);
+    const unknownMount = await fetchThroughProxy(unknownMountUrl);
+    assert.equal(unknownMount.status, expected.unknownMountStatus);
+    assert.equal((await unknownMount.arrayBuffer()).byteLength, 0);
+
+    const disallowedRoute = await fetchThroughProxy(`${mountBase}${request.disallowedPathSuffix}`);
+    assert.equal(disallowedRoute.status, expected.disallowedRouteStatus);
+    assert.equal((await disallowedRoute.arrayBuffer()).byteLength, 0);
 });
 
 conformanceTest("changes", async (activeHarness, testCase) => {
@@ -1346,4 +1777,21 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     const removedEntry = trash.data.find((entry) => entry.inode_id === uploadedInode);
     assert.ok(removedEntry !== undefined, "removed inode is missing from trash");
     assert.equal(removedEntry.deletion_seq, removed.committed_seq);
+});
+
+// The route table cannot drift from the proxy document unnoticed.
+test("proxy route table matches the document", { skip: environmentSkip }, async () => {
+    const documentPath = process.env.LOONFS_PROXY_DOCUMENT;
+    assert.ok(documentPath, "LOONFS_PROXY_DOCUMENT is not set");
+    const document = JSON.parse(readFileSync(documentPath, "utf8")) as {
+        paths: Record<string, Record<string, unknown>>;
+    };
+    const documented = new Set<string>();
+    for (const [path, item] of Object.entries(document.paths)) {
+        for (const method of Object.keys(item)) {
+            documented.add(`${method.toUpperCase()} ${path}`);
+        }
+    }
+    const table = new Set(PROXY_ROUTE_TABLE.map((route) => `${route.method} ${route.template}`));
+    assert.deepEqual([...table].sort(), [...documented].sort());
 });

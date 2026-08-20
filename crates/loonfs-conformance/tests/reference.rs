@@ -53,6 +53,11 @@ fn every_family_specific_fixture_shape_parses_without_a_server() {
             CaseFamily::EndToEnd => {
                 parse_values::<EndToEndRequest, EndToEndExpected>(&case);
             }
+            // Each SDK harness tests its own proxy. Rust only validates the
+            // shared fixture.
+            CaseFamily::Proxy => {
+                assert!(case.request.is_object() && case.expected.is_object());
+            }
         }
     }
 }
@@ -73,6 +78,8 @@ async fn rust_client_matches_the_reference_corpus() {
             CaseFamily::Pagination => run_pagination(&harness, case).await,
             CaseFamily::Changes => run_changes(&harness, case).await,
             CaseFamily::EndToEnd => run_end_to_end(&harness, case).await,
+            // Each SDK harness runs this case against its own proxy.
+            CaseFamily::Proxy => {}
         }
     }
 }

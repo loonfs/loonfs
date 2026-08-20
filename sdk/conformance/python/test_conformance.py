@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
+import threading
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,12 +13,16 @@ from typing import Any
 
 import httpx
 import pytest
+import uvicorn
 from loonfs_sdk import (
     ActorRef,
     BeginUploadRequest_DirectMultipart,
     BeginUploadRequest_DirectPut,
     BeginUploadRequest_ServiceProxied,
+    BeginUploadResponse_DirectPut,
+    BeginUploadResponse_ServiceProxied,
     Checksum,
+    CommitResponse,
     CompleteUploadRequest_DirectMultipart,
     CompleteUploadRequest_DirectPut,
     CompletedUploadPart,
@@ -25,11 +32,15 @@ from loonfs_sdk import (
     FilesystemOperation_DeletePath,
     FilesystemOperation_MovePath,
     FilesystemOperation_PutFile,
+    ListPathEntriesResponse,
     LoonFS,
     UnauthorizedError,
+    UploadContentResponse,
     UploadContentClaim,
     UploadPartChecksumClaim,
+    UploadSessionResponse,
 )
+from loonfs_sdk.proxy import ROUTES as PROXY_ROUTES, LoonFSProxy
 from loonfs_sdk.transfers import get_file, put_file
 
 
@@ -43,6 +54,7 @@ EXPECTED_CASES = [
     ("end_to_end", "end_to_end"),
     ("error_contract", "error_contract"),
     ("pagination", "pagination"),
+    ("proxy", "proxy"),
     ("upload_abort", "upload_abort"),
     ("upload_direct_put", "upload_direct_put"),
     ("upload_multipart", "upload_multipart"),
@@ -222,6 +234,37 @@ class PaginationExpected:
 
 
 @dataclass(frozen=True)
+class ProxyCommitIds:
+    directory: str
+    proxied: str
+    direct: str
+
+
+@dataclass(frozen=True)
+class ProxyRequest:
+    mount: str
+    namespace_id: str
+    unknown_mount: str
+    actor: ActorRef
+    directory: str
+    proxied_path: str
+    direct_path: str
+    commit_ids: ProxyCommitIds
+    content_utf8: str
+    disallowed_path_suffix: str
+
+
+@dataclass(frozen=True)
+class ProxyExpected:
+    mkdir_committed_seq: int
+    proxied_committed_seq: int
+    direct_committed_seq: int
+    entry_count: int
+    unknown_mount_status: int
+    disallowed_route_status: int
+
+
+@dataclass(frozen=True)
 class ChangesRequest:
     namespace_id: str
     path: str
@@ -241,6 +284,11 @@ class ChangesExpected:
 class Harness:
     client: LoonFS
     unauthenticated: LoonFS
+
+
+@dataclass(frozen=True)
+class ProxyHarness:
+    base_url: str
 
 
 def _strict_object(value: object, fields: set[str], label: str) -> JsonObject:
@@ -688,6 +736,106 @@ def _decode_pagination(
     )
 
 
+def _decode_proxy(
+    test_case: ConformanceCase,
+) -> tuple[ProxyRequest, ProxyExpected]:
+    request = _strict_object(
+        test_case.request,
+        {
+            "mount",
+            "namespace_id",
+            "unknown_mount",
+            "actor",
+            "directory",
+            "proxied_path",
+            "direct_path",
+            "commit_ids",
+            "content_utf8",
+            "disallowed_path_suffix",
+        },
+        f"{test_case.name} request",
+    )
+    commit_ids = _strict_object(
+        request["commit_ids"],
+        {"directory", "proxied", "direct"},
+        "proxy request.commit_ids",
+    )
+    expected = _strict_object(
+        test_case.expected,
+        {
+            "mkdir_committed_seq",
+            "proxied_committed_seq",
+            "direct_committed_seq",
+            "entry_count",
+            "unknown_mount_status",
+            "disallowed_route_status",
+        },
+        f"{test_case.name} expected",
+    )
+    return (
+        ProxyRequest(
+            mount=_string(request["mount"], "proxy request.mount"),
+            namespace_id=_string(
+                request["namespace_id"], "proxy request.namespace_id"
+            ),
+            unknown_mount=_string(
+                request["unknown_mount"], "proxy request.unknown_mount"
+            ),
+            actor=_actor(request["actor"], "proxy request.actor"),
+            directory=_string(request["directory"], "proxy request.directory"),
+            proxied_path=_string(
+                request["proxied_path"], "proxy request.proxied_path"
+            ),
+            direct_path=_string(
+                request["direct_path"], "proxy request.direct_path"
+            ),
+            commit_ids=ProxyCommitIds(
+                directory=_string(
+                    commit_ids["directory"], "proxy request.commit_ids.directory"
+                ),
+                proxied=_string(
+                    commit_ids["proxied"], "proxy request.commit_ids.proxied"
+                ),
+                direct=_string(
+                    commit_ids["direct"], "proxy request.commit_ids.direct"
+                ),
+            ),
+            content_utf8=_string(
+                request["content_utf8"], "proxy request.content_utf8"
+            ),
+            disallowed_path_suffix=_string(
+                request["disallowed_path_suffix"],
+                "proxy request.disallowed_path_suffix",
+            ),
+        ),
+        ProxyExpected(
+            mkdir_committed_seq=_integer(
+                expected["mkdir_committed_seq"],
+                "proxy expected.mkdir_committed_seq",
+            ),
+            proxied_committed_seq=_integer(
+                expected["proxied_committed_seq"],
+                "proxy expected.proxied_committed_seq",
+            ),
+            direct_committed_seq=_integer(
+                expected["direct_committed_seq"],
+                "proxy expected.direct_committed_seq",
+            ),
+            entry_count=_integer(
+                expected["entry_count"], "proxy expected.entry_count"
+            ),
+            unknown_mount_status=_integer(
+                expected["unknown_mount_status"],
+                "proxy expected.unknown_mount_status",
+            ),
+            disallowed_route_status=_integer(
+                expected["disallowed_route_status"],
+                "proxy expected.disallowed_route_status",
+            ),
+        ),
+    )
+
+
 def _decode_changes(
     test_case: ConformanceCase,
 ) -> tuple[ChangesRequest, ChangesExpected]:
@@ -811,6 +959,53 @@ def harness() -> Iterator[Harness]:
         unauthenticated_http.close()
 
 
+@pytest.fixture(scope="session")
+def proxy_harness(
+    cases: dict[str, ConformanceCase],
+) -> Iterator[ProxyHarness]:
+    request, _ = _decode_proxy(cases["proxy"])
+    app = LoonFSProxy(
+        _required_environment("LOONFS_CONFORMANCE_URL"),
+        _required_environment("LOONFS_CONFORMANCE_TOKEN"),
+        {request.mount: request.namespace_id},
+    )
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    _, port = listener.getsockname()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            log_level="critical",
+            access_log=False,
+            lifespan="on",
+        )
+    )
+    thread = threading.Thread(
+        target=server.run,
+        kwargs={"sockets": [listener]},
+        name="loonfs-python-proxy",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not server.started:
+            if not thread.is_alive():
+                raise AssertionError("Python proxy stopped during startup")
+            if time.monotonic() >= deadline:
+                raise AssertionError("Python proxy did not start within five seconds")
+            time.sleep(0.01)
+        yield ProxyHarness(base_url=f"http://127.0.0.1:{port}")
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        listener.close()
+        if thread.is_alive():
+            raise AssertionError("Python proxy did not stop within five seconds")
+
+
 def _apply_create_directory(
     client: LoonFS,
     namespace_id: str,
@@ -924,6 +1119,34 @@ def _completed_content(response: Any) -> tuple[ContentRef, str | None, int]:
 
 def _read_proxied(client: LoonFS, namespace_id: str, path: str) -> bytes:
     return b"".join(client.filesystem.get_file_bytes(namespace_id, path=path))
+
+
+def _proxy_response_json(response: httpx.Response, label: str) -> JsonObject:
+    response.raise_for_status()
+    return _json_object(response.json(), label)
+
+
+def _proxy_apply_commit(
+    client: httpx.Client,
+    request: ProxyRequest,
+    commit_id: str,
+    operation: JsonObject,
+    content_token: JsonObject | None = None,
+) -> CommitResponse:
+    body: JsonObject = {
+        "actor": {"id": request.actor.id, "kind": request.actor.kind},
+        "commit_id": commit_id,
+        "operations": [operation],
+    }
+    if content_token is not None:
+        body["content_tokens"] = [content_token]
+    response = client.post(
+        f"/v0/mounts/{request.mount}/commits",
+        json=body,
+    )
+    return CommitResponse(**_proxy_response_json(response, "proxy commit response"))
+
+
 
 
 def _listed_names(entries: list[Any]) -> list[str]:
@@ -1048,6 +1271,180 @@ def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None
     assert observed == request.entry_names
     assert resume_offset <= len(request.entry_names)
     assert resumed == request.entry_names[resume_offset:]
+
+
+def test_proxy(
+    cases: dict[str, ConformanceCase],
+    harness: Harness,
+    proxy_harness: ProxyHarness,
+) -> None:
+    request, expected = _decode_proxy(cases["proxy"])
+    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    payload = request.content_utf8.encode()
+    mount_base = f"/v0/mounts/{request.mount}"
+
+    with httpx.Client(
+        base_url=proxy_harness.base_url,
+        headers={"Authorization": "Bearer browser-token"},
+    ) as client:
+        mkdir = _proxy_apply_commit(
+            client,
+            request,
+            request.commit_ids.directory,
+            {
+                "kind": "create_directory",
+                "parents": False,
+                "path": request.directory,
+            },
+        )
+        assert mkdir.committed_seq == expected.mkdir_committed_seq
+
+        proxied_begin_response = client.post(
+            f"{mount_base}/uploads",
+            json={"mode": "service_proxied"},
+        )
+        proxied_begin = BeginUploadResponse_ServiceProxied(
+            **_proxy_response_json(
+                proxied_begin_response,
+                "proxy service-proxied begin response",
+            )
+        )
+        split = len(payload) // 2
+        uploaded_response = client.put(
+            f"{mount_base}/uploads/{proxied_begin.upload_id}/content",
+            headers={"Content-Type": "application/octet-stream"},
+            content=iter((payload[:split], payload[split:])),
+        )
+        uploaded = UploadContentResponse(
+            **_proxy_response_json(
+                uploaded_response,
+                "proxy upload-content response",
+            )
+        )
+        proxied_complete_response = client.post(
+            f"{mount_base}/uploads/{proxied_begin.upload_id}/complete",
+            json={"mode": "service_proxied"},
+        )
+        proxied_complete_data = _proxy_response_json(
+            proxied_complete_response,
+            "proxy service-proxied complete response",
+        )
+        proxied_complete = UploadSessionResponse(**proxied_complete_data)
+        assert proxied_complete.status == "completed"
+        proxied_content_ref = _json_object(
+            proxied_complete_data["content_ref"],
+            "proxy service-proxied content_ref",
+        )
+        assert ContentRef(**proxied_content_ref) == uploaded.content_ref
+        proxied_content_token = _json_object(
+            proxied_complete_data["content_token"],
+            "proxy service-proxied content_token",
+        )
+        proxied_commit = _proxy_apply_commit(
+            client,
+            request,
+            request.commit_ids.proxied,
+            {
+                "kind": "put_file",
+                "path": request.proxied_path,
+                "content_ref": proxied_content_ref,
+            },
+            proxied_content_token,
+        )
+        assert proxied_commit.committed_seq == expected.proxied_committed_seq
+
+        direct_begin_response = client.post(
+            f"{mount_base}/uploads",
+            json={"mode": "direct_put", "size_bytes": len(payload)},
+        )
+        direct_begin = BeginUploadResponse_DirectPut(
+            **_proxy_response_json(
+                direct_begin_response,
+                "proxy direct-PUT begin response",
+            )
+        )
+        direct_access = direct_begin.direct_put.access
+        assert direct_access.method.upper() == "PUT"
+        direct_put_response = httpx.request(
+            direct_access.method,
+            direct_access.url,
+            headers=direct_access.headers or {},
+            content=payload,
+        )
+        direct_put_response.raise_for_status()
+        direct_checksum = _checksum(
+            direct_begin.direct_put.checksum_algorithm,
+            payload,
+        )
+        direct_complete_response = client.post(
+            f"{mount_base}/uploads/{direct_begin.upload_id}/complete",
+            json={
+                "mode": "direct_put",
+                "content": {
+                    "size_bytes": len(payload),
+                    "checksum": {
+                        "algorithm": direct_checksum.algorithm,
+                        "value": direct_checksum.value,
+                    },
+                },
+            },
+        )
+        direct_complete_data = _proxy_response_json(
+            direct_complete_response,
+            "proxy direct-PUT complete response",
+        )
+        direct_complete = UploadSessionResponse(**direct_complete_data)
+        assert direct_complete.status == "completed"
+        direct_content_ref = _json_object(
+            direct_complete_data["content_ref"],
+            "proxy direct-PUT content_ref",
+        )
+        direct_content_token = _json_object(
+            direct_complete_data["content_token"],
+            "proxy direct-PUT content_token",
+        )
+        direct_commit = _proxy_apply_commit(
+            client,
+            request,
+            request.commit_ids.direct,
+            {
+                "kind": "put_file",
+                "path": request.direct_path,
+                "content_ref": direct_content_ref,
+            },
+            direct_content_token,
+        )
+        assert direct_commit.committed_seq == expected.direct_committed_seq
+
+        listing_response = client.get(
+            f"{mount_base}/filesystem/list",
+            params={"path": request.directory},
+        )
+        listing = ListPathEntriesResponse(
+            **_proxy_response_json(listing_response, "proxy list response")
+        )
+        assert len(listing.entries) == expected.entry_count
+
+        with client.stream(
+            "GET",
+            f"{mount_base}/filesystem/content",
+            params={"path": request.proxied_path},
+        ) as read_response:
+            read_response.raise_for_status()
+            assert b"".join(read_response.iter_raw()) == payload
+
+        unknown_mount = client.get(
+            f"/v0/mounts/{request.unknown_mount}/filesystem/list",
+            params={"path": request.directory},
+        )
+        assert unknown_mount.status_code == expected.unknown_mount_status
+        assert unknown_mount.content == b""
+
+        disallowed_route = client.get(
+            f"{mount_base}{request.disallowed_path_suffix}"
+        )
+        assert disallowed_route.status_code == expected.disallowed_route_status
+        assert disallowed_route.content == b""
 
 
 def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
@@ -1398,3 +1795,19 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         entry for entry in trash.entries if entry.inode_id == uploaded_inode
     )
     assert removed_entry.deletion_seq == removed.committed_seq
+
+
+def test_proxy_route_table_matches_the_document() -> None:
+    """The route table cannot drift from the proxy document unnoticed."""
+    document_path = os.environ.get("LOONFS_PROXY_DOCUMENT")
+    if not document_path:
+        pytest.skip("run scripts/run-sdk-conformance.sh python")
+    with open(document_path, encoding="utf-8") as handle:
+        document = json.load(handle)
+    documented = {
+        f"{method.upper()} {path}"
+        for path, item in document["paths"].items()
+        for method in item
+    }
+    table = {f"{method} {template}" for _operation, method, template in PROXY_ROUTES}
+    assert table == documented
