@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "LoonFS Browser Proxy API",
-    "description": "API for browser clients that access namespaces through application namespace aliases.",
+    "description": "API for browser clients that access namespaces by alias.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"

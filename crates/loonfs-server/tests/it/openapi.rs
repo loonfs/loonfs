@@ -463,7 +463,7 @@ fn proxy_paths_use_namespace_aliases_and_declare_no_security() {
     assert_eq!(spec["info"]["title"], "LoonFS Browser Proxy API");
     assert_eq!(
         spec["info"]["description"],
-        "API for browser clients that access namespaces through application namespace aliases."
+        "API for browser clients that access namespaces by alias."
     );
     assert!(spec.get("security").is_none());
     assert!(spec.pointer("/components/securitySchemes").is_none());

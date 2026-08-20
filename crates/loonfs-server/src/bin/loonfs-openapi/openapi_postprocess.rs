@@ -317,10 +317,7 @@ fn describe_proxy_document(document: &mut Value) {
     );
     info.insert(
         "description".to_owned(),
-        Value::String(
-            "API for browser clients that access namespaces through application namespace aliases."
-                .to_owned(),
-        ),
+        Value::String("API for browser clients that access namespaces by alias.".to_owned()),
     );
 }
 
