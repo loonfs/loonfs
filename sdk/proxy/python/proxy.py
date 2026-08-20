@@ -79,7 +79,7 @@ def _connection_headers(headers: list[tuple[bytes, bytes]]) -> set[bytes]:
 
 
 # Remove the browser-facing host and application cookies before forwarding.
-_REQUEST_EXCLUDED_HEADERS = frozenset({b"host", b"cookie"})
+_REQUEST_EXCLUDED_HEADERS = frozenset({b"host", b"cookie", b"authorization"})
 # Do not forward LoonFS cookies to the application.
 _RESPONSE_EXCLUDED_HEADERS = frozenset({b"set-cookie"})
 
@@ -87,18 +87,13 @@ _RESPONSE_EXCLUDED_HEADERS = frozenset({b"set-cookie"})
 def _forwarded_headers(
     headers: list[tuple[bytes, bytes]],
     extra_excluded: frozenset[bytes],
-    authorization: bytes | None = None,
 ) -> list[tuple[bytes, bytes]]:
     excluded = _HOP_BY_HOP_HEADERS | _connection_headers(headers) | extra_excluded
-    forwarded = [
+    return [
         (name, value)
         for name, value in headers
         if name.lower() not in excluded
-        and (authorization is None or name.lower() != b"authorization")
     ]
-    if authorization is not None:
-        forwarded.append((b"authorization", authorization))
-    return forwarded
 
 
 async def _request_body(receive: _Receive) -> AsyncIterator[bytes]:
@@ -106,8 +101,6 @@ async def _request_body(receive: _Receive) -> AsyncIterator[bytes]:
         message = await receive()
         if message["type"] == "http.disconnect":
             return
-        if message["type"] != "http.request":
-            continue
         body = message.get("body", b"")
         if body:
             yield body
@@ -144,9 +137,8 @@ class LoonFSProxy:
         target = httpx.URL(f"{self._server_base_url}{rewritten_path}").copy_with(
             query=scope.get("query_string", b"")
         )
-        headers = _forwarded_headers(
-            scope.get("headers", []), _REQUEST_EXCLUDED_HEADERS, self._authorization
-        )
+        headers = _forwarded_headers(scope.get("headers", []), _REQUEST_EXCLUDED_HEADERS)
+        headers.append((b"authorization", self._authorization))
         request = self._client.build_request(
             scope["method"],
             target,

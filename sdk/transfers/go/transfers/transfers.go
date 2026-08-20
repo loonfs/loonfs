@@ -8,12 +8,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"hash"
 	"hash/crc32"
 	"hash/crc64"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
@@ -23,7 +21,6 @@ import (
 
 const (
 	multipartMinimumBytes = 8 * 1024 * 1024
-	multipartMaximumParts = 10_000
 
 	featureDirectPut           = "core.uploads.direct_put"
 	featureDirectMultipart     = "core.uploads.direct_multipart"
@@ -36,7 +33,12 @@ const (
 var (
 	crc32CTable         = crc32.MakeTable(crc32.Castagnoli)
 	crc64NVMeTable      = crc64.MakeTable(crc64NVMePolynomial)
-	presignedHTTPClient = newPresignedHTTPClient()
+	presignedHTTPClient = &http.Client{
+		Transport: http.DefaultTransport.(*http.Transport).Clone(),
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 )
 
 // PutFileInput describes one in-memory file write.
@@ -88,12 +90,7 @@ func PutFile(ctx context.Context, c *client.Client, in PutFileInput) (*PutFileRe
 	if err != nil {
 		return nil, fmt.Errorf("transfers: read capabilities: %w", err)
 	}
-	transport, err := chooseUploadTransport(capabilities, int64(len(in.Bytes)))
-	if err != nil {
-		return nil, err
-	}
-
-	beginRequest, err := beginUploadRequest(in.NamespaceID, int64(len(in.Bytes)), transport)
+	beginRequest, err := beginUploadRequest(capabilities, in.NamespaceID, int64(len(in.Bytes)))
 	if err != nil {
 		return nil, err
 	}
@@ -191,61 +188,38 @@ func GetFile(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileRe
 	}, nil
 }
 
-type uploadTransport int
-
-const (
-	uploadServiceProxied uploadTransport = iota
-	uploadDirectPut
-	uploadDirectMultipart
-)
-
-func chooseUploadTransport(
-	capabilities *loonfs.CapabilityDocument,
-	sizeBytes int64,
-) (uploadTransport, error) {
-	if capabilities == nil {
-		return 0, fmt.Errorf("transfers: capability response is nil")
-	}
-	worthCutting := sizeBytes >= multipartMinimumBytes
-	if worthCutting && capabilities.Features[featureDirectMultipart] {
-		return uploadDirectMultipart, nil
-	}
-
-	proxyLimit, hasProxyLimit := capabilities.Limits[limitUploadMaximumBytes]
-	fitsProxy := !hasProxyLimit || sizeBytes <= proxyLimit
-	directPutLimit, hasDirectPutLimit := capabilities.Limits[limitDirectPutMaximumBytes]
-	fitsDirectPut := !hasDirectPutLimit || sizeBytes <= directPutLimit
-	if (worthCutting || !fitsProxy) && capabilities.Features[featureDirectPut] && fitsDirectPut {
-		return uploadDirectPut, nil
-	}
-	if fitsProxy {
-		return uploadServiceProxied, nil
-	}
-	return 0, fmt.Errorf(
-		"transfers: %d-byte upload fits no advertised transport",
-		sizeBytes,
-	)
-}
-
 func beginUploadRequest(
+	capabilities *loonfs.CapabilityDocument,
 	namespaceID loonfs.NamespaceID,
 	sizeBytes int64,
-	transport uploadTransport,
 ) (*loonfs.BeginUploadBody, error) {
+	if capabilities == nil {
+		return nil, fmt.Errorf("transfers: capability response is nil")
+	}
 	request := &loonfs.BeginUploadRequest{}
-	switch transport {
-	case uploadServiceProxied:
-		request.ServiceProxied = &loonfs.BeginUploadServiceProxied{}
-	case uploadDirectPut:
-		request.DirectPut = &loonfs.BeginUploadDirectPut{
-			SizeBytes: &sizeBytes,
-		}
-	case uploadDirectMultipart:
+	worthCutting := sizeBytes >= multipartMinimumBytes
+	if worthCutting && capabilities.Features[featureDirectMultipart] {
 		request.DirectMultipart = &loonfs.BeginUploadDirectMultipart{
 			Multipart: &loonfs.DirectMultipartUploadOptions{},
 		}
-	default:
-		return nil, fmt.Errorf("transfers: unsupported upload transport")
+	} else {
+		proxyLimit, hasProxyLimit := capabilities.Limits[limitUploadMaximumBytes]
+		fitsProxy := !hasProxyLimit || sizeBytes <= proxyLimit
+		directPutLimit, hasDirectPutLimit := capabilities.Limits[limitDirectPutMaximumBytes]
+		fitsDirectPut := !hasDirectPutLimit || sizeBytes <= directPutLimit
+		switch {
+		case (worthCutting || !fitsProxy) && capabilities.Features[featureDirectPut] && fitsDirectPut:
+			request.DirectPut = &loonfs.BeginUploadDirectPut{
+				SizeBytes: &sizeBytes,
+			}
+		case fitsProxy:
+			request.ServiceProxied = &loonfs.BeginUploadServiceProxied{}
+		default:
+			return nil, fmt.Errorf(
+				"transfers: %d-byte upload fits no advertised transport",
+				sizeBytes,
+			)
+		}
 	}
 	return &loonfs.BeginUploadBody{
 		NamespaceID: string(namespaceID),
@@ -285,15 +259,18 @@ func transferDirectPut(
 	if begin.DirectPut == nil {
 		return nil, fmt.Errorf("transfers: direct PUT response is incomplete")
 	}
-	content, err := putPresignedWithChecksum(
-		ctx,
-		begin.DirectPut.Access,
-		payload,
-		begin.DirectPut.ChecksumAlgorithm,
-	)
+	checksum, err := computeChecksum(begin.DirectPut.ChecksumAlgorithm, payload)
 	if err != nil {
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: direct PUT: %w", err)
+	}
+	if _, err := putPresigned(ctx, begin.DirectPut.Access, payload); err != nil {
+		abortUpload(ctx, c, namespaceID, begin.UploadID)
+		return nil, fmt.Errorf("transfers: direct PUT: %w", err)
+	}
+	content := &loonfs.UploadContentClaim{
+		Checksum:  checksum,
+		SizeBytes: int64(len(payload)),
 	}
 	completed, err := c.Uploads.CompleteUpload(ctx, &loonfs.CompleteUploadBody{
 		NamespaceID: string(namespaceID),
@@ -318,20 +295,15 @@ func transferDirectMultipart(
 	if begin.DirectMultipart == nil {
 		return nil, fmt.Errorf("transfers: multipart response is incomplete")
 	}
-	partSize, err := checkedPartSize(begin.DirectMultipart.PartSizeBytes)
-	if err != nil {
-		return nil, err
+	if begin.DirectMultipart.PartSizeBytes <= 0 {
+		return nil, fmt.Errorf("transfers: invalid multipart part size %d", begin.DirectMultipart.PartSizeBytes)
 	}
+	partSize := int(begin.DirectMultipart.PartSizeBytes)
 	parts := splitParts(payload, partSize)
 	if len(parts) == 0 {
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: multipart response selected for an empty payload")
 	}
-	if len(parts) > multipartMaximumParts {
-		abortUpload(ctx, c, namespaceID, begin.UploadID)
-		return nil, fmt.Errorf("transfers: multipart upload requires %d parts, maximum is %d", len(parts), multipartMaximumParts)
-	}
-
 	claims := make([]*loonfs.UploadPartChecksumClaim, len(parts))
 	for index, part := range parts {
 		checksum, checksumErr := computeChecksum(begin.DirectMultipart.ChecksumAlgorithm, part)
@@ -357,32 +329,30 @@ func transferDirectMultipart(
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: sign multipart parts returned no response")
 	}
-	if len(signed.Parts) != len(parts) {
-		abortUpload(ctx, c, namespaceID, begin.UploadID)
-		return nil, fmt.Errorf("transfers: server signed %d parts, expected %d", len(signed.Parts), len(parts))
+	accessByPart := make(map[int]*loonfs.SignedUploadPart, len(signed.Parts))
+	for _, signedPart := range signed.Parts {
+		accessByPart[signedPart.PartNumber] = signedPart
 	}
 
 	completedParts := make([]*loonfs.CompletedUploadPart, 0, len(parts))
-	for _, signedPart := range signed.Parts {
-		partNumber := signedPart.PartNumber
-		if partNumber < 1 || partNumber > len(parts) {
+	for index, part := range parts {
+		partNumber := index + 1
+		signedPart := accessByPart[partNumber]
+		if signedPart == nil {
 			abortUpload(ctx, c, namespaceID, begin.UploadID)
-			return nil, fmt.Errorf("transfers: server signed invalid part number %d", partNumber)
+			return nil, fmt.Errorf("transfers: server did not sign multipart part %d", partNumber)
 		}
-		etag, putErr := putPresigned(ctx, signedPart.Access, parts[partNumber-1], true)
+		etag, putErr := putPresigned(ctx, signedPart.Access, part)
 		if putErr != nil {
 			abortUpload(ctx, c, namespaceID, begin.UploadID)
 			return nil, fmt.Errorf("transfers: upload part %d: %w", partNumber, putErr)
 		}
 		completedParts = append(completedParts, &loonfs.CompletedUploadPart{
-			Checksum:   claims[partNumber-1].Checksum,
+			Checksum:   claims[index].Checksum,
 			Etag:       etag,
 			PartNumber: partNumber,
 		})
 	}
-	sort.Slice(completedParts, func(left, right int) bool {
-		return completedParts[left].PartNumber < completedParts[right].PartNumber
-	})
 	wholeChecksum, err := computeChecksum(begin.DirectMultipart.ChecksumAlgorithm, payload)
 	if err != nil {
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
@@ -445,17 +415,6 @@ func abortUpload(ctx context.Context, c *client.Client, namespaceID loonfs.Names
 }
 
 func completedUploadStatus(response *loonfs.UploadSessionResponse) (*loonfs.UploadSessionStatusCompleted, error) {
-	status, err := uploadSessionStatus(response)
-	if err != nil {
-		return nil, err
-	}
-	if status.Completed == nil || status.Completed.ContentRef == nil {
-		return nil, fmt.Errorf("transfers: upload did not complete")
-	}
-	return status.Completed, nil
-}
-
-func uploadSessionStatus(response *loonfs.UploadSessionResponse) (*loonfs.UploadSessionStatus, error) {
 	if response == nil {
 		return nil, fmt.Errorf("transfers: upload session response is nil")
 	}
@@ -467,15 +426,10 @@ func uploadSessionStatus(response *loonfs.UploadSessionResponse) (*loonfs.Upload
 	if err := json.Unmarshal(data, &status); err != nil {
 		return nil, fmt.Errorf("transfers: decode upload status: %w", err)
 	}
-	return &status, nil
-}
-
-func checkedPartSize(sizeBytes int64) (int, error) {
-	maximumInt := int(^uint(0) >> 1)
-	if sizeBytes <= 0 || uint64(sizeBytes) > uint64(maximumInt) {
-		return 0, fmt.Errorf("transfers: invalid multipart part size %d", sizeBytes)
+	if status.Completed == nil || status.Completed.ContentRef == nil {
+		return nil, fmt.Errorf("transfers: upload did not complete")
 	}
-	return int(sizeBytes), nil
+	return status.Completed, nil
 }
 
 func splitParts(payload []byte, partSize int) [][]byte {
@@ -494,7 +448,6 @@ func putPresigned(
 	ctx context.Context,
 	access *loonfs.ObjectTransferAccess,
 	payload []byte,
-	requireETag bool,
 ) (string, error) {
 	response, err := sendPresigned(ctx, access, http.MethodPut, bytes.NewReader(payload), int64(len(payload)))
 	if err != nil {
@@ -506,54 +459,10 @@ func putPresigned(
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
 	etag := response.Header.Get("ETag")
-	if requireETag && etag == "" {
+	if etag == "" {
 		return "", fmt.Errorf("presigned PUT response has no ETag")
 	}
 	return etag, nil
-}
-
-type checksumReader struct {
-	reader    io.Reader
-	hasher    hash.Hash
-	sizeBytes int64
-}
-
-func (r *checksumReader) Read(buffer []byte) (int, error) {
-	read, err := r.reader.Read(buffer)
-	if read > 0 {
-		_, _ = r.hasher.Write(buffer[:read])
-		r.sizeBytes += int64(read)
-	}
-	return read, err
-}
-
-func putPresignedWithChecksum(
-	ctx context.Context,
-	access *loonfs.ObjectTransferAccess,
-	payload []byte,
-	algorithm loonfs.ChecksumAlgorithm,
-) (*loonfs.UploadContentClaim, error) {
-	hasher, err := checksumHasher(algorithm)
-	if err != nil {
-		return nil, err
-	}
-	body := &checksumReader{reader: bytes.NewReader(payload), hasher: hasher}
-	response, err := sendPresigned(ctx, access, http.MethodPut, body, int64(len(payload)))
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, responseStatusError(response)
-	}
-	_, _ = io.Copy(io.Discard, response.Body)
-	return &loonfs.UploadContentClaim{
-		Checksum: &loonfs.Checksum{
-			Algorithm: algorithm,
-			Value:     hex.EncodeToString(hasher.Sum(nil)),
-		},
-		SizeBytes: body.sizeBytes,
-	}, nil
 }
 
 func getPresigned(ctx context.Context, access *loonfs.ObjectTransferAccess) ([]byte, error) {
@@ -607,15 +516,6 @@ func sendPresigned(
 	return response, nil
 }
 
-func newPresignedHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: http.DefaultTransport.(*http.Transport).Clone(),
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
 func responseStatusError(response *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
 	detail := strings.TrimSpace(string(body))
@@ -640,26 +540,20 @@ func verifyChecksum(expected *loonfs.Checksum, payload []byte) error {
 }
 
 func computeChecksum(algorithm loonfs.ChecksumAlgorithm, payload []byte) (*loonfs.Checksum, error) {
-	hasher, err := checksumHasher(algorithm)
-	if err != nil {
-		return nil, err
-	}
-	_, _ = hasher.Write(payload)
-	return &loonfs.Checksum{
-		Algorithm: algorithm,
-		Value:     hex.EncodeToString(hasher.Sum(nil)),
-	}, nil
-}
-
-func checksumHasher(algorithm loonfs.ChecksumAlgorithm) (hash.Hash, error) {
+	var value string
 	switch algorithm {
 	case loonfs.ChecksumAlgorithmSha256:
-		return sha256.New(), nil
+		digest := sha256.Sum256(payload)
+		value = hex.EncodeToString(digest[:])
 	case loonfs.ChecksumAlgorithmCrc64Nvme:
-		return crc64.New(crc64NVMeTable), nil
+		value = fmt.Sprintf("%016x", crc64.Checksum(payload, crc64NVMeTable))
 	case loonfs.ChecksumAlgorithmCrc32C:
-		return crc32.New(crc32CTable), nil
+		value = fmt.Sprintf("%08x", crc32.Checksum(payload, crc32CTable))
 	default:
 		return nil, fmt.Errorf("unsupported checksum algorithm %q", algorithm)
 	}
+	return &loonfs.Checksum{
+		Algorithm: algorithm,
+		Value:     value,
+	}, nil
 }
