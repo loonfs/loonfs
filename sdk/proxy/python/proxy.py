@@ -12,8 +12,7 @@ import httpx
 __all__ = ["LoonFSProxy"]
 
 
-# typing generics keep these runtime-evaluated aliases importable on Python 3.8;
-# builtin and collections.abc generics in aliases need 3.9.
+# Python 3.8 requires typing aliases for runtime-evaluated generics.
 _Receive = Callable[[], Awaitable[Dict[str, Any]]]
 _Send = Callable[[Dict[str, Any]], Awaitable[None]]
 
