@@ -92,7 +92,7 @@ Setup and configuration
     Print the config file with secrets redacted
 
   loonfs version
-    Print the version, commit, and build date
+    Print the version
 
 Config file location
   One config file per invocation, chosen by the first rule that applies:
