@@ -1,7 +1,7 @@
 //! The clap argument grammar for every `loonfs` command.
 
 use crate::progress::ProgressMode;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
+use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use loonfs_api::InodeId;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -709,15 +709,20 @@ pub(crate) struct FilesystemLsArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    override_usage = "loonfs stat <PATH>\n       loonfs stat --inode <INODE_ID>",
+    group(
+        ArgGroup::new("stat_target")
+            .required(true)
+            .multiple(false)
+            .args(["path", "inode"])
+    )
+)]
 pub(crate) struct FilesystemStatArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Absolute path to describe.
-    #[arg(
-        required_unless_present = "inode",
-        conflicts_with = "inode",
-        value_hint = ValueHint::Other
-    )]
+    #[arg(value_hint = ValueHint::Other)]
     pub path: Option<String>,
     /// Visible inode to describe instead of a path.
     #[arg(long, value_name = "INODE_ID", value_parser = parse_public_inode_id)]
@@ -1560,6 +1565,31 @@ mod tests {
             assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
             assert!(error.to_string().contains(selector), "{error}");
         }
+    }
+
+    #[test]
+    fn stat_help_and_parser_show_both_exclusive_target_forms() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("stat")
+            .expect("stat command")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("loonfs stat <PATH>"), "{help}");
+        assert!(help.contains("loonfs stat --inode <INODE_ID>"), "{help}");
+
+        let missing = Cli::try_parse_from(["loonfs", "stat"]).expect_err("target is required");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let both = Cli::try_parse_from(["loonfs", "stat", "/doc", "--inode", "ino_2"])
+            .expect_err("targets conflict");
+        assert_eq!(both.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        Cli::try_parse_from(["loonfs", "stat", "/doc"]).expect("path target");
+        Cli::try_parse_from(["loonfs", "stat", "--inode", "ino_2"]).expect("inode target");
     }
 
     fn assert_selected_target(cli: &Cli, profile: &str, namespace: &str) {
