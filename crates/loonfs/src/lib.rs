@@ -160,8 +160,8 @@ pub mod content_tokens {
 pub mod uploads {
     pub use loonfs_core::{
         BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
-        DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget,
-        MultipartPartTargets, ResolvedUploadCompletion,
+        DirectMultipartUploadTarget, MultipartPartTarget, MultipartPartTargets,
+        ResolvedUploadCompletion,
     };
 }
 

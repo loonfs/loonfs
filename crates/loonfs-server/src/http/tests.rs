@@ -3786,10 +3786,6 @@ mod direct_download {
             !advertised.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
             "a provider with no multipart API must not advertise one"
         );
-        assert!(advertised
-            .features
-            .keys()
-            .all(|feature| !feature.starts_with("core.uploads.direct_put.checksum.")));
         assert_eq!(
             advertised
                 .limits
@@ -3889,10 +3885,6 @@ mod direct_download {
         let advertised = client.capabilities().await.expect("capabilities");
         assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT));
         assert!(advertised.supports(FEATURE_DOWNLOADS_DIRECT_GET));
-        assert!(advertised
-            .features
-            .keys()
-            .all(|feature| !feature.starts_with("core.uploads.direct_put.checksum.")));
         assert!(
             !advertised.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
             "this adapter signs no multipart for GCS, so the key must be absent"

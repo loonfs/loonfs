@@ -190,7 +190,7 @@ async fn begin_direct_put_upload(
     let signed = issuer
         .presign_put(
             PresignedPutRequest {
-                object_key: &prepared.target.object_key,
+                object_key: &prepared.object_key,
                 expires_in: DIRECT_PUT_URL_TTL,
             },
             presign_time(),
@@ -201,7 +201,7 @@ async fn begin_direct_put_upload(
         namespace_id: prepared.namespace_id,
         upload_id: prepared.upload_id,
         direct_put: DirectPutUpload {
-            checksum_algorithm: prepared.target.checksum_algorithm,
+            checksum_algorithm,
             access: ObjectTransferAccess::PresignedUrl {
                 method: signed.method,
                 url: signed.url,
@@ -588,15 +588,10 @@ pub(super) async fn complete_upload(
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let body = body.into_bytes();
-    let direct_put_max_content_bytes = state
-        .direct_transfers
-        .as_ref()
-        .and_then(|transfers| transfers.put.as_ref())
-        .map(|issuer| issuer.max_content_bytes());
     let completed = state
         .writer
         .complete_upload_prepared_for_mode(&namespace_id, &upload_id, |mode| {
-            decode_completion_body(mode, &body, direct_put_max_content_bytes)
+            decode_completion_body(mode, &body)
         })
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
@@ -610,7 +605,6 @@ pub(super) async fn complete_upload(
 fn decode_completion_body(
     mode: UploadMode,
     body: &[u8],
-    direct_put_max_content_bytes: Option<u64>,
 ) -> std::result::Result<ResolvedUploadCompletion, String> {
     let invalid = |error: serde_json::Error| {
         format!(
@@ -629,12 +623,9 @@ fn decode_completion_body(
 
     match request {
         CompleteUploadRequest::ServiceProxied {} => Ok(ResolvedUploadCompletion::KnownContent),
-        CompleteUploadRequest::DirectPut { content } => Ok(ResolvedUploadCompletion::DirectPut {
-            content,
-            max_content_bytes: direct_put_max_content_bytes.ok_or_else(|| {
-                "direct_put completion requires the configured provider limit".to_owned()
-            })?,
-        }),
+        CompleteUploadRequest::DirectPut { content } => {
+            Ok(ResolvedUploadCompletion::DirectPut { content })
+        }
         CompleteUploadRequest::DirectMultipart { content, parts } => Ok(
             ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
         ),
@@ -666,7 +657,7 @@ mod completion_body_tests {
         let multipart_body =
             format!(r#"{{"mode":"direct_multipart","content":{CONTENT},"parts":[]}}"#);
         let direct_put_error =
-            decode_completion_body(UploadMode::DirectPut, multipart_body.as_bytes(), Some(10))
+            decode_completion_body(UploadMode::DirectPut, multipart_body.as_bytes())
                 .expect_err("multipart mode does not match direct put");
         assert_eq!(
             direct_put_error,
@@ -674,7 +665,7 @@ mod completion_body_tests {
              `direct_put`"
         );
 
-        let multipart_error = decode_completion_body(UploadMode::DirectMultipart, b"{}", None)
+        let multipart_error = decode_completion_body(UploadMode::DirectMultipart, b"{}")
             .expect_err("completion mode is required");
         assert_eq!(
             multipart_error,
@@ -684,7 +675,7 @@ mod completion_body_tests {
 
         let missing_parts = format!(r#"{{"mode":"direct_multipart","content":{CONTENT}}}"#);
         let missing_parts_error =
-            decode_completion_body(UploadMode::DirectMultipart, missing_parts.as_bytes(), None)
+            decode_completion_body(UploadMode::DirectMultipart, missing_parts.as_bytes())
                 .expect_err("multipart completion needs parts");
         assert_eq!(
             missing_parts_error,
@@ -705,7 +696,7 @@ mod completion_body_tests {
                 "content_ref",
             ),
         ] {
-            let error = decode_completion_body(UploadMode::ServiceProxied, body.as_bytes(), None)
+            let error = decode_completion_body(UploadMode::ServiceProxied, body.as_bytes())
                 .expect_err("retired completion field");
             assert!(
                 error.contains(&format!("unknown field `{field}`")),

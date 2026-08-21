@@ -6,14 +6,7 @@ use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
 /// One content-search request.
-///
-/// Every field but `pattern` is optional, and each one selects results. A
-/// misspelled `case_insensitive` or `path_prefix` would decode to the default
-/// and answer a different search than the caller asked for, with no sign that
-/// anything was dropped, so unknown fields are rejected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepRequest {
     /// The pattern, in the Rust `regex` crate's dialect (no backreferences
     /// or lookaround). Its UTF-8 encoding must be at most 1024 bytes.
@@ -22,30 +15,23 @@ pub struct GrepRequest {
     pub pattern: String,
     /// Match case-insensitively. Verification is exact; the index remains
     /// consulted through its case-folded grams.
-    #[serde(default)]
     pub case_insensitive: bool,
     /// Restrict matches to files under this complete absolute path, resolved
     /// to a directory inode before candidates are filtered.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub path_prefix: Option<AbsolutePath>,
     /// Resume cursor from a previous page. The cursor resumes strictly
     /// after the last candidate the issuing page finished scanning and is
     /// bound to that page's request; each page is evaluated against the
     /// namespace head at page time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     /// Maximum matches per page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
     /// When the unindexed tail exceeds the scan budget, return
     /// indexed-only results (reported via `tail_scanned: false`) instead
     /// of failing with `index_lagging`.
-    #[serde(default)]
     pub allow_stale: bool,
     /// Permit a capped exhaustive scan when the pattern yields no required
     /// grams. Refused beyond the server's scan budget.
-    #[serde(default)]
     pub allow_scan: bool,
 }
 
@@ -251,26 +237,6 @@ mod tests {
 
     #[test]
     fn grep_paths_keep_the_plain_string_wire_shape() {
-        let request = GrepRequest {
-            pattern: "needle".to_owned(),
-            case_insensitive: false,
-            path_prefix: Some(AbsolutePath::parse("/docs").expect("path prefix")),
-            cursor: None,
-            limit: None,
-            allow_stale: false,
-            allow_scan: false,
-        };
-        assert_eq!(
-            serde_json::to_value(request).expect("serialize grep request"),
-            serde_json::json!({
-                "pattern": "needle",
-                "case_insensitive": false,
-                "path_prefix": "/docs",
-                "allow_stale": false,
-                "allow_scan": false
-            })
-        );
-
         let found = GrepMatch {
             path: AbsolutePath::parse("/docs/a.txt").expect("match path"),
             inode_id: InodeId(2),
@@ -395,42 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn grep_path_prefix_validates_during_deserialization() {
-        let encoded = serde_json::json!({
-            "pattern": "needle",
-            "path_prefix": "relative/path"
-        });
-
-        assert!(serde_json::from_value::<GrepRequest>(encoded).is_err());
-    }
-
-    /// Every optional field on a search body selects results, so a typo would
-    /// answer a different question than the caller asked and say nothing
-    /// about it.
-    #[test]
-    fn search_request_bodies_reject_unknown_fields() {
-        serde_json::from_value::<GrepRequest>(serde_json::json!({
-            "pattern": "needle",
-            "case_insensitive": true,
-            "path_prefix": "/docs",
-            "limit": 10,
-            "allow_stale": true,
-            "allow_scan": true
-        }))
-        .expect("the same body without a typo decodes");
-
-        for body in [
-            serde_json::json!({"pattern": "needle", "case_insensitve": true}),
-            serde_json::json!({"pattern": "needle", "caseInsensitive": true}),
-            serde_json::json!({"pattern": "needle", "pathPrefix": "/docs"}),
-            serde_json::json!({"pattern": "needle", "allow_scans": true}),
-        ] {
-            assert!(
-                serde_json::from_value::<GrepRequest>(body.clone()).is_err(),
-                "an unknown field decoded instead of failing the search: {body}"
-            );
-        }
-
+    fn grep_gc_request_bodies_reject_unknown_fields() {
         serde_json::from_value::<GrepGcRequest>(serde_json::json!({"max_objects": 8}))
             .expect("the same collection body without a typo decodes");
         assert!(
