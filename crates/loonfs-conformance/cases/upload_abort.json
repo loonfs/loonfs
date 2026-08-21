@@ -1,8 +1,6 @@
 {
-  "version": 1,
   "name": "upload_abort",
   "intent": "Checks that repeating abort_upload returns the stored result.",
-  "family": "upload_abort",
   "request": {
     "namespace_id": "conf-upload-abort"
   },

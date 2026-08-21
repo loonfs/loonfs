@@ -1,8 +1,6 @@
 {
-  "version": 1,
   "name": "pagination",
   "intent": "Checks that pagination returns every entry once and can resume from a saved cursor.",
-  "family": "pagination",
   "request": {
     "namespace_id": "conf-pagination",
     "directory": "/entries",

@@ -1,8 +1,6 @@
 {
-  "version": 1,
   "name": "changes",
   "intent": "Checks the change feed fields returned after a supplied sequence.",
-  "family": "changes",
   "request": {
     "namespace_id": "conf-changes",
     "path": "/changed",
@@ -15,7 +13,6 @@
   },
   "expected": {
     "committed_seq": 1,
-    "change_count": 1,
-    "event_kind": "directory_created"
+    "change_count": 1
   }
 }

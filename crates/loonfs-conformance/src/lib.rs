@@ -11,64 +11,31 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-/// Supported fixture format version.
-pub const FIXTURE_VERSION: u32 = 1;
-
-/// Function that runs a test case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CaseFamily {
-    /// Standard API errors.
-    ErrorContract,
-    /// Repeated commit requests.
-    CommitReplay,
-    /// Direct PUT upload.
-    UploadDirectPut,
-    /// Multipart upload and repeated completion.
-    UploadMultipart,
-    /// Repeated upload abort.
-    UploadAbort,
-    /// Direct download.
-    Download,
-    /// Cursor pagination and resume.
-    Pagination,
-    /// Namespace-alias-scoped requests through a proxy.
-    Proxy,
-    /// Change feed order and identity.
-    Changes,
-    /// End-to-end filesystem workflow.
-    EndToEnd,
-}
-
 /// One shared test case.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Case {
-    /// Fixture format version.
-    pub version: u32,
     /// Case name and file stem.
     pub name: String,
     /// Behavior being tested.
     pub intent: String,
-    /// Function that runs the case.
-    pub family: CaseFamily,
     /// Input values for this case.
     pub request: Value,
     /// Expected responses and behavior.
     pub expected: Value,
 }
 
-const EXPECTED_CASES: &[(&str, CaseFamily)] = &[
-    ("changes", CaseFamily::Changes),
-    ("commit_replay", CaseFamily::CommitReplay),
-    ("download", CaseFamily::Download),
-    ("end_to_end", CaseFamily::EndToEnd),
-    ("error_contract", CaseFamily::ErrorContract),
-    ("pagination", CaseFamily::Pagination),
-    ("proxy", CaseFamily::Proxy),
-    ("upload_abort", CaseFamily::UploadAbort),
-    ("upload_direct_put", CaseFamily::UploadDirectPut),
-    ("upload_multipart", CaseFamily::UploadMultipart),
+const EXPECTED_CASES: &[&str] = &[
+    "changes",
+    "commit_replay",
+    "download",
+    "end_to_end",
+    "error_contract",
+    "pagination",
+    "proxy",
+    "upload_abort",
+    "upload_direct_put",
+    "upload_multipart",
 ];
 
 /// Failure to read or validate the test cases.
@@ -151,12 +118,6 @@ fn validate_case(path: &Path, case: &Case) -> Result<(), FixtureError> {
         path: path.to_path_buf(),
         reason,
     };
-    if case.version != FIXTURE_VERSION {
-        return Err(invalid(format!(
-            "version must be {FIXTURE_VERSION}, found {}",
-            case.version
-        )));
-    }
     let stem = path.file_stem().and_then(|stem| stem.to_str());
     if stem != Some(case.name.as_str()) {
         return Err(invalid(format!(
@@ -181,20 +142,17 @@ fn validate_inventory(directory: &Path, cases: &[Case]) -> Result<(), FixtureErr
         return Err(FixtureError::Invalid {
             path: directory.to_path_buf(),
             reason: format!(
-                "version one requires {} cases, found {}",
+                "fixture corpus requires {} cases, found {}",
                 EXPECTED_CASES.len(),
                 cases.len()
             ),
         });
     }
-    for (case, (expected_name, expected_family)) in cases.iter().zip(EXPECTED_CASES) {
-        if case.name != *expected_name || case.family != *expected_family {
+    for (case, expected_name) in cases.iter().zip(EXPECTED_CASES) {
+        if case.name != *expected_name {
             return Err(FixtureError::Invalid {
                 path: directory.to_path_buf(),
-                reason: format!(
-                    "expected `{expected_name}` with family {expected_family:?}, found `{}` with family {:?}",
-                    case.name, case.family
-                ),
+                reason: format!("expected `{expected_name}`, found `{}`", case.name),
             });
         }
     }
@@ -207,17 +165,13 @@ pub enum PatternError {
     /// The modulus is zero.
     #[error("byte pattern modulus must be greater than zero")]
     ZeroModulus,
-    /// The length does not fit in `usize`.
-    #[error("byte pattern length does not fit usize")]
-    LengthOverflow,
 }
 
 /// Generates the byte pattern `offset % modulus`.
-pub fn byte_pattern(length: u64, modulus: u8) -> Result<Vec<u8>, PatternError> {
+pub fn byte_pattern(length: usize, modulus: u8) -> Result<Vec<u8>, PatternError> {
     if modulus == 0 {
         return Err(PatternError::ZeroModulus);
     }
-    let length = usize::try_from(length).map_err(|_| PatternError::LengthOverflow)?;
     Ok((0..length)
         .map(|offset| (offset % usize::from(modulus)) as u8)
         .collect())
@@ -276,10 +230,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_one_inventory_parses_and_is_complete() {
-        let cases = load_cases().expect("load version-one cases");
+    fn inventory_parses_and_is_complete() {
+        let cases = load_cases().expect("load cases");
         assert_eq!(cases.len(), EXPECTED_CASES.len());
-        assert!(cases.iter().all(|case| case.version == FIXTURE_VERSION));
     }
 
     #[test]

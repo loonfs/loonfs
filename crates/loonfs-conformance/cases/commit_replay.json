@@ -1,8 +1,6 @@
 {
-  "version": 1,
   "name": "commit_replay",
   "intent": "Checks that repeating apply_commit with the same commit_id returns the stored result.",
-  "family": "commit_replay",
   "request": {
     "namespace_id": "conf-commit-replay",
     "commit_id": "conf-commit-replay-001",

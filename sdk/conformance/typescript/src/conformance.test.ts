@@ -20,27 +20,24 @@ import {
 import { createProxyHandler } from "../../../proxy/typescript/src/proxy.js";
 
 
-const FIXTURE_VERSION = 1;
 const RUNNER_SKIP = "run scripts/run-sdk-conformance.sh typescript";
-const CRC32C_POLYNOMIAL = 0x82f63b78;
 const CRC64_NVME_POLYNOMIAL = 0x9a6c9329ac4bc9b5n;
 const CRC64_MASK = 0xffffffffffffffffn;
 const BROWSER_MULTIPART_MIN_BYTES = 8 * 1024 * 1024;
 const PROXY_UPLOAD_MAX_BYTES = "upload.max_content_bytes";
-const CASE_FIELDS = ["expected", "family", "intent", "name", "request", "version"];
+const CASE_FIELDS = ["expected", "intent", "name", "request"];
 const EXPECTED_CASES = [
-    ["changes", "changes"],
-    ["commit_replay", "commit_replay"],
-    ["download", "download"],
-    ["end_to_end", "end_to_end"],
-    ["error_contract", "error_contract"],
-    ["pagination", "pagination"],
-    ["proxy", "proxy"],
-    ["upload_abort", "upload_abort"],
-    ["upload_direct_put", "upload_direct_put"],
-    ["upload_multipart", "upload_multipart"],
+    "changes",
+    "commit_replay",
+    "download",
+    "end_to_end",
+    "error_contract",
+    "pagination",
+    "proxy",
+    "upload_abort",
+    "upload_direct_put",
+    "upload_multipart",
 ] as const;
-const CRC32C_TABLE = makeCrc32cTable();
 const CRC64_NVME_TABLE = makeCrc64NvmeTable();
 type JsonObject = Record<string, unknown>;
 type ActorKind = "user" | "service" | "system";
@@ -52,7 +49,6 @@ interface ActorValue {
 
 interface ConformanceCase {
     name: string;
-    family: string;
     request: JsonObject;
     expected: JsonObject;
 }
@@ -62,78 +58,67 @@ interface ErrorStatusExpected {
     code: string;
 }
 
-interface ErrorOutcome {
-    status: number;
-    code: string;
-    param: string;
-}
-
 interface ErrorContractRequest {
-    namespaceId: string;
-    malformedBody: JsonObject;
-    invalidAfterSeq: string;
+    namespace_id: string;
 }
 
 interface ErrorContractExpected {
     unauthenticated: ErrorStatusExpected;
-    malformedBody: ErrorOutcome;
-    invalidQuery: ErrorOutcome;
 }
 
 interface CommitReplayRequest {
-    namespaceId: string;
-    commitId: string;
+    namespace_id: string;
+    commit_id: string;
     actor: ActorValue;
     message: string;
     path: string;
 }
 
 interface CommitReplayExpected {
-    committedSeq: number;
+    committed_seq: number;
 }
 
 interface PaginationRequest {
-    namespaceId: string;
+    namespace_id: string;
     directory: string;
     actor: ActorValue;
-    entryNames: string[];
-    pageSize: number;
-    resumeAfterPage: number;
+    entry_names: string[];
+    page_size: number;
+    resume_after_page: number;
 }
 
 interface PaginationExpected {
-    entryCount: number;
-    minimumPageCount: number;
-    headSeq: number;
+    entry_count: number;
+    minimum_page_count: number;
+    head_seq: number;
 }
 
 interface ChangesRequest {
-    namespaceId: string;
+    namespace_id: string;
     path: string;
-    commitId: string;
+    commit_id: string;
     actor: ActorValue;
-    afterSeq: number;
+    after_seq: number;
 }
 
 interface ChangesExpected {
-    committedSeq: number;
-    changeCount: number;
-    eventKind: string;
+    committed_seq: number;
+    change_count: number;
 }
 
 interface DirectPutRequest {
-    namespaceId: string;
+    namespace_id: string;
     path: string;
-    commitId: string;
+    commit_id: string;
     actor: ActorValue;
-    contentUtf8: string;
+    content_utf8: string;
 }
 
 interface DirectPutExpected {
     mode: string;
-    sizeBytes: number;
-    checksumAlgorithm: string;
-    committedSeq: number;
+    size_bytes: number;
+    checksum_algorithm: string;
+    committed_seq: number;
 }
 
 interface BytePattern {
@@ -142,24 +127,24 @@ interface BytePattern {
 }
 
 interface MultipartRequest {
-    namespaceId: string;
+    namespace_id: string;
     path: string;
-    commitId: string;
+    commit_id: string;
     actor: ActorValue;
-    partSizeBytes: number;
-    contentPattern: BytePattern;
+    part_size_bytes: number;
+    content_pattern: BytePattern;
 }
 
 interface MultipartExpected {
     mode: string;
-    partCount: number;
-    sizeBytes: number;
-    checksumAlgorithm: string;
-    committedSeq: number;
+    part_count: number;
+    size_bytes: number;
+    checksum_algorithm: string;
+    committed_seq: number;
 }
 
 interface AbortRequest {
-    namespaceId: string;
+    namespace_id: string;
 }
 
 interface AbortExpected {
@@ -168,17 +153,17 @@ interface AbortExpected {
 }
 
 interface DownloadRequest {
-    namespaceId: string;
+    namespace_id: string;
     path: string;
-    commitId: string;
+    commit_id: string;
     actor: ActorValue;
-    contentUtf8: string;
+    content_utf8: string;
 }
 
 interface DownloadExpected {
-    sizeBytes: number;
-    checksumAlgorithm: string;
-    committedSeq: number;
+    size_bytes: number;
+    checksum_algorithm: string;
+    committed_seq: number;
 }
 
 interface EndToEndCommitIds {
@@ -189,23 +174,23 @@ interface EndToEndCommitIds {
 }
 
 interface EndToEndRequest {
-    namespaceId: string;
+    namespace_id: string;
     directory: string;
-    uploadPath: string;
-    movedPath: string;
+    upload_path: string;
+    moved_path: string;
     actor: ActorValue;
-    contentUtf8: string;
-    commitIds: EndToEndCommitIds;
+    content_utf8: string;
+    commit_ids: EndToEndCommitIds;
 }
 
 interface EndToEndExpected {
-    mkdirCommittedSeq: number;
-    uploadCommittedSeq: number;
-    moveCommittedSeq: number;
-    removeCommittedSeq: number;
-    sizeBytes: number;
-    revisionCount: number;
-    changeCount: number;
+    mkdir_committed_seq: number;
+    upload_committed_seq: number;
+    move_committed_seq: number;
+    remove_committed_seq: number;
+    size_bytes: number;
+    revision_count: number;
+    change_count: number;
 }
 
 interface ProxyCommitIds {
@@ -215,25 +200,25 @@ interface ProxyCommitIds {
 }
 
 interface ProxyRequest {
-    namespaceAlias: string;
-    namespaceId: string;
-    unknownNamespaceAlias: string;
+    namespace_alias: string;
+    namespace_id: string;
+    unknown_namespace_alias: string;
     actor: ActorValue;
     directory: string;
-    proxiedPath: string;
-    directPath: string;
-    commitIds: ProxyCommitIds;
-    contentUtf8: string;
-    disallowedPathSuffix: string;
+    proxied_path: string;
+    direct_path: string;
+    commit_ids: ProxyCommitIds;
+    content_utf8: string;
+    disallowed_path_suffix: string;
 }
 
 interface ProxyExpected {
-    mkdirCommittedSeq: number;
-    proxiedCommittedSeq: number;
-    directCommittedSeq: number;
-    entryCount: number;
-    unknownNamespaceAliasStatus: number;
-    disallowedRouteStatus: number;
+    mkdir_committed_seq: number;
+    proxied_committed_seq: number;
+    direct_committed_seq: number;
+    entry_count: number;
+    unknown_namespace_alias_status: number;
+    disallowed_route_status: number;
 }
 
 interface Harness {
@@ -279,466 +264,203 @@ function strictObject(value: unknown, fields: readonly string[], label: string):
     return data;
 }
 
-function stringValue(value: unknown, label: string): string {
-    if (typeof value !== "string") {
-        throw new Error(`${label} must be a string`);
-    }
-    return value;
-}
-
-function integerValue(value: unknown, label: string): number {
-    if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-        throw new Error(`${label} must be an integer`);
-    }
-    return value;
-}
-
-function byteValue(value: unknown, label: string): number {
-    const byte = integerValue(value, label);
-    if (byte < 0 || byte > 255) {
-        throw new Error(`${label} must fit in one byte`);
-    }
-    return byte;
-}
-
-function stringArray(value: unknown, label: string): string[] {
-    if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
-        throw new Error(`${label} must be an array of strings`);
-    }
-    return value;
-}
-
-function actorValue(value: unknown, label: string): ActorValue {
-    const actor = strictObject(value, ["id", "kind"], label);
-    const kind = stringValue(actor.kind, `${label}.kind`);
-    if (kind !== "user" && kind !== "service" && kind !== "system") {
-        throw new Error(`${label}.kind is not a known actor kind`);
-    }
-    return {
-        id: stringValue(actor.id, `${label}.id`),
-        kind,
-    };
-}
-
-function errorStatus(value: unknown, label: string): ErrorStatusExpected {
-    const data = strictObject(value, ["status", "code"], label);
-    return {
-        status: integerValue(data.status, `${label}.status`),
-        code: stringValue(data.code, `${label}.code`),
-    };
-}
-
-function errorOutcome(value: unknown, label: string): ErrorOutcome {
-    const data = strictObject(value, ["status", "code", "param"], label);
-    return {
-        status: integerValue(data.status, `${label}.status`),
-        code: stringValue(data.code, `${label}.code`),
-        param: stringValue(data.param, `${label}.param`),
-    };
-}
+const ERROR_CONTRACT_REQUEST_FIELDS = ["namespace_id"] as const;
+const ERROR_CONTRACT_EXPECTED_FIELDS = ["unauthenticated"] as const;
+const COMMIT_REPLAY_REQUEST_FIELDS = [
+    "namespace_id",
+    "commit_id",
+    "actor",
+    "message",
+    "path",
+] as const;
+const COMMIT_REPLAY_EXPECTED_FIELDS = ["committed_seq"] as const;
+const PAGINATION_REQUEST_FIELDS = [
+    "namespace_id",
+    "directory",
+    "actor",
+    "entry_names",
+    "page_size",
+    "resume_after_page",
+] as const;
+const PAGINATION_EXPECTED_FIELDS = ["entry_count", "minimum_page_count", "head_seq"] as const;
+const CHANGES_REQUEST_FIELDS = [
+    "namespace_id",
+    "path",
+    "commit_id",
+    "actor",
+    "after_seq",
+] as const;
+const CHANGES_EXPECTED_FIELDS = ["committed_seq", "change_count"] as const;
+const DIRECT_PUT_REQUEST_FIELDS = [
+    "namespace_id",
+    "path",
+    "commit_id",
+    "actor",
+    "content_utf8",
+] as const;
+const DIRECT_PUT_EXPECTED_FIELDS = [
+    "mode",
+    "size_bytes",
+    "checksum_algorithm",
+    "committed_seq",
+] as const;
+const MULTIPART_REQUEST_FIELDS = [
+    "namespace_id",
+    "path",
+    "commit_id",
+    "actor",
+    "part_size_bytes",
+    "content_pattern",
+] as const;
+const MULTIPART_EXPECTED_FIELDS = [
+    "mode",
+    "part_count",
+    "size_bytes",
+    "checksum_algorithm",
+    "committed_seq",
+] as const;
+const ABORT_REQUEST_FIELDS = ["namespace_id"] as const;
+const ABORT_EXPECTED_FIELDS = ["mode", "status"] as const;
+const DOWNLOAD_REQUEST_FIELDS = [
+    "namespace_id",
+    "path",
+    "commit_id",
+    "actor",
+    "content_utf8",
+] as const;
+const DOWNLOAD_EXPECTED_FIELDS = ["size_bytes", "checksum_algorithm", "committed_seq"] as const;
+const END_TO_END_REQUEST_FIELDS = [
+    "namespace_id",
+    "directory",
+    "upload_path",
+    "moved_path",
+    "actor",
+    "content_utf8",
+    "commit_ids",
+] as const;
+const END_TO_END_EXPECTED_FIELDS = [
+    "mkdir_committed_seq",
+    "upload_committed_seq",
+    "move_committed_seq",
+    "remove_committed_seq",
+    "size_bytes",
+    "revision_count",
+    "change_count",
+] as const;
+const PROXY_REQUEST_FIELDS = [
+    "namespace_alias",
+    "namespace_id",
+    "unknown_namespace_alias",
+    "actor",
+    "directory",
+    "proxied_path",
+    "direct_path",
+    "commit_ids",
+    "content_utf8",
+    "disallowed_path_suffix",
+] as const;
+const PROXY_EXPECTED_FIELDS = [
+    "mkdir_committed_seq",
+    "proxied_committed_seq",
+    "direct_committed_seq",
+    "entry_count",
+    "unknown_namespace_alias_status",
+    "disallowed_route_status",
+] as const;
 
 function decodeErrorContract(
     testCase: ConformanceCase,
 ): [ErrorContractRequest, ErrorContractExpected] {
-    const request = strictObject(
-        testCase.request,
-        ["namespace_id", "malformed_body", "invalid_after_seq"],
-        `${testCase.name} request`,
-    );
-    const expected = strictObject(
-        testCase.expected,
-        ["unauthenticated", "malformed_body", "invalid_query"],
-        `${testCase.name} expected`,
-    );
+    strictObject(testCase.request, ERROR_CONTRACT_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, ERROR_CONTRACT_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceId: stringValue(request.namespace_id, "error_contract request.namespace_id"),
-            malformedBody: jsonObject(request.malformed_body, "error_contract request.malformed_body"),
-            invalidAfterSeq: stringValue(
-                request.invalid_after_seq,
-                "error_contract request.invalid_after_seq",
-            ),
-        },
-        {
-            unauthenticated: errorStatus(
-                expected.unauthenticated,
-                "error_contract expected.unauthenticated",
-            ),
-            malformedBody: errorOutcome(
-                expected.malformed_body,
-                "error_contract expected.malformed_body",
-            ),
-            invalidQuery: errorOutcome(
-                expected.invalid_query,
-                "error_contract expected.invalid_query",
-            ),
-        },
+        testCase.request as unknown as ErrorContractRequest,
+        testCase.expected as unknown as ErrorContractExpected,
     ];
 }
 
 function decodeCommitReplay(
     testCase: ConformanceCase,
 ): [CommitReplayRequest, CommitReplayExpected] {
-    const request = strictObject(
-        testCase.request,
-        ["namespace_id", "commit_id", "actor", "message", "path"],
-        `${testCase.name} request`,
-    );
-    const expected = strictObject(testCase.expected, ["committed_seq"], `${testCase.name} expected`);
+    strictObject(testCase.request, COMMIT_REPLAY_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, COMMIT_REPLAY_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceId: stringValue(request.namespace_id, "commit_replay request.namespace_id"),
-            commitId: stringValue(request.commit_id, "commit_replay request.commit_id"),
-            actor: actorValue(request.actor, "commit_replay request.actor"),
-            message: stringValue(request.message, "commit_replay request.message"),
-            path: stringValue(request.path, "commit_replay request.path"),
-        },
-        {
-            committedSeq: integerValue(expected.committed_seq, "commit_replay expected.committed_seq"),
-        },
+        testCase.request as unknown as CommitReplayRequest,
+        testCase.expected as unknown as CommitReplayExpected,
     ];
 }
 
 function decodePagination(
     testCase: ConformanceCase,
 ): [PaginationRequest, PaginationExpected] {
-    const request = strictObject(
-        testCase.request,
-        ["namespace_id", "directory", "actor", "entry_names", "page_size", "resume_after_page"],
-        `${testCase.name} request`,
-    );
-    const expected = strictObject(
-        testCase.expected,
-        ["entry_count", "minimum_page_count", "head_seq"],
-        `${testCase.name} expected`,
-    );
+    strictObject(testCase.request, PAGINATION_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, PAGINATION_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceId: stringValue(request.namespace_id, "pagination request.namespace_id"),
-            directory: stringValue(request.directory, "pagination request.directory"),
-            actor: actorValue(request.actor, "pagination request.actor"),
-            entryNames: stringArray(request.entry_names, "pagination request.entry_names"),
-            pageSize: integerValue(request.page_size, "pagination request.page_size"),
-            resumeAfterPage: integerValue(
-                request.resume_after_page,
-                "pagination request.resume_after_page",
-            ),
-        },
-        {
-            entryCount: integerValue(expected.entry_count, "pagination expected.entry_count"),
-            minimumPageCount: integerValue(
-                expected.minimum_page_count,
-                "pagination expected.minimum_page_count",
-            ),
-            headSeq: integerValue(expected.head_seq, "pagination expected.head_seq"),
-        },
+        testCase.request as unknown as PaginationRequest,
+        testCase.expected as unknown as PaginationExpected,
     ];
 }
 
 function decodeChanges(testCase: ConformanceCase): [ChangesRequest, ChangesExpected] {
-    const request = strictObject(
-        testCase.request,
-        ["namespace_id", "path", "commit_id", "actor", "after_seq"],
-        `${testCase.name} request`,
-    );
-    const expected = strictObject(
-        testCase.expected,
-        ["committed_seq", "change_count", "event_kind"],
-        `${testCase.name} expected`,
-    );
+    strictObject(testCase.request, CHANGES_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, CHANGES_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceId: stringValue(request.namespace_id, "changes request.namespace_id"),
-            path: stringValue(request.path, "changes request.path"),
-            commitId: stringValue(request.commit_id, "changes request.commit_id"),
-            actor: actorValue(request.actor, "changes request.actor"),
-            afterSeq: integerValue(request.after_seq, "changes request.after_seq"),
-        },
-        {
-            committedSeq: integerValue(expected.committed_seq, "changes expected.committed_seq"),
-            changeCount: integerValue(expected.change_count, "changes expected.change_count"),
-            eventKind: stringValue(expected.event_kind, "changes expected.event_kind"),
-        },
+        testCase.request as unknown as ChangesRequest,
+        testCase.expected as unknown as ChangesExpected,
     ];
 }
 
 function decodeDirectPut(testCase: ConformanceCase): [DirectPutRequest, DirectPutExpected] {
-    const request = strictObject(
-        testCase.request,
-        ["namespace_id", "path", "commit_id", "actor", "content_utf8"],
-        `${testCase.name} request`,
-    );
-    const expected = strictObject(
-        testCase.expected,
-        ["mode", "size_bytes", "checksum_algorithm", "committed_seq"],
-        `${testCase.name} expected`,
-    );
+    strictObject(testCase.request, DIRECT_PUT_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, DIRECT_PUT_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceId: stringValue(request.namespace_id, "upload_direct_put request.namespace_id"),
-            path: stringValue(request.path, "upload_direct_put request.path"),
-            commitId: stringValue(request.commit_id, "upload_direct_put request.commit_id"),
-            actor: actorValue(request.actor, "upload_direct_put request.actor"),
-            contentUtf8: stringValue(request.content_utf8, "upload_direct_put request.content_utf8"),
-        },
-        {
-            mode: stringValue(expected.mode, "upload_direct_put expected.mode"),
-            sizeBytes: integerValue(expected.size_bytes, "upload_direct_put expected.size_bytes"),
-            checksumAlgorithm: stringValue(
-                expected.checksum_algorithm,
-                "upload_direct_put expected.checksum_algorithm",
-            ),
-            committedSeq: integerValue(
-                expected.committed_seq,
-                "upload_direct_put expected.committed_seq",
-            ),
-        },
+        testCase.request as unknown as DirectPutRequest,
+        testCase.expected as unknown as DirectPutExpected,
     ];
 }
 
-function bytePatternValue(value: unknown, label: string): BytePattern {
-    const pattern = strictObject(value, ["length", "modulus"], label);
-    return {
-        length: integerValue(pattern.length, `${label}.length`),
-        modulus: byteValue(pattern.modulus, `${label}.modulus`),
-    };
-}
-
 function decodeMultipart(testCase: ConformanceCase): [MultipartRequest, MultipartExpected] {
-    const request = strictObject(
-        testCase.request,
-        ["namespace_id", "path", "commit_id", "actor", "part_size_bytes", "content_pattern"],
-        `${testCase.name} request`,
-    );
-    const expected = strictObject(
-        testCase.expected,
-        ["mode", "part_count", "size_bytes", "checksum_algorithm", "committed_seq"],
-        `${testCase.name} expected`,
-    );
+    strictObject(testCase.request, MULTIPART_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, MULTIPART_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceId: stringValue(request.namespace_id, "upload_multipart request.namespace_id"),
-            path: stringValue(request.path, "upload_multipart request.path"),
-            commitId: stringValue(request.commit_id, "upload_multipart request.commit_id"),
-            actor: actorValue(request.actor, "upload_multipart request.actor"),
-            partSizeBytes: integerValue(
-                request.part_size_bytes,
-                "upload_multipart request.part_size_bytes",
-            ),
-            contentPattern: bytePatternValue(
-                request.content_pattern,
-                "upload_multipart request.content_pattern",
-            ),
-        },
-        {
-            mode: stringValue(expected.mode, "upload_multipart expected.mode"),
-            partCount: integerValue(expected.part_count, "upload_multipart expected.part_count"),
-            sizeBytes: integerValue(expected.size_bytes, "upload_multipart expected.size_bytes"),
-            checksumAlgorithm: stringValue(
-                expected.checksum_algorithm,
-                "upload_multipart expected.checksum_algorithm",
-            ),
-            committedSeq: integerValue(
-                expected.committed_seq,
-                "upload_multipart expected.committed_seq",
-            ),
-        },
+        testCase.request as unknown as MultipartRequest,
+        testCase.expected as unknown as MultipartExpected,
     ];
 }
 
 function decodeAbort(testCase: ConformanceCase): [AbortRequest, AbortExpected] {
-    const request = strictObject(testCase.request, ["namespace_id"], `${testCase.name} request`);
-    const expected = strictObject(testCase.expected, ["mode", "status"], `${testCase.name} expected`);
+    strictObject(testCase.request, ABORT_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, ABORT_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceId: stringValue(request.namespace_id, "upload_abort request.namespace_id"),
-        },
-        {
-            mode: stringValue(expected.mode, "upload_abort expected.mode"),
-            status: stringValue(expected.status, "upload_abort expected.status"),
-        },
+        testCase.request as unknown as AbortRequest,
+        testCase.expected as unknown as AbortExpected,
     ];
 }
 
 function decodeDownload(testCase: ConformanceCase): [DownloadRequest, DownloadExpected] {
-    const request = strictObject(
-        testCase.request,
-        ["namespace_id", "path", "commit_id", "actor", "content_utf8"],
-        `${testCase.name} request`,
-    );
-    const expected = strictObject(
-        testCase.expected,
-        ["size_bytes", "checksum_algorithm", "committed_seq"],
-        `${testCase.name} expected`,
-    );
+    strictObject(testCase.request, DOWNLOAD_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, DOWNLOAD_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceId: stringValue(request.namespace_id, "download request.namespace_id"),
-            path: stringValue(request.path, "download request.path"),
-            commitId: stringValue(request.commit_id, "download request.commit_id"),
-            actor: actorValue(request.actor, "download request.actor"),
-            contentUtf8: stringValue(request.content_utf8, "download request.content_utf8"),
-        },
-        {
-            sizeBytes: integerValue(expected.size_bytes, "download expected.size_bytes"),
-            checksumAlgorithm: stringValue(
-                expected.checksum_algorithm,
-                "download expected.checksum_algorithm",
-            ),
-            committedSeq: integerValue(expected.committed_seq, "download expected.committed_seq"),
-        },
+        testCase.request as unknown as DownloadRequest,
+        testCase.expected as unknown as DownloadExpected,
     ];
 }
 
 function decodeEndToEnd(testCase: ConformanceCase): [EndToEndRequest, EndToEndExpected] {
-    const request = strictObject(
-        testCase.request,
-        ["namespace_id", "directory", "upload_path", "moved_path", "actor", "content_utf8", "commit_ids"],
-        `${testCase.name} request`,
-    );
-    const commitIds = strictObject(
-        request.commit_ids,
-        ["mkdir", "upload", "move", "remove"],
-        "end_to_end request.commit_ids",
-    );
-    const expected = strictObject(
-        testCase.expected,
-        [
-            "mkdir_committed_seq",
-            "upload_committed_seq",
-            "move_committed_seq",
-            "remove_committed_seq",
-            "size_bytes",
-            "revision_count",
-            "change_count",
-        ],
-        `${testCase.name} expected`,
-    );
+    strictObject(testCase.request, END_TO_END_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, END_TO_END_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceId: stringValue(request.namespace_id, "end_to_end request.namespace_id"),
-            directory: stringValue(request.directory, "end_to_end request.directory"),
-            uploadPath: stringValue(request.upload_path, "end_to_end request.upload_path"),
-            movedPath: stringValue(request.moved_path, "end_to_end request.moved_path"),
-            actor: actorValue(request.actor, "end_to_end request.actor"),
-            contentUtf8: stringValue(request.content_utf8, "end_to_end request.content_utf8"),
-            commitIds: {
-                mkdir: stringValue(commitIds.mkdir, "end_to_end request.commit_ids.mkdir"),
-                upload: stringValue(commitIds.upload, "end_to_end request.commit_ids.upload"),
-                move: stringValue(commitIds.move, "end_to_end request.commit_ids.move"),
-                remove: stringValue(commitIds.remove, "end_to_end request.commit_ids.remove"),
-            },
-        },
-        {
-            mkdirCommittedSeq: integerValue(
-                expected.mkdir_committed_seq,
-                "end_to_end expected.mkdir_committed_seq",
-            ),
-            uploadCommittedSeq: integerValue(
-                expected.upload_committed_seq,
-                "end_to_end expected.upload_committed_seq",
-            ),
-            moveCommittedSeq: integerValue(
-                expected.move_committed_seq,
-                "end_to_end expected.move_committed_seq",
-            ),
-            removeCommittedSeq: integerValue(
-                expected.remove_committed_seq,
-                "end_to_end expected.remove_committed_seq",
-            ),
-            sizeBytes: integerValue(expected.size_bytes, "end_to_end expected.size_bytes"),
-            revisionCount: integerValue(
-                expected.revision_count,
-                "end_to_end expected.revision_count",
-            ),
-            changeCount: integerValue(expected.change_count, "end_to_end expected.change_count"),
-        },
+        testCase.request as unknown as EndToEndRequest,
+        testCase.expected as unknown as EndToEndExpected,
     ];
 }
 
 function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
-    const request = strictObject(
-        testCase.request,
-        [
-            "namespace_alias",
-            "namespace_id",
-            "unknown_namespace_alias",
-            "actor",
-            "directory",
-            "proxied_path",
-            "direct_path",
-            "commit_ids",
-            "content_utf8",
-            "disallowed_path_suffix",
-        ],
-        `${testCase.name} request`,
-    );
-    const commitIds = strictObject(
-        request.commit_ids,
-        ["directory", "proxied", "direct"],
-        "proxy request.commit_ids",
-    );
-    const expected = strictObject(
-        testCase.expected,
-        [
-            "mkdir_committed_seq",
-            "proxied_committed_seq",
-            "direct_committed_seq",
-            "entry_count",
-            "unknown_namespace_alias_status",
-            "disallowed_route_status",
-        ],
-        `${testCase.name} expected`,
-    );
+    strictObject(testCase.request, PROXY_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, PROXY_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
-        {
-            namespaceAlias: stringValue(
-                request.namespace_alias,
-                "proxy request.namespace_alias",
-            ),
-            namespaceId: stringValue(request.namespace_id, "proxy request.namespace_id"),
-            unknownNamespaceAlias: stringValue(
-                request.unknown_namespace_alias,
-                "proxy request.unknown_namespace_alias",
-            ),
-            actor: actorValue(request.actor, "proxy request.actor"),
-            directory: stringValue(request.directory, "proxy request.directory"),
-            proxiedPath: stringValue(request.proxied_path, "proxy request.proxied_path"),
-            directPath: stringValue(request.direct_path, "proxy request.direct_path"),
-            commitIds: {
-                directory: stringValue(commitIds.directory, "proxy request.commit_ids.directory"),
-                proxied: stringValue(commitIds.proxied, "proxy request.commit_ids.proxied"),
-                direct: stringValue(commitIds.direct, "proxy request.commit_ids.direct"),
-            },
-            contentUtf8: stringValue(request.content_utf8, "proxy request.content_utf8"),
-            disallowedPathSuffix: stringValue(
-                request.disallowed_path_suffix,
-                "proxy request.disallowed_path_suffix",
-            ),
-        },
-        {
-            mkdirCommittedSeq: integerValue(
-                expected.mkdir_committed_seq,
-                "proxy expected.mkdir_committed_seq",
-            ),
-            proxiedCommittedSeq: integerValue(
-                expected.proxied_committed_seq,
-                "proxy expected.proxied_committed_seq",
-            ),
-            directCommittedSeq: integerValue(
-                expected.direct_committed_seq,
-                "proxy expected.direct_committed_seq",
-            ),
-            entryCount: integerValue(expected.entry_count, "proxy expected.entry_count"),
-            unknownNamespaceAliasStatus: integerValue(
-                expected.unknown_namespace_alias_status,
-                "proxy expected.unknown_namespace_alias_status",
-            ),
-            disallowedRouteStatus: integerValue(
-                expected.disallowed_route_status,
-                "proxy expected.disallowed_route_status",
-            ),
-        },
+        testCase.request as unknown as ProxyRequest,
+        testCase.expected as unknown as ProxyExpected,
     ];
 }
 
@@ -748,32 +470,33 @@ function loadCases(directory: string): Map<string, ConformanceCase> {
         .sort((left, right) => left.name.localeCompare(right.name))
         .map((entry): ConformanceCase => {
             const path = join(directory, entry.name);
-            const root = strictObject(JSON.parse(readFileSync(path, "utf8")), CASE_FIELDS, path);
-            const version = integerValue(root.version, `${path} version`);
-            if (version !== FIXTURE_VERSION) {
-                throw new Error(
-                    `invalid fixture ${path}: version must be ${FIXTURE_VERSION}, found ${version}`,
-                );
-            }
-            const name = stringValue(root.name, `${path} name`);
+            const root = strictObject(
+                JSON.parse(readFileSync(path, "utf8")),
+                CASE_FIELDS,
+                path,
+            ) as unknown as {
+                name: string;
+                intent: string;
+                request: unknown;
+                expected: unknown;
+            };
+            const { name, intent } = root;
             const stem = basename(path, extname(path));
             if (name !== stem) {
                 throw new Error(`invalid fixture ${path}: name is ${name}, expected ${stem}`);
             }
-            const intent = stringValue(root.intent, `${path} intent`);
             if (intent.trim() === "") {
                 throw new Error(`invalid fixture ${path}: intent must not be empty`);
             }
             return {
                 name,
-                family: stringValue(root.family, `${path} family`),
                 request: jsonObject(root.request, `${path} request`),
                 expected: jsonObject(root.expected, `${path} expected`),
             };
         });
 
-    const inventory = cases.map((testCase) => [testCase.name, testCase.family]);
-    assert.deepEqual(inventory, EXPECTED_CASES, "fixture version 1 inventory differs");
+    const inventory = cases.map((testCase) => testCase.name);
+    assert.deepEqual(inventory, EXPECTED_CASES, "fixture inventory differs");
     return new Map(cases.map((testCase) => [testCase.name, testCase]));
 }
 
@@ -999,10 +722,10 @@ function checksum(algorithm: LoonFS.ChecksumAlgorithm, bytes: Uint8Array): LoonF
     switch (algorithm) {
         case "sha256":
             return { algorithm, value: createHash("sha256").update(bytes).digest("hex") };
-        case "crc32c":
-            return { algorithm, value: crc32c(bytes).toString(16).padStart(8, "0") };
         case "crc64nvme":
             return { algorithm, value: crc64Nvme(bytes).toString(16).padStart(16, "0") };
+        default:
+            throw new Error(`unsupported checksum algorithm ${algorithm}`);
     }
 }
 
@@ -1029,26 +752,6 @@ function streamedBytes(bytes: Uint8Array): ReadableStream<Uint8Array> {
             index += 1;
         },
     });
-}
-
-function makeCrc32cTable(): Uint32Array {
-    const table = new Uint32Array(256);
-    for (let index = 0; index < table.length; index += 1) {
-        let value = index;
-        for (let bit = 0; bit < 8; bit += 1) {
-            value = (value >>> 1) ^ ((value & 1) === 0 ? 0 : CRC32C_POLYNOMIAL);
-        }
-        table[index] = value >>> 0;
-    }
-    return table;
-}
-
-function crc32c(bytes: Uint8Array): number {
-    let value = 0xffffffff;
-    for (const byte of bytes) {
-        value = CRC32C_TABLE[(value ^ byte) & 0xff]! ^ (value >>> 8);
-    }
-    return (value ^ 0xffffffff) >>> 0;
 }
 
 function makeCrc64NvmeTable(): bigint[] {
@@ -1083,7 +786,7 @@ function listedNames(entries: LoonFS.AuthoritativePathEntry[]): string[] {
 async function startProxyServer(
     handler: (request: Request) => Promise<Response>,
 ): Promise<RunningProxy> {
-    const server = createServer((incoming, outgoing) => {
+    return startServer((incoming, outgoing) => {
         void serveProxyRequest(handler, incoming, outgoing).catch(() => {
             if (!outgoing.headersSent) {
                 outgoing.writeHead(500);
@@ -1091,6 +794,12 @@ async function startProxyServer(
             outgoing.end();
         });
     });
+}
+
+async function startServer(
+    listener: (request: IncomingMessage, response: ServerResponse) => void,
+): Promise<RunningProxy> {
+    const server = createServer(listener);
     await new Promise<void>((resolve, reject) => {
         const onError = (error: Error): void => reject(error);
         server.once("error", onError);
@@ -1119,7 +828,7 @@ async function startProxyServer(
 
 async function startRecordingServer(): Promise<RunningRecordingServer> {
     const requests: string[] = [];
-    const server = createServer((incoming, outgoing) => {
+    const handler = (incoming: IncomingMessage, outgoing: ServerResponse): void => {
         const method = incoming.method ?? "GET";
         const path = new URL(incoming.url ?? "/", "http://127.0.0.1").pathname;
         requests.push(`${method} ${path}`);
@@ -1129,32 +838,8 @@ async function startRecordingServer(): Promise<RunningRecordingServer> {
             "content-length": "2",
         });
         outgoing.end("{}");
-    });
-    await new Promise<void>((resolve, reject) => {
-        const onError = (error: Error): void => reject(error);
-        server.once("error", onError);
-        server.listen(0, "127.0.0.1", () => {
-            server.off("error", onError);
-            resolve();
-        });
-    });
-    const address = server.address();
-    assert.ok(address !== null && typeof address !== "string");
-    return {
-        baseUrl: `http://127.0.0.1:${address.port}`,
-        requests,
-        close: () =>
-            new Promise<void>((resolve, reject) => {
-                server.close((error) => {
-                    if (error === undefined) {
-                        resolve();
-                    } else {
-                        reject(error);
-                    }
-                });
-                server.closeIdleConnections();
-            }),
     };
+    return { ...(await startServer(handler)), requests };
 }
 
 async function serveProxyRequest(
@@ -1250,7 +935,7 @@ conformanceTest("error_contract", async (activeHarness, testCase) => {
     const [request, expected] = decodeErrorContract(testCase);
     let caught: unknown;
     try {
-        await activeHarness.unauthenticated.namespaces.getNamespace({ namespace_id: request.namespaceId });
+        await activeHarness.unauthenticated.namespaces.getNamespace({ namespace_id: request.namespace_id });
     } catch (error) {
         caught = error;
     }
@@ -1263,10 +948,10 @@ conformanceTest("error_contract", async (activeHarness, testCase) => {
 
 conformanceTest("commit_replay", async (activeHarness, testCase) => {
     const [request, expected] = decodeCommitReplay(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
     const commit = directoryCommit(
-        request.namespaceId,
-        request.commitId,
+        request.namespace_id,
+        request.commit_id,
         request.actor,
         request.path,
         request.message,
@@ -1274,27 +959,27 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
     const first = await activeHarness.client.filesystem.applyCommit(commit);
     const replayed = await activeHarness.client.filesystem.applyCommit(commit);
 
-    assert.equal(first.committed_seq, expected.committedSeq);
-    assert.equal(first.commit_id, request.commitId);
+    assert.equal(first.committed_seq, expected.committed_seq);
+    assert.equal(first.commit_id, request.commit_id);
     assert.equal(replayed.committed_seq, first.committed_seq);
     assert.deepEqual(replayed, first);
 });
 
 conformanceTest("pagination", async (activeHarness, testCase) => {
     const [request, expected] = decodePagination(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
     await activeHarness.client.filesystem.applyCommit(
         directoryCommit(
-            request.namespaceId,
+            request.namespace_id,
             "conf-pagination-directory",
             request.actor,
             request.directory,
         ),
     );
-    for (const [index, name] of request.entryNames.entries()) {
+    for (const [index, name] of request.entry_names.entries()) {
         await activeHarness.client.filesystem.applyCommit(
             directoryCommit(
-                request.namespaceId,
+                request.namespace_id,
                 `conf-pagination-entry-${index.toString().padStart(2, "0")}`,
                 request.actor,
                 `${request.directory}/${name}`,
@@ -1307,17 +992,17 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
     let savedCursor: string | undefined;
     let resumeOffset: number | undefined;
     let page = await activeHarness.client.filesystem.listPathEntries({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: request.directory,
-        limit: request.pageSize,
+        limit: request.page_size,
     });
     let cursor: string | undefined;
     while (true) {
         pageCount += 1;
-        assert.equal(page.response.head_seq, expected.headSeq);
+        assert.equal(page.response.head_seq, expected.head_seq);
         observed.push(...listedNames(page.data));
         cursor = page.response.next_cursor ?? undefined;
-        if (pageCount === request.resumeAfterPage) {
+        if (pageCount === request.resume_after_page) {
             savedCursor = cursor;
             resumeOffset = observed.length;
         }
@@ -1327,17 +1012,17 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
         await page.getNextPage();
     }
 
-    assert.equal(observed.length, expected.entryCount);
-    assert.ok(pageCount >= expected.minimumPageCount);
+    assert.equal(observed.length, expected.entry_count);
+    assert.ok(pageCount >= expected.minimum_page_count);
     assert.equal(cursor, undefined);
     assert.ok(savedCursor !== undefined, "resume cursor was not recorded");
     assert.ok(resumeOffset !== undefined, "resume position was not recorded");
 
     const resumed: string[] = [];
     page = await activeHarness.client.filesystem.listPathEntries({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: request.directory,
-        limit: request.pageSize,
+        limit: request.page_size,
         cursor: savedCursor,
     });
     while (true) {
@@ -1350,9 +1035,9 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
     }
 
     assert.equal(new Set(observed).size, observed.length, "pagination returned an entry more than once");
-    assert.deepEqual(observed, request.entryNames);
-    assert.ok(resumeOffset <= request.entryNames.length);
-    assert.deepEqual(resumed, request.entryNames.slice(resumeOffset));
+    assert.deepEqual(observed, request.entry_names);
+    assert.ok(resumeOffset <= request.entry_names.length);
+    assert.deepEqual(resumed, request.entry_names.slice(resumeOffset));
 });
 
 test("proxy", { skip: environmentSkip }, async (context) => {
@@ -1363,9 +1048,9 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const proxyHandler = createProxyHandler({
         serverBaseUrl: activeHarness.serverBaseUrl,
         token: activeHarness.token,
-        namespaceAliases: { [request.namespaceAlias]: request.namespaceId },
+        namespaceAliases: { [request.namespace_alias]: request.namespace_id },
     });
-    const beginPath = `/v0/namespace-aliases/${encodeURIComponent(request.namespaceAlias)}/uploads`;
+    const beginPath = `/v0/namespace-aliases/${encodeURIComponent(request.namespace_alias)}/uploads`;
     const beginModes: string[] = [];
     const handler = async (incoming: Request): Promise<Response> => {
         if (incoming.method === "POST" && new URL(incoming.url).pathname === beginPath) {
@@ -1379,11 +1064,11 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const proxy = await startProxyServer(handler);
     context.after(() => proxy.close());
 
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
     const namespaceAliasBase =
         `${proxy.baseUrl}/v0/namespace-aliases/` +
-        encodeURIComponent(request.namespaceAlias);
-    const payload = new TextEncoder().encode(request.contentUtf8);
+        encodeURIComponent(request.namespace_alias);
+    const payload = new TextEncoder().encode(request.content_utf8);
 
     const mkdir = await proxyJson<LoonFS.CommitResponse>(
         `${namespaceAliasBase}/commits`,
@@ -1392,7 +1077,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
                 namespaceAliasDirectoryCommit(
-                    request.commitIds.directory,
+                    request.commit_ids.directory,
                     request.actor,
                     request.directory,
                 ),
@@ -1400,7 +1085,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         },
         "proxy directory commit",
     );
-    assert.equal(mkdir.committed_seq, expected.mkdirCommittedSeq);
+    assert.equal(mkdir.committed_seq, expected.mkdir_committed_seq);
 
     const proxiedBegin = await proxyJson<LoonFS.BeginUploadResponse>(
         `${namespaceAliasBase}/uploads`,
@@ -1443,16 +1128,16 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
                 namespaceAliasFileCommit(
-                    request.commitIds.proxied,
+                    request.commit_ids.proxied,
                     request.actor,
-                    request.proxiedPath,
+                    request.proxied_path,
                     proxiedCompleted,
                 ),
             ),
         },
         "proxy service upload commit",
     );
-    assert.equal(proxiedCommit.committed_seq, expected.proxiedCommittedSeq);
+    assert.equal(proxiedCommit.committed_seq, expected.proxied_committed_seq);
 
     const directBegin = await proxyJson<LoonFS.BeginUploadResponse>(
         `${namespaceAliasBase}/uploads`,
@@ -1488,16 +1173,16 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
                 namespaceAliasFileCommit(
-                    request.commitIds.direct,
+                    request.commit_ids.direct,
                     request.actor,
-                    request.directPath,
+                    request.direct_path,
                     directCompleted,
                 ),
             ),
         },
         "proxy direct upload commit",
     );
-    assert.equal(directCommit.committed_seq, expected.directCommittedSeq);
+    assert.equal(directCommit.committed_seq, expected.direct_committed_seq);
 
     const listUrl = new URL(`${namespaceAliasBase}/filesystem/list`);
     listUrl.searchParams.set("path", request.directory);
@@ -1506,39 +1191,39 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         { method: "GET" },
         "proxy directory listing",
     );
-    assert.equal(listing.entries.length, expected.entryCount);
+    assert.equal(listing.entries.length, expected.entry_count);
 
     const readUrl = new URL(`${namespaceAliasBase}/filesystem/content`);
-    readUrl.searchParams.set("path", request.proxiedPath);
+    readUrl.searchParams.set("path", request.proxied_path);
     const read = await fetchThroughProxy(readUrl);
     await requireSuccessfulResponse(read, "proxy file read");
     assert.deepEqual(new Uint8Array(await read.arrayBuffer()), payload);
 
     const unknownNamespaceAliasUrl = new URL(
-        `/v0/namespace-aliases/${encodeURIComponent(request.unknownNamespaceAlias)}/filesystem/list`,
+        `/v0/namespace-aliases/${encodeURIComponent(request.unknown_namespace_alias)}/filesystem/list`,
         proxy.baseUrl,
     );
     unknownNamespaceAliasUrl.searchParams.set("path", request.directory);
     const unknownNamespaceAlias = await fetchThroughProxy(unknownNamespaceAliasUrl);
-    assert.equal(unknownNamespaceAlias.status, expected.unknownNamespaceAliasStatus);
+    assert.equal(unknownNamespaceAlias.status, expected.unknown_namespace_alias_status);
     assert.equal((await unknownNamespaceAlias.arrayBuffer()).byteLength, 0);
 
     const disallowedRoute = await fetchThroughProxy(
-        `${namespaceAliasBase}${request.disallowedPathSuffix}`,
+        `${namespaceAliasBase}${request.disallowed_path_suffix}`,
     );
-    assert.equal(disallowedRoute.status, expected.disallowedRouteStatus);
+    assert.equal(disallowedRoute.status, expected.disallowed_route_status);
     assert.equal((await disallowedRoute.arrayBuffer()).byteLength, 0);
 
     beginModes.length = 0;
     const browserClient = new BrowserLoonFSClient({ environment: proxy.baseUrl });
-    const browserPath = `${request.proxiedPath}-browser`;
+    const browserPath = `${request.proxied_path}-browser`;
     await assertBrowserTransfer(
         browserClient,
-        request.namespaceAlias,
+        request.namespace_alias,
         browserPath,
         payload,
         request.actor,
-        `${request.commitIds.proxied}-browser`,
+        `${request.commit_ids.proxied}-browser`,
         "browser service-proxied transfer",
     );
     assert.deepEqual(beginModes, ["service_proxied"]);
@@ -1552,11 +1237,11 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const directPutBytes = bytePattern({ length: directPutLength, modulus: 251 });
     await assertBrowserTransfer(
         browserClient,
-        request.namespaceAlias,
-        `${request.directPath}-browser`,
+        request.namespace_alias,
+        `${request.direct_path}-browser`,
         directPutBytes,
         request.actor,
-        `${request.commitIds.direct}-browser`,
+        `${request.commit_ids.direct}-browser`,
         "browser direct-PUT transfer",
     );
     assert.deepEqual(beginModes, ["service_proxied", "direct_put"]);
@@ -1567,11 +1252,11 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     });
     await assertBrowserTransfer(
         browserClient,
-        request.namespaceAlias,
-        `${request.directPath}-browser-multipart`,
+        request.namespace_alias,
+        `${request.direct_path}-browser-multipart`,
         multipartBytes,
         request.actor,
-        `${request.commitIds.direct}-browser-multipart`,
+        `${request.commit_ids.direct}-browser-multipart`,
         "browser multipart transfer",
     );
     assert.deepEqual(beginModes, ["service_proxied", "direct_put", "direct_multipart"]);
@@ -1579,15 +1264,15 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     // The rig fails only at begin. No session exists then, so mid-flow cleanup is not covered.
     await assert.rejects(
         putBrowserFile(browserClient, {
-            namespace_alias: request.unknownNamespaceAlias,
-            path: `${request.proxiedPath}-browser-failure`,
+            namespace_alias: request.unknown_namespace_alias,
+            path: `${request.proxied_path}-browser-failure`,
             bytes: payload,
             actor: request.actor,
-            commit_id: `${request.commitIds.proxied}-browser-failure`,
+            commit_id: `${request.commit_ids.proxied}-browser-failure`,
         }),
         (error: unknown) => {
             assert.ok(error instanceof BrowserLoonFS.NotFoundError);
-            assert.equal(error.statusCode, expected.unknownNamespaceAliasStatus);
+            assert.equal(error.statusCode, expected.unknown_namespace_alias_status);
             return true;
         },
     );
@@ -1595,52 +1280,51 @@ test("proxy", { skip: environmentSkip }, async (context) => {
 
 conformanceTest("changes", async (activeHarness, testCase) => {
     const [request, expected] = decodeChanges(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
     const committed = await activeHarness.client.filesystem.applyCommit(
-        directoryCommit(request.namespaceId, request.commitId, request.actor, request.path),
+        directoryCommit(request.namespace_id, request.commit_id, request.actor, request.path),
     );
-    assert.equal(committed.committed_seq, expected.committedSeq);
+    assert.equal(committed.committed_seq, expected.committed_seq);
 
     const feed = await activeHarness.client.filesystem.listChanges({
-        namespace_id: request.namespaceId,
-        after_seq: request.afterSeq,
+        namespace_id: request.namespace_id,
+        after_seq: request.after_seq,
     });
-    assert.equal(feed.changes.length, expected.changeCount);
+    assert.equal(feed.changes.length, expected.change_count);
     assert.ok(feed.changes.length > 0, "change feed is empty");
     const change = feed.changes[0];
-    assert.equal(change.commit_id, request.commitId);
+    assert.equal(change.commit_id, request.commit_id);
     assert.deepEqual(change.committed_by, request.actor);
-    assert.equal(expected.eventKind, "directory_created");
     assert.equal(change.events.length, 1);
     assert.equal(change.events[0]?.kind, "directory_created");
 });
 
 conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
     const [request, expected] = decodeDirectPut(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
-    const payload = new TextEncoder().encode(request.contentUtf8);
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
+    const payload = new TextEncoder().encode(request.content_utf8);
     const begin = await activeHarness.client.uploads.beginUpload({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         body: { mode: "direct_put", size_bytes: payload.byteLength },
     });
-    assert.equal(begin.mode, "direct_put");
-    assert.equal(expected.mode, "direct_put");
-    assert.equal(begin.direct_put.checksum_algorithm, expected.checksumAlgorithm);
+    assert.equal(begin.mode, expected.mode);
+    const directPut = begin as LoonFS.BeginUploadResponse.DirectPut;
+    assert.equal(directPut.direct_put.checksum_algorithm, expected.checksum_algorithm);
 
-    await uploadPresigned(begin.direct_put.access, payload, "direct PUT");
+    await uploadPresigned(directPut.direct_put.access, payload, "direct PUT");
     const claim: LoonFS.UploadContentClaim = {
         size_bytes: payload.byteLength,
-        checksum: checksum(begin.direct_put.checksum_algorithm, payload),
+        checksum: checksum(directPut.direct_put.checksum_algorithm, payload),
     };
     const completed = completedUpload(
         await activeHarness.client.uploads.completeUpload({
-            namespace_id: request.namespaceId,
+            namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
             body: { mode: "direct_put", content: claim },
         }),
     );
-    assert.equal(completed.content_ref.size_bytes, expected.sizeBytes);
-    assert.equal(completed.content_ref.checksum.algorithm, expected.checksumAlgorithm);
+    assert.equal(completed.content_ref.size_bytes, expected.size_bytes);
+    assert.equal(completed.content_ref.checksum.algorithm, expected.checksum_algorithm);
     assert.deepEqual(completed.content_ref.checksum, claim.checksum);
     assert.deepEqual(
         completed.content_ref.checksum,
@@ -1649,54 +1333,54 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
 
     const committed = await activeHarness.client.filesystem.applyCommit(
         fileCommit(
-            request.namespaceId,
-            request.commitId,
+            request.namespace_id,
+            request.commit_id,
             request.actor,
             request.path,
             completed.content_ref,
             completed.content_token,
         ),
     );
-    assert.equal(committed.committed_seq, expected.committedSeq);
+    assert.equal(committed.committed_seq, expected.committed_seq);
     const stat = (await activeHarness.client.filesystem.statPath({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: request.path,
     })) as FileEntry;
     assert.deepEqual(stat.content_ref, completed.content_ref);
     assert.deepEqual(
-        await readProxied(activeHarness.client, request.namespaceId, request.path),
+        await readProxied(activeHarness.client, request.namespace_id, request.path),
         payload,
     );
 });
 
 conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     const [request, expected] = decodeMultipart(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
-    const payload = bytePattern(request.contentPattern);
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
+    const payload = bytePattern(request.content_pattern);
     const begin = await activeHarness.client.uploads.beginUpload({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         body: {
             mode: "direct_multipart",
-            multipart: { part_size_bytes: request.partSizeBytes },
+            multipart: { part_size_bytes: request.part_size_bytes },
         },
     });
-    assert.equal(begin.mode, "direct_multipart");
-    assert.equal(expected.mode, "direct_multipart");
-    assert.equal(begin.direct_multipart.part_size_bytes, request.partSizeBytes);
-    assert.equal(begin.direct_multipart.checksum_algorithm, expected.checksumAlgorithm);
+    assert.equal(begin.mode, expected.mode);
+    const multipart = begin as LoonFS.BeginUploadResponse.DirectMultipart;
+    assert.equal(multipart.direct_multipart.part_size_bytes, request.part_size_bytes);
+    assert.equal(multipart.direct_multipart.checksum_algorithm, expected.checksum_algorithm);
 
-    const chunks = splitBytes(payload, begin.direct_multipart.part_size_bytes);
-    assert.equal(chunks.length, expected.partCount);
+    const chunks = splitBytes(payload, multipart.direct_multipart.part_size_bytes);
+    assert.equal(chunks.length, expected.part_count);
     const claims: LoonFS.UploadPartChecksumClaim[] = chunks.map((chunk, index) => ({
         part_number: index + 1,
-        checksum: checksum(begin.direct_multipart.checksum_algorithm, chunk),
+        checksum: checksum(multipart.direct_multipart.checksum_algorithm, chunk),
     }));
     const signed = await activeHarness.client.uploads.signUploadParts({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         upload_id: begin.upload_id,
         parts: claims,
     });
-    assert.equal(signed.parts.length, expected.partCount);
+    assert.equal(signed.parts.length, expected.part_count);
 
     const completedParts: LoonFS.CompletedUploadPart[] = [];
     for (const signedPart of signed.parts) {
@@ -1719,7 +1403,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         });
     }
     completedParts.sort((left, right) => left.part_number - right.part_number);
-    const wholeChecksum = checksum(begin.direct_multipart.checksum_algorithm, payload);
+    const wholeChecksum = checksum(multipart.direct_multipart.checksum_algorithm, payload);
     const completion: LoonFS.CompleteUploadRequest = {
         mode: "direct_multipart",
         content: {
@@ -1730,14 +1414,14 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     };
     const first = completedUpload(
         await activeHarness.client.uploads.completeUpload({
-            namespace_id: request.namespaceId,
+            namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
             body: completion,
         }),
     );
     const replayed = completedUpload(
         await activeHarness.client.uploads.completeUpload({
-            namespace_id: request.namespaceId,
+            namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
             body: completion,
         }),
@@ -1747,23 +1431,23 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     assert.equal(replayed.mode, first.mode);
     assert.deepEqual(replayed.content_ref, first.content_ref);
     assert.equal(replayed.completed_at_ms, first.completed_at_ms);
-    assert.equal(first.content_ref.size_bytes, expected.sizeBytes);
+    assert.equal(first.content_ref.size_bytes, expected.size_bytes);
     assert.deepEqual(first.content_ref.checksum, wholeChecksum);
     assert.deepEqual(checksum(first.content_ref.checksum.algorithm, payload), wholeChecksum);
 
     const committed = await activeHarness.client.filesystem.applyCommit(
         fileCommit(
-            request.namespaceId,
-            request.commitId,
+            request.namespace_id,
+            request.commit_id,
             request.actor,
             request.path,
             first.content_ref,
             replayed.content_token,
         ),
     );
-    assert.equal(committed.committed_seq, expected.committedSeq);
+    assert.equal(committed.committed_seq, expected.committed_seq);
     assert.deepEqual(
-        await readProxied(activeHarness.client, request.namespaceId, request.path),
+        await readProxied(activeHarness.client, request.namespace_id, request.path),
         payload,
     );
 
@@ -1771,15 +1455,15 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     // part size, so this exercises putFile's multipart branch.
     const helperPath = `${request.path}-helper`;
     const helperCommit = await putFile(activeHarness.client, {
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: helperPath,
         bytes: payload,
         actor: request.actor,
-        commit_id: `${request.commitId}-helper`,
+        commit_id: `${request.commit_id}-helper`,
     });
     assert.ok(helperCommit.committed_seq > 0, "helper multipart put reported no committed_seq");
     const helperRead = await getFile(activeHarness.client, {
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: helperPath,
     });
     assert.deepEqual(helperRead.bytes, payload);
@@ -1790,25 +1474,23 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
 
 conformanceTest("upload_abort", async (activeHarness, testCase) => {
     const [request, expected] = decodeAbort(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
     const begin = await activeHarness.client.uploads.beginUpload({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         body: { mode: "service_proxied" },
     });
     const first = abortedUpload(
         await activeHarness.client.uploads.abortUpload({
-            namespace_id: request.namespaceId,
+            namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
         }),
     );
     const replayed = abortedUpload(
         await activeHarness.client.uploads.abortUpload({
-            namespace_id: request.namespaceId,
+            namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
         }),
     );
-    assert.equal(expected.mode, "service_proxied");
-    assert.equal(expected.status, "aborted");
     assert.equal(first.mode, expected.mode);
     assert.equal(first.status, expected.status);
     assert.deepEqual(replayed, first);
@@ -1817,27 +1499,27 @@ conformanceTest("upload_abort", async (activeHarness, testCase) => {
 
 conformanceTest("download", async (activeHarness, testCase) => {
     const [request, expected] = decodeDownload(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
-    const payload = new TextEncoder().encode(request.contentUtf8);
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
+    const payload = new TextEncoder().encode(request.content_utf8);
     const committed = await putFile(activeHarness.client, {
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: request.path,
         bytes: payload,
         actor: request.actor,
-        commit_id: request.commitId,
+        commit_id: request.commit_id,
     });
-    assert.equal(committed.committed_seq, expected.committedSeq);
+    assert.equal(committed.committed_seq, expected.committed_seq);
     const stat = (await activeHarness.client.filesystem.statPath({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: request.path,
     })) as FileEntry;
     const download = await getFile(activeHarness.client, {
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: request.path,
     });
     assert.deepEqual(stat.content_ref, download.content_ref);
-    assert.equal(download.content_ref.size_bytes, expected.sizeBytes);
-    assert.equal(download.content_ref.checksum.algorithm, expected.checksumAlgorithm);
+    assert.equal(download.content_ref.size_bytes, expected.size_bytes);
+    assert.equal(download.content_ref.checksum.algorithm, expected.checksum_algorithm);
     assert.equal(download.bytes.byteLength, download.content_ref.size_bytes);
     assert.deepEqual(
         checksum(download.content_ref.checksum.algorithm, download.bytes),
@@ -1848,95 +1530,95 @@ conformanceTest("download", async (activeHarness, testCase) => {
 
 conformanceTest("end_to_end", async (activeHarness, testCase) => {
     const [request, expected] = decodeEndToEnd(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
     const mkdir = await activeHarness.client.filesystem.applyCommit(
         directoryCommit(
-            request.namespaceId,
-            request.commitIds.mkdir,
+            request.namespace_id,
+            request.commit_ids.mkdir,
             request.actor,
             request.directory,
         ),
     );
-    assert.equal(mkdir.committed_seq, expected.mkdirCommittedSeq);
+    assert.equal(mkdir.committed_seq, expected.mkdir_committed_seq);
 
-    const payload = new TextEncoder().encode(request.contentUtf8);
+    const payload = new TextEncoder().encode(request.content_utf8);
     const upload = await putFile(activeHarness.client, {
-        namespace_id: request.namespaceId,
-        path: request.uploadPath,
+        namespace_id: request.namespace_id,
+        path: request.upload_path,
         bytes: payload,
         actor: request.actor,
-        commit_id: request.commitIds.upload,
+        commit_id: request.commit_ids.upload,
     });
-    assert.equal(upload.committed_seq, expected.uploadCommittedSeq);
+    assert.equal(upload.committed_seq, expected.upload_committed_seq);
     const stat = (await activeHarness.client.filesystem.statPath({
-        namespace_id: request.namespaceId,
-        path: request.uploadPath,
+        namespace_id: request.namespace_id,
+        path: request.upload_path,
     })) as FileEntry;
-    assert.equal(stat.size_bytes, expected.sizeBytes);
+    assert.equal(stat.size_bytes, expected.size_bytes);
     const uploadedInode = stat.inode_id;
 
     const initialListing = await activeHarness.client.filesystem.listPathEntries({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: request.directory,
     });
-    assert.ok(initialListing.data.some((entry) => entry.path === request.uploadPath));
+    assert.ok(initialListing.data.some((entry) => entry.path === request.upload_path));
 
     const downloaded = await getFile(activeHarness.client, {
-        namespace_id: request.namespaceId,
-        path: request.uploadPath,
+        namespace_id: request.namespace_id,
+        path: request.upload_path,
     });
     assert.deepEqual(downloaded.bytes, payload);
 
     const moved = await activeHarness.client.filesystem.applyCommit(
         moveCommit(
-            request.namespaceId,
-            request.commitIds.move,
+            request.namespace_id,
+            request.commit_ids.move,
             request.actor,
-            request.uploadPath,
-            request.movedPath,
+            request.upload_path,
+            request.moved_path,
         ),
     );
-    assert.equal(moved.committed_seq, expected.moveCommittedSeq);
+    assert.equal(moved.committed_seq, expected.move_committed_seq);
     const movedListing = await activeHarness.client.filesystem.listPathEntries({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         path: request.directory,
     });
-    assert.ok(movedListing.data.some((entry) => entry.path === request.movedPath));
+    assert.ok(movedListing.data.some((entry) => entry.path === request.moved_path));
 
     const revisions = await activeHarness.client.filesystem.listFileRevisions({
-        namespace_id: request.namespaceId,
-        path: request.movedPath,
+        namespace_id: request.namespace_id,
+        path: request.moved_path,
     });
-    assert.equal(revisions.data.length, expected.revisionCount);
-    assert.equal(revisions.data[0]?.commit_id, request.commitIds.upload);
+    assert.equal(revisions.data.length, expected.revision_count);
+    assert.equal(revisions.data[0]?.commit_id, request.commit_ids.upload);
 
     let changes = await activeHarness.client.filesystem.listChanges({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         after_seq: 0,
     });
-    assert.equal(changes.changes.length, expected.changeCount - 1);
+    assert.equal(changes.changes.length, expected.change_count - 1);
     const removed = await activeHarness.client.filesystem.applyCommit(
         deleteCommit(
-            request.namespaceId,
-            request.commitIds.remove,
+            request.namespace_id,
+            request.commit_ids.remove,
             request.actor,
-            request.movedPath,
+            request.moved_path,
         ),
     );
-    assert.equal(removed.committed_seq, expected.removeCommittedSeq);
+    assert.equal(removed.committed_seq, expected.remove_committed_seq);
 
     changes = await activeHarness.client.filesystem.listChanges({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
         after_seq: 0,
     });
-    assert.equal(changes.changes.length, expected.changeCount);
+    assert.equal(changes.changes.length, expected.change_count);
     assert.deepEqual(
         changes.changes.map((change) => change.commit_id),
         [
-            request.commitIds.mkdir,
-            request.commitIds.upload,
-            request.commitIds.move,
-            request.commitIds.remove,
+            request.commit_ids.mkdir,
+            request.commit_ids.upload,
+            request.commit_ids.move,
+            request.commit_ids.remove,
         ],
     );
     for (const change of changes.changes) {
@@ -1944,7 +1626,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     }
 
     const trash = await activeHarness.client.filesystem.listTrash({
-        namespace_id: request.namespaceId,
+        namespace_id: request.namespace_id,
     });
     const removedEntry = trash.data.find((entry) => entry.inode_id === uploadedInode);
     assert.ok(removedEntry !== undefined, "removed inode is missing from trash");
@@ -1978,14 +1660,14 @@ test("proxy forwards every documented route", { skip: environmentSkip }, async (
     const handler = createProxyHandler({
         serverBaseUrl: stub.baseUrl,
         token: "recording-stub-token",
-        namespaceAliases: { [fixture.namespaceAlias]: fixture.namespaceId },
+        namespaceAliases: { [fixture.namespace_alias]: fixture.namespace_id },
     });
     const proxy = await startProxyServer(handler);
     context.after(() => proxy.close());
 
     const instantiate = (template: string): string =>
         template.replace(/\{([^/{}]+)\}/g, (_placeholder, name: string) =>
-            name === "namespace_alias" ? fixture.namespaceAlias : "x",
+            name === "namespace_alias" ? fixture.namespace_alias : "x",
         );
     const proxyTemplateForServer = (template: string): string => {
         const serverNamespacePrefix = "/v0/namespaces/{namespace_id}";
@@ -2008,7 +1690,7 @@ test("proxy forwards every documented route", { skip: environmentSkip }, async (
             const path = instantiate(template);
             const forwardedTemplate = template.replace(
                 "/v0/namespace-aliases/{namespace_alias}",
-                `/v0/namespaces/${fixture.namespaceId}`,
+                `/v0/namespaces/${fixture.namespace_id}`,
             );
             expected.push(`${method} ${instantiate(forwardedTemplate)}`);
             const response = await fetchThroughProxy(`${proxy.baseUrl}${path}`, { method });

@@ -5,8 +5,8 @@
 use bytes::Bytes;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompleteUploadRequest,
-    DirectMultipartUploadOptions, FilesystemChange, UploadContentClaim, UploadPartChecksumClaim,
-    UploadSessionStatus,
+    DirectMultipartUploadOptions, FilesystemChange, UploadContentClaim, UploadMode,
+    UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
     ActorRef, ApiError, ChangeSeq, Checksum, CommitId, CommitRequest, FilesystemOperation,
@@ -17,50 +17,9 @@ use loonfs_client::{
     ListPathEntriesOptions, MoveOptions, NamespacePath, PutFileOptions, StatPathOptions,
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, AUTH_TOKEN};
-use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case, CaseFamily};
+use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use serde_json::Value;
-
-#[test]
-fn every_family_specific_fixture_shape_parses_without_a_server() {
-    for case in load_cases().expect("load cases") {
-        match case.family {
-            CaseFamily::ErrorContract => {
-                parse_values::<ErrorRequest, ErrorExpected>(&case);
-            }
-            CaseFamily::CommitReplay => {
-                parse_values::<CommitReplayRequest, CommitReplayExpected>(&case);
-            }
-            CaseFamily::UploadDirectPut => {
-                parse_values::<DirectPutRequest, DirectPutExpected>(&case);
-            }
-            CaseFamily::UploadMultipart => {
-                parse_values::<MultipartRequest, MultipartExpected>(&case);
-            }
-            CaseFamily::UploadAbort => {
-                parse_values::<AbortRequest, AbortExpected>(&case);
-            }
-            CaseFamily::Download => {
-                parse_values::<DownloadRequest, DownloadExpected>(&case);
-            }
-            CaseFamily::Pagination => {
-                parse_values::<PaginationRequest, PaginationExpected>(&case);
-            }
-            CaseFamily::Changes => {
-                parse_values::<ChangesRequest, ChangesExpected>(&case);
-            }
-            CaseFamily::EndToEnd => {
-                parse_values::<EndToEndRequest, EndToEndExpected>(&case);
-            }
-            // Each SDK harness tests its own proxy. Rust only validates the
-            // shared fixture.
-            CaseFamily::Proxy => {
-                assert!(case.request.is_object() && case.expected.is_object());
-            }
-        }
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rust_client_matches_the_reference_corpus() {
@@ -68,18 +27,19 @@ async fn rust_client_matches_the_reference_corpus() {
     let harness = Harness::start().await;
 
     for case in &cases {
-        match case.family {
-            CaseFamily::ErrorContract => run_error_contract(&harness, case).await,
-            CaseFamily::CommitReplay => run_commit_replay(&harness, case).await,
-            CaseFamily::UploadDirectPut => run_direct_put(&harness, case).await,
-            CaseFamily::UploadMultipart => run_multipart(&harness, case).await,
-            CaseFamily::UploadAbort => run_abort(&harness, case).await,
-            CaseFamily::Download => run_download(&harness, case).await,
-            CaseFamily::Pagination => run_pagination(&harness, case).await,
-            CaseFamily::Changes => run_changes(&harness, case).await,
-            CaseFamily::EndToEnd => run_end_to_end(&harness, case).await,
+        match case.name.as_str() {
+            "error_contract" => run_error_contract(&harness, case).await,
+            "commit_replay" => run_commit_replay(&harness, case).await,
+            "upload_direct_put" => run_direct_put(&harness, case).await,
+            "upload_multipart" => run_multipart(&harness, case).await,
+            "upload_abort" => run_abort(&harness, case).await,
+            "download" => run_download(&harness, case).await,
+            "pagination" => run_pagination(&harness, case).await,
+            "changes" => run_changes(&harness, case).await,
+            "end_to_end" => run_end_to_end(&harness, case).await,
             // Each SDK harness runs this case against its own proxy.
-            CaseFamily::Proxy => {}
+            "proxy" => {}
+            name => panic!("unknown case {name}"),
         }
     }
 }
@@ -160,16 +120,12 @@ fn put_options(actor: &ActorRef, id: &str) -> PutFileOptions {
 #[serde(deny_unknown_fields)]
 struct ErrorRequest {
     namespace_id: String,
-    malformed_body: Value,
-    invalid_after_seq: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ErrorExpected {
     unauthenticated: UnauthorizedExpected,
-    malformed_body: ErrorOutcome,
-    invalid_query: ErrorOutcome,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,23 +171,49 @@ async fn run_error_contract(harness: &Harness, case: &Case) {
             harness.server_url, request.namespace_id
         ))
         .bearer_auth(AUTH_TOKEN)
-        .json(&request.malformed_body)
+        .json(&serde_json::json!({
+            "commit_id": "conf-error-malformed-body",
+            "actor": {
+                "kind": "service",
+                "id": "conformance-error",
+            },
+            "operations": [{
+                "kind": "create_directory",
+                "path": "relative",
+            }],
+        }))
         .send()
         .await
         .expect("send malformed body");
-    assert_raw_error(malformed, &expected.malformed_body).await;
+    assert_raw_error(
+        malformed,
+        &ErrorOutcome {
+            status: 400,
+            code: "invalid_request".to_owned(),
+            param: "/operations/0/path".to_owned(),
+        },
+    )
+    .await;
 
     let invalid_query = harness
         .raw_client
         .get(format!(
             "{}/v0/namespaces/{}/changes?after_seq={}",
-            harness.server_url, request.namespace_id, request.invalid_after_seq
+            harness.server_url, request.namespace_id, "not-a-sequence"
         ))
         .bearer_auth(AUTH_TOKEN)
         .send()
         .await
         .expect("send invalid query");
-    assert_raw_error(invalid_query, &expected.invalid_query).await;
+    assert_raw_error(
+        invalid_query,
+        &ErrorOutcome {
+            status: 400,
+            code: "invalid_request".to_owned(),
+            param: "after_seq".to_owned(),
+        },
+    )
+    .await;
 }
 
 async fn assert_raw_error(response: reqwest::Response, expected: &ErrorOutcome) {
@@ -325,6 +307,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .begin_direct_put(&namespace, Some(payload.len() as u64))
         .await
         .expect("begin direct PUT");
+    assert_eq!(upload_mode_name(begin.mode()), expected.mode);
     let (upload_id, direct_put) = match begin {
         BeginUploadResponse::DirectPut {
             upload_id,
@@ -333,7 +316,6 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         } => (upload_id, direct_put),
         other => panic!("expected direct_put, found {other:?}"),
     };
-    assert_eq!(expected.mode, "direct_put");
     assert_eq!(
         direct_put.checksum_algorithm.as_str(),
         expected.checksum_algorithm
@@ -410,7 +392,7 @@ struct MultipartRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BytePattern {
-    length: u64,
+    length: usize,
     modulus: u8,
 }
 
@@ -447,6 +429,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         )
         .await
         .expect("begin multipart upload");
+    assert_eq!(upload_mode_name(begin.mode()), expected.mode);
     let (upload_id, multipart) = match begin {
         BeginUploadResponse::DirectMultipart {
             upload_id,
@@ -455,7 +438,6 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         } => (upload_id, direct_multipart),
         other => panic!("expected direct_multipart, found {other:?}"),
     };
-    assert_eq!(expected.mode, "direct_multipart");
     assert_eq!(multipart.part_size_bytes, request.part_size_bytes);
     assert_eq!(
         multipart.checksum_algorithm.as_str(),
@@ -581,6 +563,7 @@ async fn run_abort(harness: &Harness, case: &Case) {
         .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin abortable upload");
+    assert_eq!(upload_mode_name(begin.mode()), expected.mode);
     let first = harness
         .client
         .abort_upload(&namespace, begin.upload_id())
@@ -591,8 +574,7 @@ async fn run_abort(harness: &Harness, case: &Case) {
         .abort_upload(&namespace, begin.upload_id())
         .await
         .expect("replay abort");
-    assert_eq!(expected.mode, "service_proxied");
-    assert_eq!(expected.status, "aborted");
+    assert_eq!(upload_status_name(&first.status), expected.status);
     assert_eq!(replayed, first);
     let first_aborted_at_ms = aborted_at_ms(&first.status);
     assert_eq!(aborted_at_ms(&replayed.status), first_aborted_at_ms);
@@ -602,6 +584,22 @@ fn aborted_at_ms(status: &UploadSessionStatus) -> u64 {
     match status {
         UploadSessionStatus::Aborted { aborted_at_ms } => *aborted_at_ms,
         other => panic!("expected aborted upload, found {other:?}"),
+    }
+}
+
+fn upload_mode_name(mode: UploadMode) -> &'static str {
+    match mode {
+        UploadMode::ServiceProxied => "service_proxied",
+        UploadMode::DirectPut => "direct_put",
+        UploadMode::DirectMultipart => "direct_multipart",
+    }
+}
+
+fn upload_status_name(status: &UploadSessionStatus) -> &'static str {
+    match status {
+        UploadSessionStatus::Open { .. } => "open",
+        UploadSessionStatus::Completed { .. } => "completed",
+        UploadSessionStatus::Aborted { .. } => "aborted",
     }
 }
 
@@ -809,7 +807,6 @@ struct ChangesRequest {
 struct ChangesExpected {
     committed_seq: u64,
     change_count: usize,
-    event_kind: String,
 }
 
 async fn run_changes(harness: &Harness, case: &Case) {
@@ -844,7 +841,6 @@ async fn run_changes(harness: &Harness, case: &Case) {
     let change = feed.changes.first().expect("one change");
     assert_eq!(change.commit_id.as_str(), request.commit_id);
     assert_eq!(change.committed_by, request.actor);
-    assert_eq!(expected.event_kind, "directory_created");
     assert!(matches!(
         change.events.as_slice(),
         [FilesystemChange::DirectoryCreated { .. }]
