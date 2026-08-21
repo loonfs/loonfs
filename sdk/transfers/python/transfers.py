@@ -35,6 +35,7 @@ __all__ = ["GetFileResult", "PutFileResult", "get_file", "put_file"]
 
 
 _MULTIPART_MIN_BYTES = 8 * 1024 * 1024
+_DIRECT_GET_FEATURE = "core.downloads.direct_get"
 _DIRECT_MULTIPART_FEATURE = "core.uploads.direct_multipart"
 _DIRECT_PUT_FEATURE = "core.uploads.direct_put"
 _PROXY_UPLOAD_LIMIT = "upload.max_content_bytes"
@@ -141,6 +142,11 @@ def get_file(
 ) -> GetFileResult:
     """Download one file revision into memory and verify its checksum."""
 
+    capabilities = client.capabilities()
+    if not capabilities.features.get(_DIRECT_GET_FEATURE, False):
+        return _get_file_proxied(
+            client, namespace_id=namespace_id, path=path, revision_no=revision_no
+        )
     if revision_no is None:
         grant = client.filesystem.begin_download(namespace_id, path=path)
     else:
@@ -170,6 +176,58 @@ def get_file(
         path=grant.path,
         revision_no=grant.revision_no,
         content_ref=grant.content_ref,
+    )
+
+
+def _get_file_proxied(
+    client: LoonFS,
+    *,
+    namespace_id: str,
+    path: str,
+    revision_no: RevisionNo | None,
+) -> GetFileResult:
+    """Read through the service for deployments whose object store cannot
+    presign reads. The content route returns bare bytes, so the content claim
+    to verify against comes from the metadata surface first, and the read pins
+    an explicit revision so a concurrent commit cannot slip between the claim
+    and the bytes."""
+    if revision_no is None:
+        entry = client.filesystem.stat_path(namespace_id, path=path)
+        if entry.inode_kind != "file":
+            raise RuntimeError(f"path {path!r} is a {entry.inode_kind}, not a file")
+        claim = ContentRef(**entry.content_ref)
+        revision_no = entry.revision_no
+    else:
+        claim = None
+        cursor = None
+        while True:
+            page = client.filesystem.list_file_revisions(
+                namespace_id, path=path, cursor=cursor
+            )
+            for revision in page.revisions:
+                if revision.revision_no == revision_no:
+                    claim = revision.content_ref
+                    break
+            if claim is not None or page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        if claim is None:
+            raise RuntimeError(f"revision {revision_no} not found for {path!r}")
+    content = b"".join(
+        client.filesystem.get_file_bytes(namespace_id, path=path, revision_no=revision_no)
+    )
+    if len(content) != claim.size_bytes:
+        raise RuntimeError(
+            f"proxied read returned {len(content)} bytes, expected {claim.size_bytes}"
+        )
+    if _checksum(claim.checksum.algorithm, content) != claim.checksum:
+        raise RuntimeError("proxied read checksum did not match its content reference")
+    return GetFileResult(
+        content=content,
+        namespace_id=namespace_id,
+        path=path,
+        revision_no=revision_no,
+        content_ref=claim,
     )
 
 
