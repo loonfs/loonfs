@@ -186,11 +186,11 @@ def _get_file_proxied(
     path: str,
     revision_no: RevisionNo | None,
 ) -> GetFileResult:
-    """Read through the service for deployments whose object store cannot
-    presign reads. The content route returns bare bytes, so the content claim
-    to verify against comes from the metadata surface first, and the read pins
-    an explicit revision so a concurrent commit cannot slip between the claim
-    and the bytes."""
+    """Read through LoonFS when direct reads are unavailable.
+
+    Load the content reference first, then request the exact revision so the
+    reference and returned bytes describe the same file version.
+    """
     if revision_no is None:
         entry = client.filesystem.stat_path(namespace_id, path=path)
         if entry.inode_kind != "file":

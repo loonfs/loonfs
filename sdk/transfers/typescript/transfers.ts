@@ -118,10 +118,9 @@ export async function getFile(client: LoonFSClient, input: GetFileInput): Promis
     };
 }
 
-// Reads through the service for deployments whose object store cannot presign
-// reads. The content route returns bare bytes, so the content claim to verify
-// against comes from the metadata surface first, and the read pins an explicit
-// revision so a concurrent commit cannot slip between the claim and the bytes.
+// Reads through LoonFS when direct reads are unavailable. It loads the content
+// reference first, then requests the exact revision so the reference and
+// returned bytes describe the same file version.
 async function getFileProxied(client: LoonFSClient, input: GetFileInput): Promise<GetFileResult> {
     let revisionNo = input.revision_no;
     let claim: LoonFS.ContentRef | undefined;

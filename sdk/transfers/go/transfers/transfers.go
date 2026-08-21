@@ -196,11 +196,9 @@ func GetFile(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileRe
 	}, nil
 }
 
-// getFileProxied reads through the service instead of a presigned URL, for
-// deployments whose object store cannot presign reads. The content route
-// returns bare bytes, so the content claim to verify against comes from the
-// metadata surface first, and the read pins an explicit revision so a
-// concurrent commit cannot slip between the claim and the bytes.
+// getFileProxied reads through LoonFS when direct reads are unavailable.
+// It loads the content reference first, then requests the exact revision so
+// the reference and returned bytes describe the same file version.
 func getFileProxied(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileResult, error) {
 	revisionNo := in.RevisionNo
 	var claim *loonfs.ContentRef
@@ -275,8 +273,7 @@ func getFileProxied(ctx context.Context, c *client.Client, in GetFileInput) (*Ge
 	}, nil
 }
 
-// fileProjection decodes the entry's kind projection, which fern-go surfaces
-// through extra properties (the same shape the upload status decode handles).
+// fileProjection decodes the file fields stored in Fern's extra properties.
 func fileProjection(entry *loonfs.AuthoritativePathEntry) (*loonfs.AuthoritativePathEntryFile, error) {
 	if entry == nil {
 		return nil, fmt.Errorf("transfers: path entry is nil")
