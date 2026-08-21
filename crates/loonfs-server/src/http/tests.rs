@@ -1,15 +1,16 @@
 #![allow(clippy::panic)]
 // HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
 
-use super::error::status_for_core_error_code;
+use super::error::{status_for_core_error_code, ServedErrorCode};
 use super::{
-    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path, AppState,
-    SharedObjectStore,
+    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path,
+    request_log_severity, AppState, RequestLogSeverity, SharedObjectStore,
 };
 use crate::config::RuntimeCacheConfigOverrides;
 use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::body::Bytes;
+use axum::http::StatusCode;
 use futures::stream::{BoxStream, StreamExt};
 use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, MaintenanceJob,
@@ -227,6 +228,47 @@ fn error_status_mapping_matches_the_api_spec_table() {
         "api.md documents codes this build does not register: {documented:?}"
     );
     assert_api_spec_error_codes_are_registered(&spec);
+}
+
+#[test]
+fn request_log_severity_uses_typed_codes_and_status_only_as_a_fallback() {
+    assert_eq!(
+        request_log_severity(
+            StatusCode::NOT_IMPLEMENTED,
+            Some(ServedErrorCode(ErrorCode::NotSupported)),
+        ),
+        RequestLogSeverity::Debug
+    );
+    assert_eq!(
+        request_log_severity(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some(ServedErrorCode(ErrorCode::ServerError)),
+        ),
+        RequestLogSeverity::Error
+    );
+    assert_eq!(
+        request_log_severity(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(ServedErrorCode(ErrorCode::ServerBusy)),
+        ),
+        RequestLogSeverity::Warn
+    );
+    assert_eq!(
+        request_log_severity(StatusCode::NOT_IMPLEMENTED, None),
+        RequestLogSeverity::Error
+    );
+    assert_eq!(
+        request_log_severity(StatusCode::UNAUTHORIZED, None),
+        RequestLogSeverity::Warn
+    );
+    assert_eq!(
+        request_log_severity(StatusCode::FORBIDDEN, None),
+        RequestLogSeverity::Warn
+    );
+    assert_eq!(
+        request_log_severity(StatusCode::NOT_FOUND, None),
+        RequestLogSeverity::Debug
+    );
 }
 
 #[test]

@@ -30,7 +30,7 @@ pub use self::serve::{
 };
 pub use self::tls::TlsConfigError;
 
-use self::error::ApiResponseError;
+use self::error::{ApiResponseError, ServedErrorCode};
 use self::extractors::{
     authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, OptionalAppJson,
     UploadBodyBytes, UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES,
@@ -73,6 +73,7 @@ use axum::Router;
 use loonfs::ErrorCode;
 #[cfg(test)]
 use loonfs::SharedObjectStore;
+use loonfs_api::ErrorKind;
 
 /// Response header carrying the request's correlation id.
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -96,6 +97,13 @@ macro_rules! request_completion_event {
             "request completed"
         )
     };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestLogSeverity {
+    Error,
+    Warn,
+    Debug,
 }
 
 // Membership is limited to streamed content and operator work that is long by design.
@@ -161,6 +169,10 @@ async fn with_request_observability(
     let started = request_clock();
     let response = next.run(request).await;
     let status = response.status();
+    let severity = request_log_severity(
+        status,
+        response.extensions().get::<ServedErrorCode>().copied(),
+    );
     let route = state.metrics.request_served(
         matched_route.as_ref().map(MatchedPath::as_str),
         &method,
@@ -168,16 +180,52 @@ async fn with_request_observability(
         started.elapsed().as_secs_f64(),
     );
 
-    REQUEST_ID.with(|request_id| match status {
-        status if status.is_server_error() => {
+    REQUEST_ID.with(|request_id| match severity {
+        RequestLogSeverity::Error => {
             request_completion_event!(error, method, route, status, started, request_id)
         }
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+        RequestLogSeverity::Warn => {
             request_completion_event!(warn, method, route, status, started, request_id)
         }
-        _ => request_completion_event!(debug, method, route, status, started, request_id),
+        RequestLogSeverity::Debug => {
+            request_completion_event!(debug, method, route, status, started, request_id)
+        }
     });
     response
+}
+
+fn request_log_severity(
+    status: StatusCode,
+    served_error_code: Option<ServedErrorCode>,
+) -> RequestLogSeverity {
+    let Some(ServedErrorCode(code)) = served_error_code else {
+        return fallback_request_log_severity(status);
+    };
+    match code.kind() {
+        ErrorKind::Internal | ErrorKind::DataCorruption => RequestLogSeverity::Error,
+        ErrorKind::Unauthorized
+        | ErrorKind::PermissionDenied
+        | ErrorKind::Unavailable
+        | ErrorKind::DeadlineExceeded
+        | ErrorKind::OutcomeUnknown => RequestLogSeverity::Warn,
+        ErrorKind::InvalidRequest
+        | ErrorKind::ContentTooLarge
+        | ErrorKind::NotSupported
+        | ErrorKind::NotFound
+        | ErrorKind::MethodNotAllowed
+        | ErrorKind::Gone
+        | ErrorKind::AlreadyExists
+        | ErrorKind::Conflict => RequestLogSeverity::Debug,
+        _ => fallback_request_log_severity(status),
+    }
+}
+
+fn fallback_request_log_severity(status: StatusCode) -> RequestLogSeverity {
+    match status {
+        status if status.is_server_error() => RequestLogSeverity::Error,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => RequestLogSeverity::Warn,
+        _ => RequestLogSeverity::Debug,
+    }
 }
 
 #[allow(clippy::disallowed_methods)]
