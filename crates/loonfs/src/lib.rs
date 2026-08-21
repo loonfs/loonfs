@@ -256,8 +256,7 @@ impl RuntimeError {
         }
     }
 
-    /// Renders a public message while projecting object-store failures through
-    /// the provider-independent object-store boundary.
+    /// Returns an error message safe to show to users.
     pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
         let store_message = match self {
             Self::Core(error) => error.object_store_public_message(),

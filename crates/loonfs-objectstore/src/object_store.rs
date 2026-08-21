@@ -191,8 +191,7 @@ pub enum ObjectStoreError {
     },
 }
 
-/// Provider-independent classification retained after an object-store error
-/// crosses a boundary that cannot keep the original error value.
+/// A provider-independent category for an object-store error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ObjectStoreErrorClass {
     /// A required object was absent.
@@ -216,12 +215,12 @@ pub enum ObjectStoreErrorClass {
 }
 
 impl ObjectStoreErrorClass {
-    /// Classifies an object-store failure without retaining provider or object identity.
+    /// Returns the category for an object-store error.
     pub fn of(error: &ObjectStoreError) -> Self {
         error.class()
     }
 
-    /// Renders the provider-independent message safe for user-facing output.
+    /// Returns a safe message for users.
     pub fn public_message(self) -> Cow<'static, str> {
         Cow::Borrowed(match self {
             Self::NotFound => "object-store object not found",
@@ -270,7 +269,7 @@ impl ObjectStoreError {
         }
     }
 
-    /// Classifies the failure without carrying provider or object identity.
+    /// Returns this error's provider-independent category.
     pub fn class(&self) -> ObjectStoreErrorClass {
         match self {
             Self::NotFound { .. } => ObjectStoreErrorClass::NotFound,
@@ -291,7 +290,7 @@ impl ObjectStoreError {
         }
     }
 
-    /// Renders the provider-independent message safe for user-facing output.
+    /// Returns a safe message for users.
     pub fn public_message(&self) -> Cow<'static, str> {
         self.class().public_message()
     }

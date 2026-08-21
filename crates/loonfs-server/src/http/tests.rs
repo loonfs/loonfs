@@ -1446,8 +1446,6 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
         result.await,
         500,
         ErrorCode::ServerError,
-        // The injected provider detail must not surface; the public
-        // projection speaks for the store instead.
         "object-store request failed",
     )
     .await;

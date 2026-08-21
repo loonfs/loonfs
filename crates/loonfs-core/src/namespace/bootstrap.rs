@@ -73,8 +73,7 @@ impl BootstrapNamespaceError {
         }
     }
 
-    /// Returns the shared public projection for an object-store failure
-    /// carried through bootstrap.
+    /// Returns a safe message when bootstrap failed in the object store.
     pub fn object_store_public_message(&self) -> Option<std::borrow::Cow<'static, str>> {
         match self {
             BootstrapNamespaceError::Head(ControlObjectLoadError::Store { class, .. }) => {

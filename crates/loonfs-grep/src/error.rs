@@ -81,8 +81,7 @@ impl GrepError {
         }
     }
 
-    /// Renders object-store failures through the shared provider-independent
-    /// projection used by the runtime and server.
+    /// Returns an error message safe to show to users.
     pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
         match self {
             Self::StoreUnavailable { class, .. } => class.public_message(),

@@ -1089,8 +1089,7 @@ fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectSto
     }
 }
 
-/// Query parameters whose values are credential material when they appear in
-/// a URL a provider error echoes back (signed and presigned requests).
+/// Credential query parameters that providers may include in error messages.
 const CREDENTIAL_QUERY_PARAMS: &[&str] = &[
     "X-Amz-Signature",
     "X-Amz-Credential",
@@ -1100,8 +1099,7 @@ const CREDENTIAL_QUERY_PARAMS: &[&str] = &[
     "sig",
 ];
 
-/// Response-body XML elements that echo signing inputs back to the caller in
-/// provider auth failures (`SignatureDoesNotMatch` and friends).
+/// XML elements that may contain signing data in authentication errors.
 const CREDENTIAL_XML_ELEMENTS: &[&str] = &[
     "StringToSign",
     "StringToSignBytes",
@@ -1110,10 +1108,7 @@ const CREDENTIAL_XML_ELEMENTS: &[&str] = &[
     "AWSAccessKeyId",
 ];
 
-/// Strips credential material from free-text provider errors before they
-/// enter the error chain: signature/credential query parameters in echoed
-/// URLs, and the signing-input elements auth-failure bodies quote back.
-/// The diagnosable parts (status, provider error code, cause) stay.
+/// Redacts credential and signing data from provider error messages.
 fn sanitize_provider_message(message: &str) -> String {
     let mut sanitized = message.to_owned();
     for param in CREDENTIAL_QUERY_PARAMS {
@@ -1125,9 +1120,7 @@ fn sanitize_provider_message(message: &str) -> String {
     sanitized
 }
 
-/// Replaces every `?param=value` / `&param=value` occurrence's value with
-/// `<redacted>`. Matches only at a query-parameter boundary so `Signature=`
-/// does not fire inside `X-Amz-Signature=`.
+/// Redacts a query parameter without matching it inside a longer name.
 fn mask_query_param_values(message: &str, param: &str) -> String {
     let needle = format!("{param}=");
     let mut out = String::with_capacity(message.len());
@@ -1152,9 +1145,7 @@ fn mask_query_param_values(message: &str, param: &str) -> String {
     out
 }
 
-/// Replaces the text inside `<element>...</element>` with `<redacted>`; if
-/// the closing tag never arrives (truncated body), everything after the
-/// opening tag goes.
+/// Redacts an XML element, including a truncated element without a closing tag.
 fn mask_xml_element_text(message: &str, element: &str) -> String {
     let open = format!("<{element}>");
     let close = format!("</{element}>");

@@ -430,25 +430,18 @@ impl CoreError {
         self.to_string()
     }
 
-    /// Returns the shared public projection when this core error wraps a
-    /// provider or store-protocol failure.
+    /// Returns a safe message when this error came from the object store.
     pub fn object_store_public_message(&self) -> Option<std::borrow::Cow<'static, str>> {
         match self {
             CoreError::MetadataProjection(error) => metadata_projection_store_message(error),
-            CoreError::DurableContent(error) => match error {
-                DurableContentValidationError::Store { message, .. } => {
-                    Some(std::borrow::Cow::Owned(message.clone()))
-                }
-                _ => None,
-            },
+            CoreError::DurableContent(DurableContentValidationError::Store { message, .. }) => {
+                Some(std::borrow::Cow::Owned(message.clone()))
+            }
             CoreError::WriterEpoch(error) => writer_epoch_store_message(error),
-            CoreError::HeadPublish(error) => match error {
+            CoreError::HeadPublish(
                 CommitHeadPublishError::OutcomeUnknown(message)
-                | CommitHeadPublishError::Store { message, .. } => {
-                    Some(std::borrow::Cow::Owned(message.clone()))
-                }
-                _ => None,
-            },
+                | CommitHeadPublishError::Store { message, .. },
+            ) => Some(std::borrow::Cow::Owned(message.clone())),
             CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
                 Some(class.public_message())
             }
