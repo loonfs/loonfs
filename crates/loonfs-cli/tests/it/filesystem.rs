@@ -526,7 +526,7 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
 
     let no_destination = harness.run_with_stdin(&["--json", "put", "-"], b"anything");
     assert_failure(&no_destination);
-    assert_eq!(json_error(&no_destination)["code"], "invalid_input");
+    assert_eq!(json_error(&no_destination)["code"], "invalid_request");
 }
 
 /// A file many chunks long round-trips through an embedded profile to a
@@ -1136,6 +1136,54 @@ fn remote_namespace_commands_reject_invalid_namespace_ids_before_http() {
     let use_namespace = harness.run(&["--json", "use", "bad/name"]);
     assert_failure(&use_namespace);
     assert_eq!(json_error(&use_namespace)["code"], "invalid_request");
+}
+
+#[test]
+fn malformed_paths_are_invalid_request_in_both_modes_and_output_formats() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "remote",
+        "--server-url",
+        "http://127.0.0.1:9",
+    ]);
+    assert_success(&add_remote);
+
+    for profile in ["embedded", "remote"] {
+        let human = harness.run(&[
+            "stat",
+            "--profile",
+            profile,
+            "--namespace",
+            "demo",
+            "relative/path",
+        ]);
+        assert_failure(&human);
+        assert!(stderr_string(&human).contains("absolute"), "{human:?}");
+        assert!(stderr_string(&human).contains("param: path"), "{human:?}");
+
+        let json = harness.run(&[
+            "--json",
+            "stat",
+            "--profile",
+            profile,
+            "--namespace",
+            "demo",
+            "relative/path",
+        ]);
+        assert_failure(&json);
+        let error = json_error(&json);
+        assert_eq!(error["code"], "invalid_request");
+        assert_eq!(error["param"], "path");
+        assert!(error["message"]
+            .as_str()
+            .expect("error message")
+            .contains("absolute"));
+    }
 }
 
 #[test]
@@ -1790,7 +1838,7 @@ fn annotate_rejects_a_set_without_an_equals_and_a_document_beside_the_flags() {
 
     let no_equals = harness.run(&["--json", "annotate", "/docs", "--set", "owner"]);
     assert_failure(&no_equals);
-    assert_eq!(json_error(&no_equals)["code"], "invalid_input");
+    assert_eq!(json_error(&no_equals)["code"], "invalid_request");
     assert!(json_error(&no_equals)["message"]
         .as_str()
         .expect("json string")
@@ -1809,6 +1857,33 @@ fn annotate_rejects_a_set_without_an_equals_and_a_document_beside_the_flags() {
     assert_failure(&both);
     assert_eq!(both.status.code(), Some(2));
     assert_eq!(parse_json(&both.stderr)["error"]["code"], "invalid_usage");
+
+    let string_value = harness.run(&[
+        "--json",
+        "annotate",
+        "/docs",
+        "--attributes-json",
+        r#"{"set":{"tags":"[\"red\",\"blue\"]"}}"#,
+    ]);
+    assert_success(&string_value);
+    let stat = harness.run(&["--json", "stat", "/docs"]);
+    assert_success(&stat);
+    assert_eq!(
+        json_data(&stat)["attributes"]["tags"],
+        serde_json::json!(r#"["red","blue"]"#)
+    );
+
+    let native_array = harness.run(&[
+        "--json",
+        "annotate",
+        "/docs",
+        "--attributes-json",
+        r#"{"set":{"tags":["red","blue"]}}"#,
+    ]);
+    assert_failure(&native_array);
+    let error = json_error(&native_array);
+    assert_eq!(error["code"], "invalid_request");
+    assert_eq!(error["param"], "--attributes-json");
 }
 
 /// `mkdir -p` on a directory that is already there succeeds, the way Unix

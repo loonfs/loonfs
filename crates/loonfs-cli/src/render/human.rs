@@ -447,8 +447,13 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     failure.path, failure.error.code, failure.error.message
                 ));
             }
+            let directory_noun = if *directories == 1 {
+                "directory"
+            } else {
+                "directories"
+            };
             let mut summary = format!(
-                "{verb} {files} files and {directories} directories ({source} -> {destination})"
+                "{verb} {files} files and {directories} {directory_noun} ({source} -> {destination})"
             );
             if !failures.is_empty() {
                 summary.push_str(&format!("; {} failed", failures.len()));

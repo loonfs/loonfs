@@ -1,30 +1,18 @@
 //! [`CliError`]: the structured failure every command surfaces.
 
 use crate::config::NAMESPACE_ENV;
+use loonfs_api::ErrorCode;
 use serde::Serialize;
 
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
 ///
-/// `code` draws from exactly three namespaces:
+/// `code` is either a shared API error code or a code local to the backend or
+/// CLI.
 ///
-/// - **Registry codes** ([`loonfs_api::ErrorCode`]) pass through verbatim from
-///   whichever backend produced them, so embedded and remote profiles surface
-///   the same code for the same failure. Never restate a registry code as a
-///   string literal; use `ErrorCode::X.as_str()` or an error's `code()`.
-/// - **Backend-local codes** ([`crate::backend_error::BackendError`]) pass
-///   through verbatim from the backend: `invalid_config`,
-///   `invalid_input`, `client_error`, `io_error`, and `runtime_error`.
-/// - **CLI-local codes** cover failures that never reach a backend. The
-///   complete list, each owned by a constructor below, is: `invalid_config`,
-///   `invalid_input`, `profile_not_found`, `no_default_profile`,
-///   `no_default_namespace`, `profile_already_exists`,
-///   `config_already_exists`, `destination_exists`,
-///   `non_interactive_input_required`, `json_not_supported_for_streaming`,
-///   `invalid_usage`, `io_error`, and `cancelled`. Overlaps with
-///   backend-local codes are deliberate: the same string means the same thing
-///   in both layers. A local configuration failure is `invalid_config`
-///   whether the CLI or backend detects it, and registry codes are reserved
-///   for failures a server could also produce.
+/// API codes pass through unchanged so embedded and remote profiles report the
+/// same code. Validation after argument parsing uses `invalid_request`.
+/// Parser errors use the CLI-local `invalid_usage` code. Other local codes are
+/// created by the constructors below.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CliError {
     pub code: String,
@@ -87,8 +75,8 @@ impl CliError {
         Self::new("invalid_config", message)
     }
 
-    pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
-        Self::new("invalid_input", message)
+    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::InvalidRequest.as_str(), message)
     }
 
     pub(crate) fn with_param(mut self, param: impl Into<String>) -> Self {
@@ -160,9 +148,8 @@ impl CliError {
         )
     }
 
-    /// A command line the parser rejected: an unknown command, a bad value,
-    /// a missing option. Distinct from `invalid_input`, which a command that
-    /// ran reports about what it was asked to do.
+    /// A command line rejected by the argument parser. Validation that runs
+    /// after parsing uses `invalid_request` instead.
     pub(crate) fn invalid_usage(message: impl Into<String>) -> Self {
         Self::new("invalid_usage", message)
     }

@@ -395,6 +395,51 @@ fn json_covers_command_lines_the_parser_rejects() {
     assert_success(&version);
 }
 
+#[test]
+fn unused_global_selectors_are_invalid_usage() {
+    let harness = Harness::new();
+
+    for arguments in [
+        vec!["--json", "--namespace", "demo", "version"],
+        vec!["--json", "--profile", "prod", "config", "path"],
+        vec!["--json", "--namespace", "demo", "namespace", "create", "x"],
+        vec!["--json", "use", "x", "--namespace", "y"],
+    ] {
+        let output = harness.run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(parse_json(&output.stderr)["error"]["code"], "invalid_usage");
+    }
+}
+
+#[test]
+fn json_all_is_invalid_usage_even_with_a_limit() {
+    let harness = Harness::new();
+
+    for arguments in [
+        vec!["--json", "ls", "--all", "--limit", "1"],
+        vec!["--json", "changes", "--all", "--limit", "1"],
+        vec![
+            "--json",
+            "admin",
+            "checkpoint",
+            "list",
+            "--all",
+            "--limit",
+            "1",
+        ],
+    ] {
+        let output = harness.run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let error = &parse_json(&output.stderr)["error"];
+        assert_eq!(error["code"], "invalid_usage");
+        assert_eq!(error["param"], "--all");
+        assert!(error["message"]
+            .as_str()
+            .expect("error message")
+            .contains("--all cannot be used with --json"));
+    }
+}
+
 /// Embedded and remote profiles must report the same `code` for the same
 /// failure: registry codes pass through verbatim in both modes instead of
 /// being rewritten to CLI-local codes on one side.
@@ -560,21 +605,21 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     );
     assert!(!stdout_string(&all).contains("more entries exist"));
 
-    let all_json = harness.run(&["--json", "ls", "/listing", "--all", "--limit", "1001"]);
-    assert_success(&all_json);
-    let all_json_data = json_data(&all_json);
-    assert_eq!(all_json_data["namespace_id"], "demo");
-    assert_eq!(all_json_data["path"], "/listing");
-    assert!(all_json_data["head_seq"].is_u64());
-    assert!(all_json_data.get("head_drift").is_none());
+    let bounded_json = harness.run(&["--json", "ls", "/listing", "--limit", "1001"]);
+    assert_success(&bounded_json);
+    let bounded_json_data = json_data(&bounded_json);
+    assert_eq!(bounded_json_data["namespace_id"], "demo");
+    assert_eq!(bounded_json_data["path"], "/listing");
+    assert!(bounded_json_data["head_seq"].is_u64());
+    assert!(bounded_json_data.get("head_drift").is_none());
     assert_eq!(
-        all_json_data["entries"]
+        bounded_json_data["entries"]
             .as_array()
             .expect("all entries")
             .len(),
         loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
     );
-    assert!(all_json_data.get("next_cursor").is_none());
+    assert!(bounded_json_data.get("next_cursor").is_none());
 
     let jsonl = harness.run(&["ls", "/listing", "--all", "--jsonl"]);
     assert_success(&jsonl);
@@ -633,7 +678,7 @@ fn ls_surfaces_head_drift_from_paged_responses() {
         }),
     ]);
     harness.write_remote_listing_config(&server_url);
-    let json = harness.run(&["--json", "ls", "/docs", "--all", "--limit", "2"]);
+    let json = harness.run(&["--json", "ls", "/docs", "--limit", "2"]);
     assert_success(&json);
     assert!(json.stderr.is_empty());
     let data = json_data(&json);
@@ -681,9 +726,8 @@ fn ls_surfaces_head_drift_from_paged_responses() {
     server.join().expect("listing server");
 }
 
-/// `--limit` still applies with `--all`, and buffered JSON requires a limit.
 #[test]
-fn ls_limit_bounds_the_whole_listing_and_rejects_unbounded_json() {
+fn ls_limit_bounds_the_whole_listing_and_json_rejects_all() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -699,11 +743,10 @@ fn ls_limit_bounds_the_whole_listing_and_rejects_unbounded_json() {
         ]));
     }
 
-    // Explicitly unbounded JSON must use JSONL or add a bound.
     let all = harness.run(&["--json", "ls", "--all"]);
     assert_failure(&all);
     assert_eq!(all.status.code(), Some(2));
-    assert!(stderr_string(&all).contains("use '--jsonl' to stream without a limit"));
+    assert!(stderr_string(&all).contains("--all cannot be used with --json"));
 
     // A bound stops at exactly that many entries and returns a cursor.
     let first = harness.run(&["--json", "ls", "--limit", "2"]);

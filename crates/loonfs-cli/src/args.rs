@@ -1,7 +1,7 @@
 //! The clap argument grammar for every `loonfs` command.
 
 use crate::progress::ProgressMode;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
+use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use loonfs_api::InodeId;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -65,6 +65,14 @@ pub(crate) struct Cli {
         value_hint = ValueHint::FilePath
     )]
     pub(crate) config: Option<PathBuf>,
+    /// Profile to run against. Precedence is `--profile`, `LOONFS_PROFILE`,
+    /// then the configured default profile.
+    #[arg(long, global = true, value_hint = ValueHint::Other)]
+    pub(crate) profile: Option<String>,
+    /// Namespace to run against. Precedence is `--namespace`,
+    /// `LOONFS_NAMESPACE`, then the profile default.
+    #[arg(long, global = true, value_hint = ValueHint::Other)]
+    pub(crate) namespace: Option<String>,
     /// Emit machine-readable JSON instead of human output.
     #[arg(long, global = true)]
     pub(crate) json: bool,
@@ -83,6 +91,12 @@ pub(crate) struct Cli {
 }
 
 pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
+    if cli.profile.is_some() && !cli.command.accepts_profile_selector() {
+        return Err(selector_not_accepted("--profile"));
+    }
+    if cli.namespace.is_some() && !cli.command.accepts_namespace_selector() {
+        return Err(selector_not_accepted("--namespace"));
+    }
     let Some(pagination) = cli.command.pagination() else {
         return Ok(());
     };
@@ -97,10 +111,10 @@ pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
         );
         return Err(error);
     }
-    if cli.json && pagination.all && pagination.limit.is_none() {
+    if cli.json && pagination.all {
         let mut error = Cli::command().error(
             clap::error::ErrorKind::ArgumentConflict,
-            "'--all --json' requires '--limit'; use '--jsonl' to stream without a limit",
+            "--all cannot be used with --json; use --json --limit <n> for a bounded document or --jsonl to stream all results",
         );
         error.insert(
             clap::error::ContextKind::InvalidArg,
@@ -109,6 +123,18 @@ pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
         return Err(error);
     }
     Ok(())
+}
+
+fn selector_not_accepted(selector: &str) -> clap::Error {
+    let mut error = Cli::command().error(
+        clap::error::ErrorKind::ArgumentConflict,
+        format!("the argument '{selector}' cannot be used with this command"),
+    );
+    error.insert(
+        clap::error::ContextKind::InvalidArg,
+        clap::error::ContextValue::String(selector.to_owned()),
+    );
+    error
 }
 
 #[derive(Debug, Subcommand)]
@@ -185,6 +211,52 @@ pub(crate) enum Command {
 }
 
 impl Command {
+    fn accepts_profile_selector(&self) -> bool {
+        !matches!(
+            self,
+            Self::Init
+                | Self::Profile { .. }
+                | Self::Config { .. }
+                | Self::Completion(_)
+                | Self::Version
+        )
+    }
+
+    fn accepts_namespace_selector(&self) -> bool {
+        matches!(
+            self,
+            Self::Namespace {
+                command: NamespaceCommand::Show(_),
+            } | Self::Ls(_)
+                | Self::Stat(_)
+                | Self::Annotate(_)
+                | Self::Cat(_)
+                | Self::Grep(_)
+                | Self::Get(_)
+                | Self::Put(_)
+                | Self::Revisions(_)
+                | Self::Restore(_)
+                | Self::Undelete(_)
+                | Self::Mkdir(_)
+                | Self::Rm(_)
+                | Self::Mv(_)
+                | Self::Cp(_)
+                | Self::Trash(_)
+                | Self::Changes(_)
+                | Self::Doctor(_)
+                | Self::Admin {
+                    command: AdminCommand::Checkpoint { .. }
+                        | AdminCommand::Index { .. }
+                        | AdminCommand::Maintenance {
+                            command: AdminMaintenanceCommand::Step(_)
+                                | AdminMaintenanceCommand::Flush(_),
+                        }
+                        | AdminCommand::Retention { .. }
+                        | AdminCommand::Gc(_),
+                }
+        )
+    }
+
     fn pagination(&self) -> Option<&PaginationArgs> {
         match self {
             Self::Ls(args) => Some(&args.pagination),
@@ -466,9 +538,7 @@ pub(crate) struct ProfileUpdateArgs {
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct ProfileSelectorArgs {
-    /// Profile to run against. Precedence is `--profile`, `LOONFS_PROFILE`,
-    /// then the configured default profile.
-    #[arg(long, value_hint = ValueHint::Other)]
+    #[arg(from_global)]
     pub profile: Option<String>,
 }
 
@@ -482,9 +552,7 @@ pub(crate) struct RequestBehaviorArgs {
 pub(crate) struct TargetSelectorArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
-    /// Namespace to run against. Precedence is `--namespace`,
-    /// `LOONFS_NAMESPACE`, then the profile default.
-    #[arg(long, value_hint = ValueHint::Other)]
+    #[arg(from_global)]
     pub namespace: Option<String>,
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
@@ -526,7 +594,7 @@ pub(crate) struct NamespaceUseArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace: String,
+    pub namespace_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -641,15 +709,20 @@ pub(crate) struct FilesystemLsArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    override_usage = "loonfs stat <PATH>\n       loonfs stat --inode <INODE_ID>",
+    group(
+        ArgGroup::new("stat_target")
+            .required(true)
+            .multiple(false)
+            .args(["path", "inode"])
+    )
+)]
 pub(crate) struct FilesystemStatArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Absolute path to describe.
-    #[arg(
-        required_unless_present = "inode",
-        conflicts_with = "inode",
-        value_hint = ValueHint::Other
-    )]
+    #[arg(value_hint = ValueHint::Other)]
     pub path: Option<String>,
     /// Visible inode to describe instead of a path.
     #[arg(long, value_name = "INODE_ID", value_parser = parse_public_inode_id)]
@@ -798,26 +871,22 @@ pub(crate) struct FilesystemGetArgs {
     pub target: TargetSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub remote_path: String,
-    /// Local destination (defaults to the remote basename; `-` streams to
-    /// stdout). A large file is written as it arrives and never held whole,
-    /// so what a get costs in memory does not follow what it downloads. A
-    /// file destination is written beside itself and renamed into place only
-    /// once the download is complete and its content verified, so a failed
-    /// download leaves nothing there. Streaming to stdout hands bytes on as
-    /// they arrive, so content that fails verification at the end exits
-    /// nonzero after part of it has already been written — the exit status,
-    /// not the output, is what says the content was verified.
+    /// Where to write the download. Defaults to the remote file or directory
+    /// name. Use `-` to stream one file to stdout. File downloads are streamed
+    /// to a temporary path and moved into place after verification. Stdout
+    /// cannot be rolled back if verification fails after bytes are written.
     #[arg(value_hint = ValueHint::AnyPath)]
     pub local_destination: Option<String>,
-    /// Download the directory tree rooted at `remote_path`, with bounded
-    /// concurrency and per-file outcomes. The local destination is created
-    /// if it does not exist.
+    /// Download a directory and its contents. The destination is the root of
+    /// the downloaded tree. For example, `loonfs get -r /reports ./download`
+    /// writes the contents of `/reports` directly under `./download`. If the
+    /// destination is omitted, the command uses `./reports`.
     #[arg(short, long)]
     pub recursive: bool,
     /// Download this revision instead of the current content.
     #[arg(long)]
     pub revision: Option<u64>,
-    /// Overwrite the local destination if it already exists.
+    /// Overwrite existing local files.
     #[arg(long)]
     pub force: bool,
 }
@@ -1432,6 +1501,112 @@ mod tests {
     use super::*;
 
     #[test]
+    fn global_selectors_work_before_between_and_after_subcommands() {
+        let before_command = Cli::try_parse_from([
+            "loonfs",
+            "--profile",
+            "prod",
+            "--namespace",
+            "demo",
+            "ls",
+            "/",
+        ])
+        .expect("selectors before command");
+        assert_selected_target(&before_command, "prod", "demo");
+
+        let between_subcommands = Cli::try_parse_from([
+            "loonfs",
+            "admin",
+            "--profile",
+            "prod",
+            "checkpoint",
+            "--namespace",
+            "demo",
+            "list",
+        ])
+        .expect("selectors between subcommands");
+        assert_selected_target(&between_subcommands, "prod", "demo");
+
+        let after_leaf_arguments = Cli::try_parse_from([
+            "loonfs",
+            "ls",
+            "/",
+            "--profile",
+            "prod",
+            "--namespace",
+            "demo",
+        ])
+        .expect("selectors after leaf arguments");
+        assert_selected_target(&after_leaf_arguments, "prod", "demo");
+    }
+
+    #[test]
+    fn unused_global_selectors_are_rejected() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["loonfs", "--namespace", "demo", "version"], "--namespace"),
+            (
+                &["loonfs", "--profile", "prod", "config", "path"],
+                "--profile",
+            ),
+            (
+                &["loonfs", "--namespace", "demo", "namespace", "create", "x"],
+                "--namespace",
+            ),
+            (&["loonfs", "use", "x", "--namespace", "y"], "--namespace"),
+        ];
+
+        for (arguments, selector) in cases {
+            let cli = Cli::try_parse_from(*arguments).expect("global selector parses once");
+            let error = validate_cli(&cli).expect_err("unused selector must fail");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            assert!(error.to_string().contains(selector), "{error}");
+        }
+    }
+
+    #[test]
+    fn stat_help_and_parser_show_both_exclusive_target_forms() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("stat")
+            .expect("stat command")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("loonfs stat <PATH>"), "{help}");
+        assert!(help.contains("loonfs stat --inode <INODE_ID>"), "{help}");
+
+        let missing = Cli::try_parse_from(["loonfs", "stat"]).expect_err("target is required");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let both = Cli::try_parse_from(["loonfs", "stat", "/doc", "--inode", "ino_2"])
+            .expect_err("targets conflict");
+        assert_eq!(both.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        Cli::try_parse_from(["loonfs", "stat", "/doc"]).expect("path target");
+        Cli::try_parse_from(["loonfs", "stat", "--inode", "ino_2"]).expect("inode target");
+    }
+
+    fn assert_selected_target(cli: &Cli, profile: &str, namespace: &str) {
+        assert_eq!(cli.profile.as_deref(), Some(profile));
+        assert_eq!(cli.namespace.as_deref(), Some(namespace));
+        let target = match &cli.command {
+            Command::Ls(args) => Some(&args.target),
+            Command::Admin {
+                command:
+                    AdminCommand::Checkpoint {
+                        command: AdminCheckpointCommand::List(args),
+                    },
+            } => Some(&args.target),
+            _ => None,
+        }
+        .expect("test command should accept profile and namespace selectors");
+        assert_eq!(target.profile.profile.as_deref(), Some(profile));
+        assert_eq!(target.namespace.as_deref(), Some(namespace));
+    }
+
+    #[test]
     fn every_paginated_listing_accepts_the_shared_flags() {
         let cases: &[&[&str]] = &[
             &[
@@ -1522,21 +1697,38 @@ mod tests {
     }
 
     #[test]
-    fn unbounded_all_json_is_rejected_for_every_paginated_listing() {
+    fn all_json_is_rejected_for_every_paginated_listing() {
         let cases: &[&[&str]] = &[
-            &["loonfs", "--json", "ls", "--all"],
-            &["loonfs", "--json", "revisions", "/f", "--all"],
-            &["loonfs", "--json", "trash", "--all"],
-            &["loonfs", "--json", "changes", "--all"],
-            &["loonfs", "--json", "grep", "x", "--all"],
-            &["loonfs", "--json", "admin", "checkpoint", "list", "--all"],
+            &["loonfs", "--json", "ls", "--all", "--limit", "5"],
+            &[
+                "loonfs",
+                "--json",
+                "revisions",
+                "/f",
+                "--all",
+                "--limit",
+                "5",
+            ],
+            &["loonfs", "--json", "trash", "--all", "--limit", "5"],
+            &["loonfs", "--json", "changes", "--all", "--limit", "5"],
+            &["loonfs", "--json", "grep", "x", "--all", "--limit", "5"],
+            &[
+                "loonfs",
+                "--json",
+                "admin",
+                "checkpoint",
+                "list",
+                "--all",
+                "--limit",
+                "5",
+            ],
         ];
         for arguments in cases {
             let cli = Cli::try_parse_from(*arguments).expect("arguments parse");
-            let error = validate_cli(&cli).expect_err("unbounded JSON must fail");
-            assert!(error
-                .to_string()
-                .contains("use '--jsonl' to stream without a limit"));
+            let error = validate_cli(&cli).expect_err("--json --all must fail");
+            assert!(error.to_string().contains(
+                "--all cannot be used with --json; use --json --limit <n> for a bounded document or --jsonl to stream all results"
+            ));
         }
     }
 
@@ -1718,6 +1910,8 @@ mod tests {
         let command = Cli::command();
 
         assert_hint(&command, "config", ValueHint::FilePath);
+        assert_hint(&command, "profile", ValueHint::Other);
+        assert_hint(&command, "namespace", ValueHint::Other);
 
         let put = subcommand(&command, "put");
         assert_hint(put, "local_path", ValueHint::AnyPath);
@@ -1742,13 +1936,6 @@ mod tests {
         assert_hint(gcs, "service_account_key_path", ValueHint::FilePath);
         let namespace_show = subcommand(subcommand(&command, "namespace"), "show");
         assert_hint(namespace_show, "namespace_id", ValueHint::Other);
-
-        let capabilities = subcommand(&command, "capabilities");
-        assert_hint(capabilities, "profile", ValueHint::Other);
-
-        let doctor = subcommand(&command, "doctor");
-        assert_hint(doctor, "profile", ValueHint::Other);
-        assert_hint(doctor, "namespace", ValueHint::Other);
     }
 
     fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {

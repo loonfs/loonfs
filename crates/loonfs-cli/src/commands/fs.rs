@@ -3,7 +3,7 @@
 
 use super::context::{
     default_remote_put_path, destination_path_for_get, destination_user_path, directory_intent,
-    fail, namespace_path, parse_public_ordinal_arg, parse_user_path, render_target,
+    fail, namespace_path, parse_public_ordinal_arg, parse_user_path_arg, render_target,
     resolve_command_context, resolve_mutation_context, CommandContext, UndeleteHint,
 };
 use super::output::{
@@ -47,7 +47,7 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
     commit_id
         .map(|value| {
             CommitId::parse(value).map_err(|error| {
-                CliError::invalid_input(format!("invalid --commit-id: {error}"))
+                CliError::invalid_request(format!("invalid --commit-id: {error}"))
                     .with_param("--commit-id")
             })
         })
@@ -127,6 +127,7 @@ pub(crate) async fn run_filesystem_ls(
     let allow_root = true;
     let spec = namespace_path(
         &context.namespace,
+        "path",
         args.path.as_deref().unwrap_or("/"),
         allow_root,
     )
@@ -212,7 +213,7 @@ pub(crate) async fn run_filesystem_stat(
                 .as_deref()
                 .expect("clap requires either path or --inode");
             let allow_root = true;
-            let spec = namespace_path(&context.namespace, path, allow_root)
+            let spec = namespace_path(&context.namespace, "path", path, allow_root)
                 .map_err(|error| context.fail(kind, error))?;
             context.target.stat_path(&spec).await
         }
@@ -232,7 +233,7 @@ pub(crate) async fn run_filesystem_stat(
 /// guessing what the caller meant.
 fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, AttributeValue), CliError> {
     let Some((key, value)) = argument.split_once('=') else {
-        return Err(CliError::invalid_input(format!(
+        return Err(CliError::invalid_request(format!(
             "invalid --set `{argument}`: expected key=value"
         ))
         .with_param("--set"));
@@ -240,14 +241,14 @@ fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, Attribute
     Ok((
         parse_attribute_key_arg("--set", key)?,
         AttributeValue::parse(value).map_err(|error| {
-            CliError::invalid_input(format!("invalid --set value: {error}")).with_param("--set")
+            CliError::invalid_request(format!("invalid --set value: {error}")).with_param("--set")
         })?,
     ))
 }
 
 fn parse_attribute_key_arg(flag: &str, key: &str) -> Result<AttributeKey, CliError> {
     AttributeKey::parse(key).map_err(|error| {
-        CliError::invalid_input(format!("invalid {flag} key: {error}")).with_param(flag)
+        CliError::invalid_request(format!("invalid {flag} key: {error}")).with_param(flag)
     })
 }
 
@@ -270,7 +271,7 @@ fn update_attributes_options(
     let (set, remove) = match args.attributes_json.as_deref() {
         Some(document) => {
             let update: AttributeUpdateJson = serde_json::from_str(document).map_err(|error| {
-                CliError::invalid_input(format!(
+                CliError::invalid_request(format!(
                     "invalid --attributes-json attribute update: {error}"
                 ))
                 .with_param("--attributes-json")
@@ -313,7 +314,7 @@ pub(crate) async fn run_filesystem_annotate(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
     let allow_root = true;
-    let spec = namespace_path(&context.namespace, &args.path, allow_root)
+    let spec = namespace_path(&context.namespace, "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
     let options = update_attributes_options(&args, &context.actor)
         .map_err(|error| context.fail(kind, error))?;
@@ -346,7 +347,7 @@ pub(crate) async fn run_filesystem_grep(
     let path_prefix = args
         .path_prefix
         .as_deref()
-        .map(|path| parse_user_path(path, true))
+        .map(|path| parse_user_path_arg("--path-prefix", path, true))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let mut request = loonfs_api::GrepRequest {
@@ -422,7 +423,7 @@ pub(crate) async fn run_filesystem_cat(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = false;
-    let spec = namespace_path(&context.namespace, &args.path, allow_root)
+    let spec = namespace_path(&context.namespace, "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
     let revision_no = args
         .revision
@@ -465,8 +466,13 @@ pub(crate) async fn run_filesystem_get(
     }
 
     let allow_root = args.recursive;
-    let spec = namespace_path(&context.namespace, &args.remote_path, allow_root)
-        .map_err(|error| context.fail(kind, error))?;
+    let spec = namespace_path(
+        &context.namespace,
+        "remote_path",
+        &args.remote_path,
+        allow_root,
+    )
+    .map_err(|error| context.fail(kind, error))?;
     let revision_no = args
         .revision
         .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
@@ -481,7 +487,7 @@ pub(crate) async fn run_filesystem_get(
         if entry.inode_kind() != InodeKind::Directory {
             return Err(context.fail(
                 kind,
-                CliError::invalid_input(format!(
+                CliError::invalid_request(format!(
                     "`{}` is not a directory; drop -r to download one file",
                     spec.absolute_path()
                 ))
@@ -491,7 +497,7 @@ pub(crate) async fn run_filesystem_get(
         if args.revision.is_some() {
             return Err(context.fail(
                 kind,
-                CliError::invalid_input("--revision applies to one file, not a tree")
+                CliError::invalid_request("--revision applies to one file, not a tree")
                     .with_param("--revision"),
             ));
         }
@@ -499,7 +505,8 @@ pub(crate) async fn run_filesystem_get(
             Some("-") => {
                 return Err(context.fail(
                     kind,
-                    CliError::invalid_input("`-` streams one file; a tree needs a directory"),
+                    CliError::invalid_request("`-` streams one file; a tree needs a directory")
+                        .with_param("local_destination"),
                 ))
             }
             Some(destination) => PathBuf::from(destination),
@@ -519,10 +526,11 @@ pub(crate) async fn run_filesystem_get(
     if entry.inode_kind() == InodeKind::Directory {
         return Err(context.fail(
             kind,
-            CliError::invalid_input(format!(
+            CliError::invalid_request(format!(
                 "`{}` is a directory; use `loonfs get -r` to download the tree",
                 spec.absolute_path()
-            )),
+            ))
+            .with_param("remote_path"),
         ));
     }
 
@@ -813,7 +821,7 @@ pub(crate) async fn run_filesystem_revisions(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = false;
-    let spec = namespace_path(&context.namespace, &args.path, allow_root)
+    let spec = namespace_path(&context.namespace, "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
     let mut plan = PagePlan::new(&args.pagination);
     let mut cursor = args.cursor.clone();
@@ -878,7 +886,7 @@ pub(crate) async fn run_filesystem_put(
         if !metadata.is_dir() {
             return Err(context.fail(
                 kind,
-                CliError::invalid_input(format!(
+                CliError::invalid_request(format!(
                     "`{}` is not a directory; drop -r to upload one file",
                     local_path.display()
                 ))
@@ -888,14 +896,14 @@ pub(crate) async fn run_filesystem_put(
         if args.commit_id.is_some() {
             return Err(context.fail(
                 kind,
-                CliError::invalid_input(
+                CliError::invalid_request(
                     "--commit-id names one commit; a recursive upload makes one commit per file",
                 )
                 .with_param("--commit-id"),
             ));
         }
         let remote_root = match args.remote_path {
-            Some(path) => parse_user_path(&path, true),
+            Some(path) => parse_user_path_arg("remote_path", &path, true),
             None => default_remote_put_path(&local_path),
         }
         .map_err(|error| context.fail(kind, error))?;
@@ -913,10 +921,11 @@ pub(crate) async fn run_filesystem_put(
     if metadata.is_dir() {
         return Err(context.fail(
             kind,
-            CliError::invalid_input(format!(
+            CliError::invalid_request(format!(
                 "`{}` is a directory; use `loonfs put -r` to upload the tree",
                 local_path.display()
-            )),
+            ))
+            .with_param("local_path"),
         ));
     }
 
@@ -926,16 +935,17 @@ pub(crate) async fn run_filesystem_put(
         .ok_or_else(|| {
             context.fail(
                 kind,
-                CliError::invalid_input(format!(
+                CliError::invalid_request(format!(
                     "unable to derive remote target from `{}`",
                     local_path.display()
-                )),
+                ))
+                .with_param("local_path"),
             )
         })?;
     let remote_path = match args.remote_path.as_deref() {
         // A trailing slash names the directory the file lands in — the
         // cp/rsync habit — while a plain path is the full destination.
-        Some(path) => destination_user_path(path, &local_leaf, true),
+        Some(path) => destination_user_path("remote_path", "local_path", path, &local_leaf, true),
         None => default_remote_put_path(&local_path),
     }
     .map_err(|error| context.fail(kind, error))?;
@@ -969,20 +979,22 @@ async fn run_filesystem_put_stdin(
     if args.recursive {
         return Err(context.fail(
             kind,
-            CliError::invalid_input("`-` streams one file; a tree needs a directory"),
+            CliError::invalid_request("`-` streams one file; a tree needs a directory")
+                .with_param("-r"),
         ));
     }
     let Some(remote_path) = args.remote_path.as_deref() else {
         return Err(context.fail(
             kind,
-            CliError::invalid_input(
+            CliError::invalid_request(
                 "reading from `-` needs an explicit remote path; there is no local name to \
                  derive one from",
-            ),
+            )
+            .with_param("remote_path"),
         ));
     };
-    let remote_path =
-        parse_user_path(remote_path, false).map_err(|error| context.fail(kind, error))?;
+    let remote_path = parse_user_path_arg("remote_path", remote_path, false)
+        .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace.clone(), remote_path);
     let options =
         put_file_options(&args, &context.actor).map_err(|error| context.fail(kind, error))?;
@@ -1185,7 +1197,7 @@ pub(crate) async fn run_filesystem_rm(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, &location.path, &args.target, &args.actor).await?;
     let allow_root = false;
-    let spec = namespace_path(&context.namespace, &args.path, allow_root)
+    let spec = namespace_path(&context.namespace, "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
@@ -1247,7 +1259,7 @@ pub(crate) async fn run_filesystem_restore(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
     let allow_root = false;
-    let spec = namespace_path(&context.namespace, &args.path, allow_root)
+    let spec = namespace_path(&context.namespace, "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
@@ -1291,7 +1303,7 @@ pub(crate) async fn run_filesystem_undelete(
     let spec = args
         .path
         .as_deref()
-        .map(|path| namespace_path(&context.namespace, path, allow_root))
+        .map(|path| namespace_path(&context.namespace, "path", path, allow_root))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
@@ -1338,7 +1350,7 @@ pub(crate) async fn run_filesystem_mkdir(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
     let allow_root = false;
-    let spec = namespace_path(&context.namespace, &args.path, allow_root)
+    let spec = namespace_path(&context.namespace, "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
@@ -1442,7 +1454,7 @@ async fn resolve_transfer_destination(
         return Ok(named);
     }
     let leaf = loonfs_api::DisplayName::parse(source_leaf)
-        .map_err(|error| CliError::invalid_input(error.to_string()))?;
+        .map_err(|error| CliError::invalid_request(error.to_string()).with_param("source_path"))?;
     Ok(NamespacePath::new(
         context.namespace.clone(),
         named.absolute_path().join(&leaf),
@@ -1460,13 +1472,18 @@ async fn run_filesystem_transfer(
     if args.recursive && transfer_kind == TransferKind::Move {
         return Err(context.fail(
             kind,
-            CliError::invalid_input("mv moves a directory in one commit; -r is not needed")
+            CliError::invalid_request("mv moves a directory in one commit; -r is not needed")
                 .with_param("-r"),
         ));
     }
     let allow_root = false;
-    let from = namespace_path(&context.namespace, &args.source_path, allow_root)
-        .map_err(|error| context.fail(kind, error))?;
+    let from = namespace_path(
+        &context.namespace,
+        "source_path",
+        &args.source_path,
+        allow_root,
+    )
+    .map_err(|error| context.fail(kind, error))?;
     let source_leaf = from
         .absolute_path()
         .final_component()
@@ -1474,12 +1491,19 @@ async fn run_filesystem_transfer(
         .ok_or_else(|| {
             context.fail(
                 kind,
-                CliError::invalid_input("root path is not allowed for this command"),
+                CliError::invalid_request("root path is not allowed for this command")
+                    .with_param("source_path"),
             )
         })?;
-    let named_destination = destination_user_path(&args.destination_path, &source_leaf, true)
-        .map(|path| NamespacePath::new(context.namespace.clone(), path))
-        .map_err(|error| context.fail(kind, error))?;
+    let named_destination = destination_user_path(
+        "destination_path",
+        "source_path",
+        &args.destination_path,
+        &source_leaf,
+        true,
+    )
+    .map(|path| NamespacePath::new(context.namespace.clone(), path))
+    .map_err(|error| context.fail(kind, error))?;
     // A destination spelled with a trailing slash already named the
     // directory to land in, and the leaf is already appended; looking again
     // would append it twice.
@@ -1508,7 +1532,7 @@ async fn run_filesystem_transfer(
             if entry.inode_kind() != InodeKind::Directory {
                 return Err(context.fail(
                     kind,
-                    CliError::invalid_input(format!(
+                    CliError::invalid_request(format!(
                         "`{}` is not a directory; drop -r to copy one file",
                         from.absolute_path()
                     ))
@@ -1518,7 +1542,7 @@ async fn run_filesystem_transfer(
             if args.commit_id.is_some() {
                 return Err(context.fail(
                     kind,
-                    CliError::invalid_input(
+                    CliError::invalid_request(
                         "--commit-id names one commit; a recursive copy makes one commit per item",
                     )
                     .with_param("--commit-id"),
@@ -1538,10 +1562,11 @@ async fn run_filesystem_transfer(
         if entry.inode_kind() == InodeKind::Directory {
             return Err(context.fail(
                 kind,
-                CliError::invalid_input(format!(
+                CliError::invalid_request(format!(
                     "`{}` is a directory; use `loonfs cp -r` to copy the tree",
                     from.absolute_path()
-                )),
+                ))
+                .with_param("source_path"),
             ));
         }
         context

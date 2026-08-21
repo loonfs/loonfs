@@ -450,13 +450,13 @@ fn selected_credential_source(
     has_static_flags: bool,
 ) -> Result<CredentialSource, CliError> {
     match source {
-        Some("ambient") if has_static_flags => Err(CliError::invalid_input(
+        Some("ambient") if has_static_flags => Err(CliError::invalid_request(
             "`--credential-source ambient` cannot be combined with static credential flags",
         )
         .with_param("--credential-source")),
         Some("ambient") => Ok(CredentialSource::Ambient),
         Some("static") => Ok(CredentialSource::Static),
-        Some(other) => Err(CliError::invalid_input(format!(
+        Some(other) => Err(CliError::invalid_request(format!(
             "unknown credential source: `{other}` (expected ambient or static)"
         ))
         .with_param("--credential-source")),
@@ -517,18 +517,17 @@ fn profile_actor_config(
         (Some(kind), Some(id)) => Ok(ProfileActorConfig {
             actor_kind: Some(ActorKind::from(kind)),
             actor_id: Some(ActorId::parse(id).map_err(|error| {
-                CliError::invalid_input(format!("invalid --actor-id: {error}"))
+                CliError::invalid_request(format!("invalid --actor-id: {error}"))
                     .with_param("--actor-id")
             })?),
         }),
-        (None, Some(_)) => {
-            Err(CliError::invalid_input("--actor-id requires --actor-kind")
-                .with_param("--actor-id"))
-        }
-        (Some(_), None) => {
-            Err(CliError::invalid_input("--actor-kind requires --actor-id")
-                .with_param("--actor-kind"))
-        }
+        (None, Some(_)) => Err(
+            CliError::invalid_request("--actor-id requires --actor-kind").with_param("--actor-id"),
+        ),
+        (Some(_), None) => Err(
+            CliError::invalid_request("--actor-kind requires --actor-id")
+                .with_param("--actor-kind"),
+        ),
     }
 }
 
@@ -587,7 +586,7 @@ fn reject_inapplicable_update_flag(
     profile_label: &str,
 ) -> Result<(), CliError> {
     if is_set {
-        return Err(CliError::invalid_input(format!(
+        return Err(CliError::invalid_request(format!(
             "`--{flag}` does not apply to {profile_label} profiles"
         ))
         .with_param(format!("--{flag}")));
@@ -915,7 +914,7 @@ fn require_update_static_secret(
         .cloned()
         .map(SecretString::from)
         .ok_or_else(|| {
-            CliError::invalid_input(format!(
+            CliError::invalid_request(format!(
                 "switching to static credentials requires `--access-key-id` and \
                  `--secret-access-key`; missing `--{field}`"
             ))
