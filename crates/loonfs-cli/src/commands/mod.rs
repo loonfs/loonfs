@@ -117,7 +117,7 @@ fn run_completion(
                 kind,
                 None,
                 None,
-                CliError::invalid_input(COMPLETION_SHELL_REQUIRED).with_param("--shell"),
+                CliError::invalid_request(COMPLETION_SHELL_REQUIRED).with_param("--shell"),
             )
         })?;
     let mut script = Vec::new();

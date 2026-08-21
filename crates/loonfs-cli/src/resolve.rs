@@ -11,7 +11,7 @@ use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
 use loonfs_api::env::AUTH_TOKEN_ENV;
-use loonfs_api::{ActorId, ActorKind, ActorRef, ErrorCode, NamespaceId, SecretString};
+use loonfs_api::{ActorId, ActorKind, ActorRef, NamespaceId, SecretString};
 use loonfs_client::{Client, ClientConfig};
 use loonfs_grep::{GrepBlockCache, GrepService, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
 use std::sync::Arc;
@@ -67,7 +67,8 @@ pub(crate) fn resolve_namespace(
 ) -> Result<ResolvedNamespace, CliError> {
     if let Some(namespace) = explicit_namespace {
         return Ok(ResolvedNamespace {
-            namespace: parse_namespace_id(namespace)?,
+            namespace: parse_namespace_id(namespace)
+                .map_err(|error| error.with_param("--namespace"))?,
         });
     }
     if let Some(namespace) = non_empty_env(NAMESPACE_ENV) {
@@ -146,7 +147,7 @@ fn parse_actor_kind(name: &str, value: &str) -> Result<ActorKind, CliError> {
 }
 
 fn named_cli_input_error(name: &str, message: String) -> CliError {
-    let error = CliError::invalid_input(message);
+    let error = CliError::invalid_request(message);
     if name.starts_with('-') {
         error.with_param(name)
     } else {
@@ -158,8 +159,7 @@ fn named_cli_input_error(name: &str, message: String) -> CliError {
 /// surfaces its registry code so both profile modes report the same code
 /// the server would serve for it.
 pub(crate) fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
-    NamespaceId::parse(namespace)
-        .map_err(|error| CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
+    NamespaceId::parse(namespace).map_err(|error| CliError::invalid_request(error.to_string()))
 }
 
 fn default_writer_id() -> String {

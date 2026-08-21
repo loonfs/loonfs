@@ -147,7 +147,7 @@ async fn run_namespace_delete(
                 kind,
                 Some(resolved.profile_name),
                 Some(mode),
-                CliError::invalid_input(format!(
+                CliError::invalid_request(format!(
                     "confirmation `{typed}` does not match namespace id `{}`",
                     args.namespace_id
                 )),

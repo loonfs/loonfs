@@ -1,6 +1,7 @@
 //! [`CliError`]: the structured failure every command surfaces.
 
 use crate::config::NAMESPACE_ENV;
+use loonfs_api::ErrorCode;
 use serde::Serialize;
 
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
@@ -13,18 +14,18 @@ use serde::Serialize;
 ///   string literal; use `ErrorCode::X.as_str()` or an error's `code()`.
 /// - **Backend-local codes** ([`crate::backend_error::BackendError`]) pass
 ///   through verbatim from the backend: `invalid_config`,
-///   `invalid_input`, `client_error`, `io_error`, and `runtime_error`.
+///   `client_error`, `io_error`, and `runtime_error`.
+/// - **CLI request validation** uses the registry's `invalid_request` code
+///   before dispatch when a parsed value cannot form a LoonFS request.
 /// - **CLI-local codes** cover failures that never reach a backend. The
 ///   complete list, each owned by a constructor below, is: `invalid_config`,
-///   `invalid_input`, `profile_not_found`, `no_default_profile`,
-///   `no_default_namespace`, `profile_already_exists`,
-///   `config_already_exists`, `destination_exists`,
+///   `profile_not_found`, `no_default_profile`, `no_default_namespace`,
+///   `profile_already_exists`, `config_already_exists`, `destination_exists`,
 ///   `non_interactive_input_required`, `json_not_supported_for_streaming`,
-///   `invalid_usage`, `io_error`, and `cancelled`. Overlaps with
-///   backend-local codes are deliberate: the same string means the same thing
-///   in both layers. A local configuration failure is `invalid_config`
-///   whether the CLI or backend detects it, and registry codes are reserved
-///   for failures a server could also produce.
+///   `invalid_usage`, `io_error`, and `cancelled`. Overlaps with backend-local
+///   codes are deliberate: the same string means the same thing in both
+///   layers. A local configuration failure is `invalid_config` whether the
+///   CLI or backend detects it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CliError {
     pub code: String,
@@ -87,8 +88,8 @@ impl CliError {
         Self::new("invalid_config", message)
     }
 
-    pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
-        Self::new("invalid_input", message)
+    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::InvalidRequest.as_str(), message)
     }
 
     pub(crate) fn with_param(mut self, param: impl Into<String>) -> Self {
@@ -161,8 +162,8 @@ impl CliError {
     }
 
     /// A command line the parser rejected: an unknown command, a bad value,
-    /// a missing option. Distinct from `invalid_input`, which a command that
-    /// ran reports about what it was asked to do.
+    /// a missing option. Distinct from `invalid_request`, which reports a
+    /// parsed value that cannot form a LoonFS request.
     pub(crate) fn invalid_usage(message: impl Into<String>) -> Self {
         Self::new("invalid_usage", message)
     }
@@ -180,5 +181,27 @@ impl CliError {
 
     pub(crate) fn cancelled() -> Self {
         Self::new("cancelled", "operation cancelled")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn retired_error_code_is_absent_from_the_cli_tree() {
+        let retired = ["invalid", "input"].join("_");
+        for entry in walkdir::WalkDir::new(env!("CARGO_MANIFEST_DIR")) {
+            let entry = entry.expect("walk CLI tree");
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(entry.path()).expect("read CLI source or fixture");
+            assert!(
+                !bytes
+                    .windows(retired.len())
+                    .any(|window| window == retired.as_bytes()),
+                "retired error code remains in {}",
+                entry.path().display()
+            );
+        }
     }
 }

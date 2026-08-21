@@ -9,8 +9,8 @@ use thiserror::Error;
 /// Error returned by either CLI backend.
 ///
 /// `code` is either a shared [`loonfs_api::ErrorCode`] string or one of the
-/// local codes created below: `invalid_config`, `invalid_input`,
-/// `client_error`, `io_error`, or `runtime_error`. Shared codes must come
+/// local codes created below: `invalid_config`, `client_error`, `io_error`,
+/// or `runtime_error`. Shared codes must come
 /// from the registry rather than duplicated string literals so embedded and
 /// remote profiles report the same condition consistently.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -52,8 +52,8 @@ impl BackendError {
     }
 
     /// Caller input rejected before it reached a backend.
-    pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
-        Self::new("invalid_input", message)
+    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::InvalidRequest.as_str(), message)
     }
 
     /// Transport failure between a client and a remote server.
@@ -97,7 +97,7 @@ impl From<ClientError> for BackendError {
             ClientError::ConfigValidation { field, reason } => {
                 Self::invalid_config(format!("invalid `{field}`: {reason}"))
             }
-            ClientError::InvalidNamespacePath(message) => Self::invalid_input(message),
+            ClientError::InvalidNamespacePath(message) => Self::invalid_request(message),
             ClientError::InvalidCommitId(message) | ClientError::InvalidCheckpointId(message) => {
                 // The registry code core and server report for a malformed
                 // id, so pre-flight client validation matches backend
@@ -239,5 +239,14 @@ mod tests {
         let error = BackendError::from(ClientError::Io("read failed".to_owned()));
         assert_eq!(error.code, "io_error");
         assert_eq!(error.message, "i/o error: read failed");
+    }
+
+    #[test]
+    fn invalid_namespace_paths_map_to_the_registry_request_code() {
+        let error = BackendError::from(ClientError::InvalidNamespacePath(
+            "path must be absolute".to_owned(),
+        ));
+
+        assert_eq!(error.code, loonfs_api::ErrorCode::InvalidRequest.as_str());
     }
 }

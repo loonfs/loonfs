@@ -382,7 +382,7 @@ fn recursive_transfers_roundtrip_a_tree() {
     assert_success(&harness.run(&["--json", "stat", "/moved/docs/a.txt"]));
     let mv_recursive = harness.run(&["--json", "mv", "-r", "/moved", "/again"]);
     assert_failure(&mv_recursive);
-    assert_eq!(json_error(&mv_recursive)["code"], "invalid_input");
+    assert_eq!(json_error(&mv_recursive)["code"], "invalid_request");
 }
 
 /// A recursive get creates the destination it was handed, parents included,

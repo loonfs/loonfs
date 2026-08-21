@@ -148,7 +148,10 @@ pub(crate) async fn run_put_tree(
         let spec = match NamespacePath::parse(context.namespace.as_str(), &remote) {
             Ok(spec) => spec,
             Err(error) => {
-                tally.fail(remote, CliError::invalid_input(error.to_string()));
+                tally.fail(
+                    remote,
+                    CliError::invalid_request(error.to_string()).with_param("local_path"),
+                );
                 continue;
             }
         };
@@ -190,7 +193,12 @@ pub(crate) async fn run_put_tree(
         async move {
             let spec = match NamespacePath::parse(context.namespace.as_str(), &remote) {
                 Ok(spec) => spec,
-                Err(error) => return (remote, Err(CliError::invalid_input(error.to_string()))),
+                Err(error) => {
+                    return (
+                        remote,
+                        Err(CliError::invalid_request(error.to_string()).with_param("local_path")),
+                    )
+                }
             };
             // The walk states a file's length when the filesystem gave it
             // one, and that length is what decides how the payload travels.
@@ -284,7 +292,7 @@ pub(crate) async fn run_get_tree(
     std::fs::create_dir_all(local_root)
         .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;
     tally.directories += 1;
-    let listing = walk_remote_tree(context, kind, remote_root).await?;
+    let listing = walk_remote_tree(context, kind, "remote_path", remote_root).await?;
     if !runtime.json {
         if let Some(drift) = listing.head_drift.as_ref() {
             crate::render::write_listing_drift_warning(drift);
@@ -317,7 +325,12 @@ pub(crate) async fn run_get_tree(
         async move {
             let spec = match NamespacePath::parse(namespace.as_str(), &job.remote) {
                 Ok(spec) => spec,
-                Err(error) => return (job.remote, Err(CliError::invalid_input(error.to_string()))),
+                Err(error) => {
+                    return (
+                        job.remote,
+                        Err(CliError::invalid_request(error.to_string()).with_param("remote_path")),
+                    )
+                }
             };
             // One file of a tree travels exactly as a single `get` of it
             // would: past the deployment's proxy cap it streams straight
@@ -392,7 +405,7 @@ pub(crate) async fn run_copy_tree(
     message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let listing = walk_remote_tree(context, kind, source_root).await?;
+    let listing = walk_remote_tree(context, kind, "source_path", source_root).await?;
     if !runtime.json {
         if let Some(drift) = listing.head_drift.as_ref() {
             crate::render::write_listing_drift_warning(drift);
@@ -411,7 +424,10 @@ pub(crate) async fn run_copy_tree(
         let spec = match NamespacePath::parse(context.namespace.as_str(), &remote) {
             Ok(spec) => spec,
             Err(error) => {
-                tally.fail(remote, CliError::invalid_input(error.to_string()));
+                tally.fail(
+                    remote,
+                    CliError::invalid_request(error.to_string()).with_param("destination_path"),
+                );
                 continue;
             }
         };
@@ -461,8 +477,18 @@ pub(crate) async fn run_copy_tree(
             let to = NamespacePath::parse(namespace.as_str(), &destination);
             let (from, to) = match (from, to) {
                 (Ok(from), Ok(to)) => (from, to),
-                (Err(error), _) | (_, Err(error)) => {
-                    return (job.remote, Err(CliError::invalid_input(error.to_string())))
+                (Err(error), _) => {
+                    return (
+                        job.remote,
+                        Err(CliError::invalid_request(error.to_string()).with_param("source_path")),
+                    )
+                }
+                (_, Err(error)) => {
+                    return (
+                        job.remote,
+                        Err(CliError::invalid_request(error.to_string())
+                            .with_param("destination_path")),
+                    )
                 }
             };
             let result = backend
@@ -527,7 +553,8 @@ fn collect_local_tree(
     let mut all_dirs = Vec::new();
     for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
         let entry = entry.map_err(|error| {
-            CliError::invalid_input(format!("failed to walk `{}`: {error}", root.display()))
+            CliError::invalid_request(format!("failed to walk `{}`: {error}", root.display()))
+                .with_param("local_path")
         })?;
         let relative = entry
             .path()
@@ -559,10 +586,11 @@ fn collect_local_tree(
         } else {
             tally.fail(
                 entry.path().display().to_string(),
-                CliError::invalid_input(
+                CliError::invalid_request(
                     "only regular files and directories transfer; symlinks and special \
                      files do not",
-                ),
+                )
+                .with_param("local_path"),
             );
         }
     }
@@ -608,6 +636,7 @@ struct RemoteTree {
 async fn walk_remote_tree(
     context: &CommandContext,
     kind: CommandKind,
+    remote_param: &str,
     root: &str,
 ) -> Result<RemoteTree, CommandFailure> {
     let mut tree = RemoteTree {
@@ -624,8 +653,12 @@ async fn walk_remote_tree(
         } else {
             &remote_dir
         };
-        let spec = NamespacePath::parse(context.namespace.as_str(), listed)
-            .map_err(|error| context.fail(kind, CliError::invalid_input(error.to_string())))?;
+        let spec = NamespacePath::parse(context.namespace.as_str(), listed).map_err(|error| {
+            context.fail(
+                kind,
+                CliError::invalid_request(error.to_string()).with_param(remote_param),
+            )
+        })?;
         let mut pager = context
             .target
             .list_path_entries_pager(&spec, None, None)
