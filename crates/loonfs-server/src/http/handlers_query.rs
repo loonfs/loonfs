@@ -20,7 +20,7 @@ use loonfs_api::{
 };
 use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
 
-/// Maximum UTF-8 byte length accepted for a grep pattern query parameter.
+/// Maximum grep pattern length in UTF-8 bytes.
 const MAX_GREP_PATTERN_BYTES: usize = 1024;
 
 #[derive(Debug, serde::Deserialize)]
