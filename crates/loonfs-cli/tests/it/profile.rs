@@ -1076,7 +1076,7 @@ fn invalid_remote_urls_are_rejected() {
 }
 
 #[test]
-fn profile_create_rejects_a_token_over_non_loopback_plaintext_before_writing() {
+fn profile_create_rejects_token_over_non_loopback_http_before_writing() {
     let harness = Harness::new();
     let create = harness.run(&[
         "--json",

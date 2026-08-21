@@ -405,7 +405,7 @@ pub(super) fn build_profile_from_create_spec(
             let auth_token = auth_token.map(SecretString::from);
             let ca_cert_path = blank_to_none(spec.ca_cert_path);
             validate_remote_client_config(
-                &format!("{name}.server_url"),
+                name,
                 &server_url,
                 auth_token.as_ref(),
                 ca_cert_path.as_deref(),
@@ -841,7 +841,7 @@ pub(super) fn apply_update_flags(
             };
             let ca_cert_path = blank_to_none(args.ca_cert_path.clone()).or(ca_cert_path);
             validate_remote_client_config(
-                &format!("{name}.server_url"),
+                name,
                 &server_url,
                 auth_token.as_ref(),
                 ca_cert_path.as_deref(),

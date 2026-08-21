@@ -211,9 +211,11 @@ mod tests {
             "http://127.8.9.10",
             "http://[::1]",
         ] {
-            config(server_url, Some("test-token"))
-                .validate()
-                .unwrap_or_else(|error| panic!("{server_url} should be accepted: {error}"));
+            let result = config(server_url, Some("test-token")).validate();
+            assert!(
+                result.is_ok(),
+                "{server_url} should be accepted: {result:?}"
+            );
         }
     }
 

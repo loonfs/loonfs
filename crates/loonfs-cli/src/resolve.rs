@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_token_is_rejected_when_client_construction_sees_non_loopback_http() {
+    fn environment_token_is_rejected_for_non_loopback_http() {
         let auth_token = resolve_remote_auth_token_from(&None, |name| {
             assert_eq!(name, AUTH_TOKEN_ENV);
             Some("environment-token".to_owned())
