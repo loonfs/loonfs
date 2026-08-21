@@ -46,5 +46,5 @@ The typed client cannot create malformed JSON or invalid query values, so the
 error case sends those two requests with a raw HTTP client. All other requests
 use `loonfs-client`.
 
-Library unit tests cover fixture loading, byte-pattern generation, and
-pagination. The sole integration test requires local TCP listeners.
+Unit tests cover fixture loading, byte patterns, and pagination. The
+integration test requires local TCP listeners.

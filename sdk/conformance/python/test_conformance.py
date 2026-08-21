@@ -278,7 +278,7 @@ class Harness:
 
 
 def _decode(case: ConformanceCase, request_type: Any, expected_type: Any) -> tuple[Any, Any]:
-    # Strict dataclasses accept fixture mappings through Pydantic's JSON validation path.
+    # Strict Pydantic dataclasses reject Python dictionaries, so validate JSON instead.
     return (
         pydantic.TypeAdapter(request_type).validate_json(json.dumps(case.request)),
         pydantic.TypeAdapter(expected_type).validate_json(json.dumps(case.expected)),
