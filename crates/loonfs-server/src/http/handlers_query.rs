@@ -6,7 +6,7 @@ use super::handlers_uploads::current_unix_ms;
 use super::{
     authorize,
     handlers_filesystem::{parse_boolean_query_param, required_query_param, resolve_page_limit},
-    AppQuery, AppState, NamespaceIdPath, OptionalAppJson, MAX_GREP_PATTERN_BYTES,
+    AppQuery, AppState, NamespaceIdPath, OptionalAppJson,
 };
 use crate::http::error::{status_for_core_error_code, ApiResponseError};
 use axum::extract::State;
@@ -19,6 +19,9 @@ use loonfs_api::{
     GrepRequest, GrepResponse, NamespaceId, FEATURE_ADMIN_GREP_INDEX, FEATURE_QUERY_GREP,
 };
 use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
+
+/// Maximum grep pattern length in UTF-8 bytes.
+const MAX_GREP_PATTERN_BYTES: usize = 1024;
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct GrepQuery {

@@ -141,26 +141,15 @@ async fn begin_direct_put_mints_the_target_object_up_front() {
             .await
             .expect("second direct put target");
 
-    assert_eq!(first.target.checksum_algorithm, ChecksumAlgorithm::Sha256);
-    let first_content_id = first
-        .target
-        .object_key
-        .rsplit('/')
-        .next()
-        .expect("content id");
+    let first_content_id = first.object_key.rsplit('/').next().expect("content id");
     assert!(first_content_id.starts_with("con_"));
     // Same bytes, two sessions, two objects: nothing is shared, so neither
     // upload can observe the other.
     assert_ne!(
         first_content_id,
-        second
-            .target
-            .object_key
-            .rsplit('/')
-            .next()
-            .expect("content id")
+        second.object_key.rsplit('/').next().expect("content id")
     );
-    assert_ne!(first.target.object_key, second.target.object_key);
+    assert_ne!(first.object_key, second.object_key);
 }
 
 #[tokio::test]

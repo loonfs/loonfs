@@ -146,10 +146,6 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         .await
         .expect("fetch capabilities");
     assert!(capabilities.supports("core.uploads.direct_put"));
-    assert!(capabilities
-        .features
-        .keys()
-        .all(|feature| !feature.starts_with("core.uploads.direct_put.checksum.")));
 
     harness
         .client
@@ -687,10 +683,6 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
         .expect("fetch capabilities");
     assert!(capabilities.supports("core.uploads.direct_put"));
     assert!(capabilities.supports("core.downloads.direct_get"));
-    assert!(capabilities
-        .features
-        .keys()
-        .all(|feature| !feature.starts_with("core.uploads.direct_put.checksum.")));
     assert!(
         !capabilities.supports("core.uploads.direct_multipart"),
         "this adapter signs no multipart for GCS, so the key must be absent"

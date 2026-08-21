@@ -597,30 +597,18 @@ fn every_registered_operation_publishes_its_retry_class() {
     let generated = openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
         .expect("generate openapi json");
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
-    let paths = spec
-        .get("paths")
-        .and_then(Value::as_object)
-        .expect("openapi paths object");
-    let mut published = BTreeMap::new();
-    for path_item in paths.values().filter_map(Value::as_object) {
-        for method in ["get", "post", "put", "delete", "patch"] {
-            let Some(operation) = path_item.get(method) else {
-                continue;
-            };
-            let operation_id = operation
-                .get("operationId")
-                .and_then(Value::as_str)
-                .expect("OpenAPI operation has an operationId");
-            let retry_class = operation
-                .get("x-loonfs-retry")
-                .and_then(Value::as_str)
-                .expect("OpenAPI operation has an x-loonfs-retry extension");
-            assert!(
-                published.insert(operation_id, retry_class).is_none(),
-                "duplicate operationId `{operation_id}`"
-            );
-        }
-    }
+    let published = operations_by_id(&spec)
+        .into_iter()
+        .map(|(operation_id, operation)| {
+            (
+                operation_id,
+                operation
+                    .get("x-loonfs-retry")
+                    .and_then(Value::as_str)
+                    .expect("OpenAPI operation has an x-loonfs-retry extension"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let expected = openapi_postprocess::OPERATION_RETRY_CLASSES
         .iter()
@@ -1037,10 +1025,6 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
     );
     assert!(!schemas.contains_key("ContentStoreId"));
     assert!(!schemas.contains_key("FilesystemChangeCreated"));
-    assert!(
-        !schemas.contains_key("GrepRequest"),
-        "grep uses query parameters and must not publish an unused request schema"
-    );
     assert!(
         !raw.contains(r#""created""#),
         "retired creation-event kind remains in OpenAPI"

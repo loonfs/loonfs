@@ -81,14 +81,6 @@ enum UploadTransport {
     Proxied,
 }
 
-/// A payload length measured while reading the source.
-///
-/// File metadata is only a routing hint because the file may change before it
-/// is read. Only a measured length can produce
-/// [`ClientError::UploadTooLarge`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MeasuredBytes(u64);
-
 /// No advertised transport accepts the measured payload size.
 struct NoTransportFits {
     /// Description of the relevant limits.
@@ -292,10 +284,7 @@ impl Client {
         bytes: &[u8],
     ) -> Result<StagedContent> {
         // The exact size is known, so transport limits can reject it now.
-        match self
-            .transport_for_measured(MeasuredBytes(bytes.len() as u64))
-            .await?
-        {
+        match self.transport_for_measured(bytes.len() as u64).await? {
             UploadTransport::Multipart => {
                 self.stage_via_multipart(
                     namespace_id,
@@ -305,7 +294,8 @@ impl Client {
                 .await
             }
             UploadTransport::DirectPut => {
-                self.stage_bytes_via_direct_put(namespace_id, bytes).await
+                self.direct_put_transfer(namespace_id, DirectPutBody::Held(bytes))
+                    .await
             }
             UploadTransport::Proxied => self.stage_bytes_via_server(namespace_id, bytes).await,
         }
@@ -333,21 +323,12 @@ impl Client {
                 .await
             }
             UploadTransport::DirectPut => {
-                self.stage_source_via_direct_put(namespace_id, source).await
+                self.direct_put_transfer(namespace_id, DirectPutBody::Streamed(source))
+                    .await
             }
             // Proxied uploads are one request and have no resumable parts.
             UploadTransport::Proxied => self.stage_source_via_server(namespace_id, source).await,
         }
-    }
-
-    /// Streams a payload through one presigned PUT while calculating its checksum.
-    async fn stage_source_via_direct_put(
-        &self,
-        namespace_id: &NamespaceId,
-        source: PayloadSource,
-    ) -> Result<StagedContent> {
-        self.direct_put_transfer(namespace_id, DirectPutBody::Streamed(source))
-            .await
     }
 
     /// Selects an initial transport from an optional size hint.
@@ -367,11 +348,11 @@ impl Client {
     ///
     /// Returns `UploadTooLarge` before transfer when no transport accepts the
     /// measured size.
-    async fn transport_for_measured(&self, size: MeasuredBytes) -> Result<UploadTransport> {
+    async fn transport_for_measured(&self, size_bytes: u64) -> Result<UploadTransport> {
         let capabilities = self.capabilities().await?;
-        Self::transport_for(&capabilities, Some(size.0)).map_err(|no_fit| {
+        Self::transport_for(&capabilities, Some(size_bytes)).map_err(|no_fit| {
             ClientError::UploadTooLarge {
-                size_bytes: size.0,
+                size_bytes,
                 reason: no_fit.reason,
             }
         })
@@ -438,16 +419,6 @@ impl Client {
             },
             direct_put_supported,
         })
-    }
-
-    /// Uploads in-memory bytes directly to object storage.
-    async fn stage_bytes_via_direct_put(
-        &self,
-        namespace_id: &NamespaceId,
-        bytes: &[u8],
-    ) -> Result<StagedContent> {
-        self.direct_put_transfer(namespace_id, DirectPutBody::Held(bytes))
-            .await
     }
 
     /// Opens a `direct_put` session, writes its object, and completes it.

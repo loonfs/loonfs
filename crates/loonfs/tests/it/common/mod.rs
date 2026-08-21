@@ -261,10 +261,7 @@ impl TestRuntime {
     ) -> loonfs::Result<UploadSessionResponse> {
         self.writer
             .complete_upload_prepared_for_mode(namespace_id, upload_id, |_| {
-                Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
-                    content,
-                    max_content_bytes: u64::MAX,
-                })
+                Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut { content })
             })
             .await
             .map(|completed| completed.response)

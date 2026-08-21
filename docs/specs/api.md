@@ -1045,8 +1045,8 @@ content facts at completion.
 `size_bytes` is optional and advisory. When present, the server compares it
 with `upload.direct_put_max_content_bytes`, the provider's single-request
 ceiling, and answers `content_too_large` before issuing a capability when it
-is too large. The stored size is checked again at completion. Content past the
-limit moves as `direct_multipart` where that is advertised.
+is too large. The provider enforces the same limit when accepting the PUT.
+Larger content uses `direct_multipart` when available.
 
 The response includes only a short-lived transfer capability, never raw object-store credentials or a caller-managed object key. Required headers are provider-issued and must be echoed by the client; for example, an S3-compatible deployment may return:
 
@@ -1124,8 +1124,8 @@ difference answers `invalid_request`. The server builds the final content
 reference from the session's content identity and the completion claim. It
 then compares the claimed size and checksum with the object in storage. A
 mismatch makes the session unusable, and the server deletes the unpublished
-object. The provider-stored size must also be at most
-`upload.direct_put_max_content_bytes`.
+object. Completion verifies the stored content against the client's claim; it
+does not reapply the provider's upload limit.
 If the provider metadata request fails, the server returns `server_error`
 without changing the object or session, so the client can retry. The server
 does not download the object during this check.

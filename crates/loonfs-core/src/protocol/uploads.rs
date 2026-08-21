@@ -50,19 +50,12 @@ use loonfs_objectstore::{
 };
 use std::num::NonZeroU64;
 
-/// Internal target used by server integrations before they mint a presigned URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirectPutUploadTarget {
-    pub object_key: String,
-    pub checksum_algorithm: ChecksumAlgorithm,
-}
-
 /// Internal response for preparing a direct_put session before URL signing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeginDirectPutUploadTargetResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: UploadId,
-    pub target: DirectPutUploadTarget,
+    pub object_key: String,
 }
 
 /// Internal multipart target used by the server before signing part URLs.
@@ -93,10 +86,7 @@ pub enum ResolvedUploadCompletion {
     /// The session already contains all required content information.
     KnownContent,
     /// Content claim supplied when a direct PUT completes.
-    DirectPut {
-        content: UploadContentClaim,
-        max_content_bytes: u64,
-    },
+    DirectPut { content: UploadContentClaim },
     /// Multipart content information supplied at completion.
     Multipart(CompleteMultipartUploadRequest),
 }
@@ -173,10 +163,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     Ok(BeginDirectPutUploadTargetResponse {
         namespace_id: namespace_id.clone(),
         upload_id,
-        target: DirectPutUploadTarget {
-            object_key,
-            checksum_algorithm,
-        },
+        object_key,
     })
 }
 
@@ -1377,10 +1364,7 @@ enum CompletionPlan<'a> {
     /// Content previously staged through the server.
     Proxied { staged: Option<&'a ContentRef> },
     /// Directly uploaded content that must be checked at the provider.
-    DirectPut {
-        requested: ContentRef,
-        max_content_bytes: u64,
-    },
+    DirectPut { requested: ContentRef },
     /// Parts the provider must assemble and verify.
     DirectMultipart {
         requested: ContentRef,
@@ -1427,17 +1411,13 @@ fn completion_plan<'a>(
         }),
         (
             UploadSessionTransport::DirectPut { checksum_algorithm },
-            ResolvedUploadCompletion::DirectPut {
-                content,
-                max_content_bytes,
-            },
+            ResolvedUploadCompletion::DirectPut { content },
         ) => Ok(CompletionPlan::DirectPut {
             requested: claimed_content_ref(
                 session.content_id.clone(),
                 content,
                 *checksum_algorithm,
             )?,
-            max_content_bytes: *max_content_bytes,
         }),
         (
             UploadSessionTransport::DirectMultipart {
@@ -1468,12 +1448,6 @@ fn completion_plan<'a>(
             ))
         }
         (
-            UploadSessionTransport::DirectMultipart { .. },
-            ResolvedUploadCompletion::DirectPut { .. },
-        ) => Err(CoreError::InvalidUploadContent(
-            "direct_multipart completion requires a content claim and parts".to_owned(),
-        )),
-        (
             UploadSessionTransport::ServiceProxied { .. }
             | UploadSessionTransport::DirectPut { .. },
             ResolvedUploadCompletion::Multipart(_),
@@ -1483,7 +1457,7 @@ fn completion_plan<'a>(
         ))),
         (
             UploadSessionTransport::DirectMultipart { .. },
-            ResolvedUploadCompletion::KnownContent,
+            ResolvedUploadCompletion::KnownContent | ResolvedUploadCompletion::DirectPut { .. },
         ) => Err(CoreError::InvalidUploadContent(
             "direct_multipart completion requires a content claim and parts".to_owned(),
         )),
@@ -1509,17 +1483,8 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
             })?;
             Ok(CompletionOutcome::Verified(staged.clone()))
         }
-        CompletionPlan::DirectPut {
-            requested,
-            max_content_bytes,
-        } => {
+        CompletionPlan::DirectPut { requested } => {
             match verify_durable_content_checksum(store, content_store_id, &requested).await {
-                Ok(()) if requested.size_bytes > max_content_bytes => {
-                    Ok(CompletionOutcome::Unusable(format!(
-                        "direct_put content is {} bytes, over the provider's {max_content_bytes}-byte limit",
-                        requested.size_bytes
-                    )))
-                }
                 Ok(()) => Ok(CompletionOutcome::Verified(requested)),
                 Err(err) => Ok(CompletionOutcome::Unusable(content_failure_reason(err)?)),
             }
@@ -1769,7 +1734,6 @@ mod tests {
                     size_bytes: BYTES.len() as u64,
                     checksum: Checksum::crc32c(BYTES),
                 },
-                max_content_bytes: u64::MAX,
             },
             &context(2_000),
         )
@@ -1786,7 +1750,7 @@ mod tests {
 
         store
             .put(
-                &begin.target.object_key,
+                &begin.object_key,
                 Bytes::from_static(BYTES),
                 PutMode::CreateIfAbsent,
             )
@@ -1797,7 +1761,6 @@ mod tests {
                 size_bytes: BYTES.len() as u64,
                 checksum: Checksum::sha256(BYTES),
             },
-            max_content_bytes: u64::MAX,
         };
         let first = complete_upload(
             &store,
@@ -1820,66 +1783,6 @@ mod tests {
         .await
         .expect("replay direct-put completion");
         assert_eq!(replay, first);
-    }
-
-    #[tokio::test]
-    async fn a_direct_put_past_the_completion_limit_is_aborted_and_deleted() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let setup = context(1_000);
-        bootstrap_namespace(&store, &namespace_id, &setup, false)
-            .await
-            .expect("bootstrap");
-        let begin = begin_direct_put_upload_target(
-            &store,
-            &namespace_id,
-            ChecksumAlgorithm::Sha256,
-            &setup,
-        )
-        .await
-        .expect("begin direct put");
-        store
-            .put(
-                &begin.target.object_key,
-                Bytes::from_static(BYTES),
-                PutMode::CreateIfAbsent,
-            )
-            .await
-            .expect("write direct-put bytes");
-        let content_store_id = load_namespace_content_store_id(&store, &namespace_id)
-            .await
-            .expect("content store id");
-
-        let error = complete_upload(
-            &store,
-            &namespace_id,
-            &content_store_id,
-            &begin.upload_id,
-            ResolvedUploadCompletion::DirectPut {
-                content: UploadContentClaim {
-                    size_bytes: BYTES.len() as u64,
-                    checksum: Checksum::sha256(BYTES),
-                },
-                max_content_bytes: BYTES.len() as u64 - 1,
-            },
-            &context(2_000),
-        )
-        .await
-        .expect_err("stored content past the direct-put limit cannot complete");
-        assert!(matches!(error, CoreError::InvalidUploadContent(_)));
-        let state = load_upload_session_state(&store, &namespace_id, &begin.upload_id)
-            .await
-            .expect("session remains readable");
-        assert!(matches!(
-            state.state,
-            UploadSessionLifecycle::Aborted { .. }
-        ));
-        assert!(store
-            .head(&begin.target.object_key)
-            .await
-            .expect("head rejected direct put")
-            .is_none());
     }
 
     /// An aborted session is logically absent: it will never select content,
@@ -1947,7 +1850,7 @@ mod tests {
         .expect("begin direct put");
         store
             .put(
-                &begin.target.object_key,
+                &begin.object_key,
                 Bytes::from(vec![b'x'; BYTES.len()]),
                 PutMode::CreateIfAbsent,
             )
@@ -1967,7 +1870,6 @@ mod tests {
                     size_bytes: BYTES.len() as u64,
                     checksum: Checksum::sha256(BYTES),
                 },
-                max_content_bytes: u64::MAX,
             },
             &context(2_000),
         )
@@ -1984,7 +1886,7 @@ mod tests {
             }
         ));
         assert!(store
-            .head(&begin.target.object_key)
+            .head(&begin.object_key)
             .await
             .expect("head mismatched content")
             .is_none());
@@ -1999,7 +1901,6 @@ mod tests {
                     size_bytes: BYTES.len() as u64,
                     checksum: Checksum::sha256(BYTES),
                 },
-                max_content_bytes: u64::MAX,
             },
             &context(3_000),
         )

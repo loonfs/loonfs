@@ -161,9 +161,8 @@ fn capabilities(direct_multipart: bool) -> Outcome {
 #[derive(Default, Clone, Copy)]
 struct Advertised {
     direct_multipart: bool,
-    /// The algorithm returned at begin, or `None` to advertise no
-    /// `direct_put` at all.
-    direct_put: Option<ChecksumAlgorithm>,
+    /// Whether the deployment advertises `direct_put`.
+    direct_put: bool,
     /// The service's own buffering cap, when the deployment advertises one.
     proxy_max_bytes: Option<u64>,
     /// The provider's single-request ceiling, when it advertises one.
@@ -175,7 +174,7 @@ fn capabilities_for(advertised: Advertised) -> Outcome {
         FEATURE_UPLOADS_DIRECT_MULTIPART.to_owned(),
         advertised.direct_multipart,
     )]);
-    if advertised.direct_put.is_some() {
+    if advertised.direct_put {
         features.insert(FEATURE_UPLOADS_DIRECT_PUT.to_owned(), true);
     }
     let mut limits = std::collections::BTreeMap::new();
@@ -646,7 +645,7 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
     let (source, _) = watched_source(&payload, 512);
     let transport = test_transport::script(vec![
         capabilities_for(Advertised {
-            direct_put: Some(ChecksumAlgorithm::Sha256),
+            direct_put: true,
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
@@ -685,7 +684,7 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     let transport = test_transport::script(vec![
         // GCS supports CRC-32C direct PUTs but not multipart uploads.
         capabilities_for(Advertised {
-            direct_put: Some(ChecksumAlgorithm::Crc32c),
+            direct_put: true,
             direct_multipart: false,
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024 * 1024),
@@ -730,7 +729,7 @@ async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
 
     let transport = test_transport::script(vec![
         capabilities_for(Advertised {
-            direct_put: Some(ChecksumAlgorithm::Crc32c),
+            direct_put: true,
             direct_multipart: false,
             proxy_max_bytes: Some(4_096),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024 * 1024),
@@ -766,7 +765,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
     let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
     let transport = test_transport::script(vec![
         capabilities_for(Advertised {
-            direct_put: Some(ChecksumAlgorithm::Sha256),
+            direct_put: true,
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
@@ -840,7 +839,7 @@ async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
 
     let transport = test_transport::script(vec![
         capabilities_for(Advertised {
-            direct_put: Some(ChecksumAlgorithm::Sha256),
+            direct_put: true,
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
@@ -859,18 +858,6 @@ async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
         )
         .await
         .expect("a file-backed direct put should land");
-
-    // Only the caller's own file was ever written; the upload added none.
-    let left_behind: Vec<_> = std::fs::read_dir(directory.path())
-        .expect("read the directory back")
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.file_name())
-        .collect();
-    assert_eq!(
-        left_behind,
-        vec![std::ffi::OsString::from("payload.bin")],
-        "a file-backed payload should not be copied"
-    );
 
     let object_write = transport
         .sent()

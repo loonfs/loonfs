@@ -41,6 +41,6 @@ pub(crate) use self::uploads::{
 };
 pub use self::uploads::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
-    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
+    DirectMultipartUploadTarget, MultipartPartTarget, MultipartPartTargets,
     ResolvedUploadCompletion,
 };

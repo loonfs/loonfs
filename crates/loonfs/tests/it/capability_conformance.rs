@@ -49,14 +49,6 @@ fn is_grep_key(key: &str) -> bool {
     key.starts_with("query.") || key.starts_with("admin.grep.")
 }
 
-/// A registry row whose key carries a `<placeholder>` documents a *family*
-/// of keys, not one key. Only a deployment that offers the parent feature
-/// advertises a member, so no runtime advertises one unconditionally; the
-/// members are pinned against their constants below instead.
-fn is_key_family(key: &str) -> bool {
-    key.contains('<')
-}
-
 fn spec_section<'a>(spec: &'a str, start: &str, end: &str) -> &'a str {
     spec.split(start)
         .nth(1)
@@ -114,7 +106,7 @@ fn advertised_features_match_the_spec_feature_registry() {
 
     let runtime_registry: BTreeSet<String> = registry
         .into_iter()
-        .filter(|key| !is_grep_key(key) && !is_key_family(key))
+        .filter(|key| !is_grep_key(key))
         .collect();
     let advertised: BTreeSet<String> = embedded_capabilities().features.into_keys().collect();
     assert_eq!(

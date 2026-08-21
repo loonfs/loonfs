@@ -108,14 +108,13 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
     // The target is minted here, before a byte is written, and the key it
     // names is derived from that identity alone.
     assert!(begin
-        .target
         .object_key
         .rsplit('/')
         .next()
         .is_some_and(|content_id| content_id.starts_with("con_")));
 
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
-    block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
+    block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
     let completed = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
@@ -162,7 +161,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
 
     // Stands in for the provider-verified presigned upload.
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
-    block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
+    block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
     raw_store.reset();
@@ -200,7 +199,7 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
         block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
             .expect("begin direct put");
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
-    block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
+    block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
     let error = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
@@ -230,10 +229,8 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
         block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
             .expect("begin direct put");
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
-    block_on(
-        direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(delivered)),
-    )
-    .expect("write mismatched direct object");
+    block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(delivered)))
+        .expect("write mismatched direct object");
 
     let error = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
         .expect_err("mismatched bytes must fail completion");
@@ -247,7 +244,7 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
         "completion names the checksum mismatch: {error}"
     );
     assert!(
-        block_on(direct_store.head(&begin.target.object_key))
+        block_on(direct_store.head(&begin.object_key))
             .expect("head rejected object")
             .is_none(),
         "a rejected completion leaves no orphan behind"
@@ -274,7 +271,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
             .expect("begin direct put");
 
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
-    block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
+    block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
     raw_store.fail_next(1);
@@ -283,7 +280,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert_eq!(raw_store.attempts(), 1, "the checksum head is what failed");
     assert!(
-        block_on(direct_store.head(&begin.target.object_key))
+        block_on(direct_store.head(&begin.object_key))
             .expect("head the uploaded object")
             .is_some(),
         "a store failure must not delete the client's object"

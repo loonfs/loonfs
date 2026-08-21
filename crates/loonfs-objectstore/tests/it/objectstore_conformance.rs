@@ -508,11 +508,7 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
         payload.len() as u64,
         "{provider}: stored size does not match the uploaded bytes"
     );
-    let local = match stored.checksum.algorithm {
-        loonfs_api::ChecksumAlgorithm::Sha256 => Checksum::sha256(&payload),
-        loonfs_api::ChecksumAlgorithm::Crc64nvme => Checksum::crc64nvme(&payload),
-        loonfs_api::ChecksumAlgorithm::Crc32c => Checksum::crc32c(&payload),
-    };
+    let local = Checksum::compute(stored.checksum.algorithm, &payload);
     assert_eq!(
         stored.checksum, local,
         "{provider}: stored checksum does not match the uploaded bytes"

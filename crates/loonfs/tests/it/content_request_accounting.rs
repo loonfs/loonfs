@@ -559,7 +559,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
 
     harness
         .store
-        .put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes))
+        .put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes))
         .await
         .expect("drive direct provider upload");
     assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
@@ -573,7 +573,6 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
                     size_bytes: bytes.len() as u64,
                     checksum: loonfs_api::Checksum::sha256(bytes),
                 },
-                max_content_bytes: u64::MAX,
             })
         })
         .await
