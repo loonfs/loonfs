@@ -24,8 +24,15 @@ region = "us-east-1"
 key_prefix = "loonfs-demo"
 force_path_style = false
 
-# Static credentials are stored in this file; session_token is optional.
+# Uses the standard AWS SDK credential chain, including environment variables,
+# profiles, SSO, web identity, and AWS compute roles. Temporary credentials
+# refresh automatically.
 [store.credentials]
-kind = "static"
-access_key_id = "YOUR_ACCESS_KEY_ID"
-secret_access_key = "YOUR_SECRET_ACCESS_KEY"
+kind = "ambient"
+
+# To use static credentials instead:
+# [store.credentials]
+# kind = "static"
+# access_key_id = "YOUR_ACCESS_KEY_ID"
+# secret_access_key = "YOUR_SECRET_ACCESS_KEY"
+# session_token = "YOUR_SESSION_TOKEN" # optional

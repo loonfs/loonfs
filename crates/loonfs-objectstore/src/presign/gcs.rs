@@ -17,6 +17,7 @@ use crate::presign::v4::{
     percent_encode_segment, signing_dates, unix_ms,
 };
 use crate::ObjectStoreError;
+use async_trait::async_trait;
 use base64::Engine as _;
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::{Checksum, ChecksumAlgorithm};
@@ -270,6 +271,7 @@ impl GcsV4Presigner {
     }
 }
 
+#[async_trait]
 impl DirectPutIssuer for GcsV4Presigner {
     fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
         ChecksumAlgorithm::Crc32c
@@ -279,7 +281,7 @@ impl DirectPutIssuer for GcsV4Presigner {
         GCP_GCS_MAX_DIRECT_PUT_BYTES
     }
 
-    fn presign_put(
+    async fn presign_put(
         &self,
         request: PresignedPutRequest<'_>,
         now: SystemTime,
@@ -298,8 +300,9 @@ impl DirectPutIssuer for GcsV4Presigner {
     }
 }
 
+#[async_trait]
 impl DirectGetIssuer for GcsV4Presigner {
-    fn presign_get(
+    async fn presign_get(
         &self,
         request: PresignedGetRequest<'_>,
         now: SystemTime,
@@ -430,7 +433,7 @@ mod tests {
         .expect("signer")
     }
 
-    fn presign_put(signer: &GcsV4Presigner) -> crate::presign::PresignedUrl {
+    async fn presign_put(signer: &GcsV4Presigner) -> crate::presign::PresignedUrl {
         signer
             .presign_put(
                 PresignedPutRequest {
@@ -439,13 +442,14 @@ mod tests {
                 },
                 signing_time(),
             )
+            .await
             .expect("presign put")
     }
 
     /// The signature covers the object path and create-only precondition.
-    #[test]
-    fn presigned_put_binds_the_scoped_path_and_create_only_precondition() {
-        let signed = presign_put(&presigner(Some("tenant-a")));
+    #[tokio::test]
+    async fn presigned_put_binds_the_scoped_path_and_create_only_precondition() {
+        let signed = presign_put(&presigner(Some("tenant-a"))).await;
 
         assert_eq!(signed.method, "PUT");
         assert_eq!(
@@ -473,8 +477,8 @@ mod tests {
     /// The read capability signs `host` and nothing else, which is what
     /// leaves `Range` outside the signature: one issued URL serves ranged,
     /// resumed, and parallel reads without another round trip to the server.
-    #[test]
-    fn presigned_get_signs_only_the_host_so_range_stays_unsigned() {
+    #[tokio::test]
+    async fn presigned_get_signs_only_the_host_so_range_stays_unsigned() {
         let signed = presigner(Some("tenant-a"))
             .presign_get(
                 PresignedGetRequest {
@@ -483,6 +487,7 @@ mod tests {
                 },
                 signing_time(),
             )
+            .await
             .expect("presign get");
 
         assert_eq!(signed.method, "GET");
@@ -522,9 +527,9 @@ mod tests {
     /// The key prefix is part of what is signed, not decoration on the URL:
     /// dropping it produces a different signature, so a capability issued for
     /// one tenant's prefix cannot be replayed against another's.
-    #[test]
-    fn the_key_prefix_is_inside_the_signature() {
-        let unprefixed = presign_put(&presigner(None));
+    #[tokio::test]
+    async fn the_key_prefix_is_inside_the_signature() {
+        let unprefixed = presign_put(&presigner(None)).await;
 
         assert_eq!(
             unprefixed.url,
@@ -549,8 +554,8 @@ mod tests {
     /// written through such a capability is committed and then invisible to
     /// every read, listing, and collection the store performs — durable
     /// nowhere anything looks.
-    #[test]
-    fn the_signer_and_the_store_resolve_a_key_to_the_same_string() {
+    #[tokio::test]
+    async fn the_signer_and_the_store_resolve_a_key_to_the_same_string() {
         for raw_prefix in [None, Some("   "), Some(""), Some("tenant-a")] {
             let signed = presigner(raw_prefix)
                 .presign_get(
@@ -560,6 +565,7 @@ mod tests {
                     },
                     signing_time(),
                 )
+                .await
                 .expect("presign get");
 
             // Exactly what `ProviderObjectStore` does with the same value.
@@ -601,8 +607,8 @@ mod tests {
     /// Path segments are percent-encoded, and the separators between them are
     /// not. Getting either wrong signs a different object than the one the
     /// URL addresses.
-    #[test]
-    fn path_segments_are_percent_encoded_and_separators_are_not() {
+    #[tokio::test]
+    async fn path_segments_are_percent_encoded_and_separators_are_not() {
         let signed = presigner(Some("tenant-a"))
             .presign_get(
                 PresignedGetRequest {
@@ -611,6 +617,7 @@ mod tests {
                 },
                 signing_time(),
             )
+            .await
             .expect("presign get");
 
         assert_eq!(
@@ -625,10 +632,10 @@ mod tests {
 
     /// Reads and writes of the same object address the same URL, so a
     /// deployment cannot sign a write it is unable to sign a read of.
-    #[test]
-    fn presigned_get_addresses_the_same_object_the_write_did() {
+    #[tokio::test]
+    async fn presigned_get_addresses_the_same_object_the_write_did() {
         let signer = presigner(Some("tenant-a"));
-        let written = presign_put(&signer);
+        let written = presign_put(&signer).await;
         let read = signer
             .presign_get(
                 PresignedGetRequest {
@@ -637,6 +644,7 @@ mod tests {
                 },
                 signing_time(),
             )
+            .await
             .expect("presign get");
 
         let object_of = |url: &str| url.split('?').next().expect("url path").to_owned();
@@ -654,20 +662,20 @@ mod tests {
         assert_eq!(GCP_GCS_MAX_DIRECT_PUT_BYTES, 5 * 1024 * 1024 * 1024 * 1024);
     }
 
-    #[test]
-    fn expiry_outside_googles_documented_window_is_a_configuration_error() {
+    #[tokio::test]
+    async fn expiry_outside_googles_documented_window_is_a_configuration_error() {
         let signer = presigner(None);
         for expires_in in [Duration::ZERO, Duration::from_secs(7 * 24 * 60 * 60 + 1)] {
-            assert!(matches!(
-                signer.presign_get(
+            let result = signer
+                .presign_get(
                     PresignedGetRequest {
                         object_key: CONTENT_KEY,
                         expires_in,
                     },
                     signing_time(),
-                ),
-                Err(ObjectStoreError::Configuration(_))
-            ));
+                )
+                .await;
+            assert!(matches!(result, Err(ObjectStoreError::Configuration(_))));
         }
     }
 

@@ -195,6 +195,7 @@ async fn begin_direct_put_upload(
             },
             presign_time(),
         )
+        .await
         .map_err(presign_issuer_error)?;
 
     Ok(Json(BeginUploadResponse::DirectPut {
@@ -307,7 +308,7 @@ pub(super) async fn sign_upload_parts(
         .direct_multipart_part_targets(&namespace_id, &upload_id, &request.parts)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    let parts = sign_parts(issuer.as_ref(), &targets)?;
+    let parts = sign_parts(issuer.as_ref(), &targets).await?;
 
     Ok(Json(SignUploadPartsResponse {
         namespace_id,
@@ -316,38 +317,37 @@ pub(super) async fn sign_upload_parts(
     }))
 }
 
-fn sign_parts(
+async fn sign_parts(
     issuer: &dyn DirectMultipartIssuer,
     targets: &loonfs::uploads::MultipartPartTargets,
 ) -> Result<Vec<SignedUploadPart>, ApiResponseError> {
     let signing_time = presign_time();
-    targets
-        .parts
-        .iter()
-        .map(|part| {
-            let signed = issuer
-                .presign_multipart_part(
-                    PresignedPartRequest {
-                        object_key: &targets.object_key,
-                        provider_upload_id: &targets.provider_upload_id,
-                        part_number: part.part_number,
-                        checksum: &part.checksum,
-                        expires_in: MULTIPART_PART_URL_TTL,
-                    },
-                    signing_time,
-                )
-                .map_err(presign_issuer_error)?;
-            Ok(SignedUploadPart {
-                part_number: part.part_number,
-                access: ObjectTransferAccess::PresignedUrl {
-                    method: signed.method,
-                    url: signed.url,
-                    headers: signed.headers,
-                    expires_at_ms: signed.expires_at_ms,
+    let mut signed_parts = Vec::with_capacity(targets.parts.len());
+    for part in &targets.parts {
+        let signed = issuer
+            .presign_multipart_part(
+                PresignedPartRequest {
+                    object_key: &targets.object_key,
+                    provider_upload_id: &targets.provider_upload_id,
+                    part_number: part.part_number,
+                    checksum: &part.checksum,
+                    expires_in: MULTIPART_PART_URL_TTL,
                 },
-            })
-        })
-        .collect()
+                signing_time,
+            )
+            .await
+            .map_err(presign_issuer_error)?;
+        signed_parts.push(SignedUploadPart {
+            part_number: part.part_number,
+            access: ObjectTransferAccess::PresignedUrl {
+                method: signed.method,
+                url: signed.url,
+                headers: signed.headers,
+                expires_at_ms: signed.expires_at_ms,
+            },
+        });
+    }
+    Ok(signed_parts)
 }
 
 pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError {

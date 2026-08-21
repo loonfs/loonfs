@@ -13,6 +13,7 @@
 
 pub mod abs;
 mod attempts;
+mod aws_credentials;
 mod configured;
 pub mod crypto;
 pub mod gcs;

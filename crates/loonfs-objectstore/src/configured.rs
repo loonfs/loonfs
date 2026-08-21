@@ -2,6 +2,7 @@
 //! paired with the direct transfers that provider can authorize.
 
 use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
+use crate::aws_credentials::{aws_credentials_source, static_aws_credentials_source};
 use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use crate::local_fs_store::LocalFsStore;
 use crate::object_store::{Result, SharedObjectStore};
@@ -81,24 +82,25 @@ impl ConfiguredObjectStore {
     ///
     /// Construction fails when signing, provider, runtime, or key-prefix configuration is invalid.
     pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self> {
+        let credentials = aws_credentials_source(&config.credentials, &config.region)?;
         let direct_transfers =
             endpoint_is_proven(config.endpoint_url.as_deref(), AWS_S3_PROVEN_DOMAINS)
                 .then(|| {
-                    S3CompatiblePresigner::new(S3PresignerConfig {
-                        bucket: config.bucket.clone(),
-                        region: config.region.clone(),
-                        endpoint_url: config.endpoint_url.clone(),
-                        access_key_id: config.access_key_id.clone(),
-                        secret_access_key: config.secret_access_key.clone(),
-                        session_token: config.session_token.clone(),
-                        key_prefix: config.key_prefix.clone(),
-                        force_path_style: config.force_path_style,
-                        direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
-                    })
+                    S3CompatiblePresigner::with_credentials(
+                        S3PresignerConfig {
+                            bucket: config.bucket.clone(),
+                            region: config.region.clone(),
+                            endpoint_url: config.endpoint_url.clone(),
+                            key_prefix: config.key_prefix.clone(),
+                            force_path_style: config.force_path_style,
+                            direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
+                        },
+                        Arc::clone(&credentials),
+                    )
                     .map(s3_compatible_transfers)
                 })
                 .transpose()?;
-        let store = S3CompatibleStore::aws_s3(config)?;
+        let store = S3CompatibleStore::aws_s3_with_credentials(config, credentials)?;
         Ok(Self {
             inner: Arc::new(store),
             direct_transfers,
@@ -110,26 +112,31 @@ impl ConfiguredObjectStore {
     ///
     /// Construction fails when signing, provider, runtime, or key-prefix configuration is invalid.
     pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self> {
+        let credentials = static_aws_credentials_source(
+            config.access_key_id.clone(),
+            config.secret_access_key.clone(),
+            None,
+        );
         let direct_transfers = endpoint_is_proven(
             Some(config.endpoint_url.as_str()),
             CLOUDFLARE_R2_PROVEN_DOMAINS,
         )
         .then(|| {
-            S3CompatiblePresigner::new(S3PresignerConfig {
-                bucket: config.bucket.clone(),
-                region: "auto".to_owned(),
-                endpoint_url: Some(config.endpoint_url.clone()),
-                access_key_id: config.access_key_id.clone(),
-                secret_access_key: config.secret_access_key.clone(),
-                session_token: None,
-                key_prefix: config.key_prefix.clone(),
-                force_path_style: true,
-                direct_put_max_content_bytes: CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
-            })
+            S3CompatiblePresigner::with_credentials(
+                S3PresignerConfig {
+                    bucket: config.bucket.clone(),
+                    region: "auto".to_owned(),
+                    endpoint_url: Some(config.endpoint_url.clone()),
+                    key_prefix: config.key_prefix.clone(),
+                    force_path_style: true,
+                    direct_put_max_content_bytes: CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+                },
+                Arc::clone(&credentials),
+            )
             .map(s3_compatible_transfers)
         })
         .transpose()?;
-        let store = S3CompatibleStore::cloudflare_r2(config)?;
+        let store = S3CompatibleStore::cloudflare_r2_with_credentials(config, credentials)?;
         Ok(Self {
             inner: Arc::new(store),
             direct_transfers,
@@ -257,8 +264,8 @@ mod tests {
     };
     use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
     use crate::test_support::{gcs_fixture_service_account_key_file, AZURITE_ACCOUNT_KEY};
-    use crate::ObjectStore;
     use crate::ObjectStoreError;
+    use crate::{AwsS3Credentials, ObjectStore};
     use bytes::Bytes;
     use loonfs_api::ChecksumAlgorithm;
     use std::sync::Arc;
@@ -333,8 +340,8 @@ mod tests {
     }
 
     /// GCS signs the configured prefix and create-only precondition.
-    #[test]
-    fn the_gcs_bundle_signs_native_generation_preconditions() {
+    #[tokio::test]
+    async fn the_gcs_bundle_signs_native_generation_preconditions() {
         let issuer = proven_gcs_store()
             .direct_transfers()
             .and_then(|transfers| transfers.put)
@@ -349,6 +356,7 @@ mod tests {
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             )
+            .await
             .expect("presign");
 
         assert!(signed
@@ -466,17 +474,21 @@ mod tests {
     #[test]
     fn a_bundle_can_offer_put_and_get_without_multipart() {
         let presigner = Arc::new(
-            S3CompatiblePresigner::new(S3PresignerConfig {
-                bucket: "bucket".to_owned(),
-                region: "us-east-1".to_owned(),
-                endpoint_url: None,
-                access_key_id: "access".into(),
-                secret_access_key: "secret".into(),
-                session_token: None,
-                key_prefix: None,
-                force_path_style: false,
-                direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
-            })
+            S3CompatiblePresigner::new(
+                S3PresignerConfig {
+                    bucket: "bucket".to_owned(),
+                    region: "us-east-1".to_owned(),
+                    endpoint_url: None,
+                    key_prefix: None,
+                    force_path_style: false,
+                    direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
+                },
+                AwsS3Credentials::Static {
+                    access_key_id: "access".into(),
+                    secret_access_key: "secret".into(),
+                    session_token: None,
+                },
+            )
             .expect("presigner"),
         );
         let transfers = DirectTransferIssuers::read_only(presigner.clone()).with_put(presigner);
@@ -490,9 +502,11 @@ mod tests {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: endpoint_url.map(ToOwned::to_owned),
-            access_key_id: "access".into(),
-            secret_access_key: "secret".into(),
-            session_token: None,
+            credentials: AwsS3Credentials::Static {
+                access_key_id: "access".into(),
+                secret_access_key: "secret".into(),
+                session_token: None,
+            },
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
         })
@@ -536,8 +550,8 @@ mod tests {
         .expect("construct r2 store")
     }
 
-    #[test]
-    fn cloudflare_r2_presigner_uses_path_style_account_endpoint() {
+    #[tokio::test]
+    async fn cloudflare_r2_presigner_uses_path_style_account_endpoint() {
         let store = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
@@ -561,6 +575,7 @@ mod tests {
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             )
+            .await
             .expect("presign");
 
         assert!(signed.url.starts_with(

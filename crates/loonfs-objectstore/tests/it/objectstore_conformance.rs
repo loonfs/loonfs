@@ -18,8 +18,8 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, Sto
 use loonfs_objectstore::s3_compatible::{
     AwsS3StoreConfig, CloudflareR2StoreConfig, S3CompatibleStore,
 };
-use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreError;
+use loonfs_objectstore::{AwsS3Credentials, ObjectStore};
 use tempfile::TempDir;
 
 #[test]
@@ -128,9 +128,11 @@ async fn aws_s3_real_provider_conformance() {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        session_token: config.session_token,
+        credentials: AwsS3Credentials::Static {
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+            session_token: config.session_token,
+        },
         key_prefix: Some(config.prefix),
         force_path_style: false,
     })
@@ -151,9 +153,11 @@ async fn aws_s3_streamed_write_round_trips() {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        session_token: config.session_token,
+        credentials: AwsS3Credentials::Static {
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+            session_token: config.session_token,
+        },
         key_prefix: Some(config.prefix),
         force_path_style: false,
     })
@@ -189,9 +193,11 @@ async fn aws_s3_put_stores_a_trustworthy_checksum() {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        session_token: config.session_token,
+        credentials: AwsS3Credentials::Static {
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+            session_token: config.session_token,
+        },
         key_prefix: Some(config.prefix),
         force_path_style: false,
     })
@@ -243,9 +249,11 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        session_token: config.session_token,
+        credentials: AwsS3Credentials::Static {
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+            session_token: config.session_token,
+        },
         key_prefix: Some(config.prefix),
         force_path_style: false,
     })

@@ -145,8 +145,9 @@ fn presigned_expiry_ms(now: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
+#[async_trait]
 impl DirectGetIssuer for LoopbackIssuer {
-    fn presign_get(
+    async fn presign_get(
         &self,
         request: PresignedGetRequest<'_>,
         now: SystemTime,
@@ -160,6 +161,7 @@ impl DirectGetIssuer for LoopbackIssuer {
     }
 }
 
+#[async_trait]
 impl DirectPutIssuer for LoopbackIssuer {
     fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
         ChecksumAlgorithm::Sha256
@@ -169,7 +171,7 @@ impl DirectPutIssuer for LoopbackIssuer {
         DIRECT_PUT_MAX_BYTES
     }
 
-    fn presign_put(
+    async fn presign_put(
         &self,
         request: PresignedPutRequest<'_>,
         now: SystemTime,
@@ -183,8 +185,9 @@ impl DirectPutIssuer for LoopbackIssuer {
     }
 }
 
+#[async_trait]
 impl DirectMultipartIssuer for LoopbackIssuer {
-    fn presign_multipart_part(
+    async fn presign_multipart_part(
         &self,
         request: PresignedPartRequest<'_>,
         now: SystemTime,
