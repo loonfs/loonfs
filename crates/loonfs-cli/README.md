@@ -229,11 +229,18 @@ Writing
                          [--actor-kind <kind> --actor-id <id>]
     Write and remove attributes on a file or directory. --set takes
     key=value and splits on the first `=`, --remove takes a key, and both
-    repeat. A list value needs --attributes-json, which takes the whole
-    update as {"set": {...}, "remove": [...]} in the wire encoding and
-    cannot be combined with --set or --remove. The two --expected flags
-    refuse the update when the path has been rebound or the attributes have
-    moved on
+    repeat. Attribute values are strings. --attributes-json takes the whole
+    update document as {"set": {...}, "remove": [...]}, but values inside
+    set are still strings. Arrays, objects, numbers, booleans, and null are
+    rejected. To store serialized JSON, pass it as a string value.
+
+      loonfs annotate /docs/report.csv --set owner=ada
+      loonfs annotate /docs/report.csv --attributes-json \
+        '{"set":{"tags":"[\"red\",\"blue\"]"}}'
+
+    --attributes-json cannot be combined with --set or --remove. The two
+    --expected flags refuse the update when the path has been rebound or the
+    attributes have moved on
 
   loonfs rm <path> [-r] [--actor-kind <kind> --actor-id <id>]
     Delete a file, or with -r a directory and everything under it as one

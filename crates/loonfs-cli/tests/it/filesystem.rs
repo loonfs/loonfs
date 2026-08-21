@@ -1857,6 +1857,33 @@ fn annotate_rejects_a_set_without_an_equals_and_a_document_beside_the_flags() {
     assert_failure(&both);
     assert_eq!(both.status.code(), Some(2));
     assert_eq!(parse_json(&both.stderr)["error"]["code"], "invalid_usage");
+
+    let string_value = harness.run(&[
+        "--json",
+        "annotate",
+        "/docs",
+        "--attributes-json",
+        r#"{"set":{"tags":"[\"red\",\"blue\"]"}}"#,
+    ]);
+    assert_success(&string_value);
+    let stat = harness.run(&["--json", "stat", "/docs"]);
+    assert_success(&stat);
+    assert_eq!(
+        json_data(&stat)["attributes"]["tags"],
+        serde_json::json!(r#"["red","blue"]"#)
+    );
+
+    let native_array = harness.run(&[
+        "--json",
+        "annotate",
+        "/docs",
+        "--attributes-json",
+        r#"{"set":{"tags":["red","blue"]}}"#,
+    ]);
+    assert_failure(&native_array);
+    let error = json_error(&native_array);
+    assert_eq!(error["code"], "invalid_request");
+    assert_eq!(error["param"], "--attributes-json");
 }
 
 /// `mkdir -p` on a directory that is already there succeeds, the way Unix
