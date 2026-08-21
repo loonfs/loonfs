@@ -628,8 +628,7 @@ mod tests {
         }
     }
 
-    /// Loading a config preserves its credential source. Environment
-    /// credentials are read only when the object store is constructed.
+    /// Loading a config preserves its credential source without resolving it.
     #[test]
     fn ambient_credential_sources_survive_loading_with_environment_credentials_set() {
         let path = write_config(

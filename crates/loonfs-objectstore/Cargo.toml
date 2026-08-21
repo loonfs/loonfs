@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+aws-config = { version = "=1.8.1", default-features = false, features = ["credentials-process", "rt-tokio", "rustls", "sso"] }
+aws-credential-types = "=1.2.3"
 base64.workspace = true
 bytes.workspace = true
 fs4.workspace = true

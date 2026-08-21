@@ -4,6 +4,10 @@
 //! uploads carry a client-computed checksum -- not by behaviour worth a type
 //! each, so both are constructors here.
 
+use crate::aws_credentials::{
+    aws_credentials_source, static_aws_credentials_source, ObjectStoreAwsCredentialProvider,
+    SharedAwsCredentialsSource,
+};
 use crate::keyspace::parse_endpoint_url;
 use crate::object_store::Result;
 use crate::presign::PresignedUrl;
@@ -41,7 +45,7 @@ const S3_CHECKSUM_HEADERS: &[(&str, ChecksumAlgorithm)] = &[
     ("x-amz-checksum-crc32c", ChecksumAlgorithm::Crc32c),
 ];
 
-/// Supplies explicit credentials, addressing, and key scoping for AWS S3.
+/// Supplies credentials, addressing, and key scoping for AWS S3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwsS3StoreConfig {
     /// Bucket that acts as the LoonFS object-store root.
@@ -50,12 +54,8 @@ pub struct AwsS3StoreConfig {
     pub region: String,
     /// S3-compatible endpoint override, or `None` for the regional AWS endpoint.
     pub endpoint_url: Option<String>,
-    /// Access-key id used for SigV4 request signing.
-    pub access_key_id: SecretString,
-    /// Secret access key used for SigV4 request signing.
-    pub secret_access_key: SecretString,
-    /// Temporary credential token, or `None` for long-lived credentials.
-    pub session_token: Option<SecretString>,
+    /// Credential source shared by provider requests and presigned URLs.
+    pub credentials: crate::AwsS3Credentials,
     /// Logical prefix prepended to every key, or `None` to use the bucket root.
     pub key_prefix: Option<String>,
     /// Selects path-style bucket addressing for compatible endpoints that require it.
@@ -79,15 +79,13 @@ pub struct CloudflareR2StoreConfig {
     pub key_prefix: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct S3CompatibleConfig {
     provider_name: &'static str,
     bucket: String,
     region: String,
     endpoint_url: Option<String>,
-    access_key_id: SecretString,
-    secret_access_key: SecretString,
-    session_token: Option<SecretString>,
+    credentials: SharedAwsCredentialsSource,
     key_prefix: Option<String>,
     force_path_style: bool,
     /// Attach a client-computed SHA-256 to every upload so the provider
@@ -129,17 +127,24 @@ impl fmt::Debug for S3CompatibleStore {
 impl S3CompatibleStore {
     /// Builds an AWS S3 store with bounded retries and SHA-256 upload checksums.
     ///
-    /// Construction fails for invalid credentials, bucket, region, endpoint,
-    /// key prefix, runtime initialization, or provider-client configuration.
+    /// Construction fails for invalid static credentials, bucket, region,
+    /// endpoint, key prefix, runtime initialization, or provider-client
+    /// configuration. Ambient credential resolution remains lazy.
     pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self> {
+        let credentials = aws_credentials_source(&config.credentials)?;
+        Self::aws_s3_with_credentials(config, credentials)
+    }
+
+    pub(crate) fn aws_s3_with_credentials(
+        config: AwsS3StoreConfig,
+        credentials: SharedAwsCredentialsSource,
+    ) -> Result<Self> {
         Self::new(S3CompatibleConfig {
             provider_name: "aws-s3",
             bucket: config.bucket,
             region: config.region,
             endpoint_url: config.endpoint_url,
-            access_key_id: config.access_key_id,
-            secret_access_key: config.secret_access_key,
-            session_token: config.session_token,
+            credentials,
             key_prefix: config.key_prefix,
             force_path_style: config.force_path_style,
             sha256_upload_checksum: true,
@@ -152,9 +157,31 @@ impl S3CompatibleStore {
     /// Construction fails for a blank account id or any invalid shared
     /// configuration, including credentials, endpoint, and key prefix.
     pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self> {
+        let credentials = static_aws_credentials_source(
+            config.access_key_id.clone(),
+            config.secret_access_key.clone(),
+            None,
+        );
+        Self::cloudflare_r2_with_credentials(config, credentials)
+    }
+
+    pub(crate) fn cloudflare_r2_with_credentials(
+        config: CloudflareR2StoreConfig,
+        credentials: SharedAwsCredentialsSource,
+    ) -> Result<Self> {
         if config.account_id.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
                 "account id must not be empty".to_owned(),
+            ));
+        }
+        if config.access_key_id.expose().trim().is_empty() {
+            return Err(ObjectStoreError::Configuration(
+                "access key id must not be empty".to_owned(),
+            ));
+        }
+        if config.secret_access_key.expose().trim().is_empty() {
+            return Err(ObjectStoreError::Configuration(
+                "secret access key must not be empty".to_owned(),
             ));
         }
         Self::new(S3CompatibleConfig {
@@ -162,9 +189,7 @@ impl S3CompatibleStore {
             bucket: config.bucket,
             region: "auto".to_owned(),
             endpoint_url: Some(config.endpoint_url),
-            access_key_id: config.access_key_id,
-            secret_access_key: config.secret_access_key,
-            session_token: None,
+            credentials,
             key_prefix: config.key_prefix,
             // The configured endpoint is the bucket-less account host; path
             // style makes the client append the bucket. Virtual hosting would
@@ -195,17 +220,17 @@ impl S3CompatibleStore {
                 object_store_endpoint_url(&config.bucket, endpoint, config.force_path_style)
             })
             .transpose()?;
-        let request_signer = S3CompatiblePresigner::new(S3PresignerConfig {
-            bucket: config.bucket.clone(),
-            region: config.region.clone(),
-            endpoint_url: config.endpoint_url.clone(),
-            access_key_id: config.access_key_id.clone(),
-            secret_access_key: config.secret_access_key.clone(),
-            session_token: config.session_token.clone(),
-            key_prefix: config.key_prefix.clone(),
-            force_path_style: config.force_path_style,
-            direct_put_max_content_bytes: config.direct_put_max_content_bytes,
-        })?;
+        let request_signer = S3CompatiblePresigner::with_credentials(
+            S3PresignerConfig {
+                bucket: config.bucket.clone(),
+                region: config.region.clone(),
+                endpoint_url: config.endpoint_url.clone(),
+                key_prefix: config.key_prefix.clone(),
+                force_path_style: config.force_path_style,
+                direct_put_max_content_bytes: config.direct_put_max_content_bytes,
+            },
+            Arc::clone(&config.credentials),
+        )?;
 
         let io_runtime = StoreIoRuntime::new()?;
         let http = io_runtime
@@ -218,8 +243,9 @@ impl S3CompatibleStore {
             .with_retry(crate::provider_object_store::provider_retry_config())
             .with_bucket_name(config.bucket)
             .with_region(config.region)
-            .with_access_key_id(config.access_key_id.expose())
-            .with_secret_access_key(config.secret_access_key.expose())
+            .with_credentials(Arc::new(ObjectStoreAwsCredentialProvider::new(
+                config.credentials,
+            )))
             .with_virtual_hosted_style_request(!config.force_path_style);
 
         if let Some(endpoint_url) = endpoint_url {
@@ -227,9 +253,6 @@ impl S3CompatibleStore {
             builder = builder
                 .with_endpoint(endpoint_url)
                 .with_allow_http(allow_http);
-        }
-        if let Some(session_token) = &config.session_token {
-            builder = builder.with_token(session_token.expose());
         }
         if config.sha256_upload_checksum {
             builder = builder.with_checksum_algorithm(ProviderChecksum::SHA256);
@@ -355,11 +378,10 @@ impl ObjectStore for S3CompatibleStore {
     }
 
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        let signed = self.request_signer.presign_head_stored_checksum(
-            key,
-            CHECKSUM_HEAD_TTL,
-            Self::signing_time(),
-        )?;
+        let signed = self
+            .request_signer
+            .presign_head_stored_checksum(key, CHECKSUM_HEAD_TTL, Self::signing_time())
+            .await?;
         let response = self
             .execute_signed(key, signed, HttpRequestBody::empty())
             .await?;
@@ -403,11 +425,10 @@ impl ObjectStore for S3CompatibleStore {
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
-        let signed = self.request_signer.presign_create_multipart(
-            key,
-            MULTIPART_CONTROL_TTL,
-            Self::signing_time(),
-        )?;
+        let signed = self
+            .request_signer
+            .presign_create_multipart(key, MULTIPART_CONTROL_TTL, Self::signing_time())
+            .await?;
         let response = self
             .execute_signed(key, signed, HttpRequestBody::empty())
             .await?;
@@ -426,13 +447,16 @@ impl ObjectStore for S3CompatibleStore {
         parts: &[MultipartPart],
         checksum: &Checksum,
     ) -> Result<MultipartCompletion> {
-        let signed = self.request_signer.presign_complete_multipart(
-            key,
-            provider_upload_id,
-            checksum,
-            MULTIPART_CONTROL_TTL,
-            Self::signing_time(),
-        )?;
+        let signed = self
+            .request_signer
+            .presign_complete_multipart(
+                key,
+                provider_upload_id,
+                checksum,
+                MULTIPART_CONTROL_TTL,
+                Self::signing_time(),
+            )
+            .await?;
         let response = self
             .execute_signed(key, signed, complete_multipart_body(parts)?.into())
             .await?;
@@ -447,12 +471,15 @@ impl ObjectStore for S3CompatibleStore {
     }
 
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
-        let signed = self.request_signer.presign_abort_multipart(
-            key,
-            provider_upload_id,
-            MULTIPART_CONTROL_TTL,
-            Self::signing_time(),
-        )?;
+        let signed = self
+            .request_signer
+            .presign_abort_multipart(
+                key,
+                provider_upload_id,
+                MULTIPART_CONTROL_TTL,
+                Self::signing_time(),
+            )
+            .await?;
         let response = self
             .execute_signed(key, signed, HttpRequestBody::empty())
             .await?;
@@ -630,16 +657,6 @@ fn validate_config(config: &S3CompatibleConfig) -> Result<()> {
             "region must not be empty".to_owned(),
         ));
     }
-    if config.access_key_id.expose().trim().is_empty() {
-        return Err(ObjectStoreError::Configuration(
-            "access key id must not be empty".to_owned(),
-        ));
-    }
-    if config.secret_access_key.expose().trim().is_empty() {
-        return Err(ObjectStoreError::Configuration(
-            "secret access key must not be empty".to_owned(),
-        ));
-    }
     Ok(())
 }
 
@@ -669,10 +686,11 @@ fn object_store_endpoint_url(
 #[cfg(test)]
 mod tests {
     use super::{
-        multipart_error, object_store_endpoint_url, S3CompatibleConfig, S3CompatibleStore,
-        AWS_S3_MAX_DIRECT_PUT_BYTES,
+        multipart_error, object_store_endpoint_url, AwsS3StoreConfig, S3CompatibleConfig,
+        S3CompatibleStore, AWS_S3_MAX_DIRECT_PUT_BYTES,
     };
-    use crate::ObjectStoreErrorClass;
+    use crate::aws_credentials::static_aws_credentials_source;
+    use crate::{AwsS3Credentials, ObjectStoreErrorClass};
 
     fn test_config() -> S3CompatibleConfig {
         S3CompatibleConfig {
@@ -680,9 +698,7 @@ mod tests {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
-            access_key_id: "access".into(),
-            secret_access_key: "secret".into(),
-            session_token: None,
+            credentials: static_aws_credentials_source("access".into(), "secret".into(), None),
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
             sha256_upload_checksum: true,
@@ -698,10 +714,16 @@ mod tests {
     }
 
     #[test]
-    fn s3_compatible_store_rejects_blank_credentials() {
-        let mut config = test_config();
-        config.access_key_id = "".into();
-        assert!(S3CompatibleStore::new(config).is_err());
+    fn ambient_aws_store_construction_does_not_resolve_credentials() {
+        S3CompatibleStore::aws_s3(AwsS3StoreConfig {
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
+            credentials: AwsS3Credentials::Ambient {},
+            key_prefix: Some("tenant-a".to_owned()),
+            force_path_style: true,
+        })
+        .expect("construct ambient AWS store lazily");
     }
 
     #[test]

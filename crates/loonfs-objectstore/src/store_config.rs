@@ -19,18 +19,18 @@ use loonfs_api::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Environment variable ambient S3-compatible credentials read their access-key id from.
+/// Standard AWS environment credential name for the access-key id.
 pub const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
-/// Environment variable ambient S3-compatible credentials read their secret access key from.
+/// Standard AWS environment credential name for the secret access key.
 pub const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
-/// Environment variable ambient AWS credentials read an optional session token from.
+/// Standard AWS environment credential name for the optional session token.
 pub const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
 
 /// AWS S3 credential source, stored separately from provider settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum AwsS3Credentials {
-    /// Resolves credentials from the process environment when the store is constructed.
+    /// Resolves refreshable credentials through the standard AWS SDK chain.
     Ambient {},
     /// Uses the complete credential set stored in the configuration file.
     Static {
@@ -108,7 +108,7 @@ pub enum StoreConfig {
         /// Service endpoint override, or `None` to derive the regional AWS endpoint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint_url: Option<String>,
-        /// Credential source resolved when the store is constructed.
+        /// Credential source used by every provider request and presigned URL.
         credentials: AwsS3Credentials,
         /// Logical prefix applied inside the bucket, or `None` to expose its root.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,20 +237,14 @@ impl StoreConfig {
                 credentials,
                 key_prefix,
                 force_path_style,
-            } => {
-                let (access_key_id, secret_access_key, session_token) =
-                    resolve_aws_s3_credentials(credentials, |name| std::env::var(name).ok())?;
-                ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
-                    bucket: bucket.clone(),
-                    region: region.clone(),
-                    endpoint_url: endpoint_url.clone(),
-                    access_key_id,
-                    secret_access_key,
-                    session_token,
-                    key_prefix: key_prefix.clone(),
-                    force_path_style: *force_path_style,
-                })
-            }
+            } => ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
+                bucket: bucket.clone(),
+                region: region.clone(),
+                endpoint_url: endpoint_url.clone(),
+                credentials: credentials.clone(),
+                key_prefix: key_prefix.clone(),
+                force_path_style: *force_path_style,
+            }),
             StoreConfig::CloudflareR2 {
                 bucket,
                 account_id,
@@ -451,35 +445,6 @@ fn validate_r2_credentials(credentials: &CloudflareR2Credentials) -> Result<(), 
     Ok(())
 }
 
-fn resolve_aws_s3_credentials(
-    credentials: &AwsS3Credentials,
-    lookup: impl Fn(&str) -> Option<String>,
-) -> crate::object_store::Result<(SecretString, SecretString, Option<SecretString>)> {
-    match credentials {
-        AwsS3Credentials::Static {
-            access_key_id,
-            secret_access_key,
-            session_token,
-        } => Ok((
-            access_key_id.clone(),
-            secret_access_key.clone(),
-            session_token.clone(),
-        )),
-        AwsS3Credentials::Ambient {} => {
-            let access_key_id = non_blank(lookup(ACCESS_KEY_ID_ENV));
-            let secret_access_key = non_blank(lookup(SECRET_ACCESS_KEY_ENV));
-            match (access_key_id, secret_access_key) {
-                (Some(access_key_id), Some(secret_access_key)) => Ok((
-                    SecretString::new(access_key_id),
-                    SecretString::new(secret_access_key),
-                    non_blank(lookup(SESSION_TOKEN_ENV)).map(SecretString::new),
-                )),
-                _ => Err(missing_ambient_credentials("aws-s3", true)),
-            }
-        }
-    }
-}
-
 fn resolve_r2_credentials(
     credentials: &CloudflareR2Credentials,
     lookup: impl Fn(&str) -> Option<String>,
@@ -497,21 +462,16 @@ fn resolve_r2_credentials(
                     SecretString::new(access_key_id),
                     SecretString::new(secret_access_key),
                 )),
-                _ => Err(missing_ambient_credentials("cloudflare-r2", false)),
+                _ => Err(missing_r2_ambient_credentials()),
             }
         }
     }
 }
 
-fn missing_ambient_credentials(provider: &str, session_token: bool) -> ObjectStoreError {
-    let optional_session = if session_token {
-        format!("; `{SESSION_TOKEN_ENV}` is optional")
-    } else {
-        String::new()
-    };
+fn missing_r2_ambient_credentials() -> ObjectStoreError {
     ObjectStoreError::Configuration(format!(
-        "{provider} ambient credentials require non-blank `{ACCESS_KEY_ID_ENV}` and \
-         `{SECRET_ACCESS_KEY_ENV}`{optional_session}; set them in the environment or configure \
+        "cloudflare-r2 ambient credentials require non-blank `{ACCESS_KEY_ID_ENV}` and \
+         `{SECRET_ACCESS_KEY_ENV}`; set them in the environment or configure \
          `store.credentials.kind = \"static\"`"
     ))
 }
@@ -602,12 +562,8 @@ mod tests {
     #![allow(clippy::panic)]
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::{
-        resolve_aws_s3_credentials, resolve_r2_credentials, AwsS3Credentials,
-        CloudflareR2Credentials, StoreConfig, StoreConfigError,
-    };
+    use super::{resolve_r2_credentials, CloudflareR2Credentials, StoreConfig, StoreConfigError};
     use crate::ConfiguredObjectStoreKind;
-    use loonfs_api::SecretString;
 
     fn parse(contents: &str) -> StoreConfig {
         toml::from_str(contents).expect("parse store config")
@@ -744,7 +700,7 @@ secret_access_key = "secret"
     }
 
     #[test]
-    fn ambient_credentials_resolve_without_mutating_the_serialized_source() {
+    fn ambient_credential_sources_serialize_without_resolved_secrets() {
         let environment = |name: &str| match name {
             "AWS_ACCESS_KEY_ID" => Some("env-access".to_owned()),
             "AWS_SECRET_ACCESS_KEY" => Some("env-secret".to_owned()),
@@ -764,17 +720,9 @@ kind = "ambient"
         );
         aws.validate()
             .expect("ambient is a valid credential source");
-        let StoreConfig::AwsS3 { credentials, .. } = &aws else {
+        let StoreConfig::AwsS3 { .. } = &aws else {
             panic!("expected aws-s3")
         };
-        let (access_key_id, secret_access_key, session_token) =
-            resolve_aws_s3_credentials(credentials, environment).expect("resolve ambient aws");
-        assert_eq!(access_key_id.expose(), "env-access");
-        assert_eq!(secret_access_key.expose(), "env-secret");
-        assert_eq!(
-            session_token.as_ref().map(SecretString::expose),
-            Some("env-session")
-        );
         let rendered = toml::to_string_pretty(&aws).expect("serialize ambient aws");
         assert!(rendered.contains("kind = \"ambient\""));
         assert!(!rendered.contains("env-access"));
@@ -802,23 +750,8 @@ kind = "ambient"
     }
 
     #[test]
-    fn missing_runtime_ambient_credentials_are_provider_specific_and_actionable() {
+    fn missing_r2_ambient_credentials_are_actionable() {
         let missing = |_: &str| None;
-        let aws_error = resolve_aws_s3_credentials(&AwsS3Credentials::Ambient {}, missing)
-            .expect_err("missing aws ambient credentials");
-        let aws_message = aws_error.to_string();
-        assert!(
-            aws_message.contains("aws-s3 ambient credentials"),
-            "{aws_message}"
-        );
-        assert!(aws_message.contains("AWS_ACCESS_KEY_ID"), "{aws_message}");
-        assert!(
-            aws_message.contains("AWS_SECRET_ACCESS_KEY"),
-            "{aws_message}"
-        );
-        assert!(aws_message.contains("AWS_SESSION_TOKEN"), "{aws_message}");
-        assert!(aws_message.contains("kind = \"static\""), "{aws_message}");
-
         let r2_error = resolve_r2_credentials(&CloudflareR2Credentials::Ambient {}, missing)
             .expect_err("missing r2 ambient credentials");
         let r2_message = r2_error.to_string();

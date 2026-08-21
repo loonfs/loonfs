@@ -3522,8 +3522,9 @@ mod direct_download {
         }
     }
 
+    #[async_trait]
     impl DirectGetIssuer for LoopbackIssuer {
-        fn presign_get(
+        async fn presign_get(
             &self,
             request: PresignedGetRequest<'_>,
             _now: SystemTime,
@@ -3537,6 +3538,7 @@ mod direct_download {
         }
     }
 
+    #[async_trait]
     impl DirectPutIssuer for LoopbackIssuer {
         fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
             self.checksum_algorithm
@@ -3546,7 +3548,7 @@ mod direct_download {
             LOOPBACK_DIRECT_PUT_MAX_BYTES
         }
 
-        fn presign_put(
+        async fn presign_put(
             &self,
             request: PresignedPutRequest<'_>,
             _now: SystemTime,

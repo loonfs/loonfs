@@ -85,7 +85,7 @@ pub(super) async fn begin_download(
         .direct_download_target(&namespace_id, request.path.as_str(), request.revision_no)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    let access = presigned_access(issuer, &target.object_key)?;
+    let access = presigned_access(issuer, &target.object_key).await?;
 
     Ok(Json(BeginDownloadResponse {
         namespace_id,
@@ -140,7 +140,7 @@ pub(super) async fn begin_download_by_inode(
         .direct_download_target_by_inode(&namespace_id, inode_id, revision_no)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    let access = presigned_access(issuer, &target.object_key)?;
+    let access = presigned_access(issuer, &target.object_key).await?;
     Ok(Json(BeginDownloadByInodeResponse {
         namespace_id,
         inode_id: target.inode_id,
@@ -165,7 +165,7 @@ fn direct_get_issuer(state: &AppState) -> Result<&dyn DirectGetIssuer, ApiRespon
         })
 }
 
-fn presigned_access(
+async fn presigned_access(
     issuer: &dyn DirectGetIssuer,
     object_key: &str,
 ) -> Result<ObjectTransferAccess, ApiResponseError> {
@@ -177,6 +177,7 @@ fn presigned_access(
             },
             presign_time(),
         )
+        .await
         .map_err(presign_issuer_error)?;
     Ok(ObjectTransferAccess::PresignedUrl {
         method: signed.method,

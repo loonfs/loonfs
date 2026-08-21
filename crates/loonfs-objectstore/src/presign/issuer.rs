@@ -1,6 +1,7 @@
 //! Interfaces for issuing presigned reads and writes.
 
 use crate::object_store::Result;
+use async_trait::async_trait;
 use loonfs_api::{Checksum, ChecksumAlgorithm};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -62,6 +63,7 @@ pub struct PresignedUrl {
 ///
 /// A provider that cannot preserve create-only writes and report a durable
 /// full-object checksum must not implement this trait.
+#[async_trait]
 pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
     /// The whole-object checksum this provider stores for a single PUT.
     ///
@@ -79,7 +81,7 @@ pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
     ///
     /// Issuance fails for invalid keys, invalid expiry policy, unusable signing
     /// time, or malformed provider configuration.
-    fn presign_put(
+    async fn presign_put(
         &self,
         request: PresignedPutRequest<'_>,
         now: SystemTime,
@@ -88,6 +90,7 @@ pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
 
 /// Issues read capabilities for content objects a client fetches straight
 /// from the provider.
+#[async_trait]
 pub trait DirectGetIssuer: Send + Sync + std::fmt::Debug {
     /// Issues a read capability for one content object.
     ///
@@ -97,7 +100,7 @@ pub trait DirectGetIssuer: Send + Sync + std::fmt::Debug {
     ///
     /// Issuance fails for invalid keys, invalid expiry policy, unusable
     /// signing time, or malformed provider configuration.
-    fn presign_get(
+    async fn presign_get(
         &self,
         request: PresignedGetRequest<'_>,
         now: SystemTime,
@@ -105,12 +108,13 @@ pub trait DirectGetIssuer: Send + Sync + std::fmt::Debug {
 }
 
 /// Issues write permissions for an open multipart upload.
+#[async_trait]
 pub trait DirectMultipartIssuer: Send + Sync + std::fmt::Debug {
     /// Issues a write capability for one part of an open multipart upload.
     ///
     /// Multipart parts are replaceable so clients can retry them. The signed
     /// request includes the checksum that the provider must enforce.
-    fn presign_multipart_part(
+    async fn presign_multipart_part(
         &self,
         request: PresignedPartRequest<'_>,
         now: SystemTime,
