@@ -34,13 +34,13 @@ fn openapi_static_files_are_current() {
     assert_eq!(
         full,
         std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
-        "docs/specs/openapi.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- --proxy-output docs/specs/openapi-proxy.json docs/specs/openapi.json`"
+        "docs/specs/openapi.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- docs/specs/openapi.json docs/specs/openapi-proxy.json`"
     );
     assert_eq!(
         proxy,
         std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH)
             .expect("read static proxy openapi json"),
-        "docs/specs/openapi-proxy.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- --proxy-output docs/specs/openapi-proxy.json docs/specs/openapi.json`"
+        "docs/specs/openapi-proxy.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- docs/specs/openapi.json docs/specs/openapi-proxy.json`"
     );
 }
 
@@ -348,7 +348,7 @@ fn openapi_documents_current_server_paths() {
 
 #[test]
 fn openapi_operation_ids_match_the_public_registry() {
-    const REGISTRY_MESSAGE: &str = "operation IDs define generated SDK method names; update OPENAPI_OPERATION_IDS only when renaming a public method";
+    const REGISTRY_MESSAGE: &str = "operation IDs define generated SDK method names; update OPERATION_RETRY_CLASSES only when renaming a public method";
 
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -397,23 +397,26 @@ fn openapi_operation_ids_match_the_public_registry() {
         "duplicate operationIds found; {REGISTRY_MESSAGE}"
     );
 
+    let registered = openapi_postprocess::OPERATION_RETRY_CLASSES
+        .iter()
+        .map(|(operation_id, _)| *operation_id)
+        .collect::<Vec<_>>();
     operation_ids.sort_unstable();
     assert_eq!(
-        operation_ids,
-        openapi_postprocess::OPENAPI_OPERATION_IDS,
+        operation_ids, registered,
         "operationIds changed; {REGISTRY_MESSAGE}"
     );
 }
 
 #[test]
 fn proxy_operation_ids_match_the_allowlist() {
-    let registered = openapi_postprocess::OPENAPI_OPERATION_IDS
+    let registered = openapi_postprocess::OPERATION_RETRY_CLASSES
         .iter()
-        .copied()
+        .map(|(operation_id, _)| *operation_id)
         .collect::<BTreeSet<_>>();
     let allowlisted = openapi_postprocess::PROXY_OPERATIONS
         .iter()
-        .map(|(operation_id, _)| *operation_id)
+        .copied()
         .collect::<BTreeSet<_>>();
     assert_eq!(
         allowlisted.len(),
@@ -427,7 +430,7 @@ fn proxy_operation_ids_match_the_allowlist() {
     assert!(
         openapi_postprocess::PROXY_OPERATIONS
             .windows(2)
-            .all(|pair| pair[0].0 < pair[1].0),
+            .all(|pair| pair[0] < pair[1]),
         "proxy operations must stay sorted"
     );
 
@@ -511,34 +514,27 @@ fn proxy_paths_use_namespace_aliases_and_declare_no_security() {
             let operation_id = operation["operationId"]
                 .as_str()
                 .expect("proxy operation ID");
-            let scope = openapi_postprocess::PROXY_OPERATIONS
-                .iter()
-                .find_map(|(candidate, scope)| (*candidate == operation_id).then_some(*scope))
-                .expect("published proxy operation is allowlisted");
-            match scope {
-                openapi_postprocess::ProxyOperationScope::Unscoped => {
-                    assert_eq!(path, "/v0/capabilities");
-                }
-                openapi_postprocess::ProxyOperationScope::NamespaceAlias => {
-                    assert!(path.starts_with("/v0/namespace-aliases/{namespace_alias}/"));
-                    let namespace_alias = operation["parameters"]
-                        .as_array()
-                        .expect("proxy operation parameters")
-                        .iter()
-                        .find(|parameter| {
-                            parameter["in"] == "path" && parameter["name"] == "namespace_alias"
-                        })
-                        .expect("proxy operation namespace alias parameter");
-                    assert_eq!(
-                        namespace_alias["description"],
-                        "Application namespace alias"
-                    );
-                    assert_eq!(
-                        namespace_alias["schema"],
-                        serde_json::json!({"type": "string"})
-                    );
-                }
+            if operation_id == "capabilities" {
+                assert_eq!(path, "/v0/capabilities");
+                continue;
             }
+            assert!(path.starts_with("/v0/namespace-aliases/{namespace_alias}/"));
+            let namespace_alias = operation["parameters"]
+                .as_array()
+                .expect("proxy operation parameters")
+                .iter()
+                .find(|parameter| {
+                    parameter["in"] == "path" && parameter["name"] == "namespace_alias"
+                })
+                .expect("proxy operation namespace alias parameter");
+            assert_eq!(
+                namespace_alias["description"],
+                "Application namespace alias"
+            );
+            assert_eq!(
+                namespace_alias["schema"],
+                serde_json::json!({"type": "string"})
+            );
         }
     }
 }
@@ -598,26 +594,6 @@ fn openapi_document_generation_is_byte_stable() {
 
 #[test]
 fn every_registered_operation_publishes_its_retry_class() {
-    let registered = openapi_postprocess::OPENAPI_OPERATION_IDS
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let classified = openapi_postprocess::OPERATION_RETRY_CLASSES
-        .iter()
-        .map(|(operation_id, _)| *operation_id)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        openapi_postprocess::OPENAPI_OPERATION_IDS.len(),
-        registered.len(),
-        "operation IDs must be unique"
-    );
-    assert_eq!(
-        openapi_postprocess::OPERATION_RETRY_CLASSES.len(),
-        classified.len(),
-        "each operation must have one retry class"
-    );
-    assert_eq!(classified, registered);
-
     let generated = openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
         .expect("generate openapi json");
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
@@ -659,24 +635,50 @@ fn cursor_list_operations_publish_the_registered_pagination_metadata() {
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
     )
     .expect("parse openapi json");
-    let published = operations_by_id(&spec)
-        .into_iter()
-        .filter_map(|(operation_id, operation)| {
+    let operations = operations_by_id(&spec);
+    let published = operations
+        .iter()
+        .filter_map(|(&operation_id, &operation)| {
             operation
                 .get("x-fern-pagination")
                 .cloned()
                 .map(|extension| (operation_id, extension))
         })
         .collect::<BTreeMap<_, _>>();
+    let schemas = spec
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
     let expected = openapi_postprocess::PAGINATION_OPERATIONS
         .iter()
-        .map(|metadata| {
+        .map(|&operation_id| {
+            let operation = operations
+                .get(operation_id)
+                .unwrap_or_else(|| panic!("missing pagination operation `{operation_id}`"));
+            let response_reference = operation
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(Value::as_str)
+                .expect("pagination response component reference");
+            let properties = component_schema_for_ref(schemas, response_reference)
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object)
+                .expect("pagination response properties");
+            let array_properties = properties
+                .iter()
+                .filter_map(|(name, property)| {
+                    (property.get("type").and_then(Value::as_str) == Some("array"))
+                        .then_some(name.as_str())
+                })
+                .collect::<Vec<_>>();
+            let [results_property] = array_properties.as_slice() else {
+                panic!("pagination operation `{operation_id}` must have one array property");
+            };
             (
-                metadata.operation_id,
+                operation_id,
                 serde_json::json!({
                     "cursor": "$request.cursor",
                     "next_cursor": "$response.next_cursor",
-                    "results": format!("$response.{}", metadata.results_field),
+                    "results": format!("$response.{results_property}"),
                 }),
             )
         })
@@ -699,11 +701,11 @@ fn proxy_cursor_list_operations_keep_pagination_metadata() {
     let proxy_operations = operations_by_id(&proxy);
     let table_operation_ids = openapi_postprocess::PAGINATION_OPERATIONS
         .iter()
-        .map(|metadata| metadata.operation_id)
+        .copied()
         .collect::<BTreeSet<_>>();
     let expected_proxy_operations = openapi_postprocess::PROXY_OPERATIONS
         .iter()
-        .map(|(operation_id, _)| *operation_id)
+        .copied()
         .filter(|operation_id| table_operation_ids.contains(operation_id))
         .collect::<BTreeSet<_>>();
     let mut actual_proxy_operations = BTreeSet::new();

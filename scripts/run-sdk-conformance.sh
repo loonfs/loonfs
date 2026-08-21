@@ -5,12 +5,7 @@
 
 set -eu
 
-if [ "$#" -ne 1 ]; then
-    echo "usage: scripts/run-sdk-conformance.sh <go|python|typescript>" >&2
-    exit 2
-fi
-
-LANGUAGE="$1"
+LANGUAGE="${1:-}"
 case "$LANGUAGE" in
     go|python|typescript) ;;
     *)
@@ -75,11 +70,7 @@ export LOONFS_PROXY_DOCUMENT LOONFS_SERVER_DOCUMENT
 
 case "$LANGUAGE" in
     go)
-        if (cd "$REPO_ROOT/sdk/conformance/go" && go test ./...); then
-            HARNESS_STATUS=0
-        else
-            HARNESS_STATUS=$?
-        fi
+        (cd "$REPO_ROOT/sdk/conformance/go" && go test ./...)
         ;;
     python)
         PYTHON_HARNESS="$REPO_ROOT/sdk/conformance/python"
@@ -87,24 +78,14 @@ case "$LANGUAGE" in
             python3 -m venv "$PYTHON_HARNESS/.venv"
         fi
         "$PYTHON_HARNESS/.venv/bin/pip" install -q -r "$PYTHON_HARNESS/requirements.txt"
-        if PYTHONPATH="$PYTHON_HARNESS" \
-            "$PYTHON_HARNESS/.venv/bin/python" -m pytest "$PYTHON_HARNESS/test_conformance.py"; then
-            HARNESS_STATUS=0
-        else
-            HARNESS_STATUS=$?
-        fi
+        PYTHONPATH="$PYTHON_HARNESS" \
+            "$PYTHON_HARNESS/.venv/bin/python" -m pytest "$PYTHON_HARNESS/test_conformance.py"
         ;;
     typescript)
         TYPESCRIPT_HARNESS="$REPO_ROOT/sdk/conformance/typescript"
         if [ ! -d "$TYPESCRIPT_HARNESS/node_modules" ]; then
             (cd "$TYPESCRIPT_HARNESS" && npm install --no-fund --no-audit)
         fi
-        if (cd "$TYPESCRIPT_HARNESS" && npm run build && npm test); then
-            HARNESS_STATUS=0
-        else
-            HARNESS_STATUS=$?
-        fi
+        (cd "$TYPESCRIPT_HARNESS" && npm run build && npm test)
         ;;
 esac
-
-exit "$HARNESS_STATUS"

@@ -1,7 +1,7 @@
 # Generates the TypeScript client from the proxy OpenAPI document.
 api:
   specs:
-    - openapi: ../../../docs/specs/openapi-proxy.json
+    - openapi: ../../../../docs/specs/openapi-proxy.json
 groups:
   typescript-client:
     generators:
@@ -11,4 +11,4 @@ groups:
           namespaceExport: LoonFS
         output:
           location: local-file-system
-          path: ../../generated/typescript-client
+          path: ../../../generated/typescript-client
