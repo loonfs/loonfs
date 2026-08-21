@@ -168,11 +168,12 @@ Namespace management
 
 Pagination
   ls, grep, revisions, trash, changes, and admin checkpoint list return one
-  page by default. --limit sets the maximum number of results, --page-size
-  controls each request, and --cursor resumes a previous result. --all keeps
-  fetching until no pages remain or the limit is reached. --jsonl does the
-  same while writing one result per line. changes uses --after instead of
-  --cursor.
+  page by default. --limit sets the total maximum across pages, --page-size
+  controls each request, and --cursor resumes a previous result. --all is the
+  unbounded human form. Ordinary JSON is always bounded: one page by default
+  or the total set by --limit. --all cannot be combined with --json. --jsonl
+  is the unbounded machine form and writes one result per line. changes uses
+  --after instead of --cursor.
 
 Reading
   loonfs ls [path] [--limit <n>] [--page-size <n>] [--cursor <cursor>]

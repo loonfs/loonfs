@@ -111,10 +111,10 @@ pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
         );
         return Err(error);
     }
-    if cli.json && pagination.all && pagination.limit.is_none() {
+    if cli.json && pagination.all {
         let mut error = Cli::command().error(
             clap::error::ErrorKind::ArgumentConflict,
-            "'--all --json' requires '--limit'; use '--jsonl' to stream without a limit",
+            "--all cannot be used with --json; use --json --limit <n> for a bounded document or --jsonl to stream all results",
         );
         error.insert(
             clap::error::ContextKind::InvalidArg,
@@ -1670,21 +1670,38 @@ mod tests {
     }
 
     #[test]
-    fn unbounded_all_json_is_rejected_for_every_paginated_listing() {
+    fn all_json_is_rejected_for_every_paginated_listing() {
         let cases: &[&[&str]] = &[
-            &["loonfs", "--json", "ls", "--all"],
-            &["loonfs", "--json", "revisions", "/f", "--all"],
-            &["loonfs", "--json", "trash", "--all"],
-            &["loonfs", "--json", "changes", "--all"],
-            &["loonfs", "--json", "grep", "x", "--all"],
-            &["loonfs", "--json", "admin", "checkpoint", "list", "--all"],
+            &["loonfs", "--json", "ls", "--all", "--limit", "5"],
+            &[
+                "loonfs",
+                "--json",
+                "revisions",
+                "/f",
+                "--all",
+                "--limit",
+                "5",
+            ],
+            &["loonfs", "--json", "trash", "--all", "--limit", "5"],
+            &["loonfs", "--json", "changes", "--all", "--limit", "5"],
+            &["loonfs", "--json", "grep", "x", "--all", "--limit", "5"],
+            &[
+                "loonfs",
+                "--json",
+                "admin",
+                "checkpoint",
+                "list",
+                "--all",
+                "--limit",
+                "5",
+            ],
         ];
         for arguments in cases {
             let cli = Cli::try_parse_from(*arguments).expect("arguments parse");
-            let error = validate_cli(&cli).expect_err("unbounded JSON must fail");
-            assert!(error
-                .to_string()
-                .contains("use '--jsonl' to stream without a limit"));
+            let error = validate_cli(&cli).expect_err("--json --all must fail");
+            assert!(error.to_string().contains(
+                "--all cannot be used with --json; use --json --limit <n> for a bounded document or --jsonl to stream all results"
+            ));
         }
     }
 
