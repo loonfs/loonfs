@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, Dict
+from collections.abc import AsyncIterator
+from typing import Any, Awaitable, Callable, Dict
 from urllib.parse import quote
 
 import httpx
@@ -12,8 +12,8 @@ import httpx
 __all__ = ["LoonFSProxy"]
 
 
-# typing.Dict keeps these runtime-evaluated aliases importable on Python 3.8;
-# builtin generics in aliases need 3.9.
+# typing generics keep these runtime-evaluated aliases importable on Python 3.8;
+# builtin and collections.abc generics in aliases need 3.9.
 _Receive = Callable[[], Awaitable[Dict[str, Any]]]
 _Send = Callable[[Dict[str, Any]], Awaitable[None]]
 
