@@ -192,8 +192,9 @@ Reading
 
   loonfs get <remote-path> [local-destination] [-r] [--revision <n>] [--force]
     Download one file, or with -r the directory tree rooted at the remote
-    path; --force overwrites the local destination and --revision downloads
-    an older revision of one file
+    path. A recursive destination is the exact root for the downloaded
+    contents. Reruns are no-clobber by default, --force rewrites existing
+    files, and --revision downloads an older revision of one file
 
   loonfs grep <pattern> [--path-prefix <path>] [-i] [--limit <n>]
                         [--page-size <n>] [--cursor <cursor>] [--all] [--jsonl]
@@ -584,10 +585,23 @@ Behavior notes
   larger than this process could hold costs no more memory than a tree of
   small ones
 
-  If `loonfs get` omits the local destination, the CLI writes to `./<remote-filename>`
+  If a one-file `loonfs get` omits the local destination, the CLI writes to
+  `./<remote-filename>`
 
-  A local destination that ends in `/` or is an existing directory means the
-  download lands inside it under its remote name
+  For one file, a local destination that ends in `/` or is an existing
+  directory means the download lands inside it under its remote name
+
+  A recursive get writes into the exact destination root.
+
+    loonfs get -r /reports ./download
+
+  This writes the contents directly under `./download`. It never writes
+  under `./download/reports`.
+
+    loonfs get -r /reports
+
+  This derives `./reports`. Reruns are no-clobber by default, and --force
+  rewrites existing files
 
   `loonfs get` refuses to overwrite an existing local file without --force,
   and writes through a partial file beside the target, so an interrupted
