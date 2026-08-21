@@ -116,10 +116,8 @@ fn output(
     }
 }
 
-/// Uploads a local directory tree. Ancestor directories materialize through
-/// each file's own commit (`parents` semantics), so only subtrees holding no
-/// files need explicit `mkdir`s — which also keeps the two paths from racing
-/// each other over the same directory.
+/// Uploads a local directory tree. File uploads create their parent
+/// directories, so this function creates directories only for empty subtrees.
 pub(crate) async fn run_put_tree(
     kind: CommandKind,
     context: &CommandContext,
@@ -141,8 +139,7 @@ pub(crate) async fn run_put_tree(
         DestinationBehavior::NoReplace
     };
 
-    // Empty subtrees first: nothing else creates them, and their ancestors
-    // auto-create exactly like a file's would.
+    // Create empty subtrees before uploading files.
     for components in empty_dirs {
         let remote = joined_remote(remote_root, &components);
         let spec = match NamespacePath::parse(context.namespace.as_str(), &remote) {
@@ -155,7 +152,7 @@ pub(crate) async fn run_put_tree(
                 continue;
             }
         };
-        match context
+        let progress_label = match context
             .target
             .create_directory(
                 &spec,
@@ -170,22 +167,28 @@ pub(crate) async fn run_put_tree(
             )
             .await
         {
-            Ok(_) => {}
+            Ok(_) => "created",
             Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
-                let existing = context.target.stat_path_without_attributes(&spec).await;
-                if !matches!(existing, Ok(entry) if entry.inode_kind() == InodeKind::Directory) {
-                    tally.fail(remote, error.into());
-                    continue;
+                match context.target.stat_path_without_attributes(&spec).await {
+                    Ok(entry) if entry.inode_kind() == InodeKind::Directory => "already exists",
+                    Ok(_) => {
+                        tally.fail(remote, error.into());
+                        continue;
+                    }
+                    Err(error) => {
+                        tally.fail(remote, error.into());
+                        continue;
+                    }
                 }
             }
             Err(error) => {
                 tally.fail(remote, error.into());
                 continue;
             }
-        }
+        };
         tally.directories += 1;
         if runtime.progress.human_lines_enabled() {
-            write_stderr_progress(format_args!("ensured {}", spec_target(&spec)));
+            write_stderr_progress(format_args!("{progress_label} {}", spec_target(&spec)));
         }
     }
 
@@ -209,10 +212,8 @@ pub(crate) async fn run_put_tree(
                     )
                 }
             };
-            // The walk states a file's length when the filesystem gave it
-            // one, and that length is what decides how the payload travels.
-            // A file that still cannot state one fails on its own rather
-            // than taking the tree with it.
+            // Use the size found during the directory walk when available.
+            // If it was unavailable, try again before uploading this file.
             let size_bytes = match job.size_bytes {
                 Some(size_bytes) => size_bytes,
                 None => match std::fs::metadata(&job.local) {
@@ -221,13 +222,8 @@ pub(crate) async fn run_put_tree(
                 },
             };
             progress.file_started(&remote, Some(size_bytes));
-            // One file of a tree travels exactly as a single `put` of it
-            // would: held whole while it is small enough to hold, read once
-            // in pieces past that, and resumed from its own record where a
-            // single put would resume. So a tree holding a file this process
-            // could not hold costs no more memory than a tree of small ones,
-            // and its bytes are counted as they are read rather than a whole
-            // file at a time.
+            // Recursive uploads use the same streaming and resume behavior as
+            // single-file uploads.
             let payload = LocalPayload::file(&job.local, size_bytes);
             let result = super::fs::put_payload(
                 context,
@@ -278,9 +274,8 @@ pub(crate) async fn run_put_tree(
     ))
 }
 
-/// Downloads a directory tree. Local directories are created for every
-/// remote directory — including empty ones, and including the destination
-/// root itself — before any file lands.
+/// Downloads a directory tree. It creates the destination and all remote
+/// directories before downloading files.
 pub(crate) async fn run_get_tree(
     kind: CommandKind,
     context: &CommandContext,
@@ -290,14 +285,7 @@ pub(crate) async fn run_get_tree(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let mut tally = TreeTally::new();
-    // The destination root, with any missing parents, belongs to this
-    // command the way `cp -r`'s target directory belongs to `cp`. It is made
-    // before the walk so a destination that can never hold the tree costs
-    // one error instead of a full traversal, and its failure ends the
-    // command: every file below would fail the same way, and one named
-    // error beats one per file. It counts like `cp -r` counts its own
-    // destination root, so the same tree reports the same directory total
-    // whichever way it is transferred.
+    // Fail early if the destination cannot be created.
     std::fs::create_dir_all(local_root)
         .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;
     tally.directories += 1;
@@ -341,11 +329,8 @@ pub(crate) async fn run_get_tree(
                     )
                 }
             };
-            // One file of a tree travels exactly as a single `get` of it
-            // would: past the deployment's proxy cap it streams straight
-            // from object storage, and the walk already read the size that
-            // decides which. It resumes the same way too, from bytes an
-            // interrupted run of this transfer left beside that file.
+            // Recursive downloads use the same streaming and resume behavior
+            // as single-file downloads.
             let meta = job
                 .content_ref
                 .as_ref()
@@ -403,8 +388,7 @@ pub(crate) async fn run_get_tree(
     ))
 }
 
-/// Copies a directory tree server-side: directories in parent-first order,
-/// then files as content-reference copies that move no bytes.
+/// Copies a directory tree without downloading file contents to the CLI.
 pub(crate) async fn run_copy_tree(
     kind: CommandKind,
     context: &CommandContext,
@@ -423,9 +407,7 @@ pub(crate) async fn run_copy_tree(
     let head_drift = listing.head_drift;
     let mut tally = TreeTally::new();
 
-    // The destination root materializes its own ancestors; every deeper
-    // directory arrives in parent-first walk order, so plain `mkdir`
-    // suffices and never races a sibling job.
+    // Create the destination root and then its child directories in order.
     let mut directories = vec![Vec::new()];
     directories.extend(listing.directories);
     for components in &directories {
@@ -548,10 +530,8 @@ fn spec_target(spec: &NamespacePath) -> String {
     super::context::render_target(spec.namespace(), spec.absolute_path())
 }
 
-/// Collects a local tree into file jobs (with relative remote components in
-/// `remote`) plus the component paths of subtrees holding no files at all.
-/// Entries that are neither files nor directories (symlinks, sockets)
-/// become per-path failures rather than silent skips.
+/// Collects upload jobs and empty directories from a local tree. Symlinks and
+/// special files are reported as failures.
 fn collect_local_tree(
     root: &Path,
     files: &mut Vec<FileJob>,
@@ -562,8 +542,13 @@ fn collect_local_tree(
     let mut all_dirs = Vec::new();
     for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
         let entry = entry.map_err(|error| {
-            CliError::invalid_request(format!("failed to walk `{}`: {error}", root.display()))
-                .with_param("local_path")
+            CliError::new(
+                "io_error",
+                format!(
+                    "failed to read directory tree `{}`: {error}",
+                    root.display()
+                ),
+            )
         })?;
         let relative = entry
             .path()
@@ -585,10 +570,8 @@ fn collect_local_tree(
             files.push(FileJob {
                 local: entry.path().to_path_buf(),
                 remote: components.join("/"),
-                // A local length nobody can read leaves the tree's total
-                // unknown rather than wrong, and the upload proceeds either
-                // way — the failure that matters surfaces when the file is
-                // read.
+                // The upload retries metadata lookup if this first lookup
+                // fails.
                 size_bytes: entry.metadata().ok().map(|metadata| metadata.len()),
                 content_ref: None,
             });
@@ -603,8 +586,7 @@ fn collect_local_tree(
             );
         }
     }
-    // A directory is worth an explicit mkdir only when no descendant file
-    // will create it — and its ancestors come along through `parents`.
+    // Files create ancestor directories, so only empty subtrees need mkdir.
     let mut candidates: Vec<Vec<String>> = all_dirs
         .into_iter()
         .filter(|dir| {
@@ -613,9 +595,7 @@ fn collect_local_tree(
                 .any(|with_files| with_files.starts_with(dir.as_slice()))
         })
         .collect();
-    // Keep only the deepest directory of each empty chain: its `parents`
-    // mkdir materializes the ancestors, and sequential creation means no
-    // sibling job races a shared parent.
+    // Creating the deepest directory also creates its empty parents.
     candidates.sort();
     let deepest: Vec<Vec<String>> = candidates
         .iter()
@@ -639,9 +619,8 @@ struct RemoteTree {
     head_drift: Option<ListingHeadDrift>,
 }
 
-/// Breadth-first remote walk from `root`. Each directory lists at its own
-/// head (drift-tolerant listings), so the walk is not a snapshot — the
-/// same contract as section 9.3's client-side traversal.
+/// Walks a remote tree breadth-first. Each directory is listed separately, so
+/// concurrent changes may appear in the results.
 async fn walk_remote_tree(
     context: &CommandContext,
     kind: CommandKind,

@@ -166,11 +166,8 @@ pub(crate) fn directory_intent(path: &str) -> bool {
     path.len() > 1 && path.ends_with('/') && !path.ends_with("//")
 }
 
-/// Parses a human-entered CLI path with the wire's strictness, plus exactly
-/// one concession: a single trailing slash (directory intent) is accepted
-/// and dropped. Repeated separators, `.`/`..`, and relative spellings fail
-/// here exactly as the wire rejects them — the CLI never silently rewrites
-/// a path into something the caller did not type.
+/// Removes one trailing slash used to mark a directory. Repeated separators,
+/// `.` and `..` components, and relative paths remain invalid.
 pub(crate) fn parse_user_path_arg(
     param: &str,
     path: &str,
@@ -192,9 +189,8 @@ pub(crate) fn parse_user_path_arg(
     Ok(parsed)
 }
 
-/// Resolves a mutation destination: with directory intent the source's leaf
-/// name lands inside the named directory; otherwise the path is the full
-/// destination.
+/// Appends the source name when the destination ends in `/`. Otherwise, the
+/// destination is treated as the full path.
 pub(crate) fn destination_user_path(
     path_param: &str,
     source_leaf_param: &str,

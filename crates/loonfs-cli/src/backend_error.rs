@@ -8,11 +8,9 @@ use thiserror::Error;
 
 /// Error returned by either CLI backend.
 ///
-/// `code` is either a shared [`loonfs_api::ErrorCode`] string or one of the
-/// local codes created below: `invalid_config`, `client_error`, `io_error`,
-/// or `runtime_error`. Shared codes must come
-/// from the registry rather than duplicated string literals so embedded and
-/// remote profiles report the same condition consistently.
+/// `code` is either a shared [`loonfs_api::ErrorCode`] or a backend-local code.
+/// Shared codes come from the registry so embedded and remote profiles report
+/// the same code for the same failure.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message}")]
 pub(crate) struct BackendError {

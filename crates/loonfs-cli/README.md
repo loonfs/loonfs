@@ -169,10 +169,9 @@ Namespace management
 Pagination
   ls, grep, revisions, trash, changes, and admin checkpoint list return one
   page by default. --limit sets the total maximum across pages, --page-size
-  controls each request, and --cursor resumes a previous result. --all is the
-  unbounded human form. Ordinary JSON is always bounded: one page by default
-  or the total set by --limit. --all cannot be combined with --json. --jsonl
-  is the unbounded machine form and writes one result per line. changes uses
+  controls each request, and --cursor resumes a previous result. --all fetches
+  every page for human output. --json returns a bounded document and cannot be
+  combined with --all. Use --jsonl to stream every result. changes uses
   --after instead of --cursor.
 
 Reading
@@ -181,20 +180,19 @@ Reading
     List the entries of a directory, or `/` when the path is omitted
 
   loonfs stat <path>
-    Describe one path: kind, size, revision, content digest, and the
-    inode's attributes as `attr.<key>` lines. Control characters in a
-    value print escaped, so a value stays on its own line; --json carries
-    the value itself
+  loonfs stat --inode <inode-id>
+    Describe a path or visible inode. The output includes its kind, size,
+    revision, content digest, and attributes
 
   loonfs cat <path> [--revision <n>]
     Print a file's bytes to stdout; --revision prints that revision instead
     of the current content
 
   loonfs get <remote-path> [local-destination] [-r] [--revision <n>] [--force]
-    Download one file, or with -r the directory tree rooted at the remote
-    path. A recursive destination is the exact root for the downloaded
-    contents. Reruns are no-clobber by default, --force rewrites existing
-    files, and --revision downloads an older revision of one file
+    Download one file, or use -r to download a directory. For recursive
+    downloads, the local destination is the root of the downloaded contents.
+    Existing files are not overwritten unless --force is set. --revision
+    downloads an older revision of one file
 
   loonfs grep <pattern> [--path-prefix <path>] [-i] [--limit <n>]
                         [--page-size <n>] [--cursor <cursor>] [--all] [--jsonl]
@@ -229,19 +227,18 @@ Writing
                          [--expected-attributes-revision <n>]
                          [--actor-kind <kind> --actor-id <id>]
     Write and remove attributes on a file or directory. --set takes
-    key=value and splits on the first `=`, --remove takes a key, and both
-    repeat. Attribute values are strings. --attributes-json takes the whole
-    update document as {"set": {...}, "remove": [...]}, but values inside
-    set are still strings. Arrays, objects, numbers, booleans, and null are
-    rejected. To store serialized JSON, pass it as a string value.
+    key=value and splits on the first `=`, --remove takes a key, and both can
+    be repeated. Attribute values must be strings. --attributes-json accepts
+    an update document in the form {"set": {...}, "remove": [...]}. Values
+    inside set must also be strings. To store JSON data, serialize it as a
+    string.
 
       loonfs annotate /docs/report.csv --set owner=ada
       loonfs annotate /docs/report.csv --attributes-json \
         '{"set":{"tags":"[\"red\",\"blue\"]"}}'
 
-    --attributes-json cannot be combined with --set or --remove. The two
-    --expected flags refuse the update when the path has been rebound or the
-    attributes have moved on
+    --attributes-json cannot be combined with --set or --remove. The expected
+    value flags reject the update if the inode or attributes changed
 
   loonfs rm <path> [-r] [--actor-kind <kind> --actor-id <id>]
     Delete a file, or with -r a directory and everything under it as one
@@ -585,40 +582,26 @@ Behavior notes
   larger than this process could hold costs no more memory than a tree of
   small ones
 
-  If a one-file `loonfs get` omits the local destination, the CLI writes to
-  `./<remote-filename>`
+  If a single-file `loonfs get` omits the local destination, the CLI writes to
+  `./<remote-filename>`. If the destination ends in `/` or is an existing
+  directory, the file is written there under its remote name
 
-  For one file, a local destination that ends in `/` or is an existing
-  directory means the download lands inside it under its remote name
-
-  A recursive get writes into the exact destination root.
+  A recursive get writes the directory contents directly into the destination:
 
     loonfs get -r /reports ./download
 
-  This writes the contents directly under `./download`. It never writes
-  under `./download/reports`.
+  This writes the contents of `/reports` under `./download`, not
+  `./download/reports`. If the destination is omitted, the CLI uses the remote
+  directory name:
 
     loonfs get -r /reports
 
-  This derives `./reports`. Reruns are no-clobber by default, and --force
-  rewrites existing files
+  Existing files are not overwritten unless --force is set. Downloads stream
+  without buffering the entire file. The CLI writes to a temporary file and
+  moves it into place after verification, so a failed download does not leave
+  a partial destination. When streaming to stdout with `-`, written bytes
+  cannot be taken back; check the exit status to confirm verification
 
-  `loonfs get` refuses to overwrite an existing local file without --force,
-  and writes through a partial file beside the target, so an interrupted
-  download leaves nothing truncated at the target itself
-
-  `loonfs get` writes a large file as it arrives and never holds it whole, so
-  what it costs in memory follows the transfer and not the file's size; an
-  embedded profile reads its own store in chunks, while a remote profile
-  streams files past the server's proxy cap directly from object storage and
-  receives smaller files in one proxied response
-
-  A file destination is renamed into place only once the download is complete
-  and its content verified, so content that fails verification leaves nothing
-  at the destination. `loonfs get ... -` hands bytes to stdout as they
-  arrive, so the same failure exits nonzero after part of the file has
-  already been written — with `-`, the exit status is what says the content
-  was verified
   A recursive put, get, or cp works file by file with bounded concurrency,
   so a partial failure reruns per file; --commit-id names one commit, so
   `put -r` and `cp -r` reject it, and `get -r` rejects --revision for the

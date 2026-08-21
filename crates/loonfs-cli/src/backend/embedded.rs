@@ -1278,8 +1278,6 @@ mod tests {
 
     #[test]
     fn page_limit_errors_report_the_registry_code_the_server_serves() {
-        // `--limit 0` fails the same PaginationPolicy check in both modes;
-        // embedded mode must answer with the same registry code as the server.
         let error = resolve_cli_page_limit(Some(0)).expect_err("zero limit is invalid");
         assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
         assert_eq!(error.param.as_deref(), Some("limit"));
@@ -1292,8 +1290,6 @@ mod tests {
 
     #[test]
     fn map_core_error_does_not_rewrite_invalid_id_codes() {
-        // Embedded mode must report the same code the server serves for the
-        // identical failure.
         let invalid_id = NamespaceId::parse("bad/name").expect_err("invalid namespace id");
         let error = map_runtime_error(RuntimeError::Core(CoreError::InvalidNamespaceId(
             invalid_id,

@@ -155,9 +155,8 @@ fn named_cli_input_error(name: &str, message: String) -> CliError {
     }
 }
 
-/// Parses a namespace argument once at the CLI boundary. A malformed id
-/// surfaces its registry code so both profile modes report the same code
-/// the server would serve for it.
+/// Parses a namespace ID after argument parsing. Invalid IDs use the shared
+/// `invalid_request` code in both embedded and remote modes.
 pub(crate) fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
     NamespaceId::parse(namespace).map_err(|error| CliError::invalid_request(error.to_string()))
 }

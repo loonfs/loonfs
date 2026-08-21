@@ -871,29 +871,22 @@ pub(crate) struct FilesystemGetArgs {
     pub target: TargetSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub remote_path: String,
-    /// Local destination (defaults to the remote basename). For one file,
-    /// `-` streams to stdout. A large file is written as it arrives and never
-    /// held whole, so what a get costs in memory does not follow what it
-    /// downloads. A file destination is written beside itself and renamed
-    /// into place only once the download is complete and its content verified,
-    /// so a failed download leaves nothing there. Streaming to stdout hands
-    /// bytes on as they arrive, so content that fails verification at the end
-    /// exits nonzero after part of it has already been written — the exit
-    /// status, not the output, is what says the content was verified.
+    /// Where to write the download. Defaults to the remote file or directory
+    /// name. Use `-` to stream one file to stdout. File downloads are streamed
+    /// to a temporary path and moved into place after verification. Stdout
+    /// cannot be rolled back if verification fails after bytes are written.
     #[arg(value_hint = ValueHint::AnyPath)]
     pub local_destination: Option<String>,
-    /// Download the directory tree into the exact local destination root.
-    /// `loonfs get -r /reports ./download` writes the contents directly under
-    /// `./download`, never `./download/reports`. With the destination omitted,
-    /// `loonfs get -r /reports` derives `./reports`. Reruns are no-clobber by
-    /// default; `--force` rewrites existing files.
+    /// Download a directory and its contents. The destination is the root of
+    /// the downloaded tree. For example, `loonfs get -r /reports ./download`
+    /// writes the contents of `/reports` directly under `./download`. If the
+    /// destination is omitted, the command uses `./reports`.
     #[arg(short, long)]
     pub recursive: bool,
     /// Download this revision instead of the current content.
     #[arg(long)]
     pub revision: Option<u64>,
-    /// Overwrite existing local files. Recursive reruns are no-clobber by
-    /// default.
+    /// Overwrite existing local files.
     #[arg(long)]
     pub force: bool,
 }
@@ -1508,7 +1501,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn global_selectors_reach_leaf_arguments_from_every_position() {
+    fn global_selectors_work_before_between_and_after_subcommands() {
         let before_command = Cli::try_parse_from([
             "loonfs",
             "--profile",
@@ -1595,41 +1588,20 @@ mod tests {
         Cli::try_parse_from(["loonfs", "stat", "--inode", "ino_2"]).expect("inode target");
     }
 
-    #[test]
-    fn recursive_get_help_names_the_exact_destination_root() {
-        let mut command = Cli::command();
-        let help = command
-            .find_subcommand_mut("get")
-            .expect("get command")
-            .render_long_help()
-            .to_string()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        assert!(help.contains("loonfs get -r /reports ./download"), "{help}");
-        assert!(help.contains("never `./download/reports`"), "{help}");
-        assert!(
-            help.contains("loonfs get -r /reports` derives `./reports"),
-            "{help}"
-        );
-        assert!(help.contains("Reruns are no-clobber by default"), "{help}");
-        assert!(help.contains("--force` rewrites existing files"), "{help}");
-    }
-
     fn assert_selected_target(cli: &Cli, profile: &str, namespace: &str) {
         assert_eq!(cli.profile.as_deref(), Some(profile));
         assert_eq!(cli.namespace.as_deref(), Some(namespace));
         let target = match &cli.command {
-            Command::Ls(args) => &args.target,
+            Command::Ls(args) => Some(&args.target),
             Command::Admin {
                 command:
                     AdminCommand::Checkpoint {
                         command: AdminCheckpointCommand::List(args),
                     },
-            } => &args.target,
-            command => panic!("expected command with selected target, got {command:?}"),
-        };
+            } => Some(&args.target),
+            _ => None,
+        }
+        .expect("test command should accept profile and namespace selectors");
         assert_eq!(target.profile.profile.as_deref(), Some(profile));
         assert_eq!(target.namespace.as_deref(), Some(namespace));
     }

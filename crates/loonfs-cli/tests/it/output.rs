@@ -726,9 +726,8 @@ fn ls_surfaces_head_drift_from_paged_responses() {
     server.join().expect("listing server");
 }
 
-/// `--limit` still applies with human `--all`, and buffered JSON rejects it.
 #[test]
-fn ls_limit_bounds_the_whole_listing_and_rejects_unbounded_json() {
+fn ls_limit_bounds_the_whole_listing_and_json_rejects_all() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -744,7 +743,6 @@ fn ls_limit_bounds_the_whole_listing_and_rejects_unbounded_json() {
         ]));
     }
 
-    // Explicitly unbounded JSON must use JSONL.
     let all = harness.run(&["--json", "ls", "--all"]);
     assert_failure(&all);
     assert_eq!(all.status.code(), Some(2));

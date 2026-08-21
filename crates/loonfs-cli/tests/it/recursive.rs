@@ -388,7 +388,7 @@ fn recursive_transfers_roundtrip_a_tree() {
 }
 
 #[test]
-fn recursive_empty_directory_ensures_are_idempotent_but_files_still_conflict() {
+fn recursive_put_reuses_existing_directories_but_rejects_files() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -402,7 +402,7 @@ fn recursive_empty_directory_ensures_are_idempotent_but_files_still_conflict() {
     let rerun = harness.run(&["--no-progress", "put", "-r", "--force", local_tree, "/tree"]);
     assert_success(&rerun);
     assert!(
-        stdout_string(&rerun).contains("explicitly ensured 1 directory"),
+        stdout_string(&rerun).contains("stored 0 files and 1 directory"),
         "{}",
         stdout_string(&rerun)
     );

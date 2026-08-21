@@ -453,7 +453,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 "directories"
             };
             let mut summary = format!(
-                "{verb} {files} files and explicitly ensured {directories} {directory_noun} ({source} -> {destination})"
+                "{verb} {files} files and {directories} {directory_noun} ({source} -> {destination})"
             );
             if !failures.is_empty() {
                 summary.push_str(&format!("; {} failed", failures.len()));
