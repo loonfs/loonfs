@@ -395,6 +395,22 @@ fn json_covers_command_lines_the_parser_rejects() {
     assert_success(&version);
 }
 
+#[test]
+fn unused_global_selectors_are_invalid_usage() {
+    let harness = Harness::new();
+
+    for arguments in [
+        vec!["--json", "--namespace", "demo", "version"],
+        vec!["--json", "--profile", "prod", "config", "path"],
+        vec!["--json", "--namespace", "demo", "namespace", "create", "x"],
+        vec!["--json", "use", "x", "--namespace", "y"],
+    ] {
+        let output = harness.run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(parse_json(&output.stderr)["error"]["code"], "invalid_usage");
+    }
+}
+
 /// Embedded and remote profiles must report the same `code` for the same
 /// failure: registry codes pass through verbatim in both modes instead of
 /// being rewritten to CLI-local codes on one side.

@@ -65,6 +65,14 @@ pub(crate) struct Cli {
         value_hint = ValueHint::FilePath
     )]
     pub(crate) config: Option<PathBuf>,
+    /// Profile to run against. Precedence is `--profile`, `LOONFS_PROFILE`,
+    /// then the configured default profile.
+    #[arg(long, global = true, value_hint = ValueHint::Other)]
+    pub(crate) profile: Option<String>,
+    /// Namespace to run against. Precedence is `--namespace`,
+    /// `LOONFS_NAMESPACE`, then the profile default.
+    #[arg(long, global = true, value_hint = ValueHint::Other)]
+    pub(crate) namespace: Option<String>,
     /// Emit machine-readable JSON instead of human output.
     #[arg(long, global = true)]
     pub(crate) json: bool,
@@ -83,6 +91,12 @@ pub(crate) struct Cli {
 }
 
 pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
+    if cli.profile.is_some() && !cli.command.accepts_profile_selector() {
+        return Err(selector_not_accepted("--profile"));
+    }
+    if cli.namespace.is_some() && !cli.command.accepts_namespace_selector() {
+        return Err(selector_not_accepted("--namespace"));
+    }
     let Some(pagination) = cli.command.pagination() else {
         return Ok(());
     };
@@ -109,6 +123,18 @@ pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
         return Err(error);
     }
     Ok(())
+}
+
+fn selector_not_accepted(selector: &str) -> clap::Error {
+    let mut error = Cli::command().error(
+        clap::error::ErrorKind::ArgumentConflict,
+        format!("the argument '{selector}' cannot be used with this command"),
+    );
+    error.insert(
+        clap::error::ContextKind::InvalidArg,
+        clap::error::ContextValue::String(selector.to_owned()),
+    );
+    error
 }
 
 #[derive(Debug, Subcommand)]
@@ -185,6 +211,52 @@ pub(crate) enum Command {
 }
 
 impl Command {
+    fn accepts_profile_selector(&self) -> bool {
+        !matches!(
+            self,
+            Self::Init
+                | Self::Profile { .. }
+                | Self::Config { .. }
+                | Self::Completion(_)
+                | Self::Version
+        )
+    }
+
+    fn accepts_namespace_selector(&self) -> bool {
+        matches!(
+            self,
+            Self::Namespace {
+                command: NamespaceCommand::Show(_),
+            } | Self::Ls(_)
+                | Self::Stat(_)
+                | Self::Annotate(_)
+                | Self::Cat(_)
+                | Self::Grep(_)
+                | Self::Get(_)
+                | Self::Put(_)
+                | Self::Revisions(_)
+                | Self::Restore(_)
+                | Self::Undelete(_)
+                | Self::Mkdir(_)
+                | Self::Rm(_)
+                | Self::Mv(_)
+                | Self::Cp(_)
+                | Self::Trash(_)
+                | Self::Changes(_)
+                | Self::Doctor(_)
+                | Self::Admin {
+                    command: AdminCommand::Checkpoint { .. }
+                        | AdminCommand::Index { .. }
+                        | AdminCommand::Maintenance {
+                            command: AdminMaintenanceCommand::Step(_)
+                                | AdminMaintenanceCommand::Flush(_),
+                        }
+                        | AdminCommand::Retention { .. }
+                        | AdminCommand::Gc(_),
+                }
+        )
+    }
+
     fn pagination(&self) -> Option<&PaginationArgs> {
         match self {
             Self::Ls(args) => Some(&args.pagination),
@@ -466,9 +538,7 @@ pub(crate) struct ProfileUpdateArgs {
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct ProfileSelectorArgs {
-    /// Profile to run against. Precedence is `--profile`, `LOONFS_PROFILE`,
-    /// then the configured default profile.
-    #[arg(long, value_hint = ValueHint::Other)]
+    #[arg(from_global)]
     pub profile: Option<String>,
 }
 
@@ -482,9 +552,7 @@ pub(crate) struct RequestBehaviorArgs {
 pub(crate) struct TargetSelectorArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
-    /// Namespace to run against. Precedence is `--namespace`,
-    /// `LOONFS_NAMESPACE`, then the profile default.
-    #[arg(long, value_hint = ValueHint::Other)]
+    #[arg(from_global)]
     pub namespace: Option<String>,
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
@@ -526,7 +594,7 @@ pub(crate) struct NamespaceUseArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace: String,
+    pub namespace_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -1432,6 +1500,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn global_selectors_reach_leaf_arguments_from_every_position() {
+        let before_command = Cli::try_parse_from([
+            "loonfs",
+            "--profile",
+            "prod",
+            "--namespace",
+            "demo",
+            "ls",
+            "/",
+        ])
+        .expect("selectors before command");
+        assert_selected_target(&before_command, "prod", "demo");
+
+        let between_subcommands = Cli::try_parse_from([
+            "loonfs",
+            "admin",
+            "--profile",
+            "prod",
+            "checkpoint",
+            "--namespace",
+            "demo",
+            "list",
+        ])
+        .expect("selectors between subcommands");
+        assert_selected_target(&between_subcommands, "prod", "demo");
+
+        let after_leaf_arguments = Cli::try_parse_from([
+            "loonfs",
+            "ls",
+            "/",
+            "--profile",
+            "prod",
+            "--namespace",
+            "demo",
+        ])
+        .expect("selectors after leaf arguments");
+        assert_selected_target(&after_leaf_arguments, "prod", "demo");
+    }
+
+    #[test]
+    fn unused_global_selectors_are_rejected() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["loonfs", "--namespace", "demo", "version"], "--namespace"),
+            (
+                &["loonfs", "--profile", "prod", "config", "path"],
+                "--profile",
+            ),
+            (
+                &["loonfs", "--namespace", "demo", "namespace", "create", "x"],
+                "--namespace",
+            ),
+            (&["loonfs", "use", "x", "--namespace", "y"], "--namespace"),
+        ];
+
+        for (arguments, selector) in cases {
+            let cli = Cli::try_parse_from(*arguments).expect("global selector parses once");
+            let error = validate_cli(&cli).expect_err("unused selector must fail");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            assert!(error.to_string().contains(selector), "{error}");
+        }
+    }
+
+    fn assert_selected_target(cli: &Cli, profile: &str, namespace: &str) {
+        assert_eq!(cli.profile.as_deref(), Some(profile));
+        assert_eq!(cli.namespace.as_deref(), Some(namespace));
+        let target = match &cli.command {
+            Command::Ls(args) => &args.target,
+            Command::Admin {
+                command:
+                    AdminCommand::Checkpoint {
+                        command: AdminCheckpointCommand::List(args),
+                    },
+            } => &args.target,
+            command => panic!("expected command with selected target, got {command:?}"),
+        };
+        assert_eq!(target.profile.profile.as_deref(), Some(profile));
+        assert_eq!(target.namespace.as_deref(), Some(namespace));
+    }
+
+    #[test]
     fn every_paginated_listing_accepts_the_shared_flags() {
         let cases: &[&[&str]] = &[
             &[
@@ -1718,6 +1866,8 @@ mod tests {
         let command = Cli::command();
 
         assert_hint(&command, "config", ValueHint::FilePath);
+        assert_hint(&command, "profile", ValueHint::Other);
+        assert_hint(&command, "namespace", ValueHint::Other);
 
         let put = subcommand(&command, "put");
         assert_hint(put, "local_path", ValueHint::AnyPath);
@@ -1742,13 +1892,6 @@ mod tests {
         assert_hint(gcs, "service_account_key_path", ValueHint::FilePath);
         let namespace_show = subcommand(subcommand(&command, "namespace"), "show");
         assert_hint(namespace_show, "namespace_id", ValueHint::Other);
-
-        let capabilities = subcommand(&command, "capabilities");
-        assert_hint(capabilities, "profile", ValueHint::Other);
-
-        let doctor = subcommand(&command, "doctor");
-        assert_hint(doctor, "profile", ValueHint::Other);
-        assert_hint(doctor, "namespace", ValueHint::Other);
     }
 
     fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {

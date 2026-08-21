@@ -212,7 +212,7 @@ pub(crate) async fn run_namespace_use(
             .await
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    let namespace_id = parse_namespace_id(&args.namespace)
+    let namespace_id = parse_namespace_id(&args.namespace_id)
         .map_err(|error| error.with_param("namespace"))
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
@@ -223,7 +223,7 @@ pub(crate) async fn run_namespace_use(
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     mutate_config(&loaded.path, |config| {
-        set_default_namespace(config, &resolved.profile_name, &args.namespace)
+        set_default_namespace(config, &resolved.profile_name, &args.namespace_id)
     })
     .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
@@ -233,7 +233,7 @@ pub(crate) async fn run_namespace_use(
         mode: Some(mode),
         data: CommandData::DefaultNamespace {
             profile: resolved.profile_name,
-            namespace: args.namespace,
+            namespace: args.namespace_id,
         },
     })
 }
