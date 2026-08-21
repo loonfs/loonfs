@@ -317,9 +317,10 @@ fn recursive_transfers_roundtrip_a_tree() {
     assert_failure(&rerun);
     let rerun_data = json_data(&rerun);
     assert_eq!(rerun_data["files"], 0);
+    assert_eq!(rerun_data["directories"], 1);
     assert_eq!(
         rerun_data["failures"].as_array().expect("failures").len(),
-        4
+        3
     );
     assert_eq!(
         rerun_data["failures"][0]["error"]["code"], "path_conflict",
@@ -333,13 +334,14 @@ fn recursive_transfers_roundtrip_a_tree() {
         "/up",
         "--force",
     ]);
-    assert_failure(&forced);
+    assert_success(&forced);
     let forced_data = json_data(&forced);
     assert_eq!(forced_data["files"], 3);
+    assert_eq!(forced_data["directories"], 1);
     assert_eq!(
         forced_data["failures"].as_array().expect("failures").len(),
-        1,
-        "the empty directory still conflicts: {forced_data}"
+        0,
+        "the existing empty directory is already ensured: {forced_data}"
     );
 
     // Download the tree and compare bytes; empty directories materialize.
@@ -383,6 +385,40 @@ fn recursive_transfers_roundtrip_a_tree() {
     let mv_recursive = harness.run(&["--json", "mv", "-r", "/moved", "/again"]);
     assert_failure(&mv_recursive);
     assert_eq!(json_error(&mv_recursive)["code"], "invalid_request");
+}
+
+#[test]
+fn recursive_empty_directory_ensures_are_idempotent_but_files_still_conflict() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let tree = harness.temp_dir.path().join("empty-tree");
+    fs::create_dir_all(tree.join("empty")).expect("create empty directory");
+    let local_tree = tree.to_str().expect("utf-8 path");
+    assert_success(&harness.run(&["put", "-r", local_tree, "/tree"]));
+
+    let rerun = harness.run(&["--no-progress", "put", "-r", "--force", local_tree, "/tree"]);
+    assert_success(&rerun);
+    assert!(
+        stdout_string(&rerun).contains("explicitly ensured 1 directory"),
+        "{}",
+        stdout_string(&rerun)
+    );
+
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"file").expect("write payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/blocked/empty",
+    ]));
+    let blocked = harness.run(&["--json", "put", "-r", "--force", local_tree, "/blocked"]);
+    assert_failure(&blocked);
+    let data = json_data(&blocked);
+    assert_eq!(data["directories"], 0);
+    assert_eq!(data["failures"][0]["error"]["code"], "path_conflict");
 }
 
 /// A recursive get creates the destination it was handed, parents included,

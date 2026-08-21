@@ -20,7 +20,7 @@ use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
 use futures::StreamExt;
-use loonfs_api::{AuthoritativePathEntryKind, DestinationBehavior};
+use loonfs_api::{AuthoritativePathEntryKind, DestinationBehavior, ErrorCode, InodeKind};
 use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -170,13 +170,22 @@ pub(crate) async fn run_put_tree(
             )
             .await
         {
-            Ok(_) => {
-                tally.directories += 1;
-                if runtime.progress.human_lines_enabled() {
-                    write_stderr_progress(format_args!("created {}", spec_target(&spec)));
+            Ok(_) => {}
+            Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
+                let existing = context.target.stat_path_without_attributes(&spec).await;
+                if !matches!(existing, Ok(entry) if entry.inode_kind() == InodeKind::Directory) {
+                    tally.fail(remote, error.into());
+                    continue;
                 }
             }
-            Err(error) => tally.fail(remote, error.into()),
+            Err(error) => {
+                tally.fail(remote, error.into());
+                continue;
+            }
+        }
+        tally.directories += 1;
+        if runtime.progress.human_lines_enabled() {
+            write_stderr_progress(format_args!("ensured {}", spec_target(&spec)));
         }
     }
 
