@@ -1076,6 +1076,34 @@ fn invalid_remote_urls_are_rejected() {
 }
 
 #[test]
+fn profile_create_rejects_token_over_non_loopback_http_before_writing() {
+    let harness = Harness::new();
+    let create = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "default",
+        "--server-url",
+        "http://example.internal",
+        "--auth-token",
+        "test-token",
+    ]);
+
+    assert_failure(&create);
+    let error = json_error(&create);
+    assert_eq!(error["code"], "invalid_config");
+    assert!(error["message"]
+        .as_str()
+        .expect("json string")
+        .contains("bearer tokens require https except for loopback http URLs"));
+    assert!(
+        !harness.config_path.exists(),
+        "unsafe profile must be rejected before creating the config file"
+    );
+}
+
+#[test]
 fn external_remote_profile_executes_through_http() {
     let harness = Harness::new();
     let remote_server =

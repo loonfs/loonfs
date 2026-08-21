@@ -6,6 +6,7 @@ use http::Uri;
 use loonfs_api::SecretString;
 use serde::Deserialize;
 use std::fs;
+use std::net::IpAddr;
 use std::path::Path;
 
 /// Client configuration loaded from TOML or built by the caller.
@@ -65,12 +66,18 @@ impl ClientConfig {
     /// [`Client::new`](crate::Client::new) both run this, so a file-loaded
     /// config and a directly built one cannot diverge in what they accept.
     pub fn validate(&self) -> Result<()> {
-        validate_absolute_http_url("server_url", &self.server_url)?;
+        let server_uri = validate_absolute_http_url("server_url", &self.server_url)?;
         if let Some(token) = &self.auth_token {
             if token.is_blank() {
                 return Err(ClientError::ConfigValidation {
                     field: "auth_token",
                     reason: "must not be empty".to_owned(),
+                });
+            }
+            if server_uri.scheme_str() == Some("http") && !is_literal_loopback_host(&server_uri) {
+                return Err(ClientError::ConfigValidation {
+                    field: "server_url",
+                    reason: "bearer tokens require https except for loopback http URLs".to_owned(),
                 });
             }
         }
@@ -121,7 +128,7 @@ impl ClientConfig {
     }
 }
 
-fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<()> {
+fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<Uri> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ClientError::MissingConfigField { field });
@@ -158,5 +165,83 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<()> {
         });
     }
 
-    Ok(())
+    Ok(uri)
+}
+
+fn is_literal_loopback_host(uri: &Uri) -> bool {
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    if host
+        .strip_suffix('.')
+        .unwrap_or(host)
+        .eq_ignore_ascii_case("localhost")
+    {
+        return true;
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(server_url: &str, auth_token: Option<&str>) -> ClientConfig {
+        ClientConfig {
+            server_url: server_url.to_owned(),
+            auth_token: auth_token.map(SecretString::from),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        }
+    }
+
+    #[test]
+    fn bearer_tokens_are_allowed_over_https_and_literal_loopback_http() {
+        for server_url in [
+            "https://example.internal",
+            "http://localhost",
+            "http://LOCALHOST",
+            "http://localhost.",
+            "http://127.0.0.1",
+            "http://127.8.9.10",
+            "http://[::1]",
+        ] {
+            let result = config(server_url, Some("test-token")).validate();
+            assert!(
+                result.is_ok(),
+                "{server_url} should be accepted: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bearer_tokens_are_rejected_over_non_loopback_http() {
+        for server_url in ["http://example.internal", "http://192.0.2.1"] {
+            let error = config(server_url, Some("test-token"))
+                .validate()
+                .expect_err("non-loopback plaintext URL should be rejected");
+            assert!(
+                matches!(
+                    error,
+                    ClientError::ConfigValidation {
+                        field: "server_url",
+                        ref reason,
+                    } if reason == "bearer tokens require https except for loopback http URLs"
+                ),
+                "unexpected validation error for {server_url}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn plaintext_http_without_a_bearer_token_is_allowed() {
+        config("http://example.internal", None)
+            .validate()
+            .expect("unauthenticated plaintext deployments remain supported");
+    }
 }

@@ -37,7 +37,7 @@ pub(crate) fn run_config_init(
             ));
         }
         let name = prompt::prompt_line_default("profile name", "default")?;
-        let profile = build_profile_interactive(runtime)?;
+        let profile = build_profile_interactive(&name, runtime)?;
 
         mutate_config(config_path, |config| {
             let (profile_name, redacted) = add_profile(config, &name, profile)?;

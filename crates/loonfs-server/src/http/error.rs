@@ -9,8 +9,12 @@ use loonfs_api::{
     ApiError, CommitId, ErrorCode, ErrorDetails, ErrorKind, NamespaceId, NamespaceIdValidationError,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ServedErrorCode(pub(super) ErrorCode);
+
 pub(super) struct ApiResponseError {
     status: StatusCode,
+    code: ErrorCode,
     body: Box<ApiError>,
     /// Emitted as a `Retry-After` header, for retryable capacity errors.
     retry_after_seconds: Option<u32>,
@@ -20,6 +24,7 @@ impl ApiResponseError {
     pub(super) fn new(status: StatusCode, code: ErrorCode, message: &str) -> Self {
         let response = Self {
             status,
+            code,
             body: Box::new(ApiError {
                 code: code.as_str().to_owned(),
                 feature: None,
@@ -38,18 +43,13 @@ impl ApiResponseError {
     }
 
     pub(super) fn not_supported(feature: &str, message: &str) -> Self {
-        Self {
-            status: StatusCode::NOT_IMPLEMENTED,
-            body: Box::new(ApiError {
-                code: ErrorCode::NotSupported.as_str().to_owned(),
-                feature: Some(feature.to_owned()),
-                message: message.to_owned(),
-                param: None,
-                request_id: None,
-                details: None,
-            }),
-            retry_after_seconds: None,
-        }
+        let mut response = Self::new(
+            StatusCode::NOT_IMPLEMENTED,
+            ErrorCode::NotSupported,
+            message,
+        );
+        response.body.feature = Some(feature.to_owned());
+        response
     }
 
     /// Stamps a `Retry-After` hint onto the response, HTTP's native shape
@@ -165,6 +165,7 @@ impl IntoResponse for ApiResponseError {
         // directly) simply omits it.
         self.body.request_id = super::REQUEST_ID.try_with(|id| id.clone()).ok();
         let mut response = (self.status, Json(self.body)).into_response();
+        response.extensions_mut().insert(ServedErrorCode(self.code));
         if let Some(seconds) = self.retry_after_seconds {
             if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string()) {
                 response
@@ -186,6 +187,11 @@ mod tests {
             let response =
                 ApiResponseError::new(status_for_core_error_code(code), code, "test response")
                     .into_response();
+            assert_eq!(
+                response.extensions().get::<ServedErrorCode>(),
+                Some(&ServedErrorCode(code)),
+                "response extension lost {code}"
+            );
             let retry_after = response
                 .headers()
                 .get(axum::http::header::RETRY_AFTER)
@@ -193,5 +199,15 @@ mod tests {
             let expected = code.retryable_without_operator_action().then_some("1");
             assert_eq!(retry_after, expected, "unexpected Retry-After for {code}");
         }
+    }
+
+    #[test]
+    fn not_supported_response_keeps_its_typed_code_extension() {
+        let response =
+            ApiResponseError::not_supported("test.feature", "not available").into_response();
+        assert_eq!(
+            response.extensions().get::<ServedErrorCode>(),
+            Some(&ServedErrorCode(ErrorCode::NotSupported))
+        );
     }
 }

@@ -313,7 +313,8 @@ impl RemoteTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_remote_auth_token_from;
+    use super::{resolve_remote_auth_token_from, RemoteTarget};
+    use loonfs_api::env::AUTH_TOKEN_ENV;
     use loonfs_api::SecretString;
 
     #[test]
@@ -332,5 +333,25 @@ mod tests {
         );
 
         assert!(resolve_remote_auth_token_from(&None, |_| Some("  ".to_owned())).is_none());
+    }
+
+    #[test]
+    fn environment_token_is_rejected_for_non_loopback_http() {
+        let auth_token = resolve_remote_auth_token_from(&None, |name| {
+            assert_eq!(name, AUTH_TOKEN_ENV);
+            Some("environment-token".to_owned())
+        });
+        let error = RemoteTarget::new("http://example.internal", auth_token, None, false)
+            .err()
+            .expect("environment token over non-loopback plaintext HTTP should be rejected");
+
+        assert_eq!(error.code, "invalid_config");
+        assert!(
+            error
+                .message
+                .contains("bearer tokens require https except for loopback http URLs"),
+            "{}",
+            error.message
+        );
     }
 }
