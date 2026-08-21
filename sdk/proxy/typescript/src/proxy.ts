@@ -7,12 +7,6 @@ export interface ProxyConfig {
 interface ProxyRoute {
     method: "GET" | "POST" | "PUT";
     pattern: RegExp;
-    namespaceAliasScoped: boolean;
-}
-
-interface MatchedRoute {
-    route: ProxyRoute;
-    match: RegExpMatchArray;
 }
 
 const HOP_BY_HOP_HEADERS = [
@@ -71,14 +65,11 @@ function patternFor(template: string): RegExp {
 const PROXY_ROUTES: readonly ProxyRoute[] = PROXY_ROUTE_TABLE.map((entry) => ({
     method: entry.method,
     pattern: patternFor(entry.template),
-    namespaceAliasScoped: entry.template.includes("{namespace_alias}"),
 }));
 
 /** Creates a fetch-compatible handler for LoonFS browser requests. */
 export function createProxyHandler(config: ProxyConfig): (request: Request) => Promise<Response> {
     const serverBaseUrl = new URL(config.serverBaseUrl);
-    serverBaseUrl.search = "";
-    serverBaseUrl.hash = "";
     const serverBasePath = serverBaseUrl.pathname.replace(/\/+$/, "");
     const token = config.token;
     const namespaceAliases = new Map(Object.entries(config.namespaceAliases));
@@ -120,14 +111,14 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
     };
 }
 
-function matchRoute(method: string, pathname: string): MatchedRoute | undefined {
+function matchRoute(method: string, pathname: string): RegExpMatchArray | undefined {
     for (const route of PROXY_ROUTES) {
         if (route.method !== method) {
             continue;
         }
         const match = pathname.match(route.pattern);
         if (match !== null) {
-            return { route, match };
+            return match;
         }
     }
     return undefined;
@@ -135,16 +126,12 @@ function matchRoute(method: string, pathname: string): MatchedRoute | undefined 
 
 function rewritePath(
     pathname: string,
-    matched: MatchedRoute,
+    match: RegExpMatchArray,
     namespaceAliases: ReadonlyMap<string, string>,
 ): string | undefined {
-    if (!matched.route.namespaceAliasScoped) {
-        return pathname;
-    }
-
-    const encodedNamespaceAlias = matched.match.groups?.namespaceAlias;
+    const encodedNamespaceAlias = match.groups?.namespaceAlias;
     if (encodedNamespaceAlias === undefined) {
-        return undefined;
+        return pathname;
     }
     let namespaceAlias: string;
     try {

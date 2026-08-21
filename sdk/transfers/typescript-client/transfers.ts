@@ -43,8 +43,6 @@ export interface GetFileResult extends LoonFS.BeginDownloadResponse {
     bytes: Uint8Array;
 }
 
-type CompletedUpload = LoonFS.UploadSessionResponse & LoonFS.UploadSessionStatus.Completed;
-
 interface StagedContent {
     contentRef: LoonFS.ContentRef;
     contentToken?: LoonFS.ContentToken;
@@ -204,14 +202,13 @@ async function stageDirectPut(
         await abortQuietly(client, namespaceAlias, begin.upload_id);
         throw error;
     }
-    const completed = completedUpload(
+    return stagedContent(
         await client.uploads.completeUpload({
             namespace_alias: namespaceAlias,
             upload_id: begin.upload_id,
             body: { mode: "direct_put", content: upload.content },
         }),
     );
-    return stagedContent(completed);
 }
 
 async function stageMultipart(
@@ -296,16 +293,11 @@ function splitBytes(bytes: Uint8Array, partSize: number): Uint8Array[] {
     return parts;
 }
 
-function completedUpload(response: LoonFS.UploadSessionResponse): CompletedUpload {
-    const completed = response as CompletedUpload;
+function stagedContent(response: LoonFS.UploadSessionResponse): StagedContent {
+    const completed = response as LoonFS.UploadSessionResponse & LoonFS.UploadSessionStatus.Completed;
     if (completed.status !== "completed") {
         throw new Error(`upload ${response.upload_id} completed with status ${completed.status}`);
     }
-    return completed;
-}
-
-function stagedContent(response: LoonFS.UploadSessionResponse): StagedContent {
-    const completed = completedUpload(response);
     return {
         contentRef: completed.content_ref,
         contentToken: completed.content_token,

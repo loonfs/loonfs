@@ -142,15 +142,12 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 	outgoing.URL.Path = joinPath(h.target.Path, rewrittenPath)
 	outgoing.URL.RawPath = ""
 	outgoing.URL.RawQuery = request.URL.RawQuery
-	outgoing.URL.ForceQuery = request.URL.ForceQuery
 	outgoing.URL.Fragment = ""
 	outgoing.RequestURI = ""
 	outgoing.Host = h.target.Host
 	outgoing.Close = false
-	outgoing.Header = request.Header.Clone()
 	removeHopByHopHeaders(outgoing.Header)
-	// Remove the browser-facing host and application cookies before forwarding.
-	outgoing.Header.Del("Host")
+	// Remove application cookies before forwarding.
 	outgoing.Header.Del("Cookie")
 	outgoing.Header.Set("Authorization", "Bearer "+h.token)
 	if outgoing.Header.Get("User-Agent") == "" {

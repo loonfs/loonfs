@@ -40,16 +40,14 @@ export interface GetFileResult extends LoonFS.BeginDownloadResponse {
     bytes: Uint8Array;
 }
 
-type CompletedUpload = LoonFS.UploadSessionResponse & LoonFS.UploadSessionStatus.Completed;
-
 interface StagedContent {
     contentRef: LoonFS.ContentRef;
     contentToken?: LoonFS.ContentToken;
 }
 
 interface DirectPutBody {
-    body: ReadableStream<Uint8Array>;
-    content: Promise<LoonFS.UploadContentClaim>;
+    body: ArrayBuffer;
+    content: LoonFS.UploadContentClaim;
 }
 
 /**
@@ -186,36 +184,28 @@ async function stageDirectPut(
     bytes: Uint8Array,
     begin: LoonFS.BeginUploadResponse.DirectPut,
 ): Promise<StagedContent> {
-    const upload = directPutBody(begin.direct_put.checksum_algorithm, bytes);
-    let content: LoonFS.UploadContentClaim;
+    let upload: DirectPutBody;
     try {
         requirePresignedMethod(begin.direct_put.access, "PUT", "direct PUT");
-        const headers = new Headers(begin.direct_put.access.headers);
-        if (!headers.has("content-length")) {
-            headers.set("content-length", bytes.byteLength.toString());
-        }
-        const request: RequestInit & { duplex: "half" } = {
+        upload = await directPutBody(begin.direct_put.checksum_algorithm, bytes);
+        const response = await fetch(begin.direct_put.access.url, {
             redirect: "error",
             method: begin.direct_put.access.method,
-            headers,
+            headers: begin.direct_put.access.headers,
             body: upload.body,
-            duplex: "half",
-        };
-        const response = await fetch(begin.direct_put.access.url, request);
+        });
         requireSuccessfulResponse(response, "direct PUT");
-        content = await upload.content;
     } catch (error) {
         await abortQuietly(client, namespaceId, begin.upload_id);
         throw error;
     }
-    const completed = completedUpload(
+    return stagedContent(
         await client.uploads.completeUpload({
             namespace_id: namespaceId,
             upload_id: begin.upload_id,
-            body: { mode: "direct_put", content },
+            body: { mode: "direct_put", content: upload.content },
         }),
     );
-    return stagedContent(completed);
 }
 
 async function stageMultipart(
@@ -300,16 +290,11 @@ function splitBytes(bytes: Uint8Array, partSize: number): Uint8Array[] {
     return parts;
 }
 
-function completedUpload(response: LoonFS.UploadSessionResponse): CompletedUpload {
-    const completed = response as CompletedUpload;
+function stagedContent(response: LoonFS.UploadSessionResponse): StagedContent {
+    const completed = response as LoonFS.UploadSessionResponse & LoonFS.UploadSessionStatus.Completed;
     if (completed.status !== "completed") {
         throw new Error(`upload ${response.upload_id} completed with status ${completed.status}`);
     }
-    return completed;
-}
-
-function stagedContent(response: LoonFS.UploadSessionResponse): StagedContent {
-    const completed = completedUpload(response);
     return {
         contentRef: completed.content_ref,
         contentToken: completed.content_token,
@@ -344,38 +329,19 @@ function requireSuccessfulResponse(response: Response, operation: string): void 
     }
 }
 
-function directPutBody(
+async function directPutBody(
     algorithm: LoonFS.ChecksumAlgorithm,
     bytes: Uint8Array,
-): DirectPutBody {
-    let resolveContent!: (content: LoonFS.UploadContentClaim) => void;
-    let rejectContent!: (reason?: unknown) => void;
-    const content = new Promise<LoonFS.UploadContentClaim>((resolve, reject) => {
-        resolveContent = resolve;
-        rejectContent = reject;
-    });
-    void content.catch(() => undefined);
-
-    let sent = false;
-    const body = new ReadableStream<Uint8Array>({
-        pull(controller) {
-            if (sent) {
-                return;
-            }
-            sent = true;
-            const chunk = new Uint8Array(bytes.byteLength);
-            chunk.set(bytes);
-            controller.enqueue(chunk);
-            controller.close();
-            void checksum(algorithm, chunk).then((value) => {
-                resolveContent({ size_bytes: chunk.byteLength, checksum: value });
-            }, rejectContent);
+): Promise<DirectPutBody> {
+    const body = arrayBuffer(bytes);
+    const sentBytes = new Uint8Array(body);
+    return {
+        body,
+        content: {
+            size_bytes: sentBytes.byteLength,
+            checksum: await checksum(algorithm, sentBytes),
         },
-        cancel(reason) {
-            rejectContent(reason);
-        },
-    });
-    return { body, content };
+    };
 }
 
 async function checksum(
