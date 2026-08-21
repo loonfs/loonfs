@@ -73,11 +73,23 @@ impl GrepError {
             Self::NotEnabled | Self::Backfilling => ErrorCode::NotSupported,
             Self::StoreUnavailable { class, .. } => match class {
                 StoreFailureClass::PermissionDenied => ErrorCode::PermissionDenied,
-                StoreFailureClass::Other => ErrorCode::ServerError,
+                _ => ErrorCode::ServerError,
             },
             Self::CorruptIndex { .. } => ErrorCode::IndexCorrupt,
             Self::PublicationConflict { .. } => ErrorCode::StaleHead,
             Self::Runtime(error) => error.code(),
+        }
+    }
+
+    /// Returns an error message safe to show to users.
+    pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::StoreUnavailable { class, .. } => class.public_message(),
+            Self::Runtime(error) => error.public_message(),
+            Self::PublicationConflict { .. } => {
+                std::borrow::Cow::Borrowed("grep index publication conflict; retry")
+            }
+            _ => std::borrow::Cow::Owned(self.to_string()),
         }
     }
 }

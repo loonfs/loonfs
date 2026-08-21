@@ -155,7 +155,7 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
         Err(err) => {
             return Err(DurableContentValidationError::Store {
                 object_key,
-                message: err.message(),
+                message: err.public_message().into_owned(),
             })
         }
     };
@@ -196,7 +196,7 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
     if let Err(error) = store.delete(&object_key).await {
         tracing::warn!(
             content_id = %content_id,
-            error = %error,
+            error_class = ?error.class(),
             "failed to remove the content object of a terminated upload session"
         );
     }
@@ -223,7 +223,7 @@ pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
     {
         tracing::warn!(
             content_id = %content_id,
-            error = %error,
+            error_class = ?error.class(),
             "failed to abandon the multipart upload of a terminated upload session"
         );
     }
@@ -423,7 +423,7 @@ impl<S: ObjectStore> FileContentStream<S> {
             Err(err) => {
                 return Err(DurableContentValidationError::Store {
                     object_key: self.object_key.clone(),
-                    message: err.message(),
+                    message: err.public_message().into_owned(),
                 })
             }
         };
@@ -563,7 +563,7 @@ async fn validate_content_size<S: ObjectStore + ?Sized>(
         Err(err) => {
             return Err(DurableContentValidationError::Store {
                 object_key: object_key.to_owned(),
-                message: err.message(),
+                message: err.public_message().into_owned(),
             })
         }
     };
@@ -764,7 +764,7 @@ async fn load_required_object<S: ObjectStore + ?Sized>(
         }),
         Err(err) => Err(DurableContentValidationError::Store {
             object_key: object_key.to_owned(),
-            message: err.message(),
+            message: err.public_message().into_owned(),
         }),
     }
 }

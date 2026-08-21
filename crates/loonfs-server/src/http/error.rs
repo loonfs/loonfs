@@ -105,12 +105,8 @@ impl ApiResponseError {
     pub(super) fn runtime(error: RuntimeError) -> Self {
         let code = error.code();
         let details = error.details();
-        let rendered = error.to_string();
-        let message = match &error {
-            RuntimeError::Config(message) => message.as_str(),
-            _ => rendered.as_str(),
-        };
-        let mut response = Self::new(status_for_core_error_code(code), code, message);
+        let message = error.public_message();
+        let mut response = Self::new(status_for_core_error_code(code), code, &message);
         response.body.details = details.map(Box::new);
         response
     }

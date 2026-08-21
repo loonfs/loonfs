@@ -59,13 +59,15 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
         Err(ImmutableWriteError::Transport { source, .. }) => Err(
             MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ReadManifest {
                 object_key: manifest_key,
-                message: source.message(),
+                message: source.public_message().into_owned(),
             }),
         ),
-        Err(error) => Err(MetadataProjectionLoadError::ManifestLoad(
+        Err(_) => Err(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::ReadManifest {
                 object_key: manifest_key,
-                message: error.to_string(),
+                message: loonfs_objectstore::ObjectStoreErrorClass::Other
+                    .public_message()
+                    .into_owned(),
             },
         )),
     }

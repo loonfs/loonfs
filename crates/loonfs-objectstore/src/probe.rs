@@ -1,33 +1,12 @@
-//! On-demand proof that a configured store honours the object-store
-//! contract LoonFS depends on.
+//! Checks whether a configured store supports the guarantees LoonFS needs.
 //!
-//! Fencing, publication, and upload completion are all decided by provider
-//! preconditions: a gateway that accepts a create-if-absent write over an
-//! existing object, or a compare-and-swap against a stale token, corrupts
-//! data rather than failing. Nothing about a store's configuration proves
-//! it honours those preconditions, so an operator asks — and this module is
-//! the question. It is never asked implicitly: a probe writes and deletes
-//! objects, so only an explicit operator decision runs one.
+//! The probe runs only when requested because it writes and deletes objects.
+//! It runs every check even after a failure so operators receive a complete
+//! report. Objects use the `probe-runs/{run_id}/` prefix, and the final check
+//! removes them.
 //!
-//! Every check reports its own outcome and no check can end the run, so one
-//! probe answers the whole question rather than the first thing that went
-//! wrong. A check that fails names what it expected; a store that lacks an
-//! optional capability answers [`StoreProbeOutcome::Unsupported`], which is
-//! an answer and not a failure.
-//!
-//! Every object a probe writes lives under `probe-runs/{run_id}/`, which is
-//! not a durable object family: garbage collection enumerates the durable
-//! families by name and never sees this prefix, and nothing else reads it.
-//! The final check deletes the run's objects and proves the prefix empty, so
-//! a probe that completes leaves nothing behind. A probe that dies partway
-//! leaves orphans under a prefix nothing consults — harmless, and removable
-//! by prefix.
-//!
-//! This module does not decide whether a store may serve presigned direct
-//! transfers. That trust is settled by whether
-//! [`crate::ConfiguredObjectStore::direct_transfers`] built a bundle at all,
-//! because a probe exercises the store's own request path and never a
-//! presigned capability handed to a client.
+//! This probe does not test presigned direct transfers. Those are enabled only
+//! when [`crate::ConfiguredObjectStore::direct_transfers`] returns a bundle.
 
 use crate::object_store::Result as StoreResult;
 use crate::{
@@ -38,24 +17,20 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{Checksum, ChecksumAlgorithm};
 
-/// Prefix owning every object a probe run writes.
+/// Prefix for objects created by store probes.
 const PROBE_RUN_PREFIX: &str = "probe-runs";
 
-/// What one probe run observed, check by check.
+/// Results from one store probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreProbeReport {
-    /// Caller-minted label scoping this run's objects and naming it in logs.
+    /// Label used to isolate this run's objects.
     pub run_id: String,
-    /// Every check the run performed, in the order it performed them.
+    /// Checks in execution order.
     pub checks: Vec<StoreProbeCheck>,
 }
 
 impl StoreProbeReport {
-    /// Whether the store answered every check acceptably.
-    ///
-    /// An [`StoreProbeOutcome::Unsupported`] answer counts as acceptable:
-    /// the optional capabilities are declared missing rather than found
-    /// broken, and a deployment that does not need them is unaffected.
+    /// Returns true when every check passed or reported an unsupported option.
     pub fn all_passed(&self) -> bool {
         self.checks.iter().all(|check| {
             matches!(
@@ -66,18 +41,17 @@ impl StoreProbeReport {
     }
 }
 
-/// One named contract check and what the store did with it.
+/// The result of one store contract check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreProbeCheck {
-    /// Stable check name. Names are part of the report's contract: callers
-    /// and operators match on them, so they are renamed deliberately.
+    /// Stable name used by callers and operators.
     pub name: &'static str,
-    /// What the store did.
+    /// Result of the check.
     pub outcome: StoreProbeOutcome,
 }
 
 impl StoreProbeCheck {
-    /// Renders this check as one operator-facing report line.
+    /// Formats the check as one report line.
     pub fn check_line(&self) -> String {
         match &self.outcome {
             StoreProbeOutcome::Passed => format!("{}: passed", self.name),
@@ -89,35 +63,24 @@ impl StoreProbeCheck {
     }
 }
 
-/// What one check concluded about the store.
+/// Result of a store contract check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreProbeOutcome {
-    /// The store behaved as the contract requires.
+    /// The store meets the requirement.
     Passed,
-    /// The store declares it cannot do this at all. Only the optional
-    /// capabilities — client-driven multipart and stored-checksum readback
-    /// — can answer this way, and a deployment that offers neither
-    /// `direct_put` nor multipart uploads is unaffected by it.
+    /// The store does not support this optional capability.
     Unsupported,
-    /// The store did something the contract forbids, or the operation
-    /// failed outright. Either way the store is not trustworthy for the
-    /// behaviour this check names.
+    /// The store failed the check.
     Failed {
-        /// What was expected and what happened instead. Provider text
-        /// arrives already sanitized, so no credential material reaches
-        /// this message.
+        /// Safe explanation of the failure.
         message: String,
     },
 }
 
-/// Runs every contract check against `store`, scoping the run's objects
-/// under `run_id`.
+/// Runs every contract check and stores temporary objects under `run_id`.
 ///
-/// This never fails as a whole: a check that cannot complete records its
-/// own failure and the remaining checks still run, because an operator
-/// asking "is this store trustworthy?" is owed the full answer rather than
-/// the first symptom. `run_id` scopes the run's keys, so concurrent probes
-/// against one store do not collide; callers mint it.
+/// A failed check does not stop the remaining checks. Callers must provide a
+/// unique `run_id` when probes may run at the same time.
 pub async fn run_store_contract_probe(store: &dyn ObjectStore, run_id: &str) -> StoreProbeReport {
     let run = ProbeRun {
         prefix: format!("{PROBE_RUN_PREFIX}/{run_id}"),
@@ -169,9 +132,7 @@ pub async fn run_store_contract_probe(store: &dyn ObjectStore, run_id: &str) -> 
             "stored_checksum_readback",
             stored_checksum_readback(store, &run).await,
         ),
-        // Last, and last for a reason: it deletes what every check above
-        // wrote and then proves the prefix empty, so cleanup is itself
-        // under test rather than a hope.
+        // Run cleanup last so it can remove objects created by every check.
         check(
             "cleanup_leaves_prefix_empty",
             cleanup_leaves_prefix_empty(store, &run).await,
@@ -184,28 +145,28 @@ pub async fn run_store_contract_probe(store: &dyn ObjectStore, run_id: &str) -> 
     }
 }
 
-/// One run's key scope.
+/// Key prefix for one run.
 struct ProbeRun {
     prefix: String,
 }
 
 impl ProbeRun {
-    /// A key inside this run's scope.
+    /// Returns a key inside this run's prefix.
     fn key(&self, name: &str) -> String {
         format!("{}/{name}", self.prefix)
     }
 
-    /// A listing prefix inside this run's scope.
+    /// Returns a listing prefix inside this run's prefix.
     fn listing(&self, name: &str) -> String {
         format!("{}/{name}/", self.prefix)
     }
 }
 
-/// What a check concluded, before it becomes a reportable outcome.
+/// Internal check result.
 enum CheckFailure {
-    /// The store declares the capability absent.
+    /// The store does not support this optional capability.
     Unsupported,
-    /// The store is wrong, or the operation could not complete.
+    /// The store returned the wrong result or the operation failed.
     Failed(String),
 }
 
@@ -220,16 +181,10 @@ fn check(name: &'static str, result: CheckResult) -> StoreProbeCheck {
     StoreProbeCheck { name, outcome }
 }
 
-/// Turns a store failure into a reportable one, naming the operation that
-/// failed and the object it was about.
+/// Turns a store failure into a reportable one without exposing provider or
+/// object identity.
 fn failed(operation: &str, error: &ObjectStoreError) -> CheckFailure {
-    match error.object_key() {
-        Some(object_key) => CheckFailure::Failed(format!(
-            "{operation} failed for `{object_key}`: {}",
-            error.message()
-        )),
-        None => CheckFailure::Failed(format!("{operation} failed: {}", error.message())),
-    }
+    CheckFailure::Failed(format!("{operation} failed: {}", error.public_message()))
 }
 
 /// Reports what the store did instead of what the contract requires.
@@ -267,7 +222,7 @@ fn refused<T>(what: &str, result: StoreResult<T>) -> CheckResult {
         Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
         Err(error) => Err(wrong(format!(
             "{what} should have been refused as a failed precondition, but failed differently: {}",
-            error.message()
+            error.public_message()
         ))),
         Ok(_) => Err(wrong(format!(
             "{what} was accepted; the store does not enforce this precondition"
@@ -506,9 +461,9 @@ async fn visibility_after_write(store: &dyn ObjectStore, run: &ProbeRun) -> Chec
     )?;
     let listed = ok("list", store.list_prefix(&prefix).await)?;
     if listed != vec![key.clone()] {
-        return Err(wrong(format!(
-            "listing a prefix straight after a write into it answered {listed:?}"
-        )));
+        return Err(wrong(
+            "listing immediately after a write did not return exactly the newly written object",
+        ));
     }
     Ok(())
 }
@@ -529,9 +484,9 @@ async fn visibility_after_delete(store: &dyn ObjectStore, run: &ProbeRun) -> Che
     ok("delete", store.delete(&key).await)?;
     let listed = ok("list", store.list_prefix(&prefix).await)?;
     if !listed.is_empty() {
-        return Err(wrong(format!(
-            "listing a prefix straight after deleting its only object answered {listed:?}"
-        )));
+        return Err(wrong(
+            "listing immediately after deleting its only object still returned objects",
+        ));
     }
     Ok(())
 }
@@ -581,13 +536,13 @@ async fn sorted_listing(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult 
     let listed = ok("list", store.list_prefix(&prefix).await)?;
     if streamed != keys {
         return Err(wrong(format!(
-            "streaming a prefix answered {streamed:?}, not the {} objects written under it",
+            "streaming a prefix did not return the {} objects written under it",
             keys.len()
         )));
     }
     if listed != keys {
         return Err(wrong(format!(
-            "listing a prefix answered {listed:?}, not the {} objects written under it in key order",
+            "listing a prefix did not return the {} objects written under it in key order",
             keys.len()
         )));
     }
@@ -615,40 +570,38 @@ async fn range_reads(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
 
     let read = ok("bounded read", store.get(&key, bounded(1, 4)).await)?;
     if read != Some(Bytes::from_static(b"bcd")) {
-        return Err(wrong(format!(
-            "a bounded read of bytes 1..4 answered {read:?}"
-        )));
+        return Err(wrong("a bounded read of bytes 1..4 returned wrong bytes"));
     }
     // The bounded-read contract, uniform across providers: an end past the
     // object clamps, reading at the exact end is empty, and a start past
     // the end is an invalid range.
     let clamped = ok("clamped read", store.get(&key, bounded(4, 99)).await)?;
     if clamped != Some(Bytes::from_static(b"ef")) {
-        return Err(wrong(format!(
-            "a read whose end runs past the object should clamp, but answered {clamped:?}"
-        )));
+        return Err(wrong(
+            "a read whose end runs past the object did not clamp to the expected bytes",
+        ));
     }
     let at_end = ok(
         "read at the exact end",
         store.get(&key, bounded(6, 8)).await,
     )?;
     if at_end != Some(Bytes::new()) {
-        return Err(wrong(format!(
-            "a read starting at the object's exact end should be empty, but answered {at_end:?}"
-        )));
+        return Err(wrong(
+            "a read starting at the object's exact end did not return an empty range",
+        ));
     }
     match store.get(&key, bounded(7, 8)).await {
         Err(ObjectStoreError::InvalidRange { .. }) => {}
         Err(error) => {
             return Err(wrong(format!(
                 "a read starting past the object's end should be an invalid range, but failed differently: {}",
-                error.message()
+                error.public_message()
             )))
         }
-        Ok(answer) => {
-            return Err(wrong(format!(
-                "a read starting past the object's end should be an invalid range, but answered {answer:?}"
-            )))
+        Ok(_) => {
+            return Err(wrong(
+                "a read starting past the object's end should be an invalid range, but returned a response",
+            ))
         }
     }
 
@@ -746,7 +699,7 @@ async fn stored_checksum_readback(store: &dyn ObjectStore, run: &ProbeRun) -> Ch
     let checksum = stored.checksum;
     checksum
         .validate()
-        .map_err(|error| wrong(format!("a stored checksum is invalid: {error}")))?;
+        .map_err(|_| wrong("the provider returned an invalid stored checksum"))?;
     if checksum.algorithm == ChecksumAlgorithm::Sha256 && checksum != Checksum::sha256(&payload) {
         return Err(wrong(
             "a reported sha256 does not describe the bytes actually stored",
@@ -765,7 +718,8 @@ async fn cleanup_leaves_prefix_empty(store: &dyn ObjectStore, run: &ProbeRun) ->
     let remaining = ok("list after cleanup", store.list_prefix(&prefix).await)?;
     if !remaining.is_empty() {
         return Err(wrong(format!(
-            "the probe's own prefix still holds {remaining:?} after cleanup"
+            "the probe's own prefix still holds {} objects after cleanup",
+            remaining.len()
         )));
     }
     Ok(())
@@ -782,6 +736,11 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
+        arn:aws:iam::123456789012:role/private-role private-bucket \
+        namespaces/customer-a/head.json x-amz-request-id=provider-request \
+        x-amz-id-2=provider-host-id AKIAEXAMPLE";
+
     fn outcome<'a>(report: &'a StoreProbeReport, name: &str) -> &'a StoreProbeOutcome {
         &report
             .checks
@@ -789,6 +748,92 @@ mod tests {
             .find(|check| check.name == name)
             .expect("report should carry the named check")
             .outcome
+    }
+
+    #[derive(Debug)]
+    struct PoisonPermissionStore;
+
+    impl PoisonPermissionStore {
+        fn denied(key: &str) -> ObjectStoreError {
+            ObjectStoreError::PermissionDenied {
+                object_key: key.to_owned(),
+                message: POISON_PROVIDER_DETAIL.to_owned(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for PoisonPermissionStore {
+        async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
+            Err(Self::denied(key))
+        }
+
+        async fn get_with_metadata(&self, key: &str) -> StoreResult<Option<ObjectBody>> {
+            Err(Self::denied(key))
+        }
+
+        async fn get(&self, key: &str, _range: Option<ByteRange>) -> StoreResult<Option<Bytes>> {
+            Err(Self::denied(key))
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            _bytes: Bytes,
+            _mode: PutMode,
+        ) -> StoreResult<ObjectMetadata> {
+            Err(Self::denied(key))
+        }
+
+        async fn delete(&self, key: &str) -> StoreResult<()> {
+            Err(Self::denied(key))
+        }
+
+        fn list_prefix_from_stream(
+            &self,
+            prefix: &str,
+            _start_after: Option<&str>,
+        ) -> BoxStream<'static, StoreResult<String>> {
+            Box::pin(futures::stream::once(std::future::ready(Err(
+                Self::denied(prefix),
+            ))))
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_failures_make_every_probe_message_safe_to_paste() {
+        let report = run_store_contract_probe(&PoisonPermissionStore, "probe_poison").await;
+        let messages: Vec<_> = report
+            .checks
+            .iter()
+            .filter_map(|check| match &check.outcome {
+                StoreProbeOutcome::Failed { message } => Some(message.as_str()),
+                StoreProbeOutcome::Passed | StoreProbeOutcome::Unsupported => None,
+            })
+            .collect();
+
+        assert!(!messages.is_empty());
+        for message in messages {
+            assert!(
+                message.contains("object-store permission denied"),
+                "{message}"
+            );
+            for marker in [
+                "<Error>AccessDenied</Error>",
+                "arn:aws:iam::123456789012:role/private-role",
+                "private-bucket",
+                "namespaces/customer-a/head.json",
+                "x-amz-request-id=provider-request",
+                "x-amz-id-2=provider-host-id",
+                "AKIAEXAMPLE",
+                "probe-runs/probe_poison",
+            ] {
+                assert!(
+                    !message.contains(marker),
+                    "probe message leaked {marker}: {message}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

@@ -74,7 +74,6 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
                     bytes.len() as u64,
                     &mut retries,
                     Some(&deadline),
-                    &error,
                 ) else {
                     return resolve_readback(store, key, &bytes, error).await;
                 };

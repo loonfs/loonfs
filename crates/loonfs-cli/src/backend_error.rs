@@ -131,16 +131,17 @@ impl From<ClientError> for BackendError {
 }
 
 pub(crate) fn map_runtime_error(error: RuntimeError) -> BackendError {
+    let public_message = error.public_message().into_owned();
     match error {
-        RuntimeError::Config(message) => BackendError::invalid_config(message),
-        RuntimeError::RuntimeTask(message) => BackendError::runtime_error(message),
+        RuntimeError::Config(_) => BackendError::invalid_config(public_message),
+        RuntimeError::RuntimeTask(_) => BackendError::runtime_error(public_message),
         // The embedded surface reports the same structured details a server
         // puts in its error envelope for the same condition, so `--json`
         // consumers read one contract from both backends.
         error => BackendError {
             code: error.code().as_str().to_owned(),
             feature: None,
-            message: error.to_string(),
+            message: public_message,
             param: None,
             request_id: None,
             details: error.details().map(Box::new),
@@ -182,7 +183,10 @@ pub(crate) fn map_namespace_scoped_grep_error(
                 response
             }
         }
-        error => BackendError::new(error.code().as_str(), error.to_string()),
+        error => {
+            let message = error.public_message().into_owned();
+            BackendError::new(error.code().as_str(), message)
+        }
     }
 }
 

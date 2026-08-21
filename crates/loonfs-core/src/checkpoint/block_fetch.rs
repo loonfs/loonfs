@@ -151,7 +151,7 @@ pub(super) async fn load_section_bytes<S: ObjectStore + ?Sized>(
         .await
         .map_err(|err| ManifestLoadError::ReadSegment {
             object_key: object_key.to_owned(),
-            message: err.to_string(),
+            message: err.public_message().into_owned(),
         })?
     else {
         return Err(ManifestLoadError::MissingSegment {

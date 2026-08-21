@@ -289,7 +289,7 @@ impl S3CompatibleStore {
             .http
             .execute(request)
             .await
-            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+            .map_err(|err| ObjectStoreError::retryable_transport(key, err.to_string()))?;
 
         let status = response.status();
         let headers = response.headers().clone();
@@ -297,7 +297,7 @@ impl S3CompatibleStore {
             .into_body()
             .bytes()
             .await
-            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+            .map_err(|err| ObjectStoreError::retryable_transport(key, err.to_string()))?;
         Ok(SignedResponse {
             status,
             headers,
@@ -334,7 +334,17 @@ impl SignedResponse {
         if self.status.is_success() && !text.contains("<Error") {
             return None;
         }
-        Some(xml_element(&text, "Code").unwrap_or_else(|| self.status.to_string()))
+        let code = xml_element(&text, "Code").unwrap_or_else(|| self.status.to_string());
+        tracing::debug!(
+            provider_status = self.status.as_u16(),
+            provider_error_code = code,
+            provider_request_id = self
+                .headers
+                .get("x-amz-request-id")
+                .and_then(|value| value.to_str().ok()),
+            "S3-compatible provider request failed"
+        );
+        Some(code)
     }
 }
 
@@ -365,10 +375,9 @@ impl ObjectStore for S3CompatibleStore {
             });
         }
         if !status.is_success() {
-            // A HEAD carries no body to quote, so the status is the whole
-            // diagnostic the provider gives us.
-            return Err(ObjectStoreError::transport(
+            return Err(transport_for_status(
                 key,
+                status,
                 format!("checksum head failed with {status}"),
             ));
         }
@@ -577,7 +586,36 @@ fn multipart_error(key: &str, operation: &str, code: &str) -> ObjectStoreError {
                 message: format!("provider refused multipart {operation}: {code}"),
             }
         }
+        "NoSuchBucket" | "NoSuchKey" => ObjectStoreError::NotFound {
+            object_key: key.to_owned(),
+        },
+        "ConditionalRequestConflict" | "PreconditionFailed" => {
+            ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            }
+        }
+        "InternalError" | "RequestTimeout" | "ServiceUnavailable" | "SlowDown" => {
+            ObjectStoreError::retryable_transport(
+                key,
+                format!("multipart {operation} failed: {code}"),
+            )
+        }
         code => ObjectStoreError::transport(key, format!("multipart {operation} failed: {code}")),
+    }
+}
+
+fn transport_for_status(
+    key: &str,
+    status: http::StatusCode,
+    message: impl Into<String>,
+) -> ObjectStoreError {
+    if status == http::StatusCode::REQUEST_TIMEOUT
+        || status == http::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        ObjectStoreError::retryable_transport(key, message)
+    } else {
+        ObjectStoreError::transport(key, message)
     }
 }
 
@@ -631,9 +669,10 @@ fn object_store_endpoint_url(
 #[cfg(test)]
 mod tests {
     use super::{
-        object_store_endpoint_url, S3CompatibleConfig, S3CompatibleStore,
+        multipart_error, object_store_endpoint_url, S3CompatibleConfig, S3CompatibleStore,
         AWS_S3_MAX_DIRECT_PUT_BYTES,
     };
+    use crate::ObjectStoreErrorClass;
 
     fn test_config() -> S3CompatibleConfig {
         S3CompatibleConfig {
@@ -663,6 +702,26 @@ mod tests {
         let mut config = test_config();
         config.access_key_id = "".into();
         assert!(S3CompatibleStore::new(config).is_err());
+    }
+
+    #[test]
+    fn multipart_provider_codes_are_classified_at_the_adapter_boundary() {
+        for (code, expected) in [
+            ("AccessDenied", ObjectStoreErrorClass::PermissionDenied),
+            ("NoSuchKey", ObjectStoreErrorClass::NotFound),
+            (
+                "PreconditionFailed",
+                ObjectStoreErrorClass::PreconditionFailed,
+            ),
+            ("SlowDown", ObjectStoreErrorClass::RetryableTransport),
+            ("MalformedXML", ObjectStoreErrorClass::Other),
+        ] {
+            assert_eq!(
+                multipart_error("private-key", "complete", code).class(),
+                expected,
+                "wrong class for {code}"
+            );
+        }
     }
 
     #[test]

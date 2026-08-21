@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
 use loonfs_api::Checksum;
+use std::borrow::Cow;
 use std::fmt::Debug;
 use std::sync::Arc;
 use thiserror::Error;
@@ -185,7 +186,68 @@ pub enum ObjectStoreError {
         object_key: String,
         /// Sanitized provider or local-IO diagnostic.
         message: String,
+        /// Whether repeating the operation may succeed without operator action.
+        retryable: bool,
     },
+}
+
+/// A provider-independent category for an object-store error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ObjectStoreErrorClass {
+    /// A required object was absent.
+    NotFound,
+    /// A key, content reference, or range was invalid.
+    InvalidRequest,
+    /// A conditional operation observed a conflicting state.
+    PreconditionFailed,
+    /// The selected identity or credentials were rejected.
+    PermissionDenied,
+    /// The object exists without the checksum metadata LoonFS requires.
+    StoredChecksumMissing,
+    /// The provider does not implement the requested capability.
+    Unsupported,
+    /// Store construction or configuration failed.
+    Configuration,
+    /// A transient transport failure may succeed when repeated.
+    RetryableTransport,
+    /// A non-retryable transport or provider-protocol failure occurred.
+    Other,
+}
+
+impl ObjectStoreErrorClass {
+    /// Returns the category for an object-store error.
+    pub fn of(error: &ObjectStoreError) -> Self {
+        error.class()
+    }
+
+    /// Returns a safe message for users.
+    pub fn public_message(self) -> Cow<'static, str> {
+        Cow::Borrowed(match self {
+            Self::NotFound => "object-store object not found",
+            Self::InvalidRequest => "object-store request is invalid",
+            Self::PreconditionFailed => {
+                "object-store precondition failed; retry against the latest state"
+            }
+            Self::PermissionDenied => {
+                "object-store permission denied; verify that the selected credentials can access the configured bucket and key prefix"
+            }
+            Self::StoredChecksumMissing => {
+                "object-store checksum metadata is missing; rewrite the object with checksum support"
+            }
+            Self::Unsupported => {
+                "object-store capability is not supported by the selected provider"
+            }
+            Self::Configuration => {
+                "object-store configuration is invalid; verify the provider, bucket, credentials, endpoint, and key prefix fields"
+            }
+            Self::RetryableTransport => {
+                "object-store is temporarily unavailable; retry the operation"
+            }
+            Self::Other => {
+                "object-store request failed; verify the selected provider and endpoint configuration"
+            }
+        })
+    }
 }
 
 impl ObjectStoreError {
@@ -194,7 +256,43 @@ impl ObjectStoreError {
         Self::Transport {
             object_key: object_key.into(),
             message: message.into(),
+            retryable: false,
         }
+    }
+
+    /// Builds a retryable transport failure for an operation on `object_key`.
+    pub fn retryable_transport(object_key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Transport {
+            object_key: object_key.into(),
+            message: message.into(),
+            retryable: true,
+        }
+    }
+
+    /// Returns this error's provider-independent category.
+    pub fn class(&self) -> ObjectStoreErrorClass {
+        match self {
+            Self::NotFound { .. } => ObjectStoreErrorClass::NotFound,
+            Self::InvalidKey { .. } | Self::InvalidContentRef(_) | Self::InvalidRange { .. } => {
+                ObjectStoreErrorClass::InvalidRequest
+            }
+            Self::PreconditionFailed { .. } => ObjectStoreErrorClass::PreconditionFailed,
+            Self::PermissionDenied { .. } => ObjectStoreErrorClass::PermissionDenied,
+            Self::StoredChecksumMissing { .. } => ObjectStoreErrorClass::StoredChecksumMissing,
+            Self::Unsupported(_) => ObjectStoreErrorClass::Unsupported,
+            Self::Configuration(_) => ObjectStoreErrorClass::Configuration,
+            Self::Transport {
+                retryable: true, ..
+            } => ObjectStoreErrorClass::RetryableTransport,
+            Self::Transport {
+                retryable: false, ..
+            } => ObjectStoreErrorClass::Other,
+        }
+    }
+
+    /// Returns a safe message for users.
+    pub fn public_message(&self) -> Cow<'static, str> {
+        self.class().public_message()
     }
 
     /// Key of the object (or listed prefix) the failing operation targeted,
@@ -679,6 +777,46 @@ mod tests {
     use super::*;
     use futures::stream;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
+        arn:aws:iam::123456789012:role/private-role private-bucket \
+        namespaces/customer-a/head.json x-amz-request-id=provider-request \
+        x-amz-id-2=provider-host-id AKIAEXAMPLE";
+
+    #[test]
+    fn public_permission_message_drops_every_provider_marker() {
+        let error = ObjectStoreError::PermissionDenied {
+            object_key: "namespaces/customer-a/head.json".to_owned(),
+            message: POISON_PROVIDER_DETAIL.to_owned(),
+        };
+
+        let public = error.public_message();
+        assert_eq!(
+            public,
+            "object-store permission denied; verify that the selected credentials can access the configured bucket and key prefix"
+        );
+        for marker in [
+            "<Error>AccessDenied</Error>",
+            "arn:aws:iam::123456789012:role/private-role",
+            "private-bucket",
+            "namespaces/customer-a/head.json",
+            "x-amz-request-id=provider-request",
+            "x-amz-id-2=provider-host-id",
+            "AKIAEXAMPLE",
+        ] {
+            assert!(!public.contains(marker), "public message leaked {marker}");
+        }
+    }
+
+    #[test]
+    fn retryable_transport_has_a_distinct_public_projection() {
+        let retryable = ObjectStoreError::retryable_transport("private-key", "provider timeout");
+        let protocol = ObjectStoreError::transport("private-key", "malformed response");
+
+        assert_eq!(retryable.class(), ObjectStoreErrorClass::RetryableTransport);
+        assert_eq!(protocol.class(), ObjectStoreErrorClass::Other);
+        assert_ne!(retryable.public_message(), protocol.public_message());
+    }
 
     #[derive(Debug)]
     struct ListOverrideStore {

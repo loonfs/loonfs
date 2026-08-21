@@ -134,7 +134,7 @@ impl GcpGcsStore {
             .http
             .execute(request)
             .await
-            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+            .map_err(|err| ObjectStoreError::retryable_transport(key, err.to_string()))?;
 
         let mut parts = http::Response::new(());
         *parts.status_mut() = response.status();
@@ -199,12 +199,17 @@ impl ObjectStore for GcpGcsStore {
             });
         }
         if !status.is_success() {
-            // A HEAD carries no body to quote, so the status is the whole
-            // diagnostic the provider gives us.
-            return Err(ObjectStoreError::transport(
-                key,
-                format!("checksum head failed with {status}"),
-            ));
+            let message = format!("checksum head failed with {status}");
+            return Err(
+                if status == http::StatusCode::REQUEST_TIMEOUT
+                    || status == http::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error()
+                {
+                    ObjectStoreError::retryable_transport(key, message)
+                } else {
+                    ObjectStoreError::transport(key, message)
+                },
+            );
         }
 
         let headers = response.headers();

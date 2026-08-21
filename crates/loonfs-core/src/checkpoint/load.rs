@@ -209,7 +209,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
             .await
             .map_err(|err| ManifestLoadError::ReadManifest {
                 object_key: manifest_key.clone(),
-                message: err.to_string(),
+                message: err.public_message().into_owned(),
             })?
         else {
             return Err(ManifestLoadError::MissingManifest {
@@ -315,7 +315,7 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
         .await
         .map_err(|err| ManifestLoadError::ReadManifest {
             object_key: manifest_key.to_owned(),
-            message: err.to_string(),
+            message: err.public_message().into_owned(),
         })?
     else {
         return Ok(None);

@@ -216,7 +216,7 @@ impl MaintenanceJob for GcJob {
                 // rebuilds its safety checks from durable state.
                 tracing::info!(
                     namespace_id = %namespace_id,
-                    error = %error,
+                    error = %error.public_message(),
                     "collection rejected its resume position; restarting the pass"
                 );
                 return Ok(MaintenanceStepReport::concluded(

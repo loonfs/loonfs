@@ -88,7 +88,7 @@ where
             Err(error) => {
                 return Err(E::from(ControlUpdateError::Store {
                     object_key: loaded.object_key,
-                    message: error.message(),
+                    message: error.public_message().into_owned(),
                     class: StoreFailureClass::of(&error),
                 }))
             }

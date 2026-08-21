@@ -115,11 +115,42 @@ mod tests {
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
+    use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse};
     use loonfs_api::{
         AbsolutePath, AttributesProjection, AuthoritativePathEntry, AuthoritativePathEntryKind,
         ChangeSeq, DisplayName, InodeId, NamespaceId,
     };
     use loonfs_client::ClientError;
+
+    const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
+        arn:aws:iam::123456789012:role/private-role private-bucket \
+        namespaces/customer-a/head.json x-amz-request-id=provider-request \
+        x-amz-id-2=provider-host-id AKIAEXAMPLE";
+
+    fn assert_provider_markers_absent(rendered: &str) {
+        for marker in [
+            "<Error>AccessDenied</Error>",
+            "arn:aws:iam::123456789012:role/private-role",
+            "private-bucket",
+            "namespaces/customer-a/head.json",
+            "x-amz-request-id=provider-request",
+            "x-amz-id-2=provider-host-id",
+            "AKIAEXAMPLE",
+        ] {
+            assert!(
+                !rendered.contains(marker),
+                "rendered output leaked {marker}: {rendered}"
+            );
+        }
+    }
+
+    fn poison_permission_runtime_error() -> loonfs::RuntimeError {
+        loonfs::RuntimeError::Core(loonfs::CoreError::Store {
+            object_key: "namespaces/customer-a/head.json".to_owned(),
+            message: POISON_PROVIDER_DETAIL.to_owned(),
+            class: loonfs::StoreFailureClass::PermissionDenied,
+        })
+    }
 
     fn rendered_remote_error(server_boundary: &str) -> serde_json::Value {
         let body: loonfs_api::ApiError =
@@ -150,6 +181,137 @@ mod tests {
                 "server field `{field}` was lost before CLI JSON"
             );
         }
+    }
+
+    #[test]
+    fn provider_failure_is_safe_on_embedded_remote_and_doctor_surfaces() {
+        let public_message = loonfs::ObjectStoreError::PermissionDenied {
+            object_key: "namespaces/customer-a/head.json".to_owned(),
+            message: POISON_PROVIDER_DETAIL.to_owned(),
+        }
+        .public_message()
+        .into_owned();
+
+        let embedded_failure = CommandFailure {
+            kind: CommandKind::ConfigShow,
+            profile: Some("embedded".to_owned()),
+            mode: Some("embedded".to_owned()),
+            error: Box::new(CliError::from(crate::backend_error::map_runtime_error(
+                poison_permission_runtime_error(),
+            ))),
+        };
+        let embedded_human = human_error(&embedded_failure.error);
+        let embedded_json = json_error(&embedded_failure).expect("embedded JSON error renders");
+        for rendered in [&embedded_human, &embedded_json] {
+            assert_provider_markers_absent(rendered);
+            assert!(rendered.contains(&public_message), "{rendered}");
+        }
+
+        let remote_boundary = serde_json::to_string(&loonfs_api::ApiError {
+            code: loonfs_api::ErrorCode::PermissionDenied.as_str().to_owned(),
+            feature: None,
+            message: public_message.clone(),
+            param: None,
+            request_id: Some("req_provider_hygiene".to_owned()),
+            details: None,
+        })
+        .expect("remote boundary serializes");
+        let body: loonfs_api::ApiError =
+            serde_json::from_str(&remote_boundary).expect("remote boundary is valid JSON");
+        let remote_failure = CommandFailure {
+            kind: CommandKind::ConfigShow,
+            profile: Some("remote".to_owned()),
+            mode: Some("remote".to_owned()),
+            error: Box::new(CliError::from(crate::backend_error::BackendError::from(
+                ClientError::from_api_error(403, body),
+            ))),
+        };
+        let remote_human = human_error(&remote_failure.error);
+        let remote_json = json_error(&remote_failure).expect("remote JSON error renders");
+        for rendered in [&remote_human, &remote_json] {
+            assert_provider_markers_absent(rendered);
+            assert!(rendered.contains(&public_message), "{rendered}");
+            assert!(rendered.contains("req_provider_hygiene"), "{rendered}");
+        }
+
+        let checks = vec![
+            StoreProbeCheckResult {
+                name: "create_if_absent_enforced".to_owned(),
+                outcome: StoreProbeCheckOutcome::Failed,
+                message: Some(format!("create failed: {public_message}")),
+            },
+            StoreProbeCheckResult {
+                name: "compare_and_swap_rejects_stale".to_owned(),
+                outcome: StoreProbeCheckOutcome::Failed,
+                message: Some(format!(" create   failed:  {public_message}\n")),
+            },
+            StoreProbeCheckResult {
+                name: "stored_checksum_readback".to_owned(),
+                outcome: StoreProbeCheckOutcome::Failed,
+                message: Some(format!("checksum head failed: {public_message}")),
+            },
+            StoreProbeCheckResult {
+                name: "range_reads".to_owned(),
+                outcome: StoreProbeCheckOutcome::Failed,
+                message: Some(
+                    "range read failed: object-store is temporarily unavailable; retry the operation"
+                        .to_owned(),
+                ),
+            },
+        ];
+        let doctor = CommandOutput {
+            kind: CommandKind::Doctor,
+            profile: Some("embedded".to_owned()),
+            mode: Some("embedded".to_owned()),
+            data: CommandData::Doctor {
+                checks: vec![DoctorCheck {
+                    name: "store_probe".to_owned(),
+                    status: DoctorStatus::Failed,
+                    message: "store probe probe_poison: 4 of 4 checks failed".to_owned(),
+                    request_id: None,
+                    store_probe: Some(StoreProbeResponse {
+                        run_id: "probe_poison".to_owned(),
+                        checks: checks.clone(),
+                    }),
+                }],
+            },
+        };
+        let doctor_human = human_success(&doctor);
+        let doctor_json = json_success(&doctor).expect("doctor JSON renders");
+        for rendered in [&doctor_human, &doctor_json] {
+            assert_provider_markers_absent(rendered);
+            assert!(rendered.contains(&public_message), "{rendered}");
+        }
+        assert!(
+            doctor_human.contains("FAILED  store_probe"),
+            "{doctor_human}"
+        );
+        assert!(
+            doctor_human.contains("3 checks failed: object-store permission denied;"),
+            "{doctor_human}"
+        );
+        assert!(
+            doctor_human.contains(
+                "affected: create_if_absent_enforced, compare_and_swap_rejects_stale, stored_checksum_readback"
+            ),
+            "{doctor_human}"
+        );
+        assert!(
+            doctor_human.contains(
+                "1 check failed: object-store is temporarily unavailable; retry the operation"
+            ),
+            "{doctor_human}"
+        );
+        assert!(
+            doctor_human.contains("affected: range_reads"),
+            "{doctor_human}"
+        );
+        let doctor_value: serde_json::Value =
+            serde_json::from_str(&doctor_json).expect("doctor JSON is valid");
+        assert_eq!(
+            doctor_value["data"]["checks"][0]["store_probe"]["checks"],
+            serde_json::to_value(checks).expect("probe checks serialize")
+        );
     }
 
     fn path_entry(path: &str, display_name: Option<&str>) -> AuthoritativePathEntry {

@@ -72,6 +72,17 @@ impl BootstrapNamespaceError {
             | BootstrapNamespaceError::Head(_) => None,
         }
     }
+
+    /// Returns a safe message when bootstrap failed in the object store.
+    pub fn object_store_public_message(&self) -> Option<std::borrow::Cow<'static, str>> {
+        match self {
+            BootstrapNamespaceError::Head(ControlObjectLoadError::Store { class, .. }) => {
+                Some(class.public_message())
+            }
+            BootstrapNamespaceError::Core(error) => error.object_store_public_message(),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(

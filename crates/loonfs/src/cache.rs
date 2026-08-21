@@ -307,7 +307,7 @@ impl ReadCore {
             .await
             .map_err(|error| ControlObjectLoadError::Store {
                 object_key: object_key.to_owned(),
-                message: error.message(),
+                message: error.public_message().into_owned(),
                 class: StoreFailureClass::of(&error),
             })?
             .ok_or_else(|| ControlObjectLoadError::MissingObject {

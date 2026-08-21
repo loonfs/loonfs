@@ -303,7 +303,7 @@ fn corrupt(object_key: &str, error: impl ToString) -> GrepRootError {
 fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepRootError {
     GrepRootError::Store {
         object_key: object_key.to_owned(),
-        message: error.message(),
+        message: error.public_message().into_owned(),
         class: StoreFailureClass::of(error),
     }
 }

@@ -45,6 +45,48 @@ pub(super) fn store_probe_report_lines(
     lines
 }
 
+/// Groups failed probe checks by the one-line message shown by `doctor`.
+pub(super) fn store_probe_failure_group_lines(
+    response: &loonfs_api::v0::StoreProbeResponse,
+) -> Vec<String> {
+    let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+    for check in &response.checks {
+        if check.outcome != StoreProbeCheckOutcome::Failed {
+            continue;
+        }
+        let message = check
+            .message
+            .as_deref()
+            .map(normalize_probe_message)
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| "object-store check failed".to_owned());
+        match groups.iter_mut().find(|(existing, _)| *existing == message) {
+            Some((_, affected)) => affected.push(check.name.as_str()),
+            None => groups.push((message, vec![check.name.as_str()])),
+        }
+    }
+
+    groups
+        .into_iter()
+        .flat_map(|(message, affected)| {
+            let count = affected.len();
+            let noun = if count == 1 { "check" } else { "checks" };
+            [
+                format!("{count} {noun} failed: {message}"),
+                format!("affected: {}", affected.join(", ")),
+            ]
+        })
+        .collect()
+}
+
+fn normalize_probe_message(message: &str) -> String {
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    match normalized.find("object-store ") {
+        Some(public_start) => normalized[public_start..].to_owned(),
+        None => normalized,
+    }
+}
+
 /// Formats the result of one WAL flush step.
 pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u64) -> String {
     match outcome {

@@ -40,7 +40,8 @@ pub use immutable_write::ImmutableWriteError;
 pub use object_store::ObjectStoreError as Error;
 pub use object_store::{
     ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, Result, SharedObjectStore, StoredObjectChecksum,
+    ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, Result, SharedObjectStore,
+    StoredObjectChecksum,
 };
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
 pub use provider_object_store::{

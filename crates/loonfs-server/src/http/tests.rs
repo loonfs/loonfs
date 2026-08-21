@@ -408,6 +408,151 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
+const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
+    arn:aws:iam::123456789012:role/private-role private-bucket \
+    namespaces/customer-a/head.json x-amz-request-id=provider-request \
+    x-amz-id-2=provider-host-id AKIAEXAMPLE";
+
+fn assert_provider_markers_absent(rendered: &str) {
+    for marker in [
+        "<Error>AccessDenied</Error>",
+        "arn:aws:iam::123456789012:role/private-role",
+        "private-bucket",
+        "namespaces/customer-a/head.json",
+        "x-amz-request-id=provider-request",
+        "x-amz-id-2=provider-host-id",
+        "AKIAEXAMPLE",
+    ] {
+        assert!(
+            !rendered.contains(marker),
+            "API body leaked {marker}: {rendered}"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct PoisonProviderStore;
+
+impl PoisonProviderStore {
+    fn denied(key: &str) -> ObjectStoreError {
+        ObjectStoreError::PermissionDenied {
+            object_key: key.to_owned(),
+            message: POISON_PROVIDER_DETAIL.to_owned(),
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for PoisonProviderStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        Err(Self::denied(key))
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        Err(Self::denied(key))
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        _range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        Err(Self::denied(key))
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        _bytes: Bytes,
+        _mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        Err(Self::denied(key))
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        Err(Self::denied(key))
+    }
+
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        _start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        Box::pin(futures::stream::once(std::future::ready(Err(
+            Self::denied(prefix),
+        ))))
+    }
+}
+
+#[tokio::test]
+async fn provider_failure_is_projected_in_the_remote_api_envelope() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let router = app_with_store(
+        test_config(temp_dir.path(), "provider-hygiene-writer"),
+        Arc::new(PoisonProviderStore),
+    )
+    .await
+    .expect("build app");
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/v0/namespaces")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(r#"{"namespace_id":"customer-a"}"#))
+                .expect("create namespace request"),
+        )
+        .await
+        .expect("create namespace response");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let request_id = response
+        .headers()
+        .get(super::REQUEST_ID_HEADER)
+        .expect("request id header")
+        .to_str()
+        .expect("request id header is text")
+        .to_owned();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read provider failure body");
+    let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
+
+    assert_provider_markers_absent(&rendered);
+    assert!(rendered.contains(
+        "object-store permission denied; verify that the selected credentials can access the configured bucket and key prefix"
+    ));
+    assert!(rendered.contains(&request_id), "{rendered}");
+}
+
+#[tokio::test]
+async fn provider_failure_is_projected_in_the_presign_api_envelope() {
+    use axum::response::IntoResponse;
+
+    let response = super::REQUEST_ID
+        .scope("req_presign_hygiene".to_owned(), async {
+            super::handlers_uploads::presign_issuer_error(PoisonProviderStore::denied(
+                "namespaces/customer-a/head.json",
+            ))
+            .into_response()
+        })
+        .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read presign failure body");
+    let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
+
+    assert_provider_markers_absent(&rendered);
+    assert!(rendered.contains(
+        "object-store permission denied; verify that the selected credentials can access the configured bucket and key prefix"
+    ));
+    assert!(rendered.contains("req_presign_hygiene"), "{rendered}");
+}
+
 #[derive(Debug)]
 struct StaleHeadOnceStore {
     inner: LocalFsStore,
@@ -1301,7 +1446,7 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
         result.await,
         500,
         ErrorCode::ServerError,
-        "injected grep-root outage",
+        "object-store request failed",
     )
     .await;
     harness.server.abort();

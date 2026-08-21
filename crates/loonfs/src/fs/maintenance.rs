@@ -609,7 +609,7 @@ impl FsAdmin {
             Err(error) => tracing::warn!(
                 namespace_id = %namespace_id,
                 families = ?spec.families(),
-                error = %error,
+                error = %error.public_message(),
                 "streaming metadata compaction failed; a later step plans it again"
             ),
         }
