@@ -82,7 +82,7 @@ impl ConfiguredObjectStore {
     ///
     /// Construction fails when signing, provider, runtime, or key-prefix configuration is invalid.
     pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self> {
-        let credentials = aws_credentials_source(&config.credentials)?;
+        let credentials = aws_credentials_source(&config.credentials, &config.region)?;
         let direct_transfers =
             endpoint_is_proven(config.endpoint_url.as_deref(), AWS_S3_PROVEN_DOMAINS)
                 .then(|| {

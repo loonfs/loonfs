@@ -21,18 +21,11 @@ This document is a non-normative reference: provider limits and performance data
 | **Request scale, partitions, throughput** | At least 3,500 write-class requests/s and 5,500 GET/HEAD requests/s per partitioned prefix; unlimited prefixes; scaling is gradual and may return 503 Slow Down. AWS also cites up to 100 Gb/s from a single EC2 instance and aggregate multi-Tb/s workloads.[^9] | Initial bucket scale is about 1,000 writes/s and 5,000 reads/s, then auto-scales. Ramp no faster than roughly doubling every 20 minutes. Sequential names can hotspot; random prefixes improve initial fanout. Internet egress default quota is commonly 200 Gbps per region, subject to account history and quotas.[^19][^20] | Public r2.dev buckets are test-only and may throttle at hundreds of req/s; production should use custom domains or direct APIs. Cloudflare REST management API is not for high-throughput object I/O; use S3-compatible or Workers APIs.[^32] | Standard GPv2/blob accounts: default max request rate 40,000 req/s in many listed regions, 20,000 elsewhere; ingress commonly 60/25 Gbps and egress 200/50 Gbps by region, increaseable by request. Partition hot spots can cause 503/500; use distribution and backoff.[^44][^45] | Vendor-specific. Run compatibility and load tests before relying on any numbers. |
 | **Published GET/HEAD latency** | AWS publishes rough general S3 small-object / first-byte latencies of about 100-200 ms.[^10] | No provider-published average GET/HEAD latency found. Need to benchmark. | No provider-published average GET/HEAD latency found. Need to benchmark. | No provider-published average GET/HEAD latency found. Need to benchmark. | Need to benchmark to verify. |
 
-AWS S3 credentials with `kind = "ambient"` use the standard AWS SDK
-credential chain. The chain checks environment variables, shared config and
-credentials files selected by `AWS_PROFILE`, credential processes, SSO, web
-identity, ECS task credentials, and EC2 instance metadata. Temporary
-credentials refresh through the SDK provider. Every AWS request resolves its
-credentials from the same source, including direct transfers, checksum
-requests, multipart control requests, and store probes. A presigned URL made
-with temporary credentials includes the current `X-Amz-Security-Token`.
+AWS S3 credentials with `kind = "ambient"` use the standard AWS SDK credential chain. It checks environment variables, shared config and credentials files, credential processes, SSO, web identity, ECS task credentials, and EC2 instance metadata. `AWS_PROFILE` selects a named profile.
 
-Cloudflare R2 does not use the AWS credential chain. R2 ambient credentials
-continue to read `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from the
-process environment when the store is constructed.
+The provider client and presigned URLs use the same credential source. Temporary credentials refresh automatically, and presigned URLs include the current session token.
+
+Cloudflare R2 does not use this chain. R2 ambient credentials read `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` when the store starts.
 
 ## 3. Proven providers and direct-put
 

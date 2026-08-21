@@ -24,17 +24,15 @@ region = "us-east-1"
 key_prefix = "loonfs-demo"
 force_path_style = false
 
-# Ambient credentials use the standard AWS SDK chain: environment variables,
-# shared config and credentials files selected by AWS_PROFILE, credential
-# processes, SSO, web identity, ECS task credentials, and EC2 instance
-# metadata. Temporary credentials refresh, and presigned URLs include the
-# current session token.
+# Uses the standard AWS SDK credential chain, including environment variables,
+# profiles, SSO, web identity, and AWS compute roles. Temporary credentials
+# refresh automatically.
 [store.credentials]
 kind = "ambient"
 
-# Static credentials remain available instead. session_token is optional.
-#[store.credentials]
-#kind = "static"
-#access_key_id = "YOUR_ACCESS_KEY_ID"
-#secret_access_key = "YOUR_SECRET_ACCESS_KEY"
-#session_token = "YOUR_SESSION_TOKEN"
+# To use static credentials instead:
+# [store.credentials]
+# kind = "static"
+# access_key_id = "YOUR_ACCESS_KEY_ID"
+# secret_access_key = "YOUR_SECRET_ACCESS_KEY"
+# session_token = "YOUR_SESSION_TOKEN" # optional

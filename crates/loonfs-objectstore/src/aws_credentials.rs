@@ -43,9 +43,10 @@ pub(crate) type SharedAwsCredentialsSource = Arc<dyn AwsCredentialsSource>;
 /// Builds the runtime source selected by the AWS S3 configuration.
 pub(crate) fn aws_credentials_source(
     credentials: &AwsS3Credentials,
+    region: &str,
 ) -> Result<SharedAwsCredentialsSource, ObjectStoreError> {
     match credentials {
-        AwsS3Credentials::Ambient {} => Ok(Arc::new(AmbientAwsCredentialsSource::default())),
+        AwsS3Credentials::Ambient {} => Ok(Arc::new(AmbientAwsCredentialsSource::new(region))),
         AwsS3Credentials::Static {
             access_key_id,
             secret_access_key,
@@ -119,8 +120,8 @@ impl AwsCredentialsSource for StaticAwsCredentialsSource {
     }
 }
 
-#[derive(Default)]
 struct AmbientAwsCredentialsSource {
+    region: String,
     provider: OnceCell<SharedCredentialsProvider>,
 }
 
@@ -132,10 +133,20 @@ impl fmt::Debug for AmbientAwsCredentialsSource {
 }
 
 impl AmbientAwsCredentialsSource {
+    fn new(region: &str) -> Self {
+        Self {
+            region: region.to_owned(),
+            provider: OnceCell::new(),
+        }
+    }
+
     async fn provider(&self) -> &SharedCredentialsProvider {
         self.provider
             .get_or_init(|| async {
-                let chain = DefaultCredentialsChain::builder().build().await;
+                let chain = DefaultCredentialsChain::builder()
+                    .region(aws_types::region::Region::new(self.region.clone()))
+                    .build()
+                    .await;
                 SharedCredentialsProvider::new(chain)
             })
             .await
@@ -304,7 +315,7 @@ mod tests {
             )),
         );
 
-        let source = aws_credentials_source(&AwsS3Credentials::Ambient {})
+        let source = aws_credentials_source(&AwsS3Credentials::Ambient {}, "us-east-1")
             .expect("construct ambient source");
         let credentials = source
             .credentials()
@@ -330,7 +341,7 @@ mod tests {
         )
         .expect("write shared credentials file");
 
-        let source = aws_credentials_source(&AwsS3Credentials::Ambient {})
+        let source = aws_credentials_source(&AwsS3Credentials::Ambient {}, "us-east-1")
             .expect("construct ambient source");
         let credentials = source
             .credentials()
@@ -348,11 +359,14 @@ mod tests {
 
     #[tokio::test]
     async fn static_credentials_are_returned_exactly() {
-        let source = aws_credentials_source(&AwsS3Credentials::Static {
-            access_key_id: "static-access".into(),
-            secret_access_key: "static-secret".into(),
-            session_token: Some("static-session".into()),
-        })
+        let source = aws_credentials_source(
+            &AwsS3Credentials::Static {
+                access_key_id: "static-access".into(),
+                secret_access_key: "static-secret".into(),
+                session_token: Some("static-session".into()),
+            },
+            "us-east-1",
+        )
         .expect("construct static source");
 
         let credentials = source
@@ -373,7 +387,7 @@ mod tests {
         let _lock = ENVIRONMENT.lock().await;
         let tempdir = tempfile::tempdir().expect("create temporary AWS config directory");
         let _environment = isolated_aws_environment(&tempdir, None);
-        let source = aws_credentials_source(&AwsS3Credentials::Ambient {})
+        let source = aws_credentials_source(&AwsS3Credentials::Ambient {}, "us-east-1")
             .expect("construct ambient source");
 
         let error = source

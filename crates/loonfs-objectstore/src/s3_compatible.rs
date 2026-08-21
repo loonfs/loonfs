@@ -131,7 +131,7 @@ impl S3CompatibleStore {
     /// endpoint, key prefix, runtime initialization, or provider-client
     /// configuration. Ambient credential resolution remains lazy.
     pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self> {
-        let credentials = aws_credentials_source(&config.credentials)?;
+        let credentials = aws_credentials_source(&config.credentials, &config.region)?;
         Self::aws_s3_with_credentials(config, credentials)
     }
 

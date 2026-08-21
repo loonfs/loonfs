@@ -96,7 +96,8 @@ impl S3CompatiblePresigner {
     /// endpoint, content, expiry, and signing-time failures surface when
     /// [`DirectPutIssuer::presign_put`] runs.
     pub fn new(config: S3PresignerConfig, credentials: crate::AwsS3Credentials) -> Result<Self> {
-        Self::with_credentials(config, aws_credentials_source(&credentials)?)
+        let source = aws_credentials_source(&credentials, &config.region)?;
+        Self::with_credentials(config, source)
     }
 
     pub(crate) fn with_credentials(
