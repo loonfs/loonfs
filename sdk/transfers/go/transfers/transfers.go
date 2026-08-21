@@ -22,6 +22,7 @@ import (
 const (
 	multipartMinimumBytes = 8 * 1024 * 1024
 
+	featureDirectGet           = "core.downloads.direct_get"
 	featureDirectPut           = "core.uploads.direct_put"
 	featureDirectMultipart     = "core.uploads.direct_multipart"
 	limitUploadMaximumBytes    = "upload.max_content_bytes"
@@ -152,6 +153,13 @@ func GetFile(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileRe
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
+	capabilities, err := c.Capabilities(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("transfers: read capabilities: %w", err)
+	}
+	if capabilities == nil || !capabilities.Features[featureDirectGet] {
+		return getFileProxied(ctx, c, in)
+	}
 	grant, err := c.Filesystem.BeginDownload(ctx, &loonfs.BeginDownloadRequest{
 		NamespaceID: string(in.NamespaceID),
 		Path:        in.Path,
@@ -186,6 +194,102 @@ func GetFile(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileRe
 		RevisionNo:  grant.RevisionNo,
 		ContentRef:  grant.ContentRef,
 	}, nil
+}
+
+// getFileProxied reads through LoonFS when direct reads are unavailable.
+// It loads the content reference first, then requests the exact revision so
+// the reference and returned bytes describe the same file version.
+func getFileProxied(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileResult, error) {
+	revisionNo := in.RevisionNo
+	var claim *loonfs.ContentRef
+	if revisionNo == nil {
+		entry, err := c.Filesystem.StatPath(ctx, &loonfs.StatPathRequest{
+			NamespaceID: string(in.NamespaceID),
+			Path:        string(in.Path),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("transfers: stat path: %w", err)
+		}
+		file, err := fileProjection(entry)
+		if err != nil {
+			return nil, err
+		}
+		headRevision := file.RevisionNo
+		revisionNo = &headRevision
+		claim = file.ContentRef
+	} else {
+		page, err := c.Filesystem.ListFileRevisions(ctx, &loonfs.ListFileRevisionsRequest{
+			NamespaceID: string(in.NamespaceID),
+			Path:        string(in.Path),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("transfers: list file revisions: %w", err)
+		}
+		iterator := page.Iterator()
+		for iterator.Next(ctx) {
+			revision := iterator.Current()
+			if revision.RevisionNo == *revisionNo {
+				claim = revision.ContentRef
+				break
+			}
+		}
+		if claim == nil {
+			return nil, fmt.Errorf("transfers: revision %d not found for %s", *revisionNo, in.Path)
+		}
+	}
+	if claim == nil {
+		return nil, fmt.Errorf("transfers: revision has no content reference")
+	}
+
+	reader, err := c.Filesystem.GetFileBytes(ctx, &loonfs.GetFileBytesRequest{
+		NamespaceID: string(in.NamespaceID),
+		Path:        string(in.Path),
+		RevisionNo:  revisionNo,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("transfers: read content: %w", err)
+	}
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("transfers: read content: %w", err)
+	}
+	if int64(len(payload)) != claim.SizeBytes {
+		return nil, fmt.Errorf(
+			"transfers: proxied read returned %d bytes, expected %d",
+			len(payload),
+			claim.SizeBytes,
+		)
+	}
+	if err := verifyChecksum(claim.Checksum, payload); err != nil {
+		return nil, fmt.Errorf("transfers: verify proxied read: %w", err)
+	}
+
+	return &GetFileResult{
+		Bytes:       payload,
+		NamespaceID: in.NamespaceID,
+		Path:        in.Path,
+		RevisionNo:  *revisionNo,
+		ContentRef:  claim,
+	}, nil
+}
+
+// fileProjection decodes the file fields stored in Fern's extra properties.
+func fileProjection(entry *loonfs.AuthoritativePathEntry) (*loonfs.AuthoritativePathEntryFile, error) {
+	if entry == nil {
+		return nil, fmt.Errorf("transfers: path entry is nil")
+	}
+	data, err := json.Marshal(entry.GetExtraProperties())
+	if err != nil {
+		return nil, fmt.Errorf("transfers: encode path entry projection: %w", err)
+	}
+	var projection loonfs.AuthoritativePathEntryKind
+	if err := json.Unmarshal(data, &projection); err != nil {
+		return nil, fmt.Errorf("transfers: decode path entry projection: %w", err)
+	}
+	if projection.File == nil {
+		return nil, fmt.Errorf("transfers: path is a %s, not a file", projection.InodeKind)
+	}
+	return projection.File, nil
 }
 
 func beginUploadRequest(
