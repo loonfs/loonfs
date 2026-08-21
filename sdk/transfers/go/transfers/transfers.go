@@ -295,10 +295,11 @@ func transferDirectMultipart(
 	if begin.DirectMultipart == nil {
 		return nil, fmt.Errorf("transfers: multipart response is incomplete")
 	}
-	if begin.DirectMultipart.PartSizeBytes <= 0 {
+	partSizeBytes := begin.DirectMultipart.PartSizeBytes
+	partSize := int(partSizeBytes)
+	if partSizeBytes <= 0 || int64(partSize) != partSizeBytes {
 		return nil, fmt.Errorf("transfers: invalid multipart part size %d", begin.DirectMultipart.PartSizeBytes)
 	}
-	partSize := int(begin.DirectMultipart.PartSizeBytes)
 	parts := splitParts(payload, partSize)
 	if len(parts) == 0 {
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
@@ -346,6 +347,10 @@ func transferDirectMultipart(
 		if putErr != nil {
 			abortUpload(ctx, c, namespaceID, begin.UploadID)
 			return nil, fmt.Errorf("transfers: upload part %d: %w", partNumber, putErr)
+		}
+		if etag == "" {
+			abortUpload(ctx, c, namespaceID, begin.UploadID)
+			return nil, fmt.Errorf("transfers: upload part %d: presigned PUT response has no ETag", partNumber)
 		}
 		completedParts = append(completedParts, &loonfs.CompletedUploadPart{
 			Checksum:   claims[index].Checksum,
@@ -458,11 +463,7 @@ func putPresigned(
 		return "", responseStatusError(response)
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
-	etag := response.Header.Get("ETag")
-	if etag == "" {
-		return "", fmt.Errorf("presigned PUT response has no ETag")
-	}
-	return etag, nil
+	return response.Header.Get("ETag"), nil
 }
 
 func getPresigned(ctx context.Context, access *loonfs.ObjectTransferAccess) ([]byte, error) {
