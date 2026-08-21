@@ -28,15 +28,13 @@ overlay_handwritten() {
 prune_generated() {
     case "$1" in
     go)
-        # Fern's top-level model tests exercise the generator, not LoonFS;
-        # fern-go has no option to suppress them.
+        # Fern cannot omit these generator-level model tests.
         for name in admin filesystem inodes namespaces query types uploads; do
             rm "generated/go/${name}_test.go"
         done
         ;;
     python)
-        # The API has no server-sent events; the generated SSE support is dead
-        # code and the only importer of the anyio dependency.
+        # LoonFS does not use server-sent events.
         rm -r generated/python/core/http_sse
         python3 - <<'PY'
 import pathlib
