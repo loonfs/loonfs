@@ -237,7 +237,7 @@ impl EmbeddedTarget {
         // deliberately share one provider client.
         let store: SharedObjectStore = store_config
             .configured_object_store()
-            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))?
+            .map_err(|err| CliError::invalid_config(err.public_message().into_owned()))?
             .into_shared();
         Self::over_store(store, writer_id, TraceStoreKind::from(store_config.kind())).await
     }

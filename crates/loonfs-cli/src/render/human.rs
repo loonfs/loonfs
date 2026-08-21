@@ -590,6 +590,16 @@ fn human_doctor(checks: &[DoctorCheck]) -> String {
     let mut lines = Vec::new();
     for check in checks {
         if check.status == DoctorStatus::Failed {
+            if let Some(response) = &check.store_probe {
+                let groups = store_probe_failure_group_lines(response);
+                if !groups.is_empty() {
+                    lines.push(format!("FAILED  {}", check.name));
+                    lines.extend(groups.into_iter().map(|line| format!("        {line}")));
+                    continue;
+                }
+            }
+        }
+        if check.status == DoctorStatus::Failed {
             lines.push(format!("{}: failed", check.name));
             let mut detail = format!("  detail: {}", single_line(&check.message));
             if let Some(request_id) = &check.request_id {

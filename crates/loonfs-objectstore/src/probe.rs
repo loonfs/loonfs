@@ -220,16 +220,10 @@ fn check(name: &'static str, result: CheckResult) -> StoreProbeCheck {
     StoreProbeCheck { name, outcome }
 }
 
-/// Turns a store failure into a reportable one, naming the operation that
-/// failed and the object it was about.
+/// Turns a store failure into a reportable one without exposing provider or
+/// object identity.
 fn failed(operation: &str, error: &ObjectStoreError) -> CheckFailure {
-    match error.object_key() {
-        Some(object_key) => CheckFailure::Failed(format!(
-            "{operation} failed for `{object_key}`: {}",
-            error.message()
-        )),
-        None => CheckFailure::Failed(format!("{operation} failed: {}", error.message())),
-    }
+    CheckFailure::Failed(format!("{operation} failed: {}", error.public_message()))
 }
 
 /// Reports what the store did instead of what the contract requires.
@@ -267,7 +261,7 @@ fn refused<T>(what: &str, result: StoreResult<T>) -> CheckResult {
         Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
         Err(error) => Err(wrong(format!(
             "{what} should have been refused as a failed precondition, but failed differently: {}",
-            error.message()
+            error.public_message()
         ))),
         Ok(_) => Err(wrong(format!(
             "{what} was accepted; the store does not enforce this precondition"
@@ -506,9 +500,9 @@ async fn visibility_after_write(store: &dyn ObjectStore, run: &ProbeRun) -> Chec
     )?;
     let listed = ok("list", store.list_prefix(&prefix).await)?;
     if listed != vec![key.clone()] {
-        return Err(wrong(format!(
-            "listing a prefix straight after a write into it answered {listed:?}"
-        )));
+        return Err(wrong(
+            "listing immediately after a write did not return exactly the newly written object",
+        ));
     }
     Ok(())
 }
@@ -529,9 +523,9 @@ async fn visibility_after_delete(store: &dyn ObjectStore, run: &ProbeRun) -> Che
     ok("delete", store.delete(&key).await)?;
     let listed = ok("list", store.list_prefix(&prefix).await)?;
     if !listed.is_empty() {
-        return Err(wrong(format!(
-            "listing a prefix straight after deleting its only object answered {listed:?}"
-        )));
+        return Err(wrong(
+            "listing immediately after deleting its only object still returned objects",
+        ));
     }
     Ok(())
 }
@@ -581,13 +575,13 @@ async fn sorted_listing(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult 
     let listed = ok("list", store.list_prefix(&prefix).await)?;
     if streamed != keys {
         return Err(wrong(format!(
-            "streaming a prefix answered {streamed:?}, not the {} objects written under it",
+            "streaming a prefix did not return the {} objects written under it",
             keys.len()
         )));
     }
     if listed != keys {
         return Err(wrong(format!(
-            "listing a prefix answered {listed:?}, not the {} objects written under it in key order",
+            "listing a prefix did not return the {} objects written under it in key order",
             keys.len()
         )));
     }
@@ -615,40 +609,38 @@ async fn range_reads(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
 
     let read = ok("bounded read", store.get(&key, bounded(1, 4)).await)?;
     if read != Some(Bytes::from_static(b"bcd")) {
-        return Err(wrong(format!(
-            "a bounded read of bytes 1..4 answered {read:?}"
-        )));
+        return Err(wrong("a bounded read of bytes 1..4 returned wrong bytes"));
     }
     // The bounded-read contract, uniform across providers: an end past the
     // object clamps, reading at the exact end is empty, and a start past
     // the end is an invalid range.
     let clamped = ok("clamped read", store.get(&key, bounded(4, 99)).await)?;
     if clamped != Some(Bytes::from_static(b"ef")) {
-        return Err(wrong(format!(
-            "a read whose end runs past the object should clamp, but answered {clamped:?}"
-        )));
+        return Err(wrong(
+            "a read whose end runs past the object did not clamp to the expected bytes",
+        ));
     }
     let at_end = ok(
         "read at the exact end",
         store.get(&key, bounded(6, 8)).await,
     )?;
     if at_end != Some(Bytes::new()) {
-        return Err(wrong(format!(
-            "a read starting at the object's exact end should be empty, but answered {at_end:?}"
-        )));
+        return Err(wrong(
+            "a read starting at the object's exact end did not return an empty range",
+        ));
     }
     match store.get(&key, bounded(7, 8)).await {
         Err(ObjectStoreError::InvalidRange { .. }) => {}
         Err(error) => {
             return Err(wrong(format!(
                 "a read starting past the object's end should be an invalid range, but failed differently: {}",
-                error.message()
+                error.public_message()
             )))
         }
-        Ok(answer) => {
-            return Err(wrong(format!(
-                "a read starting past the object's end should be an invalid range, but answered {answer:?}"
-            )))
+        Ok(_) => {
+            return Err(wrong(
+                "a read starting past the object's end should be an invalid range, but returned a response",
+            ))
         }
     }
 
@@ -746,7 +738,7 @@ async fn stored_checksum_readback(store: &dyn ObjectStore, run: &ProbeRun) -> Ch
     let checksum = stored.checksum;
     checksum
         .validate()
-        .map_err(|error| wrong(format!("a stored checksum is invalid: {error}")))?;
+        .map_err(|_| wrong("the provider returned an invalid stored checksum"))?;
     if checksum.algorithm == ChecksumAlgorithm::Sha256 && checksum != Checksum::sha256(&payload) {
         return Err(wrong(
             "a reported sha256 does not describe the bytes actually stored",
@@ -765,7 +757,8 @@ async fn cleanup_leaves_prefix_empty(store: &dyn ObjectStore, run: &ProbeRun) ->
     let remaining = ok("list after cleanup", store.list_prefix(&prefix).await)?;
     if !remaining.is_empty() {
         return Err(wrong(format!(
-            "the probe's own prefix still holds {remaining:?} after cleanup"
+            "the probe's own prefix still holds {} objects after cleanup",
+            remaining.len()
         )));
     }
     Ok(())
@@ -782,6 +775,11 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
+        arn:aws:iam::123456789012:role/private-role private-bucket \
+        namespaces/customer-a/head.json x-amz-request-id=provider-request \
+        x-amz-id-2=provider-host-id AKIAEXAMPLE";
+
     fn outcome<'a>(report: &'a StoreProbeReport, name: &str) -> &'a StoreProbeOutcome {
         &report
             .checks
@@ -789,6 +787,92 @@ mod tests {
             .find(|check| check.name == name)
             .expect("report should carry the named check")
             .outcome
+    }
+
+    #[derive(Debug)]
+    struct PoisonPermissionStore;
+
+    impl PoisonPermissionStore {
+        fn denied(key: &str) -> ObjectStoreError {
+            ObjectStoreError::PermissionDenied {
+                object_key: key.to_owned(),
+                message: POISON_PROVIDER_DETAIL.to_owned(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for PoisonPermissionStore {
+        async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
+            Err(Self::denied(key))
+        }
+
+        async fn get_with_metadata(&self, key: &str) -> StoreResult<Option<ObjectBody>> {
+            Err(Self::denied(key))
+        }
+
+        async fn get(&self, key: &str, _range: Option<ByteRange>) -> StoreResult<Option<Bytes>> {
+            Err(Self::denied(key))
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            _bytes: Bytes,
+            _mode: PutMode,
+        ) -> StoreResult<ObjectMetadata> {
+            Err(Self::denied(key))
+        }
+
+        async fn delete(&self, key: &str) -> StoreResult<()> {
+            Err(Self::denied(key))
+        }
+
+        fn list_prefix_from_stream(
+            &self,
+            prefix: &str,
+            _start_after: Option<&str>,
+        ) -> BoxStream<'static, StoreResult<String>> {
+            Box::pin(futures::stream::once(std::future::ready(Err(
+                Self::denied(prefix),
+            ))))
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_failures_make_every_probe_message_safe_to_paste() {
+        let report = run_store_contract_probe(&PoisonPermissionStore, "probe_poison").await;
+        let messages: Vec<_> = report
+            .checks
+            .iter()
+            .filter_map(|check| match &check.outcome {
+                StoreProbeOutcome::Failed { message } => Some(message.as_str()),
+                StoreProbeOutcome::Passed | StoreProbeOutcome::Unsupported => None,
+            })
+            .collect();
+
+        assert!(!messages.is_empty());
+        for message in messages {
+            assert!(
+                message.contains("object-store permission denied"),
+                "{message}"
+            );
+            for marker in [
+                "<Error>AccessDenied</Error>",
+                "arn:aws:iam::123456789012:role/private-role",
+                "private-bucket",
+                "namespaces/customer-a/head.json",
+                "x-amz-request-id=provider-request",
+                "x-amz-id-2=provider-host-id",
+                "AKIAEXAMPLE",
+                "probe-runs/probe_poison",
+            ] {
+                assert!(
+                    !message.contains(marker),
+                    "probe message leaked {marker}: {message}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

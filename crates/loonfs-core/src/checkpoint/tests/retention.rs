@@ -807,7 +807,10 @@ async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_recor
             },
         )) => {
             assert_eq!(object_key, manifest_key);
-            assert!(message.contains("injected basis verification failure"));
+            assert_eq!(
+                message,
+                loonfs_objectstore::ObjectStoreErrorClass::Other.public_message()
+            );
         }
         other => panic!("expected a classified manifest store error, got {other:?}"),
     }

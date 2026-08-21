@@ -295,7 +295,7 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
                 ControlObjectLoadError::Store {
                     object_key: object_key.clone(),
-                    message: error.message(),
+                    message: error.public_message().into_owned(),
                     class: StoreFailureClass::of(&error),
                 },
             ))

@@ -93,7 +93,7 @@ async fn prefetch_recent_segments<S: ObjectStore + ?Sized>(
                 Ok(None) => {}
                 Err(error) => {
                     failed_requests += 1;
-                    first_error.get_or_insert_with(|| error.to_string());
+                    first_error.get_or_insert_with(|| error.public_message().into_owned());
                 }
             }
         }
@@ -241,7 +241,7 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
                     .await
                     .map_err(|err| WalChainLoadError::ReadWal {
                         object_key: object_key.clone(),
-                        message: err.to_string(),
+                        message: err.public_message().into_owned(),
                     })?
                     .ok_or_else(|| WalChainLoadError::MissingWalObject {
                         object_key: object_key.clone(),

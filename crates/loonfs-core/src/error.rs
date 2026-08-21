@@ -33,6 +33,7 @@ pub use self::CoreError as Error;
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 pub use loonfs_api::{ErrorCode, ErrorKind};
+pub use loonfs_objectstore::ObjectStoreErrorClass as StoreFailureClass;
 
 /// Detailed core error.
 ///
@@ -303,7 +304,7 @@ impl From<ImmutableWriteError> for CoreError {
             )),
             ImmutableWriteError::Transport { object_key, source } => Self::Store {
                 object_key,
-                message: source.message(),
+                message: source.public_message().into_owned(),
                 class: StoreFailureClass::of(&source),
             },
             error => Self::Store {
@@ -315,32 +316,17 @@ impl From<ImmutableWriteError> for CoreError {
     }
 }
 
-/// Classifies a provider failure by the action required to fix it. This
-/// classification is preserved after the original error is converted to a
-/// message so the wire error code remains accurate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum StoreFailureClass {
-    /// The provider rejected the deployment's credentials: operator work,
-    /// never transient. Served as `permission_denied`.
-    PermissionDenied,
-    /// Everything else is internal from the caller's point of view.
-    Other,
-}
-
-impl StoreFailureClass {
-    /// Classifies a provider error before converting it to a stored message.
-    pub fn of(error: &ObjectStoreError) -> Self {
-        match error {
-            ObjectStoreError::PermissionDenied { .. } => Self::PermissionDenied,
-            _ => Self::Other,
-        }
-    }
-}
-
 fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
     match class {
         StoreFailureClass::PermissionDenied => ErrorCode::PermissionDenied,
-        StoreFailureClass::Other => ErrorCode::ServerError,
+        StoreFailureClass::NotFound
+        | StoreFailureClass::InvalidRequest
+        | StoreFailureClass::PreconditionFailed
+        | StoreFailureClass::StoredChecksumMissing
+        | StoreFailureClass::Unsupported
+        | StoreFailureClass::Configuration
+        | StoreFailureClass::RetryableTransport
+        | StoreFailureClass::Other => ErrorCode::ServerError,
     }
 }
 
@@ -354,7 +340,7 @@ impl CoreError {
     pub(crate) fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
         Self::Store {
             object_key: object_key.into(),
-            message: error.message(),
+            message: error.public_message().into_owned(),
             class: StoreFailureClass::of(error),
         }
     }
@@ -444,6 +430,33 @@ impl CoreError {
         self.to_string()
     }
 
+    /// Returns the shared public projection when this core error wraps a
+    /// provider or store-protocol failure.
+    pub fn object_store_public_message(&self) -> Option<std::borrow::Cow<'static, str>> {
+        match self {
+            CoreError::MetadataProjection(error) => metadata_projection_store_message(error),
+            CoreError::DurableContent(error) => match error {
+                DurableContentValidationError::Store { message, .. } => {
+                    Some(std::borrow::Cow::Owned(message.clone()))
+                }
+                _ => None,
+            },
+            CoreError::WriterEpoch(error) => writer_epoch_store_message(error),
+            CoreError::HeadPublish(error) => match error {
+                CommitHeadPublishError::OutcomeUnknown(message)
+                | CommitHeadPublishError::Store { message, .. } => {
+                    Some(std::borrow::Cow::Owned(message.clone()))
+                }
+                _ => None,
+            },
+            CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
+                Some(class.public_message())
+            }
+            CoreError::FailedOperation { source, .. } => source.object_store_public_message(),
+            _ => None,
+        }
+    }
+
     /// Structured wire details for this error, when the variant carries
     /// machine-usable identity (API spec, "Standard error contract"). The
     /// server serializes this beside [`CoreError::code`]; embedded callers
@@ -490,6 +503,41 @@ impl CoreError {
             }),
             _ => None,
         }
+    }
+}
+
+fn metadata_projection_store_message(
+    error: &MetadataProjectionLoadError,
+) -> Option<std::borrow::Cow<'static, str>> {
+    match error {
+        MetadataProjectionLoadError::LoadHead(error) => control_object_store_message(error),
+        MetadataProjectionLoadError::WalChainLoad(WalChainLoadError::ReadWal {
+            message, ..
+        })
+        | MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::ReadManifest { message, .. }
+            | ManifestLoadError::ReadSegment { message, .. },
+        ) => Some(std::borrow::Cow::Owned(message.clone())),
+        _ => None,
+    }
+}
+
+fn control_object_store_message(
+    error: &ControlObjectLoadError,
+) -> Option<std::borrow::Cow<'static, str>> {
+    match error {
+        ControlObjectLoadError::Store { class, .. } => Some(class.public_message()),
+        _ => None,
+    }
+}
+
+fn writer_epoch_store_message(
+    error: &WriterEpochAcquireError,
+) -> Option<std::borrow::Cow<'static, str>> {
+    match error {
+        WriterEpochAcquireError::LoadHead(error) => control_object_store_message(error),
+        WriterEpochAcquireError::HeadWrite { class, .. } => Some(class.public_message()),
+        _ => None,
     }
 }
 

@@ -317,7 +317,7 @@ fn wal_immutable_write_error(error: ImmutableWriteError) -> CoreError {
             format!("immutable WAL segment `{object_key}` already exists with different bytes"),
         ),
         ImmutableWriteError::Transport { object_key, source } => {
-            let message = source.message();
+            let message = source.public_message().into_owned();
             let class = StoreFailureClass::of(&source);
             CoreError::WalWrite {
                 object_key,

@@ -369,7 +369,7 @@ fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> A
     match error {
         // Both cases mean the advertised query.grep capability is unavailable.
         error @ (GrepError::NotEnabled | GrepError::Backfilling) => {
-            ApiResponseError::not_supported(FEATURE_QUERY_GREP, &error.to_string())
+            ApiResponseError::not_supported(FEATURE_QUERY_GREP, &error.public_message())
         }
         GrepError::Runtime(error) => {
             let cursor_is_invalid = matches!(
@@ -383,7 +383,11 @@ fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> A
                 response
             }
         }
-        error => ApiResponseError::new(status_for_core_error_code(code), code, &error.to_string()),
+        error => ApiResponseError::new(
+            status_for_core_error_code(code),
+            code,
+            &error.public_message(),
+        ),
     }
 }
 

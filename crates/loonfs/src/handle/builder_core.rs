@@ -75,9 +75,9 @@ impl HandleBuilderCore {
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
                 let kind = TraceStoreKind::from(config.kind());
-                let store = config.configured_object_store().map_err(|error| {
-                    RuntimeError::Config(format!("invalid store config: {error}"))
-                })?;
+                let store = config
+                    .configured_object_store()
+                    .map_err(|error| RuntimeError::Config(error.public_message().into_owned()))?;
                 (store.into_shared(), kind)
             }
             StoreSource::Shared(store) => (store, TraceStoreKind::Unknown),

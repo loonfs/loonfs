@@ -421,11 +421,10 @@ impl Drop for AbortUploadOnDrop {
         let path = self.path.clone();
         let upload_id = std::mem::take(&mut self.upload_id);
         handle.spawn(async move {
-            if let Err(err) = multipart.abort_multipart(&path, &upload_id).await {
+            if let Err(_err) = multipart.abort_multipart(&path, &upload_id).await {
                 tracing::warn!(
                     object_key = %path,
                     operation = "abort_multipart",
-                    error = %err,
                     "failed to abort the multipart upload of an abandoned write",
                 );
             }
@@ -466,7 +465,6 @@ impl MultipartWrite<'_> {
                 payload_bytes,
                 &mut retries,
                 None,
-                &err,
             ) else {
                 return Err(map_provider_error(self.key, err));
             };
@@ -617,7 +615,6 @@ impl MultipartWrite<'_> {
                 payload_bytes,
                 &mut retries,
                 None,
-                &err,
             ) else {
                 return Err(map_provider_error(self.key, err));
             };
@@ -706,11 +703,10 @@ impl MultipartWrite<'_> {
         match self.multipart.abort_multipart(self.path, upload_id).await {
             Ok(()) => {}
             Err(err) if provider_not_found(&err) => {}
-            Err(err) => {
+            Err(_err) => {
                 tracing::warn!(
                     object_key = self.key,
                     operation = "abort_multipart",
-                    error = %err,
                     "failed to abort multipart upload; parts remain until the bucket lifecycle rule collects them",
                 );
             }
@@ -940,7 +936,6 @@ impl ObjectStore for ProviderObjectStore {
                 0,
                 &mut retries,
                 Some(&deadline),
-                &err,
             ) else {
                 return Err(map_provider_error(key, err));
             };
@@ -1074,9 +1069,10 @@ fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectSto
                 format!("unknown {store} configuration key `{key}`"),
             )
         }
-        provider_store::Error::Generic { source, .. } => {
-            ObjectStoreError::transport(object_key, sanitize_provider_message(&source.to_string()))
-        }
+        provider_store::Error::Generic { source, .. } => ObjectStoreError::retryable_transport(
+            object_key,
+            sanitize_provider_message(&source.to_string()),
+        ),
         provider_store::Error::JoinError { source } => {
             ObjectStoreError::transport(object_key, sanitize_provider_message(&source.to_string()))
         }
@@ -1212,6 +1208,19 @@ mod tests {
         assert_eq!(last_modified_ms(i64::MIN), None);
         assert_eq!(last_modified_ms(1), Some(1));
         assert_eq!(last_modified_ms(1_754_000_000_000), Some(1_754_000_000_000));
+    }
+
+    #[test]
+    fn provider_client_failures_are_classified_at_the_adapter_boundary() {
+        let path = Path::from("private-key");
+        assert_eq!(
+            map_provider_error("private-key", transport_glitch()).class(),
+            crate::ObjectStoreErrorClass::RetryableTransport
+        );
+        assert_eq!(
+            map_provider_error("private-key", auth_rejection(&path)).class(),
+            crate::ObjectStoreErrorClass::PermissionDenied
+        );
     }
 
     #[test]

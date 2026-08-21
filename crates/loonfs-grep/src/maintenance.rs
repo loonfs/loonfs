@@ -185,7 +185,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
                 // its own safety proof from durable state.
                 tracing::info!(
                     namespace_id = %namespace_id,
-                    error = %error,
+                    error = %error.public_message(),
                     "grep collection rejected its resume position; restarting the pass"
                 );
                 return Ok(MaintenanceStepReport::concluded(

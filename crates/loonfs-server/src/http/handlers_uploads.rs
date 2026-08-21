@@ -351,15 +351,19 @@ fn sign_parts(
 }
 
 pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError {
+    let message = error.public_message();
     match error {
-        ObjectStoreError::InvalidContentRef(message) => {
+        ObjectStoreError::InvalidContentRef(_) => {
             ApiResponseError::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
                 .with_param("/content")
         }
-        error => ApiResponseError::new(
+        ObjectStoreError::PermissionDenied { .. } => {
+            ApiResponseError::new(StatusCode::FORBIDDEN, ErrorCode::PermissionDenied, &message)
+        }
+        _ => ApiResponseError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::ServerError,
-            &error.to_string(),
+            &message,
         ),
     }
 }

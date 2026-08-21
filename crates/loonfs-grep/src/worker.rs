@@ -1832,7 +1832,7 @@ fn next_grep_run_ordinal(current: u64) -> Result<u64> {
 fn core_store_error(object_key: &str, error: &ObjectStoreError) -> GrepError {
     GrepError::StoreUnavailable {
         object_key: object_key.to_owned(),
-        message: error.message(),
+        message: error.public_message().into_owned(),
         class: StoreFailureClass::of(error),
     }
 }

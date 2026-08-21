@@ -389,7 +389,7 @@ impl ServerConfig {
             .configured_object_store()
             .map_err(|err| ServerConfigError::InvalidField {
                 field: "store",
-                reason: err.to_string(),
+                reason: err.public_message().into_owned(),
             })
     }
 

@@ -148,12 +148,12 @@ fn map_object_store_error(object_key: &str, err: ObjectStoreError) -> CommitHead
         ObjectStoreError::PreconditionFailed { .. } => CommitHeadPublishError::StaleHead,
         // A transport failure after the CAS was sent leaves the outcome
         // unobserved: the head may already reference the new segment.
-        ObjectStoreError::Transport { message, .. } => {
-            CommitHeadPublishError::OutcomeUnknown(message)
+        error @ ObjectStoreError::Transport { .. } => {
+            CommitHeadPublishError::OutcomeUnknown(error.public_message().into_owned())
         }
         other => CommitHeadPublishError::Store {
             object_key: object_key.to_owned(),
-            message: other.to_string(),
+            message: other.public_message().into_owned(),
         },
     }
 }
@@ -171,7 +171,11 @@ mod tests {
                 "namespaces/demo/control/head.json",
                 ObjectStoreError::transport("namespaces/demo/control/head.json", "timeout"),
             ),
-            CommitHeadPublishError::OutcomeUnknown("timeout".to_owned())
+            CommitHeadPublishError::OutcomeUnknown(
+                loonfs_objectstore::ObjectStoreErrorClass::Other
+                    .public_message()
+                    .into_owned()
+            )
         );
         assert_eq!(
             map_object_store_error(

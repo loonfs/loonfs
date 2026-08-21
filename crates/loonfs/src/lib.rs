@@ -255,4 +255,25 @@ impl RuntimeError {
             Self::Config(_) | Self::RuntimeTask(_) => None,
         }
     }
+
+    /// Renders a public message while projecting object-store failures through
+    /// the provider-independent object-store boundary.
+    pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
+        let store_message = match self {
+            Self::Core(error) => error.object_store_public_message(),
+            Self::Bootstrap(error) => error.object_store_public_message(),
+            Self::Config(_) | Self::RuntimeTask(_) => None,
+        };
+        if let Some(message) = store_message {
+            return message;
+        }
+
+        match self {
+            Self::Config(message) | Self::RuntimeTask(message) => {
+                std::borrow::Cow::Owned(message.clone())
+            }
+            Self::Core(error) => std::borrow::Cow::Owned(error.to_string()),
+            Self::Bootstrap(error) => std::borrow::Cow::Owned(error.to_string()),
+        }
+    }
 }

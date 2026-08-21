@@ -3,7 +3,6 @@
 use crate::attempts::count_retry_attempt;
 use crate::timing::MonotonicTimer;
 use crate::PROVIDER_OPERATION_DEADLINE;
-use std::fmt::Display;
 use std::time::Duration;
 
 /// Bounded retry configuration matching the provider client's read budget.
@@ -43,7 +42,6 @@ pub(crate) fn next_retry_backoff(
     payload_bytes: u64,
     retries: &mut u32,
     deadline: Option<&OperationDeadline<'_>>,
-    error: &dyn Display,
 ) -> Option<Duration> {
     if *retries >= policy.max_retries {
         tracing::warn!(
@@ -51,7 +49,6 @@ pub(crate) fn next_retry_backoff(
             operation,
             retry = *retries,
             payload_bytes,
-            error = %error,
             "object store write retry budget exhausted; not retrying",
         );
         return None;
@@ -64,7 +61,6 @@ pub(crate) fn next_retry_backoff(
                 operation,
                 retry = *retries,
                 payload_bytes,
-                error = %error,
                 "object store operation deadline exhausted; not retrying",
             );
             return None;
@@ -80,7 +76,6 @@ pub(crate) fn next_retry_backoff(
         retry = *retries,
         max_retries = policy.max_retries,
         backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-        error = %error,
         "transient object store write failure, backing off before retry",
     );
     Some(backoff)
@@ -135,7 +130,6 @@ mod tests {
             max_backoff: Duration::from_millis(1),
             operation_deadline: Duration::from_secs(1),
         };
-        let error = "injected transport failure".to_owned();
         let (_, attempts) = counting_attempts(async {
             let mut retries = 0;
             assert_eq!(
@@ -146,7 +140,6 @@ mod tests {
                     7,
                     &mut retries,
                     None,
-                    &error,
                 ),
                 Some(Duration::from_millis(1))
             );
