@@ -72,7 +72,7 @@ fn run_profile_create(
 ) -> Result<CommandOutput, CommandFailure> {
     let (name, spec) = create_profile_spec_from_create(command);
     let result = (|| -> Result<(String, ProfileConfig), CliError> {
-        let profile = build_profile_from_create_spec(spec, runtime)?;
+        let profile = build_profile_from_create_spec(&name, spec, runtime)?;
         mutate_config(config_path, |config| add_profile(config, &name, profile))
     })()
     .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
@@ -105,7 +105,7 @@ fn run_profile_update(
             .clone();
 
         let updated = if has_update_flags(&args) {
-            apply_update_flags(existing, &args)?
+            apply_update_flags(&name, existing, &args)?
         } else if runtime.interactive {
             apply_update_interactive(existing)?
         } else {

@@ -5,7 +5,9 @@ use crate::args::{
     ProfileCreateGcsArgs, ProfileCreateLocalArgs, ProfileCreateR2Args, ProfileCreateRemoteArgs,
     ProfileCreateS3Args, ProfileUpdateArgs, RuntimeBehavior,
 };
-use crate::config::{ProfileActorConfig, ProfileConfig, StoreConfig};
+use crate::config::{
+    validate_remote_client_config, ProfileActorConfig, ProfileConfig, StoreConfig,
+};
 use crate::error::CliError;
 use crate::prompt;
 use loonfs_api::{ActorId, ActorKind, SecretString};
@@ -267,6 +269,7 @@ fn create_remote_spec(args: ProfileCreateRemoteArgs) -> (String, CreateProfileSp
 }
 
 pub(super) fn build_profile_interactive(
+    name: &str,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
     if !runtime.interactive {
@@ -286,6 +289,7 @@ pub(super) fn build_profile_interactive(
             _ => CreateProviderSpec::Remote(ProfileCreateRemoteSpec::default()),
         };
     build_profile_from_create_spec(
+        name,
         CreateProfileSpec {
             provider,
             actor: CreateActorSpec {
@@ -298,6 +302,7 @@ pub(super) fn build_profile_interactive(
 }
 
 pub(super) fn build_profile_from_create_spec(
+    name: &str,
     spec: CreateProfileSpec,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
@@ -396,12 +401,21 @@ pub(super) fn build_profile_from_create_spec(
                 None if runtime.interactive => prompt::prompt_secret_optional("auth token", None)?,
                 None => None,
             };
+            let server_url = require_or_prompt(spec.server_url.as_ref(), "server-url", runtime)?;
+            let auth_token = auth_token.map(SecretString::from);
+            let ca_cert_path = blank_to_none(spec.ca_cert_path);
+            validate_remote_client_config(
+                &format!("{name}.server_url"),
+                &server_url,
+                auth_token.as_ref(),
+                ca_cert_path.as_deref(),
+            )?;
             Ok(ProfileConfig::Remote {
-                server_url: require_or_prompt(spec.server_url.as_ref(), "server-url", runtime)?,
+                server_url,
                 actor,
                 default_namespace: None,
-                auth_token: auth_token.map(SecretString::from),
-                ca_cert_path: blank_to_none(spec.ca_cert_path),
+                auth_token,
+                ca_cert_path,
             })
         }
     }
@@ -699,6 +713,7 @@ fn validate_remote_update_flags(args: &ProfileUpdateArgs) -> Result<(), CliError
 }
 
 pub(super) fn apply_update_flags(
+    name: &str,
     existing: ProfileConfig,
     args: &ProfileUpdateArgs,
 ) -> Result<ProfileConfig, CliError> {
@@ -818,16 +833,27 @@ pub(super) fn apply_update_flags(
             default_namespace,
             auth_token,
             ca_cert_path,
-        } => Ok(ProfileConfig::Remote {
-            server_url: args.server_url.clone().unwrap_or(server_url),
-            actor: updated_actor(actor, args)?,
-            default_namespace,
-            auth_token: match args.auth_token.clone() {
+        } => {
+            let server_url = args.server_url.clone().unwrap_or(server_url);
+            let auth_token = match args.auth_token.clone() {
                 Some(token) => blank_to_none(Some(token)).map(SecretString::from),
                 None => auth_token,
-            },
-            ca_cert_path: blank_to_none(args.ca_cert_path.clone()).or(ca_cert_path),
-        }),
+            };
+            let ca_cert_path = blank_to_none(args.ca_cert_path.clone()).or(ca_cert_path);
+            validate_remote_client_config(
+                &format!("{name}.server_url"),
+                &server_url,
+                auth_token.as_ref(),
+                ca_cert_path.as_deref(),
+            )?;
+            Ok(ProfileConfig::Remote {
+                server_url,
+                actor: updated_actor(actor, args)?,
+                default_namespace,
+                auth_token,
+                ca_cert_path,
+            })
+        }
     }
 }
 
@@ -1097,6 +1123,7 @@ mod tests {
     #[test]
     fn create_profile_supports_azure_abs() {
         let profile = build_profile_from_create_spec(
+            "default",
             CreateProfileSpec {
                 provider: CreateProviderSpec::Azure(ProfileCreateAzureSpec {
                     account_name: Some("devstoreaccount1".to_owned()),
@@ -1145,6 +1172,7 @@ mod tests {
     #[test]
     fn no_static_flags_select_ambient_without_storing_secrets() {
         let s3 = build_profile_from_create_spec(
+            "default",
             CreateProfileSpec {
                 provider: CreateProviderSpec::S3(ProfileCreateS3Spec {
                     bucket: Some("bucket".to_owned()),
@@ -1169,6 +1197,7 @@ mod tests {
     #[test]
     fn remote_creation_never_captures_an_environment_token() {
         let remote = build_profile_from_create_spec(
+            "default",
             CreateProfileSpec {
                 provider: CreateProviderSpec::Remote(ProfileCreateRemoteSpec {
                     server_url: Some("http://127.0.0.1:9400".to_owned()),
@@ -1188,6 +1217,7 @@ mod tests {
     #[test]
     fn static_flags_imply_static_and_require_the_complete_set() {
         let incomplete = build_profile_from_create_spec(
+            "default",
             CreateProfileSpec {
                 provider: CreateProviderSpec::S3(ProfileCreateS3Spec {
                     bucket: Some("bucket".to_owned()),
@@ -1203,6 +1233,7 @@ mod tests {
         assert!(incomplete.message.contains("secret-access-key"));
 
         let complete = build_profile_from_create_spec(
+            "default",
             CreateProfileSpec {
                 provider: CreateProviderSpec::S3(ProfileCreateS3Spec {
                     bucket: Some("bucket".to_owned()),
@@ -1242,6 +1273,7 @@ mod tests {
         };
 
         let error = apply_update_flags(
+            "default",
             local_fs.clone(),
             &ProfileUpdateArgs {
                 bucket: Some("bucket".to_owned()),
@@ -1255,6 +1287,7 @@ mod tests {
         );
 
         let error = apply_update_flags(
+            "default",
             local_fs,
             &ProfileUpdateArgs {
                 auth_token: Some("token".to_owned()),
@@ -1279,6 +1312,7 @@ mod tests {
         };
 
         let updated = apply_update_flags(
+            "default",
             remote,
             &ProfileUpdateArgs {
                 auth_token: Some("new-token".to_owned()),
@@ -1299,6 +1333,37 @@ mod tests {
     }
 
     #[test]
+    fn remote_update_rejects_a_token_over_non_loopback_plaintext_http() {
+        let remote = ProfileConfig::Remote {
+            server_url: "https://example.internal".to_owned(),
+            actor: crate::config::ProfileActorConfig::default(),
+            default_namespace: None,
+            auth_token: None,
+            ca_cert_path: None,
+        };
+
+        let error = apply_update_flags(
+            "default",
+            remote,
+            &ProfileUpdateArgs {
+                server_url: Some("http://example.internal".to_owned()),
+                auth_token: Some("new-token".to_owned()),
+                ..empty_update_args()
+            },
+        )
+        .expect_err("unsafe effective remote profile should be rejected");
+
+        assert_eq!(error.code, "invalid_config");
+        assert!(
+            error
+                .message
+                .contains("bearer tokens require https except for loopback http URLs"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
     fn update_switches_credential_source_only_with_a_complete_static_set() {
         let profile = ProfileConfig::Embedded {
             store: StoreConfig::AwsS3 {
@@ -1315,6 +1380,7 @@ mod tests {
         };
 
         let error = apply_update_flags(
+            "default",
             profile.clone(),
             &ProfileUpdateArgs {
                 credential_source: Some("static".to_owned()),
@@ -1336,6 +1402,7 @@ mod tests {
         ));
 
         let updated = apply_update_flags(
+            "default",
             profile,
             &ProfileUpdateArgs {
                 credential_source: Some("static".to_owned()),

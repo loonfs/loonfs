@@ -202,10 +202,12 @@ impl ProfileConfig {
                 ca_cert_path,
             } => {
                 validate_actor_and_default_namespace(name, actor, default_namespace.as_deref())?;
-                validate_http_url(&profile_field(name, "server_url"), server_url)?;
-                if let Some(token) = auth_token {
-                    require_non_empty(&profile_field(name, "auth_token"), token.expose())?;
-                }
+                validate_remote_client_config(
+                    &profile_field(name, "server_url"),
+                    server_url,
+                    auth_token.as_ref(),
+                    ca_cert_path.as_deref(),
+                )?;
                 if let Some(path) = ca_cert_path {
                     require_non_empty(&profile_field(name, "ca_cert_path"), path)?;
                 }
@@ -649,14 +651,19 @@ fn validate_default_namespace(field: &str, value: &str) -> Result<(), CliError> 
         .map_err(|err| CliError::invalid_config(format!("invalid `{field}`: {err}")))
 }
 
-fn validate_http_url(field: &str, value: &str) -> Result<(), CliError> {
-    // One URL grammar authority: the client's own config validation.
+pub(crate) fn validate_remote_client_config(
+    field: &str,
+    server_url: &str,
+    auth_token: Option<&SecretString>,
+    ca_cert_path: Option<&str>,
+) -> Result<(), CliError> {
+    // One remote-client policy authority: the client's own config validation.
     ClientConfig {
-        server_url: value.to_owned(),
-        auth_token: None,
+        server_url: server_url.to_owned(),
+        auth_token: auth_token.cloned(),
         request_timeout_ms: None,
         disable_transient_retry: false,
-        ca_cert_path: None,
+        ca_cert_path: ca_cert_path.map(ToOwned::to_owned),
     }
     .validate()
     .map_err(|error| CliError::invalid_config(format!("invalid `{field}`: {error}")))

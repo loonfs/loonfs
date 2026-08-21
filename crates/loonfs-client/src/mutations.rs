@@ -452,7 +452,7 @@ mod tests {
     fn client_and_config_debug_redact_the_auth_token() {
         let raw_token = "client-debug-secret";
         let config = ClientConfig {
-            server_url: "http://example.com".to_owned(),
+            server_url: "https://example.com".to_owned(),
             auth_token: Some(raw_token.into()),
             request_timeout_ms: None,
             disable_transient_retry: false,
