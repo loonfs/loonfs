@@ -746,7 +746,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 		CommitID:    loonfs.CommitID(request.CommitIDs.Move),
 		Operations: []*loonfs.FilesystemOperation{
 			{
-				MovePath: &loonfs.FsOpMovePath{
+				MovePath: &loonfs.FilesystemOperationMovePath{
 					Behavior: &noReplace,
 					FromPath: loonfs.AbsolutePath(request.UploadPath),
 					ToPath:   loonfs.AbsolutePath(request.MovedPath),
@@ -787,7 +787,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 		CommitID:    loonfs.CommitID(request.CommitIDs.Remove),
 		Operations: []*loonfs.FilesystemOperation{
 			{
-				DeletePath: &loonfs.FsOpDeletePath{
+				DeletePath: &loonfs.FilesystemOperationDeletePath{
 					Behavior: &nonRecursive,
 					Path:     loonfs.AbsolutePath(request.MovedPath),
 				},
@@ -1258,7 +1258,7 @@ func proxyCommitCompletedFile(
 		ContentTokens: contentTokens,
 		Operations: []*loonfs.FilesystemOperation{
 			{
-				PutFile: &loonfs.FsOpPutFile{
+				PutFile: &loonfs.FilesystemOperationPutFile{
 					Behavior:   &noReplace,
 					ContentRef: contentRef,
 					Path:       loonfs.AbsolutePath(path),
@@ -1684,7 +1684,7 @@ func commitCompletedFile(
 		ContentTokens: contentTokens,
 		Operations: []*loonfs.FilesystemOperation{
 			{
-				PutFile: &loonfs.FsOpPutFile{
+				PutFile: &loonfs.FilesystemOperationPutFile{
 					Behavior:   &noReplace,
 					ContentRef: contentRef,
 					Path:       loonfs.AbsolutePath(path),
@@ -1816,7 +1816,7 @@ func createDirectoryCommit(
 		Message:     message,
 		Operations: []*loonfs.FilesystemOperation{
 			{
-				CreateDirectory: &loonfs.FsOpCreateDirectory{
+				CreateDirectory: &loonfs.FilesystemOperationCreateDirectory{
 					Parents: &parents,
 					Path:    loonfs.AbsolutePath(path),
 				},

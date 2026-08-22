@@ -245,7 +245,10 @@ pub enum DeleteDirectoryBehavior {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FilesystemOperation {
     /// Create one directory.
-    #[cfg_attr(feature = "openapi", schema(title = "FsOpCreateDirectory"))]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationCreateDirectory")
+    )]
     CreateDirectory {
         /// Absolute destination path, rejected when invalid or already bound.
         path: AbsolutePath,
@@ -255,7 +258,7 @@ pub enum FilesystemOperation {
         parents: bool,
     },
     /// Create or replace one file with an already-durable content ref.
-    #[cfg_attr(feature = "openapi", schema(title = "FsOpPutFile"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationPutFile"))]
     PutFile {
         /// Absolute destination path; missing ancestors are created automatically.
         path: AbsolutePath,
@@ -273,7 +276,7 @@ pub enum FilesystemOperation {
         expected_revision_no: Option<RevisionNo>,
     },
     /// Delete one path.
-    #[cfg_attr(feature = "openapi", schema(title = "FsOpDeletePath"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationDeletePath"))]
     DeletePath {
         /// Absolute path that must resolve to a visible inode.
         path: AbsolutePath,
@@ -295,7 +298,7 @@ pub enum FilesystemOperation {
         expected_inode_id: Option<InodeId>,
     },
     /// Move one path to another path.
-    #[cfg_attr(feature = "openapi", schema(title = "FsOpMovePath"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMovePath"))]
     MovePath {
         /// Absolute source path that must resolve to a visible inode.
         from_path: AbsolutePath,
@@ -306,7 +309,7 @@ pub enum FilesystemOperation {
         behavior: DestinationBehavior,
     },
     /// Copy one file path to another path.
-    #[cfg_attr(feature = "openapi", schema(title = "FsOpCopyPath"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationCopyPath"))]
     CopyPath {
         /// Absolute source path that must resolve to a visible file.
         from_path: AbsolutePath,
@@ -320,7 +323,7 @@ pub enum FilesystemOperation {
     ///
     /// `inode_id` and `deletion_seq` identify one exact deletion. A stale
     /// sequence returns `not_deleted` and cannot undo a later deletion.
-    #[cfg_attr(feature = "openapi", schema(title = "FsOpUndelete"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUndelete"))]
     Undelete {
         /// Deleted inode to make reachable again.
         #[serde(with = "crate::public_inode_id")]
@@ -342,7 +345,10 @@ pub enum FilesystemOperation {
         path: Option<AbsolutePath>,
     },
     /// Restore an older revision as the current revision for a path.
-    #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationRestoreRevision")
+    )]
     RestoreRevision {
         /// Absolute path that must resolve to a visible file.
         path: AbsolutePath,
@@ -350,7 +356,10 @@ pub enum FilesystemOperation {
         source_revision_no: RevisionNo,
     },
     /// Write and remove attributes on the inode one path resolves to.
-    #[cfg_attr(feature = "openapi", schema(title = "FsOpUpdateAttributes"))]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationUpdateAttributes")
+    )]
     UpdateAttributes {
         /// Absolute path that must resolve to a visible file or directory.
         path: AbsolutePath,

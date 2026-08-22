@@ -4649,42 +4649,42 @@
       "FilesystemOperation": {
         "oneOf": [
           {
-            "$ref": "#/components/schemas/FsOpCreateDirectory"
+            "$ref": "#/components/schemas/FilesystemOperationCreateDirectory"
           },
           {
-            "$ref": "#/components/schemas/FsOpPutFile"
+            "$ref": "#/components/schemas/FilesystemOperationPutFile"
           },
           {
-            "$ref": "#/components/schemas/FsOpDeletePath"
+            "$ref": "#/components/schemas/FilesystemOperationDeletePath"
           },
           {
-            "$ref": "#/components/schemas/FsOpMovePath"
+            "$ref": "#/components/schemas/FilesystemOperationMovePath"
           },
           {
-            "$ref": "#/components/schemas/FsOpCopyPath"
+            "$ref": "#/components/schemas/FilesystemOperationCopyPath"
           },
           {
-            "$ref": "#/components/schemas/FsOpUndelete"
+            "$ref": "#/components/schemas/FilesystemOperationUndelete"
           },
           {
-            "$ref": "#/components/schemas/FsOpRestoreRevision"
+            "$ref": "#/components/schemas/FilesystemOperationRestoreRevision"
           },
           {
-            "$ref": "#/components/schemas/FsOpUpdateAttributes"
+            "$ref": "#/components/schemas/FilesystemOperationUpdateAttributes"
           }
         ],
         "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because concurrency guards are optional. A\nmisspelled guard must fail decoding instead of silently becoming `None`\nand allowing an unguarded write. Any future fieldless variant must use\nempty braces so serde also rejects unexpected fields for that variant.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
-            "create_directory": "#/components/schemas/FsOpCreateDirectory",
-            "put_file": "#/components/schemas/FsOpPutFile",
-            "delete_path": "#/components/schemas/FsOpDeletePath",
-            "move_path": "#/components/schemas/FsOpMovePath",
-            "copy_path": "#/components/schemas/FsOpCopyPath",
-            "undelete": "#/components/schemas/FsOpUndelete",
-            "restore_revision": "#/components/schemas/FsOpRestoreRevision",
-            "update_attributes": "#/components/schemas/FsOpUpdateAttributes"
+            "create_directory": "#/components/schemas/FilesystemOperationCreateDirectory",
+            "put_file": "#/components/schemas/FilesystemOperationPutFile",
+            "delete_path": "#/components/schemas/FilesystemOperationDeletePath",
+            "move_path": "#/components/schemas/FilesystemOperationMovePath",
+            "copy_path": "#/components/schemas/FilesystemOperationCopyPath",
+            "undelete": "#/components/schemas/FilesystemOperationUndelete",
+            "restore_revision": "#/components/schemas/FilesystemOperationRestoreRevision",
+            "update_attributes": "#/components/schemas/FilesystemOperationUpdateAttributes"
           }
         }
       },
@@ -6412,7 +6412,7 @@
           }
         }
       },
-      "FsOpCreateDirectory": {
+      "FilesystemOperationCreateDirectory": {
         "type": "object",
         "description": "Create one directory.",
         "required": [
@@ -6436,7 +6436,7 @@
           }
         }
       },
-      "FsOpPutFile": {
+      "FilesystemOperationPutFile": {
         "type": "object",
         "description": "Create or replace one file with an already-durable content ref.",
         "required": [
@@ -6469,7 +6469,7 @@
           }
         }
       },
-      "FsOpDeletePath": {
+      "FilesystemOperationDeletePath": {
         "type": "object",
         "description": "Delete one path.",
         "required": [
@@ -6499,7 +6499,7 @@
           }
         }
       },
-      "FsOpMovePath": {
+      "FilesystemOperationMovePath": {
         "type": "object",
         "description": "Move one path to another path.",
         "required": [
@@ -6528,7 +6528,7 @@
           }
         }
       },
-      "FsOpCopyPath": {
+      "FilesystemOperationCopyPath": {
         "type": "object",
         "description": "Copy one file path to another path.",
         "required": [
@@ -6557,7 +6557,7 @@
           }
         }
       },
-      "FsOpUndelete": {
+      "FilesystemOperationUndelete": {
         "type": "object",
         "description": "Restore a deleted file or subtree.\n\n`inode_id` and `deletion_seq` identify one exact deletion. A stale\nsequence returns `not_deleted` and cannot undo a later deletion.",
         "required": [
@@ -6588,7 +6588,7 @@
           }
         }
       },
-      "FsOpRestoreRevision": {
+      "FilesystemOperationRestoreRevision": {
         "type": "object",
         "description": "Restore an older revision as the current revision for a path.",
         "required": [
@@ -6613,7 +6613,7 @@
           }
         }
       },
-      "FsOpUpdateAttributes": {
+      "FilesystemOperationUpdateAttributes": {
         "type": "object",
         "description": "Write and remove attributes on the inode one path resolves to.",
         "required": [

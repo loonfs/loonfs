@@ -128,7 +128,7 @@ func PutFile(ctx context.Context, c *client.Client, in PutFileInput) (*PutFileRe
 		Message:       in.Message,
 		Operations: []*loonfs.FilesystemOperation{
 			{
-				PutFile: &loonfs.FsOpPutFile{
+				PutFile: &loonfs.FilesystemOperationPutFile{
 					Behavior:           &behavior,
 					ContentRef:         status.ContentRef,
 					ExpectedRevisionNo: in.ExpectedRevisionNo,
