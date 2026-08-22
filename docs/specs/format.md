@@ -30,13 +30,17 @@ meant to send:
   request, at every level of nesting.
 - **HTTP response bodies tolerate them**, so a client keeps working against a
   server newer than itself.
-- **Immutable, never-rewritten durable families tolerate them**, for the same
-  reason: nothing rewrites them, so nothing can erase a field it did not
-  understand.
+- **Immutable, never-rewritten durable families tolerate them**, at every
+  level of nesting, for the same reason: nothing rewrites them, so nothing
+  can erase a field it did not understand.
 - **Mutable control-object envelopes and payloads reject them**, because a
   reader that tolerated an unknown field would erase it on the next
   read-modify-write and still report a successful guarded update
   (section 1.7).
+- **`ContentRef`, `Checksum`, and `ActorRef` are closed shapes.** They reject
+  unknown fields wherever they appear, in request bodies and in durable rows
+  alike, because the same types decode request bodies. They evolve only by
+  new `kind` and `algorithm` values, never by new fields.
 
 Durable formats store inode IDs as integers. The public API uses strings such
 as `ino_27`; this does not change stored data.
@@ -332,6 +336,11 @@ newer field, erase it during read-modify-write, and still report a successful
 guarded update. All six registered kinds use that strict decoder; immutable
 WAL segments, metadata segments, namespace manifests, grep segments, and grep
 manifests remain tolerant of additive fields.
+
+WAL segment pointers in immutable segments may contain unknown fields. The
+same pointers in the mutable head may not. The head uses strict decoders for
+`visible_wal_tip` and `recent_segments` so a guarded rewrite cannot discard
+unknown data.
 
 Readers of small mutable control objects must use a full-object read that
 returns bytes and the object identity metadata for those same bytes. This does
@@ -679,8 +688,8 @@ The core rules are:
 - future content strategies must use a new `content_ref.kind` and name their
   durability and validation rules before revisions may reference them.
 
-The `ContentRef` document rejects unknown fields, so a field this format does
-not define is corruption, not a future extension:
+`ContentRef` rejects unknown fields in every context, including immutable
+durable records. Extend it with new `kind` values instead of adding fields:
 
 ```json
 {
@@ -740,9 +749,10 @@ A `set` also carries the binding the delete removed, as one
 deleted name survives after unbind rows age out, and it is the binding
 undelete restores in place. A delete addressed by inode has no name to
 record and writes `deleted_direntry` as `null`; the field is always
-written, so an encoding that omits it is not a deletion without a name but
-corruption. Only a `set` can carry one, and a `revoke` that does is
-corruption too — a partial binding is not expressible at all. This schema
+written, so omitting it is corruption rather than an unnamed deletion. Only a
+`set` includes this field. A reader ignores it on a `revoke`, just like any
+other unknown field (encoding conventions above). A partial binding is not
+valid. This schema
 evolves in place at metadata-row version 1 before the first stable
 release; the implementation carries no compatibility shim for intermediate
 pre-release encodings, and in particular the earlier encoding that spelled
@@ -2002,8 +2012,10 @@ and grep maintenance does not collect core-owned objects.
 ### 4.3 Evolution rules
 
 - **Additive within a released version.** Readers ignore unknown payload and
-  envelope fields. After the first stable release, adding such fields is the
-  only change permitted within an existing format version.
+  envelope fields, at every level of nesting, except inside the closed shapes
+  named in the encoding conventions above. After the first stable release,
+  adding such fields is the only change permitted within an existing format
+  version.
 - **Other post-release changes require a new version.** After the first stable
   release, renaming, removing, retyping, or re-tagging any field — or changing
   the payload encoding — requires a new `format_version` for the owning family.

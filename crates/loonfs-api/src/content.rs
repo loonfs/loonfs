@@ -111,6 +111,9 @@ impl fmt::Display for ChecksumAlgorithm {
 /// An algorithm and its canonical lowercase-hex checksum value.
 ///
 /// The enclosing value defines which bytes the checksum covers.
+// This type also appears in request bodies, so it rejects unknown fields in
+// every context. Add new algorithms instead of new fields. This is not
+// rustdoc because it describes storage behavior, not the public API.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -388,6 +391,9 @@ pub enum ContentRefValidationError {
 ///
 /// A `ContentRef` is safe to publish only after the referenced bytes are
 /// durable in the namespace's content store.
+// This type also appears in request bodies, so it rejects unknown fields in
+// every context. Add new content kinds instead of new fields. This is not
+// rustdoc because it describes storage behavior, not the public API.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]

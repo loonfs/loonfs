@@ -13,6 +13,9 @@ const MAX_ACTOR_ID_BYTES: usize = 256;
 ///
 /// LoonFS stores this value as provided. It does not authenticate the actor or
 /// look up profile information.
+// This type also appears in request bodies, so it rejects unknown fields in
+// every context. Add new actor kinds instead of new fields. This is not
+// rustdoc because it describes storage behavior, not the public API.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
