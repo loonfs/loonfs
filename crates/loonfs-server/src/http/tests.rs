@@ -25,7 +25,7 @@ use loonfs_api::{
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
 use loonfs_grep::root::{
-    encode_grep_root, load_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer,
+    encode_grep_root, load_grep_root, GrepManifestObjectId, GrepRootEnvelope, GrepRootPointer,
 };
 use loonfs_grep::{GrepWorker, NamespaceReads};
 use loonfs_objectstore::keys::wal_head;
@@ -77,7 +77,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "content_tokens",
     "created_by",
     "created_at_ms",
-    "current_manifest_id",
+    "current_manifest_no",
     "cursor_inode_id",
     "degraded_retention",
     "degraded_roots",
@@ -106,7 +106,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "include_attributes",
     "inode_id",
     "inode_kind",
-    "manifest_id",
+    "manifest_no",
     "max_objects",
     "max_wal_tail_segments",
     "name_key",
@@ -707,7 +707,7 @@ async fn admin_namespace_diagnostics_route_answers_storage_fields() {
     assert_eq!(diagnostics.namespace_id, namespace_id);
     assert_eq!(diagnostics.head_seq, ChangeSeq(1));
     assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(0));
-    assert_eq!(diagnostics.current_manifest_id, None);
+    assert_eq!(diagnostics.current_manifest_no, None);
     assert_eq!(diagnostics.wal_tail_segments, 1);
 
     state.writer.shutdown().await.expect("shutdown writer");
@@ -1483,9 +1483,15 @@ async fn grep_error_missing_manifest_is_index_corrupt_and_core_reads_survive() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let namespace_id = namespace_id("grep-error-missing-manifest");
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
-    let manifest_id =
-        GrepManifestId::parse("gmf_11111111111111111111111111111111").expect("manifest id");
-    write_grep_pointer(&*store, &namespace_id, namespace_id.clone(), manifest_id).await;
+    let manifest_object_id = GrepManifestObjectId::parse("gmf_11111111111111111111111111111111")
+        .expect("manifest object id");
+    write_grep_pointer(
+        &*store,
+        &namespace_id,
+        namespace_id.clone(),
+        manifest_object_id,
+    )
+    .await;
     writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "missing-manifest-server").await;
@@ -1498,16 +1504,22 @@ async fn grep_error_corrupt_manifest_is_index_corrupt_and_core_reads_survive() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let namespace_id = namespace_id("grep-error-manifest");
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
-    let manifest_id =
-        GrepManifestId::parse("gmf_22222222222222222222222222222222").expect("manifest id");
+    let manifest_object_id = GrepManifestObjectId::parse("gmf_22222222222222222222222222222222")
+        .expect("manifest object id");
     store
         .put_overwrite(
-            &grep_manifest_key(&namespace_id, &manifest_id),
+            &grep_manifest_key(&namespace_id, &manifest_object_id),
             Bytes::from_static(b"corrupt grep manifest"),
         )
         .await
         .expect("write corrupt grep manifest");
-    write_grep_pointer(&*store, &namespace_id, namespace_id.clone(), manifest_id).await;
+    write_grep_pointer(
+        &*store,
+        &namespace_id,
+        namespace_id.clone(),
+        manifest_object_id,
+    )
+    .await;
     writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "manifest-server").await;
@@ -1520,13 +1532,13 @@ async fn grep_error_identity_mismatch_is_index_corrupt_and_core_reads_survive() 
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let namespace_id = namespace_id("grep-error-identity");
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
-    let manifest_id =
-        GrepManifestId::parse("gmf_33333333333333333333333333333333").expect("manifest id");
+    let manifest_object_id = GrepManifestObjectId::parse("gmf_33333333333333333333333333333333")
+        .expect("manifest object id");
     write_grep_pointer(
         &*store,
         &namespace_id,
         NamespaceId::parse("different-grep-identity").expect("different namespace id"),
-        manifest_id,
+        manifest_object_id,
     )
     .await;
     writer.shutdown().await.expect("shutdown writer");
@@ -3186,13 +3198,13 @@ async fn write_grep_pointer(
     store: &dyn ObjectStore,
     stored_namespace_id: &NamespaceId,
     pointer_namespace_id: NamespaceId,
-    manifest_id: GrepManifestId,
+    manifest_object_id: GrepManifestObjectId,
 ) {
     // Every caller here injects a fault the load hits before it compares
     // digests, so any well-formed digest stands in for the real one.
     let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
         pointer_namespace_id,
-        manifest_id,
+        manifest_object_id,
         loonfs_api::sha256_digest(b"a manifest these tests never reach"),
     ))
     .expect("build grep pointer");

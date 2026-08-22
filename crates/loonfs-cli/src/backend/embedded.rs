@@ -1095,7 +1095,7 @@ mod tests {
                 "`{namespace_id}` kept a WAL tail of {} segments past the checkpoint threshold",
                 status.wal_tail_segments
             );
-            assert!(status.current_manifest_id.is_some(), "{namespace_id}");
+            assert!(status.current_manifest_no.is_some(), "{namespace_id}");
         }
         let indexed_status = target
             .backend

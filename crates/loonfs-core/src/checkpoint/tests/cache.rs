@@ -372,12 +372,12 @@ async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
         max_rows_per_segment: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
-    let manifest_id = checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
+    let manifest_no = checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
     let before = cache.stats();
 
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
             .expect("load materialized manifest");
     let after = cache.stats();
@@ -650,7 +650,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        tables.manifest().payload.manifest_id,
+        tables.manifest().payload.manifest_no,
     )
     .await
     .expect("materialize manifest");
@@ -688,8 +688,8 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     // stripped must return the same rows through fetched filter blocks —
     // the inline copy is an accelerator, never an answer of its own.
     let mut stripped_payload = tables.manifest().payload.clone();
-    stripped_payload.manifest_id = ManifestId(stripped_payload.manifest_id.0 + 1);
-    stripped_payload.manifest_object_id = ManifestObjectId::generate(stripped_payload.manifest_id);
+    stripped_payload.manifest_no = ManifestNo(stripped_payload.manifest_no.0 + 1);
+    stripped_payload.manifest_object_id = ManifestObjectId::generate(stripped_payload.manifest_no);
     for descriptor in &mut stripped_payload.metadata_files {
         descriptor.filter_inline = None;
     }
@@ -1466,7 +1466,7 @@ async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
         "L0 checkpoint update should use the WAL tail and copy existing metadata file refs"
     );
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("load checkpoint manifest");
     // One L0 run per checkpoint, the first included.

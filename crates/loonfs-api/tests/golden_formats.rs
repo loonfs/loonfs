@@ -41,7 +41,7 @@ use loonfs_api::wire::wal::{
 use loonfs_api::{
     sha256_digest, ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue,
     Attributes, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId,
-    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId,
+    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo, ManifestObjectId,
     MetadataCompactionId, MetadataTableId, NameKey, NamespaceId, RevisionNo, UploadId,
     WalSegmentId, WriterEpoch,
 };
@@ -125,8 +125,8 @@ fn checkpoint_id(value: &str) -> CheckpointId {
     CheckpointId::parse(value).expect("valid checkpoint id")
 }
 
-fn manifest_object_id(manifest_id: u64, suffix: &str) -> ManifestObjectId {
-    ManifestObjectId::parse(format!("{manifest_id:020}-{suffix}"))
+fn manifest_object_id(manifest_no: u64, suffix: &str) -> ManifestObjectId {
+    ManifestObjectId::parse(format!("{manifest_no:020}-{suffix}"))
         .expect("valid manifest object id")
 }
 
@@ -334,7 +334,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
 fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
     NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id(),
-        manifest_id: ManifestId(2),
+        manifest_no: ManifestNo(2),
         manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
         head_seq: ChangeSeq(2),
         head_commit_id: commit_id(),
@@ -599,7 +599,7 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::MetadataRoot,
         MetadataRootState {
             namespace_id: namespace_id(),
-            manifest_id: ManifestId(2),
+            manifest_no: ManifestNo(2),
             manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
             manifest_head_seq: ChangeSeq(2),
             manifest_payload_checksum:
@@ -613,7 +613,7 @@ fn control_objects_match_golden_bytes() {
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
             namespace_id: namespace_id(),
-            manifest_id: ManifestId(2),
+            manifest_no: ManifestNo(2),
             manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
             manifest_head_seq: ChangeSeq(2),
             manifest_payload_checksum:
@@ -635,7 +635,7 @@ fn control_objects_match_golden_bytes() {
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000004"),
             namespace_id: namespace_id(),
-            manifest_id: ManifestId(4),
+            manifest_no: ManifestNo(4),
             manifest_object_id: manifest_object_id(4, "0123456789abcdef"),
             manifest_head_seq: ChangeSeq(4),
             manifest_payload_checksum:
@@ -695,7 +695,7 @@ fn control_objects_match_golden_bytes() {
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000003"),
             namespace_id: namespace_id(),
-            manifest_id: ManifestId(3),
+            manifest_no: ManifestNo(3),
             manifest_object_id: manifest_object_id(3, "0123456789abcdef"),
             manifest_head_seq: ChangeSeq(3),
             manifest_payload_checksum:
@@ -1251,7 +1251,7 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
             serde_json::to_value(CheckpointRecordState {
                 checkpoint_id: checkpoint_id("chk_00000000000000000000000000000005"),
                 namespace_id: namespace_id(),
-                manifest_id: ManifestId(5),
+                manifest_no: ManifestNo(5),
                 manifest_object_id: manifest_object_id(5, "0123456789abcdef"),
                 manifest_head_seq: ChangeSeq(5),
                 manifest_payload_checksum: sha256_digest(b"manifest"),

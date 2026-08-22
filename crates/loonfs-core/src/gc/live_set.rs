@@ -290,15 +290,15 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             .await
             .map_err(CoreError::load_head)?;
         let mut live = LiveSet::collecting(namespace_deleted);
-        let mut manifest_ids = BTreeSet::new();
+        let mut manifest_object_ids = BTreeSet::new();
         if !namespace_deleted {
-            manifest_ids.extend(root_manifest_object_id.clone());
+            manifest_object_ids.extend(root_manifest_object_id.clone());
         }
         let active_record_bases = collect_checkpoint_records(
             store,
             namespace_id,
             namespace_deleted,
-            &mut manifest_ids,
+            &mut manifest_object_ids,
             &mut live,
             budget,
             context,
@@ -308,7 +308,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             store,
             namespace_id,
             root_manifest_object_id.as_ref(),
-            manifest_ids,
+            manifest_object_ids,
             &active_record_bases,
             &mut live,
             budget,
@@ -345,7 +345,7 @@ async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     namespace_deleted: bool,
-    manifest_ids: &mut BTreeSet<ManifestObjectId>,
+    manifest_object_ids: &mut BTreeSet<ManifestObjectId>,
     live: &mut LiveSet,
     budget: &mut PassBudget,
     context: &MutationContext,
@@ -369,7 +369,7 @@ async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
         {
             continue;
         }
-        manifest_ids.insert(record.manifest_object_id.clone());
+        manifest_object_ids.insert(record.manifest_object_id.clone());
         // In a live namespace, a candidate still protects its basis but does
         // not protect its own record key.
         if !candidate {
@@ -411,13 +411,13 @@ async fn collect_manifest_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     root_manifest_object_id: Option<&ManifestObjectId>,
-    manifest_ids: BTreeSet<ManifestObjectId>,
+    manifest_object_ids: BTreeSet<ManifestObjectId>,
     active_record_bases: &ActiveRecordBases,
     live: &mut LiveSet,
     budget: &mut PassBudget,
 ) -> CollectResult<()> {
     // Only a validated manifest can protect its table objects.
-    for manifest_object_id in &manifest_ids {
+    for manifest_object_id in &manifest_object_ids {
         charge(budget)?;
         let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
         match load_namespace_manifest_envelope_if_present(
@@ -463,7 +463,7 @@ async fn collect_manifest_tables<S: ObjectStore + ?Sized>(
             },
         }
     }
-    live.manifests = manifest_ids;
+    live.manifests = manifest_object_ids;
     Ok(())
 }
 

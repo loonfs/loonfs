@@ -9,7 +9,7 @@ use crate::namespace::control::{load_metadata_root_object, load_metadata_root_ob
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, MetadataRootState};
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
-use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 
@@ -53,7 +53,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
         Err(ImmutableWriteError::DifferentObject { .. }) => Err(
             MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestObjectConflict {
                 object_key: manifest_key,
-                manifest_id: manifest.payload.manifest_id,
+                manifest_no: manifest.payload.manifest_no,
             }),
         ),
         Err(ImmutableWriteError::Transport { source, .. }) => Err(
@@ -123,7 +123,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     // acknowledged publication. A root that no longer names the predecessor
     // therefore supersedes the candidate, whatever the head ordering says;
     // the caller rebases against the current root and retries.
-    let manifest_id = manifest.payload.manifest_id;
+    let manifest_no = manifest.payload.manifest_no;
     let manifest_object_id = manifest.payload.manifest_object_id.clone();
     let manifest_head_seq = manifest.payload.head_seq;
     for _attempt in 0..CONTENTION_RETRY_LIMIT {
@@ -139,7 +139,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             }
         };
         let current = &loaded.state;
-        if current.manifest_id == manifest_id
+        if current.manifest_no == manifest_no
             && current.manifest_object_id == manifest_object_id
             && current.manifest_payload_checksum == manifest.payload_checksum
         {
@@ -148,7 +148,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             // bytes).
             return Ok(ManifestPublicationOutcome::Published(current.clone()));
         }
-        if root_supersedes_candidate(current, manifest_head_seq, manifest_id) {
+        if root_supersedes_candidate(current, manifest_head_seq, manifest_no) {
             return Ok(ManifestPublicationOutcome::Superseded(current.clone()));
         }
         match &expected_predecessor {
@@ -161,7 +161,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
 
         let next = MetadataRootState {
             namespace_id: namespace_id.clone(),
-            manifest_id,
+            manifest_no,
             manifest_object_id: manifest_object_id.clone(),
             manifest_head_seq,
             manifest_payload_checksum: manifest.payload_checksum.clone(),
@@ -188,7 +188,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
                 if root_points_to_candidate(&recovered, &next) {
                     return Ok(ManifestPublicationOutcome::Published(recovered));
                 }
-                if root_supersedes_candidate(&recovered, manifest_head_seq, manifest_id) {
+                if root_supersedes_candidate(&recovered, manifest_head_seq, manifest_no) {
                     return Ok(ManifestPublicationOutcome::Superseded(recovered));
                 }
                 return Err(CoreError::store(&loaded.object_key, &error));
@@ -213,7 +213,7 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
     let object_key = loonfs_objectstore::keys::metadata_root(namespace_id);
     let next = MetadataRootState {
         namespace_id: namespace_id.clone(),
-        manifest_id: manifest.payload.manifest_id,
+        manifest_no: manifest.payload.manifest_no,
         manifest_object_id: manifest.payload.manifest_object_id.clone(),
         manifest_head_seq: manifest.payload.head_seq,
         manifest_payload_checksum: manifest.payload_checksum.clone(),
@@ -235,7 +235,7 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
 }
 
 fn root_points_to_candidate(current: &MetadataRootState, candidate: &MetadataRootState) -> bool {
-    current.manifest_id == candidate.manifest_id
+    current.manifest_no == candidate.manifest_no
         && current.manifest_object_id == candidate.manifest_object_id
         && current.manifest_head_seq == candidate.manifest_head_seq
         && current.manifest_payload_checksum == candidate.manifest_payload_checksum
@@ -244,9 +244,9 @@ fn root_points_to_candidate(current: &MetadataRootState, candidate: &MetadataRoo
 fn root_supersedes_candidate(
     current: &MetadataRootState,
     candidate_head_seq: ChangeSeq,
-    candidate_manifest_id: ManifestId,
+    candidate_manifest_no: ManifestNo,
 ) -> bool {
     current.manifest_head_seq > candidate_head_seq
         || (current.manifest_head_seq == candidate_head_seq
-            && current.manifest_id >= candidate_manifest_id)
+            && current.manifest_no >= candidate_manifest_no)
 }

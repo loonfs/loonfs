@@ -8,7 +8,7 @@ use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_grep::keyspace::{manifest_key, manifests_prefix, root_key};
 use loonfs_grep::root::{
     advance_grep_root, encode_grep_manifest, encode_grep_root, load_grep_root, seed_grep_root,
-    GrepIndexState, GrepIndexStatus, GrepManifestEnvelope, GrepManifestId, GrepManifestState,
+    GrepIndexState, GrepIndexStatus, GrepManifestEnvelope, GrepManifestObjectId, GrepManifestState,
     GrepRootEnvelope, GrepRootError, GrepRootPointer,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -23,11 +23,11 @@ async fn load_rejects_namespace_identity_mismatch() {
     let requested = namespace_id("requested");
     let wrong = root(namespace_id("other"), ChangeSeq(0));
     let manifest = GrepManifestEnvelope::from_state(wrong).expect("manifest envelope");
-    let manifest_id = GrepManifestId::generate();
+    let manifest_object_id = GrepManifestObjectId::generate();
     let manifest_bytes = encode_grep_manifest(&manifest).expect("encode manifest");
     store
         .put(
-            &manifest_key(&requested, &manifest_id),
+            &manifest_key(&requested, &manifest_object_id),
             Bytes::from(manifest_bytes),
             PutMode::CreateIfAbsent,
         )
@@ -35,7 +35,7 @@ async fn load_rejects_namespace_identity_mismatch() {
         .expect("write mismatched manifest");
     let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
         requested.clone(),
-        manifest_id,
+        manifest_object_id,
         manifest.payload_checksum().to_owned(),
     ))
     .expect("pointer envelope");
@@ -118,8 +118,8 @@ async fn identical_state_publishes_a_fresh_manifest_object() {
         "the two candidates carry the very same bytes"
     );
     assert_ne!(
-        first.manifest_id(),
-        second.manifest_id(),
+        first.manifest_object_id(),
+        second.manifest_object_id(),
         "and still occupy different objects"
     );
     assert_eq!(
@@ -143,10 +143,10 @@ async fn a_manifest_key_occupied_by_other_bytes_is_corrupt() {
     let state = root(namespace_id.clone(), ChangeSeq(0));
     let envelope = GrepManifestEnvelope::from_state(state.clone()).expect("manifest envelope");
     let bytes = encode_grep_manifest(&envelope).expect("encode manifest");
-    let manifest_id = GrepManifestId::generate();
+    let manifest_object_id = GrepManifestObjectId::generate();
     store
         .put(
-            &manifest_key(&namespace_id, &manifest_id),
+            &manifest_key(&namespace_id, &manifest_object_id),
             Bytes::from_static(b"not the manifest these bytes claim to be"),
             PutMode::Overwrite,
         )
@@ -156,7 +156,7 @@ async fn a_manifest_key_occupied_by_other_bytes_is_corrupt() {
     assert!(matches!(
         store
             .put_immutable_verified(
-                &manifest_key(&namespace_id, &manifest_id),
+                &manifest_key(&namespace_id, &manifest_object_id),
                 Bytes::from(bytes)
             )
             .await,

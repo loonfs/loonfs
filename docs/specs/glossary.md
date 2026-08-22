@@ -12,7 +12,7 @@
 | **Direntry** | A directory binding that places one inode under one parent directory and one name. |
 | **Path** | A human-friendly name built by walking visible directory bindings. Paths can change; inode identity does not. |
 | **Revision** | One immutable committed version of a file's content. Revisions are ordered by `revision_no` within an inode. |
-| **Namespace manifest** | The immutable object that describes one durable namespace file set: metadata SSTs, manifest sequence, head summary, fork references, and checkpoint records. |
+| **Namespace manifest** | The immutable object that describes one durable namespace file set: metadata SSTs, manifest number, head summary, fork references, and checkpoint records. |
 | **Checkpoint** | A durable pinned reference to one manifest version and namespace sequence. It lets readers and retention logic rely on that manifest without replaying the entire WAL history. |
 | **Snapshot** | An in-process read view. It may be stable for one operation or session, but it is not a durable checkpoint unless explicitly recorded as one. |
 | **Content object** | One immutable object containing file bytes. In v0, each file revision stores the whole file as one object. |

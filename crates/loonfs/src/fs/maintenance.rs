@@ -291,7 +291,7 @@ impl FsAdmin {
                     FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::Superseded => {
                         WalFlushStepOutcome::Superseded {
                             attempted_seq: flush.target_head_seq,
-                            current_manifest_id: flush.manifest_id,
+                            current_manifest_no: flush.manifest_no,
                         }
                     }
                 },
@@ -576,7 +576,7 @@ impl FsAdmin {
             .compaction_finished(&outcome, elapsed_ms);
         match &outcome {
             Ok(loonfs_core::MetadataCompactionJobOutcome::Published {
-                manifest_id,
+                manifest_no,
                 rows_read,
                 rows_written,
                 output_segments,
@@ -595,7 +595,7 @@ impl FsAdmin {
                     rows_read,
                     rows_written,
                     output_segments,
-                    manifest_id = manifest_id.0,
+                    manifest_no = manifest_no.0,
                     "streaming metadata compaction rebuilt a family group"
                 );
             }

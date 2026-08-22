@@ -7,9 +7,9 @@ use loonfs_api::wire::sst_blocks::BlockHandle;
 use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId};
 use loonfs_grep::root::{
     decode_grep_manifest, decode_grep_root, encode_grep_manifest, encode_grep_root,
-    GrepEnvelopeCodecError, GrepIndexState, GrepIndexStatus, GrepManifestEnvelope, GrepManifestId,
-    GrepManifestState, GrepManifestStateError, GrepReorganizeState, GrepRootEnvelope,
-    GrepRootPointer, GrepSegmentRef,
+    GrepEnvelopeCodecError, GrepIndexState, GrepIndexStatus, GrepManifestEnvelope,
+    GrepManifestObjectId, GrepManifestState, GrepManifestStateError, GrepReorganizeState,
+    GrepRootEnvelope, GrepRootPointer, GrepSegmentRef,
 };
 use loonfs_test_support::ids::namespace_id;
 
@@ -27,14 +27,14 @@ const ADDITIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload
 // Pointer ids are minted, not derived, so each fixture names an arbitrary
 // id and carries the digest of the manifest it points at. That pairing is
 // the whole binding between a pointer and its bytes.
-const BACKFILLING_MANIFEST_ID: &str = "gmf_1a2b3c4d5e6f70819a2b3c4d5e6f7081";
-const ACTIVE_MANIFEST_ID: &str = "gmf_2b3c4d5e6f70819a2b3c4d5e6f708192";
-const DISABLED_MANIFEST_ID: &str = "gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b";
+const BACKFILLING_MANIFEST_OBJECT_ID: &str = "gmf_1a2b3c4d5e6f70819a2b3c4d5e6f7081";
+const ACTIVE_MANIFEST_OBJECT_ID: &str = "gmf_2b3c4d5e6f70819a2b3c4d5e6f708192";
+const DISABLED_MANIFEST_OBJECT_ID: &str = "gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b";
 
-const BACKFILLING_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:da26d9831f13dc8e5ddde25d2fab527d5f7680fb6e04d4ef2b5c7b9e0d2c17e9","payload":{"namespace_id":"docs","manifest_id":"gmf_1a2b3c4d5e6f70819a2b3c4d5e6f7081","manifest_payload_checksum":"sha256:9830f4c85251848be5281ba26973b0696fd124976be41990079b3f2547857d64"}}"#;
-const ACTIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:b7e10bc96ab45a12553e905fbdbcd8306bdd7ce3f5535c8fc1277fbbee7370a2","payload":{"namespace_id":"docs","manifest_id":"gmf_2b3c4d5e6f70819a2b3c4d5e6f708192","manifest_payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271"}}"#;
-const DISABLED_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:a9e26310c31bcf2c8e51ec8372116a9728a41dd5b97f802a30fd0072dfd5bca6","payload":{"namespace_id":"docs","manifest_id":"gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b","manifest_payload_checksum":"sha256:23df5ecd9b434d54cd161da837a68125b58876f21015262840cd8924fcebef90"}}"#;
-const ADDITIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:7e69ef2152b1f24c139e7531679b774eb5e70c10dee482a677cec917383a233b","payload":{"namespace_id":"docs","manifest_id":"gmf_4d5e6f70819a2b3c4d5e6f70819a2b3c","manifest_payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271","future_pointer":true},"future_envelope":{"retained":true}}"#;
+const BACKFILLING_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:443aed6802ddefde4af3c114b92f244407abc12d5f66f93d900fcd851d52f154","payload":{"namespace_id":"docs","manifest_object_id":"gmf_1a2b3c4d5e6f70819a2b3c4d5e6f7081","manifest_payload_checksum":"sha256:9830f4c85251848be5281ba26973b0696fd124976be41990079b3f2547857d64"}}"#;
+const ACTIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:c45edca5a7938a9184e59e93d82bc4a1b92fa77e37d210e652d69f16b893d97d","payload":{"namespace_id":"docs","manifest_object_id":"gmf_2b3c4d5e6f70819a2b3c4d5e6f708192","manifest_payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271"}}"#;
+const DISABLED_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:85a15333cb34faa587ec66511cfca4a4d375e261c312c07aed5faa29bdc072f1","payload":{"namespace_id":"docs","manifest_object_id":"gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b","manifest_payload_checksum":"sha256:23df5ecd9b434d54cd161da837a68125b58876f21015262840cd8924fcebef90"}}"#;
+const ADDITIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:7b47a63a7ddc97b373bc6d434a133a06bcc088e2f57ba329a76e59cfa05fcbbc","payload":{"namespace_id":"docs","manifest_object_id":"gmf_4d5e6f70819a2b3c4d5e6f70819a2b3c","manifest_payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271","future_pointer":true},"future_envelope":{"retained":true}}"#;
 
 // The string spelling every grep envelope carried before the version became
 // a number, kept only to prove it is refused.
@@ -55,16 +55,16 @@ fn encoded_manifests_and_pointers_match_frozen_bytes() {
                 .expect("manifest JSON is UTF-8");
         assert_eq!(actual, expected);
 
-        let (manifest_id, expected) = match manifest.manifest_state().status() {
+        let (manifest_object_id, expected) = match manifest.manifest_state().status() {
             GrepIndexStatus::Backfilling { .. } => {
-                (BACKFILLING_MANIFEST_ID, BACKFILLING_POINTER_V1)
+                (BACKFILLING_MANIFEST_OBJECT_ID, BACKFILLING_POINTER_V1)
             }
-            GrepIndexStatus::Active { .. } => (ACTIVE_MANIFEST_ID, ACTIVE_POINTER_V1),
-            GrepIndexStatus::Disabled {} => (DISABLED_MANIFEST_ID, DISABLED_POINTER_V1),
+            GrepIndexStatus::Active { .. } => (ACTIVE_MANIFEST_OBJECT_ID, ACTIVE_POINTER_V1),
+            GrepIndexStatus::Disabled {} => (DISABLED_MANIFEST_OBJECT_ID, DISABLED_POINTER_V1),
         };
         let pointer = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
             namespace_id("docs"),
-            GrepManifestId::parse(manifest_id).expect("valid manifest id"),
+            GrepManifestObjectId::parse(manifest_object_id).expect("valid manifest object id"),
             manifest.payload_checksum().to_owned(),
         ))
         .expect("build pointer envelope");
@@ -78,13 +78,13 @@ fn encoded_manifests_and_pointers_match_frozen_bytes() {
 /// candidates over identical state are two distinct objects.
 #[test]
 fn identical_manifest_state_mints_distinct_ids() {
-    let first = GrepManifestId::generate();
-    let second = GrepManifestId::generate();
+    let first = GrepManifestObjectId::generate();
+    let second = GrepManifestObjectId::generate();
 
     assert_ne!(first, second);
     assert!(first.as_str().starts_with("gmf_"));
     assert_eq!(
-        GrepManifestId::parse(first.as_str()).expect("a generated id parses"),
+        GrepManifestObjectId::parse(first.as_str()).expect("a generated id parses"),
         first
     );
 }

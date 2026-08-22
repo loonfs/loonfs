@@ -18,7 +18,11 @@ field names and enum values are `snake_case`; fields holding typed identifiers
 are suffixed `_id`; every durable tagged union uses `kind` as its
 discriminator. The HTTP binding uses `kind` too, and additionally uses `mode`,
 `status`, `outcome`, and `inode_kind` as tag words where those read better at
-the call site.
+the call site. Number suffixes have fixed meanings. `_seq` is a position in
+the namespace commit history. `_no` is a monotonic counter scoped to a
+resource, such as a file, inode, or namespace. `_index` is a 0-based position
+inside a collection. `_number` is a 1-based position defined by a provider or
+tool.
 
 Unknown fields are tolerated where a reader must accept what a newer writer
 added, and rejected where accepting one would lose information the sender
@@ -976,9 +980,9 @@ becomes provenance only.
 
 A checkpoint is a durable pin to a namespace manifest version, stored as a
 first-class record under `checkpoints/` — never inside a manifest, and never
-an input to latest visibility. A record carries its basis facts (manifest id,
-seq, payload checksum, head commit id), a required tagged `owner`, and a
-tagged `status`. A `user` owner carries a name label and an optional
+an input to latest visibility. A record carries its basis facts (manifest
+number, seq, payload checksum, head commit id), a required tagged `owner`, and
+a tagged `status`. A `user` owner carries a name label and an optional
 `expires_at_ms`; a `fork` owner carries the target namespace the pin protects
 and a required `expires_at_ms`. There is no expiry field at the record's top
 level.
@@ -1934,12 +1938,12 @@ exactly one producer.
 ```text
 namespaces/{namespace_id}/extensions/grep/
 ├── root.json
-├── manifests/{manifest_id}.manifest.json
+├── manifests/{manifest_object_id}.manifest.json
 └── segments/{segment_id}.sst.zst
 ```
 
-`manifest_id` is `gmf_` followed by 32 lowercase hex characters, drawn fresh
-for every candidate. It names *which object* holds the manifest and says
+`manifest_object_id` is `gmf_` followed by 32 lowercase hex characters, drawn
+fresh for every candidate. It names *which object* holds the manifest and says
 nothing about its contents: a content-derived id would make an identical
 rebuild reuse the object an earlier publication left behind, and that reuse
 is what would let collection race a publication for a manifest the winner is
@@ -1952,8 +1956,9 @@ starts without grep state until grep is enabled for the target.
 
 - envelope: `kind = "grep_root"`, `format_version = 1`,
   `payload_checksum`, and raw JSON `payload`;
-- payload: `namespace_id`, `manifest_id`, and `manifest_payload_checksum`,
-  which must equal the named manifest envelope's own `payload_checksum`.
+- payload: `namespace_id`, `manifest_object_id`, and
+  `manifest_payload_checksum`, which must equal the named manifest envelope's
+  own `payload_checksum`.
 
 Each immutable manifest has the same envelope grammar with
 `kind = "grep_manifest"` and `format_version = 1`. Its payload is the full

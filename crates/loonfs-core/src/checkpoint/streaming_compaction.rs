@@ -70,7 +70,7 @@ use crate::time::current_time_ms;
 use crate::time::StdMonotonicTimer;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataFileRef, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::{ChangeSeq, ManifestId, MetadataCompactionId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -396,7 +396,7 @@ enum MergeStop {
 pub enum MetadataCompactionJobOutcome {
     /// The rebuilt group replaced its snapshot in a published manifest.
     Published {
-        manifest_id: ManifestId,
+        manifest_no: ManifestNo,
         rows_read: u64,
         rows_written: u64,
         input_bytes: u64,
@@ -424,7 +424,7 @@ pub enum MetadataCompactionJobOutcome {
 /// What one finalization attempt sequence decided.
 #[derive(Debug)]
 pub(super) enum Finalization {
-    Published(ManifestId),
+    Published(ManifestNo),
     Abandoned,
     Superseded,
     /// The cancellation token was set before this finalization published.
@@ -540,7 +540,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     )
     .await?
     {
-        Finalization::Published(manifest_id) => {
+        Finalization::Published(manifest_no) => {
             // The job stops heartbeating here and leaves its final lease
             // where it is. Deleting it would break the handoff: a collection
             // pass that captured its live set before this publication would
@@ -557,11 +557,11 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
                 input_bytes,
                 output_bytes,
                 output_segments,
-                manifest_id = manifest_id.0,
+                manifest_no = manifest_no.0,
                 "streaming metadata compaction published"
             );
             Ok(MetadataCompactionJobOutcome::Published {
-                manifest_id,
+                manifest_no,
                 rows_read,
                 rows_written,
                 input_bytes,
@@ -707,7 +707,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         drop(tables);
         match published {
             ManifestPublicationOutcome::Published(_) => {
-                return Ok(Finalization::Published(manifest.payload.manifest_id))
+                return Ok(Finalization::Published(manifest.payload.manifest_no))
             }
             ManifestPublicationOutcome::Superseded(_)
             | ManifestPublicationOutcome::RootCasRaceLost => {

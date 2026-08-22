@@ -495,7 +495,7 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
     .await
     .expect("second checkpoint")
     .checkpoint;
-    assert_ne!(moved_on.manifest_id, pinned.manifest_id);
+    assert_ne!(moved_on.manifest_no, pinned.manifest_no);
 
     // Simulate the crash residue: the pinned record stays active while
     // its basis manifest object vanishes.
@@ -3089,7 +3089,7 @@ async fn gc_retains_unrecognized_manifest_keys() {
         ),
         (
             format!("{manifest_prefix}invalid.manifest.json"),
-            b"invalid manifest id".as_slice(),
+            b"invalid manifest number".as_slice(),
         ),
     ];
     for (key, bytes) in &foreign_objects {
@@ -3599,7 +3599,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     .expect("second owner")
     .checkpoint;
     assert_ne!(first.checkpoint_id, second.checkpoint_id);
-    assert_eq!(first.manifest_id, second.manifest_id);
+    assert_eq!(first.manifest_no, second.manifest_no);
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await

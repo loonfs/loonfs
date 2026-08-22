@@ -355,15 +355,15 @@ mod tests {
 
     fn manifest_basis(
         owner: &str,
-        manifest_id: u64,
+        manifest_no: u64,
         object_nonce: &str,
         checksum: &str,
     ) -> MetadataBasis {
         MetadataBasis::Manifest(BasisManifest {
             owner_namespace_id: namespace_id(owner),
-            manifest_id: loonfs_api::ManifestId(manifest_id),
+            manifest_no: loonfs_api::ManifestNo(manifest_no),
             manifest_object_id: ManifestObjectId::parse(format!(
-                "{manifest_id:020}-{object_nonce}"
+                "{manifest_no:020}-{object_nonce}"
             ))
             .expect("valid manifest object id"),
             manifest_payload_checksum: checksum.to_owned(),
@@ -524,7 +524,7 @@ mod tests {
         // Manifest position is derived from the cohesive basis identity, and
         // the measured tail count remains cached payload rather than becoming
         // a second lookup coordinate.
-        assert_eq!(projection.basis().manifest_id(), loonfs_api::ManifestId(4));
+        assert_eq!(projection.basis().manifest_no(), loonfs_api::ManifestNo(4));
         assert_eq!(projection.manifest_head_seq(), ChangeSeq(7));
         projection.wal_tail_segments += 1;
         assert!(projection.is_reusable_for(&key, &roomy_options()));

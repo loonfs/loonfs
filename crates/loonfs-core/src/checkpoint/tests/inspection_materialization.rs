@@ -19,11 +19,11 @@ use super::super::validate::{
 };
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use futures::future::try_join_all;
-use loonfs_api::manifest_object_id_manifest_id;
+use loonfs_api::manifest_object_id_manifest_no;
 use loonfs_api::wire::manifest::{
     MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
 };
-use loonfs_api::{ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_api::{ManifestNo, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_objectstore::ObjectStore;
 
@@ -31,10 +31,10 @@ use loonfs_objectstore::ObjectStore;
 pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_id: ManifestId,
+    manifest_no: ManifestNo,
 ) -> Result<ManifestMaterializationForInspection, ManifestLoadError> {
     let manifest_object_id =
-        manifest_object_id_for_manifest_id(store, namespace_id, manifest_id).await?;
+        manifest_object_id_for_manifest_no(store, namespace_id, manifest_no).await?;
     load_manifest_materialization_for_inspection_if_present(
         store,
         namespace_id,
@@ -47,10 +47,10 @@ pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore 
 }
 
 #[cfg(test)]
-async fn manifest_object_id_for_manifest_id<S: ObjectStore + ?Sized>(
+async fn manifest_object_id_for_manifest_no<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_id: ManifestId,
+    manifest_no: ManifestNo,
 ) -> Result<ManifestObjectId, ManifestLoadError> {
     let prefix = metadata_manifest_prefix(namespace_id);
     let keys =
@@ -71,12 +71,12 @@ async fn manifest_object_id_for_manifest_id<S: ObjectStore + ?Sized>(
         let Ok(object_id) = ManifestObjectId::parse(raw_id) else {
             continue;
         };
-        if manifest_object_id_manifest_id(object_id.as_str()) == Some(manifest_id) {
+        if manifest_object_id_manifest_no(object_id.as_str()) == Some(manifest_no) {
             return Ok(object_id);
         }
     }
     Err(ManifestLoadError::MissingManifest {
-        object_key: format!("{prefix}{:020}-*.manifest.json", manifest_id.0),
+        object_key: format!("{prefix}{:020}-*.manifest.json", manifest_no.0),
     })
 }
 

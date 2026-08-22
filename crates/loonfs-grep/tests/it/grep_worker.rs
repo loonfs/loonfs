@@ -20,7 +20,7 @@ use loonfs_grep::keyspace::{
 };
 use loonfs_grep::root::{
     advance_grep_root, encode_grep_root, load_grep_root, GrepIndexState, GrepIndexStatus,
-    GrepManifestId, GrepManifestState, GrepRootEnvelope, GrepRootPointer,
+    GrepManifestObjectId, GrepManifestState, GrepRootEnvelope, GrepRootPointer,
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcOptions, GrepGcReport,
@@ -349,7 +349,7 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
         .await
         .expect("load root after failures")
         .expect("root remains");
-    assert_eq!(after.manifest_id(), maximum.manifest_id());
+    assert_eq!(after.manifest_object_id(), maximum.manifest_object_id());
     assert_eq!(
         after.manifest_state().index().next_run_ordinal,
         MAX_PUBLIC_INTEGER
@@ -1184,12 +1184,13 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         new_query(&store, &namespace_id, &request("needle")).await,
     );
 
-    let missing_manifest_id =
-        GrepManifestId::parse("gmf_11111111111111111111111111111111").expect("valid manifest id");
+    let missing_manifest_object_id =
+        GrepManifestObjectId::parse("gmf_11111111111111111111111111111111")
+            .expect("valid manifest object id");
     write_pointer(
         &*store,
         &namespace_id,
-        missing_manifest_id,
+        missing_manifest_object_id,
         sha256_digest(b"whatever the absent manifest would have carried"),
     )
     .await;
@@ -1198,11 +1199,12 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         new_query(&store, &namespace_id, &request("needle")).await,
     );
 
-    let corrupt_manifest_id =
-        GrepManifestId::parse("gmf_22222222222222222222222222222222").expect("valid manifest id");
+    let corrupt_manifest_object_id =
+        GrepManifestObjectId::parse("gmf_22222222222222222222222222222222")
+            .expect("valid manifest object id");
     store
         .put_overwrite(
-            &manifest_key(&namespace_id, &corrupt_manifest_id),
+            &manifest_key(&namespace_id, &corrupt_manifest_object_id),
             Bytes::from_static(b"corrupt manifest"),
         )
         .await
@@ -1210,7 +1212,7 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
     write_pointer(
         &*store,
         &namespace_id,
-        corrupt_manifest_id,
+        corrupt_manifest_object_id,
         sha256_digest(b"corrupt manifest"),
     )
     .await;
@@ -1255,16 +1257,19 @@ async fn backfilling_root_without_checkpoint_id_is_index_corrupt() {
         .expect("load backfilling root")
         .expect("backfilling root exists");
     let manifest_bytes = store
-        .get(&manifest_key(&namespace_id, root.manifest_id()), None)
+        .get(
+            &manifest_key(&namespace_id, root.manifest_object_id()),
+            None,
+        )
         .await
         .expect("read backfilling manifest")
         .expect("backfilling manifest exists");
-    let (corrupt_manifest_id, corrupt_payload_checksum) =
+    let (corrupt_manifest_object_id, corrupt_payload_checksum) =
         write_manifest_without_checkpoint_id(&*store, &namespace_id, &manifest_bytes).await;
     write_pointer(
         &*store,
         &namespace_id,
-        corrupt_manifest_id,
+        corrupt_manifest_object_id,
         corrupt_payload_checksum,
     )
     .await;
@@ -1280,7 +1285,7 @@ async fn write_manifest_without_checkpoint_id(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
     manifest_bytes: &[u8],
-) -> (GrepManifestId, String) {
+) -> (GrepManifestObjectId, String) {
     let mut document: serde_json::Value =
         serde_json::from_slice(manifest_bytes).expect("decode valid manifest document");
     document["payload"]["status"]
@@ -1292,26 +1297,26 @@ async fn write_manifest_without_checkpoint_id(
         serde_json::to_vec(&document["payload"]).expect("encode corrupt manifest payload");
     let payload_checksum = sha256_digest(&payload_bytes);
     document["payload_checksum"] = serde_json::Value::String(payload_checksum.clone());
-    let manifest_id = GrepManifestId::generate();
+    let manifest_object_id = GrepManifestObjectId::generate();
     store
         .put_overwrite(
-            &manifest_key(namespace_id, &manifest_id),
+            &manifest_key(namespace_id, &manifest_object_id),
             Bytes::from(serde_json::to_vec(&document).expect("encode corrupt manifest document")),
         )
         .await
         .expect("write manifest missing checkpoint id");
-    (manifest_id, payload_checksum)
+    (manifest_object_id, payload_checksum)
 }
 
 async fn write_pointer(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
-    manifest_id: GrepManifestId,
+    manifest_object_id: GrepManifestObjectId,
     manifest_payload_checksum: String,
 ) {
     let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
         namespace_id.clone(),
-        manifest_id,
+        manifest_object_id,
         manifest_payload_checksum,
     ))
     .expect("build pointer");
@@ -1836,7 +1841,7 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
         "the unreferenced candidate was examined and kept"
     );
     let advanced = advanced.expect("pointer advance completes");
-    let candidate_key = manifest_key(&namespace_id, advanced.manifest_id());
+    let candidate_key = manifest_key(&namespace_id, advanced.manifest_object_id());
     assert!(
         !manifests_before.contains(&candidate_key),
         "the candidate claimed an object no earlier publication wrote"
@@ -1925,7 +1930,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         &live_namespace,
         &live_root.manifest_state().segments()[0].segment_id,
     );
-    let live_manifest_key = manifest_key(&live_namespace, live_root.manifest_id());
+    let live_manifest_key = manifest_key(&live_namespace, live_root.manifest_object_id());
     let orphan_key = segment_key(&live_namespace, &IndexSegmentId::generate());
     store
         .put(
@@ -2151,7 +2156,7 @@ async fn seed_collectable_namespace(root: &Path, namespace_id: &NamespaceId) -> 
 
 /// Aged, unreferenced segment keys with fixed ids, so two independently
 /// seeded stores hold the same collectable garbage under the same names —
-/// the live segment and manifest ids are minted and cannot match.
+/// the live segment and manifest object ids are minted and cannot match.
 fn orphan_keys(namespace_id: &NamespaceId) -> Vec<String> {
     (0..6u8)
         .map(|index| {
@@ -2187,9 +2192,9 @@ async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
         .list_prefix(&grep_prefix(&namespace_id))
         .await
         .expect("list paged-store keys");
-    // The live segment and manifest ids are minted and differ between the
-    // two stores; what must match is how many keys there are and which of
-    // them are collectable.
+    // The live segment and manifest object ids are minted and differ
+    // between the two stores; what must match is how many keys there are
+    // and which of them are collectable.
     assert_eq!(
         whole_before.len(),
         paged_before.len(),

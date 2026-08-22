@@ -1,7 +1,7 @@
 //! Manifest load errors, classified as corruption versus store trouble.
 
 use loonfs_api::wire::manifest::MetadataTableFamily;
-use loonfs_api::{ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_api::{ManifestNo, ManifestObjectId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -32,12 +32,12 @@ pub enum ManifestLoadError {
         actual: NamespaceId,
     },
     #[error(
-        "namespace manifest id mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
+        "namespace manifest number mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
-    ManifestIdMismatch {
+    ManifestNoMismatch {
         object_key: String,
-        expected: ManifestId,
-        actual: ManifestId,
+        expected: ManifestNo,
+        actual: ManifestNo,
     },
     #[error(
         "namespace manifest object id mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
@@ -48,18 +48,18 @@ pub enum ManifestLoadError {
         actual: ManifestObjectId,
     },
     #[error(
-        "namespace manifest object conflict for `{object_key}` manifest `{manifest_id}`: the immutable key contains different bytes"
+        "namespace manifest object conflict for `{object_key}` manifest `{manifest_no}`: the immutable key contains different bytes"
     )]
     ManifestObjectConflict {
         object_key: String,
-        manifest_id: ManifestId,
+        manifest_no: ManifestNo,
     },
     #[error(
-        "namespace manifest conflict for `{object_key}` manifest `{manifest_id}`: expected payload checksum `{expected_payload_checksum}`, actual `{actual_payload_checksum}`"
+        "namespace manifest conflict for `{object_key}` manifest `{manifest_no}`: expected payload checksum `{expected_payload_checksum}`, actual `{actual_payload_checksum}`"
     )]
     ManifestConflict {
         object_key: String,
-        manifest_id: ManifestId,
+        manifest_no: ManifestNo,
         expected_payload_checksum: String,
         actual_payload_checksum: String,
     },

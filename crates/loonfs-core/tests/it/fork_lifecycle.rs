@@ -19,7 +19,7 @@ use loonfs_api::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataTableFamily,
         NamespaceManifestEnvelope,
     },
-    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestId, NamespaceId,
+    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId,
 };
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_head_control;
@@ -130,7 +130,7 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
     let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status");
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_no, None);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
     // And so do writes.
@@ -184,7 +184,7 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
     let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status after flush");
-    assert_eq!(status.current_manifest_id, Some(ManifestId(1)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
 }
 
 /// Exactly one of two concurrent creates of the same id wins; the loser is

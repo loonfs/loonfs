@@ -256,7 +256,7 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
-    use loonfs_api::{ChangeSeq, CommitId, ManifestId, ManifestObjectId};
+    use loonfs_api::{ChangeSeq, CommitId, ManifestNo, ManifestObjectId};
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::{tempdir, TempDir};
@@ -279,7 +279,7 @@ mod tests {
         CheckpointRecordState {
             checkpoint_id,
             namespace_id,
-            manifest_id: ManifestId(1),
+            manifest_no: ManifestNo(1),
             manifest_object_id: ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
                 .expect("manifest object id"),
             manifest_head_seq: ChangeSeq(1),

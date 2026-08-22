@@ -82,7 +82,7 @@ use loonfs_api::wire::sst_blocks::{
 };
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId,
-    ManifestId, ManifestObjectId, NameKey, NamespaceId, RevisionNo,
+    ManifestNo, ManifestObjectId, NameKey, NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::keys::{
     metadata_manifest_object, metadata_manifest_prefix, metadata_table, wal_head, wal_segment,
@@ -217,7 +217,7 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
 }
 
 /// Checkpoints, then folds every L0 run into the base through
-/// reorganization units, returning the resulting current manifest id. The
+/// reorganization units, returning the resulting current manifest number. The
 /// old synchronous rebuild produced this shape in one checkpoint call;
 /// tests that need a compacted base with a specific segmentation policy use
 /// this instead.
@@ -226,7 +226,7 @@ async fn checkpoint_then_reorganize<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
-) -> ManifestId {
+) -> ManifestNo {
     create_checkpoint(store, namespace_id, context)
         .await
         .expect("create checkpoint");
@@ -315,7 +315,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
-) -> ManifestId {
+) -> ManifestNo {
     let fold_policy = MetadataLsmPolicy {
         max_l0_runs: NonZeroUsize::MIN,
         ..policy
@@ -343,7 +343,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
         .await
         .expect("read metadata root")
         .state
-        .manifest_id
+        .manifest_no
 }
 
 /// Runs the job a step planned, the way the maintenance runner's background
@@ -380,13 +380,13 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<CurrentFileState> {
-    let manifest_id = load_metadata_root_object(store, namespace_id)
+    let manifest_no = load_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
-        .manifest_id;
+        .manifest_no;
     let materialized =
-        load_manifest_materialization_for_inspection(store, namespace_id, manifest_id)
+        load_manifest_materialization_for_inspection(store, namespace_id, manifest_no)
             .await
             .expect("materialize the manifest");
     let inode_ids: Vec<InodeId> = materialized
@@ -512,8 +512,8 @@ async fn current_manifest_key<S: ObjectStore + ?Sized>(
     )
 }
 
-fn manifest_object_id(manifest_id: ManifestId) -> ManifestObjectId {
-    ManifestObjectId::parse(format!("{:020}-0123456789abcdef", manifest_id.0))
+fn manifest_object_id(manifest_no: ManifestNo) -> ManifestObjectId {
+    ManifestObjectId::parse(format!("{:020}-0123456789abcdef", manifest_no.0))
         .expect("valid manifest object id")
 }
 
@@ -639,8 +639,8 @@ fn test_context() -> MutationContext {
     mutation_context("test-writer", 1_000)
 }
 
-fn manifest_id(seq: ChangeSeq) -> ManifestId {
-    ManifestId(seq.0)
+fn manifest_no(seq: ChangeSeq) -> ManifestNo {
+    ManifestNo(seq.0)
 }
 
 async fn write_file_and_checkpoint(
@@ -782,7 +782,7 @@ use super::runs::l0_run_count;
 #[cfg(test)]
 pub(crate) struct ManifestMetadataSource<'a> {
     pub(super) head: &'a HeadState,
-    pub(super) basis_manifest_id: Option<ManifestId>,
+    pub(super) basis_manifest_no: Option<ManifestNo>,
     pub(super) retention_floor_seq: ChangeSeq,
     pub(super) metadata_state: &'a MetadataState,
 }
@@ -793,13 +793,13 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     namespace_id: &NamespaceId,
     source: ManifestMetadataSource<'_>,
     policy: MetadataLsmPolicy,
-    manifest_id: ManifestId,
+    manifest_no: ManifestNo,
 ) -> crate::error::Result<NamespaceManifestEnvelope> {
-    let manifest_object_id = ManifestObjectId::generate(manifest_id);
+    let manifest_object_id = ManifestObjectId::generate(manifest_no);
     let head = source.head;
     let metadata_state = source.metadata_state;
     let head_seq = head.seq;
-    let previous_manifest = match source.basis_manifest_id {
+    let previous_manifest = match source.basis_manifest_no {
         Some(previous_id) => Some(
             load_manifest_materialization_for_inspection(store, namespace_id, previous_id)
                 .await
@@ -869,7 +869,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
 
     NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
-        manifest_id,
+        manifest_no,
         manifest_object_id,
         head_seq,
         head_commit_id: head.head_commit_id.clone(),

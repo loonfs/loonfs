@@ -109,6 +109,6 @@ fn checkpoint_summary(
         created_at_ms: record.created_at_ms,
         expires_at_ms,
         checkpoint_seq: record.manifest_head_seq,
-        manifest_id: record.manifest_id,
+        manifest_no: record.manifest_no,
     }
 }

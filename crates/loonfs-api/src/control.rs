@@ -6,7 +6,7 @@ use crate::envelope::EnvelopeCodecError;
 use crate::WriterEpoch;
 use crate::{
     ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
-    ContentRefKind, ContentStoreId, InodeId, ManifestId, ManifestObjectId, MetadataCompactionId,
+    ContentRefKind, ContentStoreId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
     NamespaceId, UploadId, WalSegmentId,
 };
 use serde::de::DeserializeOwned;
@@ -113,8 +113,8 @@ pub struct MetadataRootState {
     /// Namespace whose materialized file set this root selects.
     pub namespace_id: NamespaceId,
     /// Monotonic logical position of the selected manifest.
-    pub manifest_id: ManifestId,
-    /// Immutable candidate chosen at `manifest_id`.
+    pub manifest_no: ManifestNo,
+    /// Immutable candidate chosen at `manifest_no`.
     pub manifest_object_id: ManifestObjectId,
     /// Greatest namespace sequence represented by the selected manifest.
     pub manifest_head_seq: ChangeSeq,
@@ -264,8 +264,8 @@ pub struct CheckpointRecordState {
     /// Source namespace whose manifest and metadata remain pinned.
     pub namespace_id: NamespaceId,
     /// Logical manifest position of the pinned basis.
-    pub manifest_id: ManifestId,
-    /// Immutable manifest candidate selected at `manifest_id`.
+    pub manifest_no: ManifestNo,
+    /// Immutable manifest candidate selected at `manifest_no`.
     pub manifest_object_id: ManifestObjectId,
     /// Greatest source sequence materialized by the pinned manifest.
     pub manifest_head_seq: ChangeSeq,

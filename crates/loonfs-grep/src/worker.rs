@@ -1769,7 +1769,7 @@ fn live_grep_keys(root: &LoadedGrepRoot) -> BTreeSet<String> {
     let namespace_id = root.manifest_state().namespace_id();
     let mut live = BTreeSet::from([
         root_key(namespace_id),
-        manifest_key(namespace_id, root.manifest_id()),
+        manifest_key(namespace_id, root.manifest_object_id()),
     ]);
     live.extend(
         root.manifest_state()

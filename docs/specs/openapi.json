@@ -3864,7 +3864,7 @@
           "owner",
           "created_at_ms",
           "checkpoint_seq",
-          "manifest_id"
+          "manifest_no"
         ],
         "properties": {
           "checkpoint_id": {
@@ -3887,8 +3887,8 @@
             "description": "When garbage collection may release the record without being asked,\nin Unix milliseconds. Absent means the pin holds until it is\nreleased. An instant already in the past is a record whose expiry\nhas passed and which no collection pass has reached yet: it is still\na root, so it is still listed.",
             "minimum": 0
           },
-          "manifest_id": {
-            "$ref": "#/components/schemas/ManifestId",
+          "manifest_no": {
+            "$ref": "#/components/schemas/ManifestNo",
             "description": "Manifest pinned by the checkpoint."
           },
           "owner": {
@@ -5138,10 +5138,10 @@
           }
         }
       },
-      "ManifestId": {
+      "ManifestNo": {
         "type": "integer",
         "format": "int64",
-        "description": "Version number for a namespace manifest. It can increase when metadata changes, even if no namespace commit is written.",
+        "description": "Monotonic manifest counter for one namespace. It can increase when metadata changes, even if no namespace commit is written.",
         "maximum": 9007199254740991,
         "minimum": 0
       },
@@ -5217,8 +5217,8 @@
           "wal_tail_segments"
         ],
         "properties": {
-          "current_manifest_id": {
-            "$ref": "#/components/schemas/ManifestId",
+          "current_manifest_no": {
+            "$ref": "#/components/schemas/ManifestNo",
             "description": "Current manifest pointer recorded by the head."
           },
           "head_seq": {
@@ -6861,7 +6861,7 @@
         "description": "The root already covered the attempted sequence — another publisher\ngot there first.",
         "required": [
           "attempted_seq",
-          "current_manifest_id",
+          "current_manifest_no",
           "outcome"
         ],
         "properties": {
@@ -6869,8 +6869,8 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Sequence this step attempted to flush through."
           },
-          "current_manifest_id": {
-            "$ref": "#/components/schemas/ManifestId",
+          "current_manifest_no": {
+            "$ref": "#/components/schemas/ManifestNo",
             "description": "Manifest the root currently references."
           },
           "outcome": {

@@ -100,7 +100,7 @@ fn reads_name_their_anchor_and_the_lookup_that_came_back_empty() {
     // with their `=` so a line that merely carries the word cannot satisfy
     // the assertion.
     let walk = find_line(&log, "phase=\"walk_path\"");
-    for field in ["head_seq=", "manifest_id=", "manifest_head_seq="] {
+    for field in ["head_seq=", "manifest_no=", "manifest_head_seq="] {
         assert!(walk.contains(field), "missing `{field}` in: {walk}");
     }
     // The walk that found nothing says which of the agreeing lookups was

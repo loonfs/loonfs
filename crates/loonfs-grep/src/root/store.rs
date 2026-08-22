@@ -10,7 +10,7 @@ use super::codec::{
     GrepManifestEnvelope, GrepRootEnvelope,
 };
 use super::error::{GrepRootError, Result};
-use super::state::{GrepManifestId, GrepManifestState, GrepRootPointer};
+use super::state::{GrepManifestObjectId, GrepManifestState, GrepRootPointer};
 use crate::keyspace::{manifest_key, root_key};
 use bytes::Bytes;
 use loonfs::StoreFailureClass;
@@ -64,8 +64,8 @@ impl LoadedGrepRoot {
     }
 
     /// Object the pointer names, which is the manifest's whole identity.
-    pub fn manifest_id(&self) -> &GrepManifestId {
-        self.pointer.pointer().manifest_id()
+    pub fn manifest_object_id(&self) -> &GrepManifestObjectId {
+        self.pointer.pointer().manifest_object_id()
     }
 
     pub fn manifest_state(&self) -> &GrepManifestState {
@@ -113,7 +113,7 @@ pub async fn load_grep_manifest<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     pointer: &GrepRootPointer,
 ) -> Result<Option<GrepManifestEnvelope>> {
-    let object_key = manifest_key(namespace_id, pointer.manifest_id());
+    let object_key = manifest_key(namespace_id, pointer.manifest_object_id());
     let Some(bytes) = store
         .get(&object_key, None)
         .await
@@ -153,7 +153,7 @@ pub async fn load_grep_root<S: ObjectStore + ?Sized>(
     let Some(manifest) = load_grep_manifest(store, namespace_id, pointer.pointer()).await? else {
         return Err(GrepRootError::MissingManifest {
             root_key: pointer.object_key.clone(),
-            manifest_key: manifest_key(namespace_id, pointer.pointer().manifest_id()),
+            manifest_key: manifest_key(namespace_id, pointer.pointer().manifest_object_id()),
         });
     };
     Ok(Some(LoadedGrepRoot { pointer, manifest }))
@@ -172,7 +172,7 @@ pub async fn seed_grep_root<S: ObjectStore + ?Sized>(
     let object_key = root_key(state.namespace_id());
     let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
         state.namespace_id().clone(),
-        written.manifest_id,
+        written.manifest_object_id,
         manifest.payload_checksum().to_owned(),
     ))
     .map_err(|error| corrupt(&object_key, error))?;
@@ -224,7 +224,7 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
     let written = write_grep_manifest(store, next).await?;
     let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
         next.namespace_id().clone(),
-        written.manifest_id,
+        written.manifest_object_id,
         written.envelope.payload_checksum().to_owned(),
     ))
     .map_err(|error| corrupt(&current.pointer.object_key, error))?;
@@ -260,7 +260,7 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
 }
 
 struct WrittenGrepManifest {
-    manifest_id: GrepManifestId,
+    manifest_object_id: GrepManifestObjectId,
     envelope: GrepManifestEnvelope,
 }
 
@@ -276,8 +276,8 @@ async fn write_grep_manifest<S: ObjectStore + ?Sized>(
 ) -> Result<WrittenGrepManifest> {
     let envelope = GrepManifestEnvelope::from_state(state.clone())
         .map_err(|error| corrupt(&root_key(state.namespace_id()), error))?;
-    let manifest_id = GrepManifestId::generate();
-    let object_key = manifest_key(state.namespace_id(), &manifest_id);
+    let manifest_object_id = GrepManifestObjectId::generate();
+    let object_key = manifest_key(state.namespace_id(), &manifest_object_id);
     let bytes =
         Bytes::from(encode_grep_manifest(&envelope).map_err(|error| corrupt(&object_key, error))?);
     // Create-only plus the byte check stay on this write even though a
@@ -288,7 +288,7 @@ async fn write_grep_manifest<S: ObjectStore + ?Sized>(
         .await
         .map_err(immutable_write_error)?;
     Ok(WrittenGrepManifest {
-        manifest_id,
+        manifest_object_id,
         envelope,
     })
 }

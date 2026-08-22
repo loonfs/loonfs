@@ -31,7 +31,7 @@ use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainL
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{
-    next_public_ordinal, ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestId,
+    next_public_ordinal, ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo,
     ManifestObjectId, NamespaceId, MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
@@ -41,7 +41,7 @@ use tracing::Instrument;
 ///
 /// This may be a newly published manifest or one that was already current.
 pub(super) struct FlushedBasis {
-    pub(super) manifest_id: ManifestId,
+    pub(super) manifest_no: ManifestNo,
     pub(super) manifest_object_id: ManifestObjectId,
     pub(super) manifest_head_seq: ChangeSeq,
     pub(super) manifest_payload_checksum: String,
@@ -51,8 +51,8 @@ pub(super) struct FlushedBasis {
     pub(super) target_head_seq: ChangeSeq,
     /// Manifest `metadata/root.json` references after the attempt — the
     /// basis itself, or the newer root that superseded it.
-    pub(super) root_after_manifest_id: ManifestId,
-    /// Sequence covered by `root_after_manifest_id`.
+    pub(super) root_after_manifest_no: ManifestNo,
+    /// Sequence covered by `root_after_manifest_no`.
     pub(super) root_after_head_seq: ChangeSeq,
     pub(super) outcome: FlushWalOutcome,
 }
@@ -94,7 +94,7 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
                 return Ok(FlushWalResponse {
                     namespace_id: namespace_id.clone(),
                     target_head_seq: basis.target_head_seq,
-                    manifest_id: basis.root_after_manifest_id,
+                    manifest_no: basis.root_after_manifest_no,
                     manifest_head_seq: basis.root_after_head_seq,
                     outcome: basis.outcome,
                 });
@@ -125,7 +125,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         ))
         .await?;
     let head_seq = projection.head.seq;
-    let basis_manifest_id = projection.basis.manifest_id();
+    let basis_manifest_no = projection.basis.manifest_no();
     // Only a manifest this namespace published can already cover the head.
     // A genesis or fork basis must be materialized here even at an
     // unchanged head, because the namespace owns no manifest yet and a
@@ -136,13 +136,13 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     {
         let basis_manifest = basis_manifest.expect("an owned basis names a manifest");
         return Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
-            manifest_id: basis_manifest.manifest_id,
+            manifest_no: basis_manifest.manifest_no,
             manifest_object_id: basis_manifest.manifest_object_id.clone(),
             manifest_head_seq: head_seq,
             manifest_payload_checksum: basis_manifest.manifest_payload_checksum.clone(),
             head_commit_id: projection.head.head_commit_id.clone(),
             target_head_seq: head_seq,
-            root_after_manifest_id: basis_manifest.manifest_id,
+            root_after_manifest_no: basis_manifest.manifest_no,
             root_after_head_seq: head_seq,
             outcome: FlushWalOutcome::AlreadyCurrent,
         })));
@@ -151,13 +151,13 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     // One generated object id, one write. The generated id ends in 16 random
     // hex characters, so the key is this attempt's alone and a conflict under
     // it is corruption rather than contention.
-    let manifest_id = next_manifest_id_after(basis_manifest_id)?;
+    let manifest_no = next_manifest_no_after(basis_manifest_no)?;
     let manifest = build_namespace_manifest_for_projection(
         store,
         namespace_id,
         &projection,
-        manifest_id,
-        ManifestObjectId::generate(manifest_id),
+        manifest_no,
+        ManifestObjectId::generate(manifest_no),
     )
     .await?;
     write_namespace_manifest(store, &manifest)
@@ -171,7 +171,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     // Advance the root for readers. A superseded outcome is fine: the
     // manifest we wrote stays durable and valid as a basis even when a
     // newer root already won.
-    let (outcome, root_after_manifest_id, root_after_head_seq) = match publish_metadata_root(
+    let (outcome, root_after_manifest_no, root_after_head_seq) = match publish_metadata_root(
         store,
         namespace_id,
         &manifest,
@@ -189,12 +189,12 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     {
         ManifestPublicationOutcome::Published(_) => (
             FlushWalOutcome::Published,
-            manifest.payload.manifest_id,
+            manifest.payload.manifest_no,
             manifest.payload.head_seq,
         ),
         ManifestPublicationOutcome::Superseded(current) => (
             FlushWalOutcome::Superseded,
-            current.manifest_id,
+            current.manifest_no,
             current.manifest_head_seq,
         ),
         ManifestPublicationOutcome::RootCasRaceLost => {
@@ -202,13 +202,13 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         }
     };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
-        manifest_id: manifest.payload.manifest_id,
+        manifest_no: manifest.payload.manifest_no,
         manifest_object_id: manifest.payload.manifest_object_id.clone(),
         manifest_head_seq: manifest.payload.head_seq,
         manifest_payload_checksum: manifest.payload_checksum.clone(),
         head_commit_id: projection.head.head_commit_id.clone(),
         target_head_seq: head_seq,
-        root_after_manifest_id,
+        root_after_manifest_no,
         root_after_head_seq,
         outcome,
     })))
@@ -311,11 +311,13 @@ fn ensure_reconstructed_head_matches(
     Ok(())
 }
 
-pub(super) fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId> {
+pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> {
     next_public_ordinal(current.0)
-        .map(ManifestId)
+        .map(ManifestNo)
         .ok_or_else(|| {
-            CoreError::Internal(format!("manifest id cannot exceed {MAX_PUBLIC_INTEGER}"))
+            CoreError::Internal(format!(
+                "manifest number cannot exceed {MAX_PUBLIC_INTEGER}"
+            ))
         })
 }
 
@@ -348,7 +350,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     projection: &RootProjection<'_, S>,
-    manifest_id: ManifestId,
+    manifest_no: ManifestNo,
     manifest_object_id: ManifestObjectId,
 ) -> Result<NamespaceManifestEnvelope> {
     let head_seq = projection.head.seq;
@@ -395,7 +397,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
 
     NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
-        manifest_id,
+        manifest_no,
         manifest_object_id,
         head_seq,
         head_commit_id: projection.head.head_commit_id.clone(),
@@ -417,15 +419,15 @@ mod ordinal_tests {
     use super::*;
 
     #[test]
-    fn manifest_id_advancement_accepts_the_maximum_and_rejects_the_next_value() {
+    fn manifest_no_advancement_accepts_the_maximum_and_rejects_the_next_value() {
         assert_eq!(
-            next_manifest_id_after(ManifestId(MAX_PUBLIC_INTEGER - 1))
+            next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER - 1))
                 .expect("advance to public maximum"),
-            ManifestId(MAX_PUBLIC_INTEGER)
+            ManifestNo(MAX_PUBLIC_INTEGER)
         );
 
-        let error = next_manifest_id_after(ManifestId(MAX_PUBLIC_INTEGER))
-            .expect_err("manifest id must not exceed the public maximum");
+        let error = next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER))
+            .expect_err("manifest number must not exceed the public maximum");
         assert!(matches!(
             error,
             CoreError::Internal(message) if message.contains("cannot exceed")

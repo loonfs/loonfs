@@ -24,7 +24,7 @@ use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::{
     AbsolutePath, AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,
     AuthoritativePathEntryKind, ChangeSeq, ContentRef, ContentStoreId, DirectoryPageCursor,
-    DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestId,
+    DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo,
     NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
@@ -102,7 +102,7 @@ impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReadAnchor {
     head_seq: ChangeSeq,
-    manifest_id: ManifestId,
+    manifest_no: ManifestNo,
     manifest_head_seq: ChangeSeq,
 }
 
@@ -214,7 +214,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             });
         }
         let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
-        let manifest_id = basis.manifest_id();
+        let manifest_no = basis.manifest_no();
         let loaded_basis = load_basis_metadata_tables(
             store,
             load_context.table_cache,
@@ -227,12 +227,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let manifest_head = head_from_manifest(&head, tables.manifest());
         let anchor = ReadAnchor {
             head_seq: head.seq,
-            manifest_id,
+            manifest_no,
             manifest_head_seq: manifest_head.seq,
         };
         let cache_key = WalTailProjectionCacheKey {
             namespace_id: namespace_id.clone(),
-            manifest_id,
+            manifest_no,
             manifest_head_seq: manifest_head.seq,
             head_seq: head.seq,
             head_etag: load_context.head_etag.to_owned(),
@@ -299,7 +299,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         fields(
             phase = "walk_path",
             head_seq = self.anchor.head_seq.0,
-            manifest_id = self.anchor.manifest_id.0,
+            manifest_no = self.anchor.manifest_no.0,
             manifest_head_seq = self.anchor.manifest_head_seq.0,
         )
     )]
@@ -636,7 +636,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         fields(
             phase = "walk_path",
             head_seq = self.anchor.head_seq.0,
-            manifest_id = self.anchor.manifest_id.0,
+            manifest_no = self.anchor.manifest_no.0,
             manifest_head_seq = self.anchor.manifest_head_seq.0,
         )
     )]

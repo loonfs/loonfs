@@ -2,7 +2,7 @@
 
 use super::error::GrepManifestStateError;
 use loonfs_api::wire::sst_blocks::BlockHandle;
-pub use loonfs_api::GrepManifestId;
+pub use loonfs_api::GrepManifestObjectId;
 use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,19 +23,19 @@ pub const GREP_INDEX_FORMAT_VERSION: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub struct GrepRootPointer {
     namespace_id: NamespaceId,
-    manifest_id: GrepManifestId,
+    manifest_object_id: GrepManifestObjectId,
     manifest_payload_checksum: String,
 }
 
 impl GrepRootPointer {
     pub fn new(
         namespace_id: NamespaceId,
-        manifest_id: GrepManifestId,
+        manifest_object_id: GrepManifestObjectId,
         manifest_payload_checksum: String,
     ) -> Self {
         Self {
             namespace_id,
-            manifest_id,
+            manifest_object_id,
             manifest_payload_checksum,
         }
     }
@@ -44,8 +44,8 @@ impl GrepRootPointer {
         &self.namespace_id
     }
 
-    pub fn manifest_id(&self) -> &GrepManifestId {
-        &self.manifest_id
+    pub fn manifest_object_id(&self) -> &GrepManifestObjectId {
+        &self.manifest_object_id
     }
 
     /// Must equal `payload_checksum` in the referenced manifest envelope.

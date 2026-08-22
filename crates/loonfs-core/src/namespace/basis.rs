@@ -21,7 +21,7 @@ use crate::namespace::control::{
 };
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::NamespaceId;
-use loonfs_api::{manifest_object_id_manifest_id, ChangeSeq, ManifestId, ManifestObjectId};
+use loonfs_api::{manifest_object_id_manifest_no, ChangeSeq, ManifestNo, ManifestObjectId};
 use loonfs_objectstore::ObjectStore;
 
 /// The materialized starting point every read and flush builds on.
@@ -42,7 +42,7 @@ pub struct BasisManifest {
     /// Namespace under whose prefix the manifest and its tables live.
     pub owner_namespace_id: NamespaceId,
     /// Logical manifest position, which the object id encodes.
-    pub manifest_id: ManifestId,
+    pub manifest_no: ManifestNo,
     pub manifest_object_id: ManifestObjectId,
     /// The `payload_checksum` the loaded manifest must carry.
     pub manifest_payload_checksum: String,
@@ -89,10 +89,10 @@ impl MetadataBasis {
 
     /// Logical position this basis sits at. Genesis is position zero: the
     /// namespace's first published manifest is one past it.
-    pub fn manifest_id(&self) -> ManifestId {
+    pub fn manifest_no(&self) -> ManifestNo {
         match self {
-            MetadataBasis::Genesis => ManifestId(0),
-            MetadataBasis::Manifest(manifest) => manifest.manifest_id,
+            MetadataBasis::Genesis => ManifestNo(0),
+            MetadataBasis::Manifest(manifest) => manifest.manifest_no,
         }
     }
 
@@ -119,7 +119,7 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     let basis = match root {
         Some(root) => MetadataBasis::Manifest(BasisManifest {
             owner_namespace_id: namespace_id.clone(),
-            manifest_id: root.state.manifest_id,
+            manifest_no: root.state.manifest_no,
             manifest_object_id: root.state.manifest_object_id,
             manifest_payload_checksum: root.state.manifest_payload_checksum,
         }),
@@ -137,17 +137,17 @@ pub(crate) fn metadata_basis_without_root(
     let Some(fork_basis) = &head.fork_basis else {
         return Ok(MetadataBasis::Genesis);
     };
-    let manifest_id = manifest_object_id_manifest_id(fork_basis.source_manifest_object_id.as_str())
+    let manifest_no = manifest_object_id_manifest_no(fork_basis.source_manifest_object_id.as_str())
         .ok_or_else(|| ControlObjectLoadError::Codec {
             object_key: loonfs_objectstore::keys::wal_head(&head.namespace_id),
             message: format!(
-                "fork basis manifest object id `{}` does not encode a manifest id",
+                "fork basis manifest object id `{}` does not encode a manifest number",
                 fork_basis.source_manifest_object_id
             ),
         })?;
     Ok(MetadataBasis::Manifest(BasisManifest {
         owner_namespace_id: fork_basis.source_namespace_id.clone(),
-        manifest_id,
+        manifest_no,
         manifest_object_id: fork_basis.source_manifest_object_id.clone(),
         manifest_payload_checksum: fork_basis.source_manifest_checksum.clone(),
     }))

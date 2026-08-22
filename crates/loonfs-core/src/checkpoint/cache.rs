@@ -11,7 +11,7 @@ use crate::metadata::MetadataState;
 use crate::recency::Recency;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
-use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -406,7 +406,7 @@ pub trait WalTailProjectionCacheObserver: Send + Sync + 'static {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WalTailProjectionCacheKey {
     pub namespace_id: NamespaceId,
-    pub manifest_id: ManifestId,
+    pub manifest_no: ManifestNo,
     pub manifest_head_seq: ChangeSeq,
     pub head_seq: ChangeSeq,
     pub head_etag: String,
@@ -661,7 +661,7 @@ mod tests {
     };
     use crate::metadata::{InodeRecord, MetadataState};
     use loonfs_api::wire::sst_blocks::DecodedDataBlock;
-    use loonfs_api::{ActorId, ActorRef, ChangeSeq, InodeId, InodeKind, ManifestId, NamespaceId};
+    use loonfs_api::{ActorId, ActorRef, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
     use std::sync::Arc;
 
     fn block(decoded_bytes: usize) -> DecodedMetadataTableBlock {
@@ -691,7 +691,7 @@ mod tests {
         });
         let key = WalTailProjectionCacheKey {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            manifest_id: ManifestId(7),
+            manifest_no: ManifestNo(7),
             manifest_head_seq: ChangeSeq(11),
             head_seq: ChangeSeq(12),
             head_etag: "stable-head-etag".to_owned(),
