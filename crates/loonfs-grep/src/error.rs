@@ -72,7 +72,7 @@ impl GrepError {
         match self {
             Self::NotEnabled | Self::Backfilling => ErrorCode::NotSupported,
             Self::StoreUnavailable { class, .. } => match class {
-                StoreFailureClass::PermissionDenied => ErrorCode::PermissionDenied,
+                StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
                 _ => ErrorCode::ServerError,
             },
             Self::CorruptIndex { .. } => ErrorCode::IndexCorrupt,
@@ -129,7 +129,7 @@ mod tests {
         for (class, expected) in [
             (
                 StoreFailureClass::PermissionDenied,
-                ErrorCode::PermissionDenied,
+                ErrorCode::StoragePermissionDenied,
             ),
             (StoreFailureClass::Other, ErrorCode::ServerError),
         ] {

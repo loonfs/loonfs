@@ -204,7 +204,7 @@ fn request_log_severity(
     match code.kind() {
         ErrorKind::Internal | ErrorKind::DataCorruption => RequestLogSeverity::Error,
         ErrorKind::Unauthorized
-        | ErrorKind::PermissionDenied
+        | ErrorKind::StoragePermissionDenied
         | ErrorKind::Unavailable
         | ErrorKind::DeadlineExceeded
         | ErrorKind::OutcomeUnknown => RequestLogSeverity::Warn,

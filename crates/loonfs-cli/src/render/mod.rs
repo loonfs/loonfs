@@ -208,7 +208,9 @@ mod tests {
         }
 
         let remote_boundary = serde_json::to_string(&loonfs_api::ApiError {
-            code: loonfs_api::ErrorCode::PermissionDenied.as_str().to_owned(),
+            code: loonfs_api::ErrorCode::StoragePermissionDenied
+                .as_str()
+                .to_owned(),
             feature: None,
             message: public_message.clone(),
             param: None,
@@ -223,7 +225,7 @@ mod tests {
             profile: Some("remote".to_owned()),
             mode: Some("remote".to_owned()),
             error: Box::new(CliError::from(crate::backend_error::BackendError::from(
-                ClientError::from_api_error(403, body),
+                ClientError::from_api_error(503, body),
             ))),
         };
         let remote_human = human_error(&remote_failure.error);

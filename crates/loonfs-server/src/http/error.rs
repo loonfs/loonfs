@@ -137,7 +137,12 @@ fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
         ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
         ErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
         ErrorKind::ContentTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-        ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+        // The backing object store rejected the deployment's storage
+        // credentials, which is not a statement about the caller. 403 would
+        // tell the caller to re-authenticate or to ask someone for access,
+        // and neither helps: the deployment cannot serve the request until
+        // an operator fixes the credentials or the bucket policy.
+        ErrorKind::StoragePermissionDenied => StatusCode::SERVICE_UNAVAILABLE,
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
         ErrorKind::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
         ErrorKind::Gone => StatusCode::GONE,

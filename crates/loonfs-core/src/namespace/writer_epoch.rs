@@ -280,7 +280,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_permission_denied_head_write_is_classified_as_permission_denied() {
+    async fn a_permission_denied_head_write_is_classified_as_storage_permission_denied() {
         let temp_dir = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -308,7 +308,10 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(CoreError::from(error).code(), ErrorCode::PermissionDenied);
+        assert_eq!(
+            CoreError::from(error).code(),
+            ErrorCode::StoragePermissionDenied
+        );
     }
 
     #[tokio::test]

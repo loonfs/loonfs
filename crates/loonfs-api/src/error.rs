@@ -20,9 +20,9 @@ pub enum ErrorKind {
     /// operation. Send a smaller payload (for uploads, prefer `direct_put`);
     /// retrying unchanged will not succeed.
     ContentTooLarge,
-    /// The caller may not perform this operation. Request access; retrying
-    /// unchanged will not succeed.
-    PermissionDenied,
+    /// The backing object store rejected the deployment's credentials. The
+    /// operator must fix the credentials or bucket policy before retrying.
+    StoragePermissionDenied,
     /// The deployment does not implement this operation. Gate on the
     /// capability document instead of retrying.
     NotSupported,
@@ -130,7 +130,7 @@ macro_rules! error_codes {
 error_codes! {
     InvalidRequest => "invalid_request",
     Unauthorized => "unauthorized",
-    PermissionDenied => "permission_denied",
+    StoragePermissionDenied => "storage_permission_denied",
     ContentTooLarge => "content_too_large",
     NotSupported => "not_supported",
     RouteNotFound => "route_not_found",
@@ -181,10 +181,9 @@ impl ErrorCode {
             // into a capped scan.
             ErrorCode::InvalidRequest | ErrorCode::QueryUnindexable => ErrorKind::InvalidRequest,
             ErrorCode::Unauthorized => ErrorKind::Unauthorized,
-            // Produced when the backing object store rejects the
-            // deployment's credentials: operator-actionable and never
-            // transient, exactly the kind's contract.
-            ErrorCode::PermissionDenied => ErrorKind::PermissionDenied,
+            // This is a deployment storage failure, not a caller
+            // authorization failure.
+            ErrorCode::StoragePermissionDenied => ErrorKind::StoragePermissionDenied,
             ErrorCode::ContentTooLarge => ErrorKind::ContentTooLarge,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
@@ -243,7 +242,7 @@ impl ErrorCode {
             ErrorCode::CommitQueueFull | ErrorCode::ServerBusy | ErrorCode::ShuttingDown => true,
             ErrorCode::InvalidRequest
             | ErrorCode::Unauthorized
-            | ErrorCode::PermissionDenied
+            | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
             | ErrorCode::NotSupported
             | ErrorCode::RouteNotFound

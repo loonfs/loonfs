@@ -188,7 +188,7 @@ struct LoonfsOpenApi;
 /// OpenAPI definition for the 503 response every operation can return.
 #[derive(utoipa::ToResponse)]
 #[response(
-    description = "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, or required maintenance. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
+    description = "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, required maintenance, or invalid storage credentials. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
 )]
 #[expect(
     dead_code,

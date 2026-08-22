@@ -1,7 +1,7 @@
 //! Upload session handlers plus the presign and content-token helpers
 //! backing them.
 
-use super::error::ApiResponseError;
+use super::error::{status_for_core_error_code, ApiResponseError};
 use super::{
     authorize, AppPath, AppState, NamespaceIdPath, UploadBodyBytes, UploadBodyStream,
     UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
@@ -357,9 +357,13 @@ pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError 
             ApiResponseError::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
                 .with_param("/content")
         }
-        ObjectStoreError::PermissionDenied { .. } => {
-            ApiResponseError::new(StatusCode::FORBIDDEN, ErrorCode::PermissionDenied, &message)
-        }
+        // The status comes from the registry so this handler cannot drift
+        // from the status the rest of the server serves for the code.
+        ObjectStoreError::PermissionDenied { .. } => ApiResponseError::new(
+            status_for_core_error_code(ErrorCode::StoragePermissionDenied),
+            ErrorCode::StoragePermissionDenied,
+            &message,
+        ),
         _ => ApiResponseError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::ServerError,

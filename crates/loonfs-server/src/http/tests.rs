@@ -508,7 +508,7 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
         .await
         .expect("create namespace response");
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let request_id = response
         .headers()
         .get(super::REQUEST_ID_HEADER)
@@ -540,7 +540,7 @@ async fn provider_failure_is_projected_in_the_presign_api_envelope() {
             .into_response()
         })
         .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("read presign failure body");

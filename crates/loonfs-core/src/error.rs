@@ -318,7 +318,7 @@ impl From<ImmutableWriteError> for CoreError {
 
 fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
     match class {
-        StoreFailureClass::PermissionDenied => ErrorCode::PermissionDenied,
+        StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
         StoreFailureClass::NotFound
         | StoreFailureClass::InvalidRequest
         | StoreFailureClass::PreconditionFailed
@@ -1089,9 +1089,9 @@ mod tests {
         assert!(CoreError::Internal("boom".to_owned()).details().is_none());
     }
 
-    /// Provider auth failures keep their class across the message-flattening
-    /// seams and reach the wire as `permission_denied`; every other store
-    /// failure stays `server_error`.
+    /// Provider authorization failures map to
+    /// `storage_permission_denied`. Other store failures map to
+    /// `server_error`.
     #[test]
     fn store_permission_denied_classifies_to_its_wire_code() {
         let denied = ObjectStoreError::PermissionDenied {
@@ -1099,8 +1099,8 @@ mod tests {
             message: "AccessDenied: bucket policy".to_owned(),
         };
         let error = CoreError::store("namespaces/demo/wal/head.json", &denied);
-        assert_eq!(error.code(), ErrorCode::PermissionDenied);
-        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
+        assert_eq!(error.kind(), ErrorKind::StoragePermissionDenied);
 
         let transport = ObjectStoreError::transport("namespaces/demo/wal/head.json", "timed out");
         let error = CoreError::store("namespaces/demo/wal/head.json", &transport);
@@ -1122,11 +1122,11 @@ mod tests {
             CoreError::from(ControlUpdateError::LoadHead(denied.clone())),
         ];
         for error in core_wrappers {
-            assert_eq!(error.code(), ErrorCode::PermissionDenied);
+            assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
         }
         assert_eq!(
             BootstrapNamespaceError::Head(denied).code(),
-            ErrorCode::PermissionDenied
+            ErrorCode::StoragePermissionDenied
         );
     }
 }
