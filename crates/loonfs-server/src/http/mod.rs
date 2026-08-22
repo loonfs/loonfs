@@ -36,26 +36,25 @@ use self::extractors::{
     UploadBodyBytes, UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES,
     MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
-use self::handlers_downloads::{begin_download, begin_download_by_inode};
+use self::handlers_downloads::{create_download, create_download_by_inode};
 use self::handlers_filesystem::{
-    apply_commit, get_file_bytes, list_changes, list_file_revisions, list_path_entries, list_trash,
-    stat_path,
+    create_commit, get_file_bytes, get_path_entry, list_changes, list_file_revisions,
+    list_path_entries, list_trash,
 };
 use self::handlers_inodes::{
-    get_file_revision_bytes_by_inode, list_file_revisions_by_inode, stat_inode,
+    get_file_revision_bytes_by_inode, get_inode, list_file_revisions_by_inode,
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, delete_namespace, fork_namespace, get_namespace,
-    get_namespace_diagnostics, list_checkpoints, maintenance_step, release_checkpoint,
+    get_namespace_diagnostics, list_checkpoints, release_checkpoint, run_maintenance,
 };
 use self::handlers_query::{
-    disable_grep_index, enable_grep_index, gc_grep_index, get_grep_index_status, grep,
+    disable_grep_index, enable_grep_index, gc_grep_index, get_grep_index, grep,
     grep_index_not_maintained, grep_queries_not_served,
 };
 use self::handlers_store::probe_store as probe_store_handler;
 use self::handlers_uploads::{
-    abort_upload, begin_upload, complete_upload, get_upload_status, sign_upload_parts,
-    upload_content,
+    abort_upload, complete_upload, create_upload, get_upload, put_upload_content, sign_upload_parts,
 };
 use self::serve::AppState;
 #[cfg(test)]
@@ -110,7 +109,7 @@ enum RequestLogSeverity {
 const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
     "/v0/namespaces/{namespace_id}/filesystem/content",
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
-    "/v0/admin/namespaces/{namespace_id}/maintenance/step",
+    "/v0/admin/namespaces/{namespace_id}/maintenance/run",
     "/v0/admin/store/probe",
     "/v0/admin/namespaces/{namespace_id}/grep/index/gc",
 ];
@@ -266,16 +265,19 @@ fn router(state: AppState) -> Router {
     // deployment that only answers searches has no authority over the state
     // this reports, so it gates with the mutating three.
     let grep_status_route = if maintains_index {
-        get(get_grep_index_status)
+        get(get_grep_index)
     } else {
         get(grep_index_not_maintained)
     };
     let request_deadline_ms = state.config.request_deadline_ms;
     Router::new()
-        .route("/health", get(health))
-        .route("/readiness", get(readiness))
+        .route("/health", get(get_health))
+        .route("/readiness", get(get_readiness))
         .route("/metrics", get(get_metrics))
-        .route("/v0/capabilities", get(handlers_namespace::capabilities))
+        .route(
+            "/v0/capabilities",
+            get(handlers_namespace::get_capabilities),
+        )
         .route("/v0/namespaces", post(create_namespace))
         .route(
             "/v0/namespaces/{namespace_id}",
@@ -287,12 +289,12 @@ fn router(state: AppState) -> Router {
             get(get_namespace_diagnostics),
         )
         .route(
-            "/v0/namespaces/{namespace_id}/filesystem/list",
+            "/v0/namespaces/{namespace_id}/filesystem/entries",
             get(list_path_entries),
         )
         .route(
-            "/v0/namespaces/{namespace_id}/filesystem/stat",
-            get(stat_path),
+            "/v0/namespaces/{namespace_id}/filesystem/entry",
+            get(get_path_entry),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/content",
@@ -305,9 +307,9 @@ fn router(state: AppState) -> Router {
         // upload modes do on `POST .../uploads`.
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/downloads",
-            post(begin_download),
+            post(create_download),
         )
-        .route("/v0/namespaces/{namespace_id}/query/grep", grep_route)
+        .route("/v0/namespaces/{namespace_id}/grep", grep_route)
         .route(
             "/v0/admin/namespaces/{namespace_id}/grep/index",
             grep_status_route,
@@ -330,7 +332,7 @@ fn router(state: AppState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
-            get(stat_inode),
+            get(get_inode),
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
@@ -342,7 +344,7 @@ fn router(state: AppState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
-            post(begin_download_by_inode),
+            post(create_download_by_inode),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/trash",
@@ -351,15 +353,15 @@ fn router(state: AppState) -> Router {
         // A commit that reaches the deadline may still land. The publisher
         // owns an accepted candidate, as after a client disconnect, and the
         // commit receipt makes retry safe.
-        .route("/v0/namespaces/{namespace_id}/commits", post(apply_commit))
-        .route("/v0/namespaces/{namespace_id}/uploads", post(begin_upload))
+        .route("/v0/namespaces/{namespace_id}/commits", post(create_commit))
+        .route("/v0/namespaces/{namespace_id}/uploads", post(create_upload))
         .route(
             "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
             // No body-limit layer: the upload route never buffers its
             // body, so a framework limit measured against a buffered read
             // would never fire. `UploadBodyStream` counts the bytes as it
             // forwards them and enforces `upload.max_content_bytes` itself.
-            put(upload_content),
+            put(put_upload_content),
         )
         .route(
             "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
@@ -375,7 +377,7 @@ fn router(state: AppState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
-            get(get_upload_status),
+            get(get_upload),
         )
         .route("/v0/namespaces/{namespace_id}/changes", get(list_changes))
         .route(
@@ -387,8 +389,8 @@ fn router(state: AppState) -> Router {
             post(release_checkpoint),
         )
         .route(
-            "/v0/admin/namespaces/{namespace_id}/maintenance/step",
-            post(maintenance_step),
+            "/v0/admin/namespaces/{namespace_id}/maintenance/run",
+            post(run_maintenance),
         )
         // The one admin route whose subject is the store rather than a
         // namespace, so it sits beside them rather than under one.
@@ -442,7 +444,7 @@ async fn method_not_allowed() -> ApiResponseError {
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "health",
+        operation_id = "get_health",
         path = "/health",
         tag = "system",
         summary = "Check health",
@@ -454,7 +456,7 @@ async fn method_not_allowed() -> ApiResponseError {
         )
     )
 )]
-async fn health() -> &'static str {
+async fn get_health() -> &'static str {
     "ok"
 }
 
@@ -462,7 +464,7 @@ async fn health() -> &'static str {
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "readiness",
+        operation_id = "get_readiness",
         path = "/readiness",
         tag = "system",
         summary = "Check readiness",
@@ -477,7 +479,7 @@ async fn health() -> &'static str {
         )
     )
 )]
-async fn readiness(State(state): State<AppState>) -> Result<&'static str, ApiResponseError> {
+async fn get_readiness(State(state): State<AppState>) -> Result<&'static str, ApiResponseError> {
     if state.writer.is_shutting_down() {
         return Err(ApiResponseError::new(
             StatusCode::SERVICE_UNAVAILABLE,

@@ -100,7 +100,7 @@ def put_file(
 ) -> PutFileResult:
     """Upload in-memory bytes, complete the upload, and commit the file."""
 
-    begin = _begin_upload(client, namespace_id, content)
+    begin = _create_upload(client, namespace_id, content)
     if http_client is None:
         with httpx.Client() as transfer_client:
             staged = _stage_upload(
@@ -125,7 +125,7 @@ def put_file(
     }
     if message is not None:
         commit_arguments["message"] = message
-    committed = client.filesystem.apply_commit(namespace_id, **commit_arguments)
+    committed = client.filesystem.create_commit(namespace_id, **commit_arguments)
     return PutFileResult(
         namespace_id=committed.namespace_id,
         commit_id=committed.commit_id,
@@ -143,15 +143,15 @@ def get_file(
 ) -> GetFileResult:
     """Download one file revision into memory and verify its checksum."""
 
-    capabilities = client.capabilities()
+    capabilities = client.system.get_capabilities()
     if not capabilities.features.get(_DIRECT_GET_FEATURE, False):
         return _get_file_proxied(
             client, namespace_id=namespace_id, path=path, revision_no=revision_no
         )
     if revision_no is None:
-        grant = client.filesystem.begin_download(namespace_id, path=path)
+        grant = client.filesystem.create_download(namespace_id, path=path)
     else:
-        grant = client.filesystem.begin_download(
+        grant = client.filesystem.create_download(
             namespace_id,
             path=path,
             revision_no=revision_no,
@@ -193,7 +193,7 @@ def _get_file_proxied(
     reference and returned bytes describe the same file version.
     """
     if revision_no is None:
-        entry = client.filesystem.stat_path(namespace_id, path=path)
+        entry = client.filesystem.get_path_entry(namespace_id, path=path)
         if entry.inode_kind != "file":
             raise RuntimeError(f"path {path!r} is a {entry.inode_kind}, not a file")
         claim = entry.content_ref
@@ -232,8 +232,8 @@ def _get_file_proxied(
     )
 
 
-def _begin_upload(client: LoonFS, namespace_id: str, content: bytes):
-    capabilities = client.capabilities()
+def _create_upload(client: LoonFS, namespace_id: str, content: bytes):
+    capabilities = client.system.get_capabilities()
     features = capabilities.features or {}
     limits = capabilities.limits or {}
     size_bytes = len(content)
@@ -261,7 +261,7 @@ def _begin_upload(client: LoonFS, namespace_id: str, content: bytes):
                 f"{size_bytes} bytes exceed the advertised proxy and direct PUT limits, "
                 "and direct multipart is unavailable"
             )
-    return client.uploads.begin_upload(namespace_id, request=request)
+    return client.uploads.create_upload(namespace_id, request=request)
 
 
 def _stage_upload(
@@ -273,7 +273,7 @@ def _stage_upload(
 ) -> _StagedContent:
     if begin.mode == "service_proxied":
         try:
-            client.uploads.upload_content(namespace_id, begin.upload_id, request=content)
+            client.uploads.put_upload_content(namespace_id, begin.upload_id, request=content)
             completion = client.uploads.complete_upload(
                 namespace_id,
                 begin.upload_id,

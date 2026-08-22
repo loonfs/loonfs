@@ -99,7 +99,7 @@ pub(super) struct UploadPathParams {
     feature = "openapi",
     utoipa::path(
         post,
-        operation_id = "begin_upload",
+        operation_id = "create_upload",
         path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
@@ -118,7 +118,7 @@ pub(super) struct UploadPathParams {
         )
     )
 )]
-pub(super) async fn begin_upload(
+pub(super) async fn create_upload(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     UploadControlJson(request): UploadControlJson<
@@ -500,7 +500,7 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
     feature = "openapi",
     utoipa::path(
         put,
-        operation_id = "upload_content",
+        operation_id = "put_upload_content",
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
         tag = "uploads",
         summary = "Upload content",
@@ -535,7 +535,7 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
 /// broken connection — and only the second is the client's. The stream
 /// records which, so the client is told the truth rather than a blanket
 /// storage error.
-pub(super) async fn upload_content(
+pub(super) async fn put_upload_content(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
@@ -779,7 +779,7 @@ mod completion_body_tests {
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "get_upload_status",
+        operation_id = "get_upload",
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
         summary = "Get upload session",
@@ -798,7 +798,7 @@ mod completion_body_tests {
         )
     )
 )]
-pub(super) async fn get_upload_status(
+pub(super) async fn get_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
     namespace_id_path: NamespaceIdPath,

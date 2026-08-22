@@ -79,7 +79,7 @@ export async function putFile(client: LoonFSClient, input: PutFileInput): Promis
     if (input.message !== undefined) {
         request.message = input.message;
     }
-    return client.filesystem.applyCommit(request);
+    return client.filesystem.createCommit(request);
 }
 
 /**
@@ -87,11 +87,11 @@ export async function putFile(client: LoonFSClient, input: PutFileInput): Promis
  * Streaming and resume are follow-ups.
  */
 export async function getFile(client: LoonFSClient, input: GetFileInput): Promise<GetFileResult> {
-    const capabilities = await client.capabilities();
+    const capabilities = await client.system.getCapabilities();
     if ((capabilities.features ?? {})[DIRECT_GET_FEATURE] !== true) {
         return getFileProxied(client, input);
     }
-    const grant = await client.filesystem.beginDownload(input);
+    const grant = await client.filesystem.createDownload(input);
     requirePresignedMethod(grant.access, "GET", "download");
     const response = await fetch(grant.access.url, {
         redirect: "error",
@@ -125,7 +125,7 @@ async function getFileProxied(client: LoonFSClient, input: GetFileInput): Promis
     let revisionNo = input.revision_no;
     let claim: LoonFS.ContentRef | undefined;
     if (revisionNo === undefined) {
-        const entry = await client.filesystem.statPath({
+        const entry = await client.filesystem.getPathEntry({
             namespace_id: input.namespace_id,
             path: input.path,
         });
@@ -170,9 +170,9 @@ async function stageBytes(
     namespaceId: LoonFS.NamespaceId,
     bytes: Uint8Array,
 ): Promise<StagedContent> {
-    const capabilities = await client.capabilities();
+    const capabilities = await client.system.getCapabilities();
     const beginRequest = selectBeginRequest(capabilities, bytes);
-    const begin = await client.uploads.beginUpload({
+    const begin = await client.uploads.createUpload({
         namespace_id: namespaceId,
         body: beginRequest,
     });
@@ -226,7 +226,7 @@ async function stageServiceProxied(
     begin: LoonFS.BeginUploadResponse.ServiceProxied,
 ): Promise<StagedContent> {
     try {
-        await client.uploads.uploadContent(arrayBuffer(bytes), namespaceId, begin.upload_id);
+        await client.uploads.putUploadContent(arrayBuffer(bytes), namespaceId, begin.upload_id);
         return stagedContent(
             await client.uploads.completeUpload({
                 namespace_id: namespaceId,

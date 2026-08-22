@@ -39,7 +39,7 @@ pub(super) struct GrepQuery {
     utoipa::path(
         get,
         operation_id = "grep",
-        path = "/v0/namespaces/{namespace_id}/query/grep",
+        path = "/v0/namespaces/{namespace_id}/grep",
         tag = "query",
         summary = "Content search",
         description = "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep root.",
@@ -221,7 +221,7 @@ pub(super) async fn enable_grep_index(
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "get_grep_index_status",
+        operation_id = "get_grep_index",
         path = "/v0/admin/namespaces/{namespace_id}/grep/index",
         tag = "admin",
         summary = "Get grep index status",
@@ -236,7 +236,7 @@ pub(super) async fn enable_grep_index(
         )
     )
 )]
-pub(super) async fn get_grep_index_status(
+pub(super) async fn get_grep_index(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,

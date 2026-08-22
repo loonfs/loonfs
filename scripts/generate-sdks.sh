@@ -29,7 +29,7 @@ prune_generated() {
     case "$1" in
     go)
         # Fern cannot omit these generator-level model tests.
-        for name in admin filesystem inodes namespaces query types uploads; do
+        for name in admin filesystem inodes namespaces query system types uploads; do
             rm "generated/go/${name}_test.go"
         done
         ;;

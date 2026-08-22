@@ -428,7 +428,7 @@ def _apply(
         extra["message"] = message
     if content_tokens is not None:
         extra["content_tokens"] = content_tokens
-    return client.filesystem.apply_commit(
+    return client.filesystem.create_commit(
         namespace_id,
         actor=actor,
         commit_id=commit_id,
@@ -509,7 +509,7 @@ def _proxy_response_json(response: httpx.Response, label: str) -> JsonObject:
     return value
 
 
-def _proxy_apply_commit(
+def _proxy_create_commit(
     client: httpx.Client,
     request: ProxyRequest,
     commit_id: str,
@@ -678,7 +678,7 @@ def test_proxy(
         base_url=proxy_harness,
         headers={"Authorization": "Bearer browser-token"},
     ) as client:
-        mkdir = _proxy_apply_commit(
+        mkdir = _proxy_create_commit(
             client,
             request,
             request.commit_ids.directory,
@@ -723,7 +723,7 @@ def test_proxy(
         proxied_complete = UploadSessionResponse_Completed(**proxied_complete_data)
         assert proxied_complete.content_ref == uploaded.content_ref
         assert proxied_complete.content_token is not None
-        proxied_commit = _proxy_apply_commit(
+        proxied_commit = _proxy_create_commit(
             client,
             request,
             request.commit_ids.proxied,
@@ -779,7 +779,7 @@ def test_proxy(
         direct_complete = UploadSessionResponse_Completed(**direct_complete_data)
         assert direct_complete.content_ref.size_bytes == len(payload)
         assert direct_complete.content_token is not None
-        direct_commit = _proxy_apply_commit(
+        direct_commit = _proxy_create_commit(
             client,
             request,
             request.commit_ids.direct,
@@ -793,7 +793,7 @@ def test_proxy(
         assert direct_commit.committed_seq == expected.direct_committed_seq
 
         listing_response = client.get(
-            f"{namespace_alias_base}/filesystem/list",
+            f"{namespace_alias_base}/filesystem/entries",
             params={"path": request.directory},
         )
         listing = ListPathEntriesResponse(
@@ -810,7 +810,7 @@ def test_proxy(
             assert b"".join(read_response.iter_raw()) == payload
 
         unknown_namespace_alias = client.get(
-            f"/v0/namespace-aliases/{request.unknown_namespace_alias}/filesystem/list",
+            f"/v0/namespace-aliases/{request.unknown_namespace_alias}/filesystem/entries",
             params={"path": request.directory},
         )
         assert unknown_namespace_alias.status_code == expected.unknown_namespace_alias_status
@@ -855,7 +855,7 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     )
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
-    begin = harness.client.uploads.begin_upload(
+    begin = harness.client.uploads.create_upload(
         request.namespace_id,
         request=BeginUploadRequest_DirectPut(size_bytes=len(payload)),
     )
@@ -891,7 +891,7 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     )
     assert committed.committed_seq == expected.committed_seq
     stat = _file_entry(
-        harness.client.filesystem.stat_path(request.namespace_id, path=request.path)
+        harness.client.filesystem.get_path_entry(request.namespace_id, path=request.path)
     )
     assert stat.content_ref == content_ref
     assert _read_proxied(harness.client, request.namespace_id, request.path) == payload
@@ -903,7 +903,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     )
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
     payload = _byte_pattern(request.content_pattern)
-    begin = harness.client.uploads.begin_upload(
+    begin = harness.client.uploads.create_upload(
         request.namespace_id,
         request=BeginUploadRequest_DirectMultipart(
             multipart=DirectMultipartUploadOptions(
@@ -1027,7 +1027,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
 def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(cases["upload_abort"], AbortRequest, AbortExpected)
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
-    begin = harness.client.uploads.begin_upload(
+    begin = harness.client.uploads.create_upload(
         request.namespace_id,
         request=BeginUploadRequest_ServiceProxied(),
     )
@@ -1061,7 +1061,7 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert committed.committed_seq == expected.committed_seq
 
     stat = _file_entry(
-        harness.client.filesystem.stat_path(request.namespace_id, path=request.path)
+        harness.client.filesystem.get_path_entry(request.namespace_id, path=request.path)
     )
     downloaded = get_file(
         harness.client,
@@ -1103,7 +1103,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         commit_id=request.commit_ids.upload,
     )
     assert upload.committed_seq == expected.upload_committed_seq
-    stat = harness.client.filesystem.stat_path(
+    stat = harness.client.filesystem.get_path_entry(
         request.namespace_id, path=request.upload_path
     )
     assert stat.size_bytes == expected.size_bytes

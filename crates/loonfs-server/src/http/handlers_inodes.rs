@@ -48,7 +48,7 @@ pub(super) struct StatInodeQuery {
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "stat_inode",
+        operation_id = "get_inode",
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
         tag = "inodes",
         summary = "Stat inode",
@@ -68,7 +68,7 @@ pub(super) struct StatInodeQuery {
         )
     )
 )]
-pub(super) async fn stat_inode(
+pub(super) async fn get_inode(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<InodePathParams>,

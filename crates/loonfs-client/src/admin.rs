@@ -150,7 +150,7 @@ impl Client {
         request: &MaintenanceStepRequest,
     ) -> Result<MaintenanceStepResponse> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/maintenance/step",
+            "{}/v0/admin/namespaces/{namespace_id}/maintenance/run",
             self.base_url
         );
         self.request_json_once(self.post(&url), Some(request)).await
@@ -178,7 +178,7 @@ impl Client {
         namespace_id: &NamespaceId,
         request: &GrepRequest,
     ) -> Result<GrepResponse> {
-        let mut url = format!("{}/v0/namespaces/{namespace_id}/query/grep", self.base_url);
+        let mut url = format!("{}/v0/namespaces/{namespace_id}/grep", self.base_url);
         let mut has_query = false;
         append_query_param(&mut url, &mut has_query, "pattern", &request.pattern);
         append_query_param(

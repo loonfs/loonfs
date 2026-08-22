@@ -54,9 +54,8 @@ impl GrepHost {
         }
     }
 
-    /// The query the server's `GET .../query/grep` performs: this host's
-    /// service and store for grep's own segments, its reader for the
-    /// filesystem.
+    /// Runs a grep request with this host's grep service, object store, and
+    /// filesystem reader.
     pub(crate) async fn grep(
         &self,
         namespace_id: &NamespaceId,

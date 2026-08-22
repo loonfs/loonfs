@@ -262,11 +262,11 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		request.Path,
 		&request.Message,
 	)
-	first, err := h.client.Filesystem.ApplyCommit(context.Background(), commit)
+	first, err := h.client.Filesystem.CreateCommit(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("first commit: %v", err)
 	}
-	replayed, err := h.client.Filesystem.ApplyCommit(context.Background(), commit)
+	replayed, err := h.client.Filesystem.CreateCommit(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("replayed commit: %v", err)
 	}
@@ -308,7 +308,7 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	createNamespace(t, h.client, request.NamespaceID)
 	payload := []byte(request.ContentUTF8)
 	sizeBytes := int64(len(payload))
-	begin, err := h.client.Uploads.BeginUpload(context.Background(), &loonfs.BeginUploadBody{
+	begin, err := h.client.Uploads.CreateUpload(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
 		Body: &loonfs.BeginUploadRequest{
 			DirectPut: &loonfs.BeginUploadDirectPut{SizeBytes: &sizeBytes},
@@ -402,7 +402,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	request, expected := decodeCaseValues[multipartRequest, multipartExpected](t, testCase)
 	createNamespace(t, h.client, request.NamespaceID)
 	payload := makeBytePattern(t, request.ContentPattern)
-	begin, err := h.client.Uploads.BeginUpload(context.Background(), &loonfs.BeginUploadBody{
+	begin, err := h.client.Uploads.CreateUpload(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
 		Body: &loonfs.BeginUploadRequest{
 			DirectMultipart: &loonfs.BeginUploadDirectMultipart{
@@ -561,7 +561,7 @@ func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[abortRequest, abortExpected](t, testCase)
 	createNamespace(t, h.client, request.NamespaceID)
-	begin, err := h.client.Uploads.BeginUpload(context.Background(), &loonfs.BeginUploadBody{
+	begin, err := h.client.Uploads.CreateUpload(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
 		Body: &loonfs.BeginUploadRequest{
 			ServiceProxied: &loonfs.BeginUploadServiceProxied{},
@@ -636,7 +636,7 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	stat := statPath(t, h.client, request.NamespaceID, request.Path)
 	file := requireFileProjection(t, stat)
-	grant, err := h.client.Filesystem.BeginDownload(context.Background(), &loonfs.BeginDownloadRequest{
+	grant, err := h.client.Filesystem.CreateDownload(context.Background(), &loonfs.BeginDownloadRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        loonfs.AbsolutePath(request.Path),
 	})
@@ -1053,7 +1053,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 
 	createNamespace(t, h.client, request.NamespaceID)
 	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(request.NamespaceAlias)
-	mkdir := proxyApplyCommit(t, proxyServer.Client(), namespaceAliasBaseURL, createDirectoryCommit(
+	mkdir := proxyCreateCommit(t, proxyServer.Client(), namespaceAliasBaseURL, createDirectoryCommit(
 		request.NamespaceID,
 		request.CommitIDs.Directory,
 		&request.Actor,
@@ -1065,7 +1065,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	payload := []byte(request.ContentUTF8)
-	proxiedBegin := proxyBeginUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.BeginUploadRequest{
+	proxiedBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.BeginUploadRequest{
 		ServiceProxied: &loonfs.BeginUploadServiceProxied{},
 	})
 	if proxiedBegin.ServiceProxied == nil {
@@ -1111,7 +1111,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	sizeBytes := int64(len(payload))
-	directBegin := proxyBeginUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.BeginUploadRequest{
+	directBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.BeginUploadRequest{
 		DirectPut: &loonfs.BeginUploadDirectPut{SizeBytes: &sizeBytes},
 	})
 	if directBegin.DirectPut == nil || directBegin.DirectPut.DirectPut == nil {
@@ -1154,7 +1154,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		t,
 		proxyServer.Client(),
 		http.MethodGet,
-		namespaceAliasBaseURL+"/filesystem/list?"+listingQuery.Encode(),
+		namespaceAliasBaseURL+"/filesystem/entries?"+listingQuery.Encode(),
 		nil,
 	)
 	if len(listing.Entries) != expected.EntryCount {
@@ -1183,7 +1183,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	unknownStatus := proxyResponseStatus(
 		t,
 		proxyServer.Client(),
-		proxyServer.URL+"/v0/namespace-aliases/"+url.PathEscape(request.UnknownNamespaceAlias)+"/filesystem/list",
+		proxyServer.URL+"/v0/namespace-aliases/"+url.PathEscape(request.UnknownNamespaceAlias)+"/filesystem/entries",
 	)
 	if unknownStatus != expected.UnknownNamespaceAliasStatus {
 		t.Errorf("unknown namespace alias status = %d, want %d", unknownStatus, expected.UnknownNamespaceAliasStatus)
@@ -1198,7 +1198,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 }
 
-func proxyBeginUpload(
+func proxyCreateUpload(
 	t *testing.T,
 	httpClient *http.Client,
 	namespaceAliasBaseURL string,
@@ -1248,7 +1248,7 @@ func proxyCommitCompletedFile(
 	if contentToken != nil {
 		contentTokens = []*loonfs.ContentToken{contentToken}
 	}
-	return proxyApplyCommit(t, httpClient, namespaceAliasBaseURL, &loonfs.CommitRequest{
+	return proxyCreateCommit(t, httpClient, namespaceAliasBaseURL, &loonfs.CommitRequest{
 		NamespaceID:   namespaceID,
 		Actor:         actor,
 		CommitID:      loonfs.CommitID(commitID),
@@ -1265,7 +1265,7 @@ func proxyCommitCompletedFile(
 	})
 }
 
-func proxyApplyCommit(
+func proxyCreateCommit(
 	t *testing.T,
 	httpClient *http.Client,
 	namespaceAliasBaseURL string,
@@ -1389,7 +1389,7 @@ func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 		request.Path,
 		nil,
 	)
-	committed, err := h.client.Filesystem.ApplyCommit(context.Background(), commit)
+	committed, err := h.client.Filesystem.CreateCommit(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("commit change: %v", err)
 	}
@@ -1706,7 +1706,7 @@ func commitCompletedFile(
 
 func applyCommit(t *testing.T, sdk *client.Client, request *loonfs.CommitRequest) *loonfs.CommitResponse {
 	t.Helper()
-	response, err := sdk.Filesystem.ApplyCommit(context.Background(), request)
+	response, err := sdk.Filesystem.CreateCommit(context.Background(), request)
 	if err != nil {
 		t.Fatalf("apply commit %q: %v", request.CommitID, err)
 	}
@@ -1715,7 +1715,7 @@ func applyCommit(t *testing.T, sdk *client.Client, request *loonfs.CommitRequest
 
 func statPath(t *testing.T, sdk *client.Client, namespaceID, path string) *loonfs.AuthoritativePathEntry {
 	t.Helper()
-	entry, err := sdk.Filesystem.StatPath(context.Background(), &loonfs.StatPathRequest{
+	entry, err := sdk.Filesystem.GetPathEntry(context.Background(), &loonfs.GetPathEntryRequest{
 		NamespaceID: namespaceID,
 		Path:        path,
 	})
@@ -1802,7 +1802,7 @@ func applyCreateDirectory(
 	path string,
 ) {
 	t.Helper()
-	_, err := sdk.Filesystem.ApplyCommit(
+	_, err := sdk.Filesystem.CreateCommit(
 		context.Background(),
 		createDirectoryCommit(namespaceID, commitID, actor, path, nil),
 	)

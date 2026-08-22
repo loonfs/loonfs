@@ -17,7 +17,7 @@
         ],
         "summary": "Check health",
         "description": "Returns `ok` when the server is running and can accept requests.",
-        "operationId": "health",
+        "operationId": "get_health",
         "responses": {
           "200": {
             "description": "Server health check",
@@ -82,7 +82,7 @@
         ],
         "summary": "Check readiness",
         "description": "Returns `ready` while the server admits new work. Once shutdown begins and publisher admission closes, answers 503 `shutting_down` so load balancers can drain the instance. `/health` stays the liveness probe: it only reports that the process is up.",
-        "operationId": "readiness",
+        "operationId": "get_readiness",
         "responses": {
           "200": {
             "description": "The server admits new work",
@@ -444,7 +444,7 @@
         ],
         "summary": "Get grep index status",
         "description": "Returns whether the namespace's grep index is `disabled`, `backfilling`, or `active`, including build progress when available. A namespace that has never enabled the index is `disabled`. This operation requires a deployment that maintains grep indexes and does not change the index.",
-        "operationId": "get_grep_index_status",
+        "operationId": "get_grep_index",
         "parameters": [
           {
             "name": "namespace_id",
@@ -764,14 +764,14 @@
         "x-loonfs-retry": "new_attempt"
       }
     },
-    "/v0/admin/namespaces/{namespace_id}/maintenance/step": {
+    "/v0/admin/namespaces/{namespace_id}/maintenance/run": {
       "post": {
         "tags": [
           "admin"
         ],
         "summary": "Run maintenance step",
         "description": "Runs one bounded maintenance step. The body selects the actions by naming them: `metadata` folds the WAL tail once it reaches the threshold and merges one bounded reorganization unit, `advance_retention: true` advances the retention floor, and `gc` runs one bounded garbage-collection pass. Selected actions run in that order, each reports separately, and an absent report means the body did not select that action. A body that selects nothing is rejected. Nothing surrenders replay history or sweeps objects unless the body asked for it. A deleted namespace accepts a step that selects `gc` alone, which is how its reclaimable state is collected; any other selection is refused. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
-        "operationId": "maintenance_step",
+        "operationId": "run_maintenance",
         "parameters": [
           {
             "name": "namespace_id",
@@ -912,11 +912,11 @@
     "/v0/capabilities": {
       "get": {
         "tags": [
-          "capabilities"
+          "system"
         ],
         "summary": "Get capabilities",
         "description": "Returns a summary of supported features and limits.",
-        "operationId": "capabilities",
+        "operationId": "get_capabilities",
         "responses": {
           "200": {
             "description": "Capability document",
@@ -1298,7 +1298,7 @@
         ],
         "summary": "Apply a commit",
         "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
-        "operationId": "apply_commit",
+        "operationId": "create_commit",
         "parameters": [
           {
             "name": "namespace_id",
@@ -1505,7 +1505,7 @@
         ],
         "summary": "Begin download",
         "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.max_content_bytes`.",
-        "operationId": "begin_download",
+        "operationId": "create_download",
         "parameters": [
           {
             "name": "namespace_id",
@@ -1595,7 +1595,7 @@
         "x-loonfs-retry": "safe"
       }
     },
-    "/v0/namespaces/{namespace_id}/filesystem/list": {
+    "/v0/namespaces/{namespace_id}/filesystem/entries": {
       "get": {
         "tags": [
           "filesystem"
@@ -1718,6 +1718,102 @@
         }
       }
     },
+    "/v0/namespaces/{namespace_id}/filesystem/entry": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "Stat path",
+        "description": "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
+        "operationId": "get_path_entry",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute filesystem path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_attributes",
+            "in": "query",
+            "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative path entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthoritativePathEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path or include_attributes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
     "/v0/namespaces/{namespace_id}/filesystem/revisions": {
       "get": {
         "tags": [
@@ -1829,102 +1925,6 @@
           "next_cursor": "$response.next_cursor",
           "results": "$response.revisions"
         }
-      }
-    },
-    "/v0/namespaces/{namespace_id}/filesystem/stat": {
-      "get": {
-        "tags": [
-          "filesystem"
-        ],
-        "summary": "Stat path",
-        "description": "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
-        "operationId": "stat_path",
-        "parameters": [
-          {
-            "name": "namespace_id",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "path",
-            "in": "query",
-            "description": "Absolute filesystem path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "include_attributes",
-            "in": "query",
-            "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Authoritative path entry",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AuthoritativePathEntry"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid path or include_attributes",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace or path not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/trash": {
@@ -2118,6 +2118,178 @@
         "x-loonfs-retry": "new_attempt"
       }
     },
+    "/v0/namespaces/{namespace_id}/grep": {
+      "get": {
+        "tags": [
+          "query"
+        ],
+        "summary": "Content search",
+        "description": "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep root.",
+        "operationId": "grep",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pattern",
+            "in": "query",
+            "description": "Pattern in the Rust `regex` crate's dialect. Its UTF-8 encoding must be at most 1024 bytes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "case_insensitive",
+            "in": "query",
+            "description": "Match case-insensitively (`true` or `false`). Defaults to `false`.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "path_prefix",
+            "in": "query",
+            "description": "Complete absolute path used to restrict matches.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "allow_scan",
+            "in": "query",
+            "description": "Permit a capped exhaustive scan when the pattern has no required grams (`true` or `false`). Defaults to `false`.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "allow_stale",
+            "in": "query",
+            "description": "Return indexed-only results when the unindexed tail exceeds the scan budget (`true` or `false`). Defaults to `false`.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum matches per page",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque grep page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of matches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrepResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid pattern, cursor, or an unindexable pattern without allow_scan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The grep index is corrupt or its backing store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.matches"
+        }
+      }
+    },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}": {
       "get": {
         "tags": [
@@ -2125,7 +2297,7 @@
         ],
         "summary": "Stat inode",
         "description": "Returns the current path entry for a visible inode. Unknown or hidden inodes answer `inode_not_found`.",
-        "operationId": "stat_inode",
+        "operationId": "get_inode",
         "parameters": [
           {
             "name": "namespace_id",
@@ -2470,7 +2642,7 @@
         ],
         "summary": "Begin download by inode",
         "description": "Authorizes a direct read of one retained inode revision. The request body is `{}` and the response does not include a path.",
-        "operationId": "begin_download_by_inode",
+        "operationId": "create_download_by_inode",
         "parameters": [
           {
             "name": "namespace_id",
@@ -2590,178 +2762,6 @@
         "x-loonfs-retry": "safe"
       }
     },
-    "/v0/namespaces/{namespace_id}/query/grep": {
-      "get": {
-        "tags": [
-          "query"
-        ],
-        "summary": "Content search",
-        "description": "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep root.",
-        "operationId": "grep",
-        "parameters": [
-          {
-            "name": "namespace_id",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "pattern",
-            "in": "query",
-            "description": "Pattern in the Rust `regex` crate's dialect. Its UTF-8 encoding must be at most 1024 bytes.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "case_insensitive",
-            "in": "query",
-            "description": "Match case-insensitively (`true` or `false`). Defaults to `false`.",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false
-            }
-          },
-          {
-            "name": "path_prefix",
-            "in": "query",
-            "description": "Complete absolute path used to restrict matches.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "allow_scan",
-            "in": "query",
-            "description": "Permit a capped exhaustive scan when the pattern has no required grams (`true` or `false`). Defaults to `false`.",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false
-            }
-          },
-          {
-            "name": "allow_stale",
-            "in": "query",
-            "description": "Return indexed-only results when the unindexed tail exceeds the scan budget (`true` or `false`). Defaults to `false`.",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Maximum matches per page",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int32",
-              "default": 1000,
-              "maximum": 1000,
-              "minimum": 1
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "Opaque grep page cursor",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "One page of matches",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GrepResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid pattern, cursor, or an unindexable pattern without allow_scan",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "The grep index is corrupt or its backing store is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "x-loonfs-retry": "safe",
-        "x-fern-pagination": {
-          "cursor": "$request.cursor",
-          "next_cursor": "$response.next_cursor",
-          "results": "$response.matches"
-        }
-      }
-    },
     "/v0/namespaces/{namespace_id}/uploads": {
       "post": {
         "tags": [
@@ -2769,7 +2769,7 @@
         ],
         "summary": "Begin upload",
         "description": "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store presigned credentials.",
-        "operationId": "begin_upload",
+        "operationId": "create_upload",
         "parameters": [
           {
             "name": "namespace_id",
@@ -2876,7 +2876,7 @@
         ],
         "summary": "Get upload session",
         "description": "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
-        "operationId": "get_upload_status",
+        "operationId": "get_upload",
         "parameters": [
           {
             "name": "namespace_id",
@@ -3175,7 +3175,7 @@
         ],
         "summary": "Upload content",
         "description": "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
-        "operationId": "upload_content",
+        "operationId": "put_upload_content",
         "parameters": [
           {
             "name": "namespace_id",
@@ -7031,11 +7031,7 @@
   "tags": [
     {
       "name": "system",
-      "description": "Server health, readiness, and metrics"
-    },
-    {
-      "name": "capabilities",
-      "description": "Capability discovery"
+      "description": "Server health, readiness, metrics, and capability discovery"
     },
     {
       "name": "namespaces",

@@ -226,7 +226,7 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
 
     let (status, body, request_id) = request_error(
         &router,
-        "/v0/namespaces/demo/filesystem/stat?path=%2Fmissing.txt",
+        "/v0/namespaces/demo/filesystem/entry?path=%2Fmissing.txt",
     )
     .await;
     assert_eq!(status, 404);
@@ -273,7 +273,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
 
     capture.clear();
     let (status, body, request_id) =
-        request_error(&router, "/v0/namespaces/demo/query/grep?pattern=x").await;
+        request_error(&router, "/v0/namespaces/demo/grep?pattern=x").await;
     assert_eq!(status, 501);
     assert_eq!(body.code, "not_supported");
     let events = capture.snapshot();
@@ -288,7 +288,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         completions[0],
         &request_id,
         "GET",
-        "/v0/namespaces/{namespace_id}/query/grep",
+        "/v0/namespaces/{namespace_id}/grep",
         501,
     );
 

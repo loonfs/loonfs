@@ -65,7 +65,7 @@ fn post_gc_with(
     gc: serde_json::Value,
 ) -> ApiResult<loonfs_api::GcResponse> {
     let step: ApiResult<loonfs_api::MaintenanceStepResponse> = post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
         "test-token",
         serde_json::json!({ "gc": gc }),
     );
@@ -81,7 +81,7 @@ fn post_maintenance_step(
     namespace: &str,
 ) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
     post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
         "test-token",
         serde_json::json!({ "metadata": {} }),
     )
@@ -93,7 +93,7 @@ fn post_empty_maintenance_step(
     namespace: &str,
 ) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
     post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
         "test-token",
         serde_json::json!({}),
     )
@@ -105,7 +105,7 @@ fn post_retention_advance(
     namespace: &str,
 ) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
     post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
         "test-token",
         serde_json::json!({ "advance_retention": true }),
     )

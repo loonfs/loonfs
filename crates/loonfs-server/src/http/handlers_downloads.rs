@@ -37,7 +37,7 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
     feature = "openapi",
     utoipa::path(
         post,
-        operation_id = "begin_download",
+        operation_id = "create_download",
         path = "/v0/namespaces/{namespace_id}/filesystem/downloads",
         tag = "filesystem",
         summary = "Begin download",
@@ -69,7 +69,7 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
 /// applies. Both bound the memory a proxied read costs this process, and
 /// this route reads metadata and signs a string: the file's bytes never
 /// come here at all, which is the entire point.
-pub(super) async fn begin_download(
+pub(super) async fn create_download(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<BeginDownloadRequest>,
@@ -100,7 +100,7 @@ pub(super) async fn begin_download(
     feature = "openapi",
     utoipa::path(
         post,
-        operation_id = "begin_download_by_inode",
+        operation_id = "create_download_by_inode",
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
@@ -124,7 +124,7 @@ pub(super) async fn begin_download(
     )
 )]
 /// Authorizes a direct read of one retained inode revision.
-pub(super) async fn begin_download_by_inode(
+pub(super) async fn create_download_by_inode(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<InodeRevisionPathParams>,

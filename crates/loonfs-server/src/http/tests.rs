@@ -2128,7 +2128,9 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     let body = expect_enveloped(
         || {
             raw_agent()
-                .get(&format!("http://{addr}/v0/namespaces/demo/filesystem/stat"))
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/filesystem/entry"
+                ))
                 .set("authorization", "Bearer test-token")
                 .call()
         },
@@ -2235,7 +2237,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
 
     // Invalid grep path prefixes return invalid_request after authentication.
     let grep_url =
-        format!("http://{addr}/v0/namespaces/demo/query/grep?pattern=needle&path_prefix=relative");
+        format!("http://{addr}/v0/namespaces/demo/grep?pattern=needle&path_prefix=relative");
     let body = expect_enveloped(
         || {
             raw_agent()

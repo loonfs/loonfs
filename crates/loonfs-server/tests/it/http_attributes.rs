@@ -101,25 +101,25 @@ async fn http_reads_project_flat_attribute_siblings_together() {
 
     // Stat's default is on: the annotated inode carries its map, and the
     // bare one carries the cleared state at revision 0 rather than nothing.
-    let annotated = get_json(&harness, "/filesystem/stat?path=%2Fdocs%2Freport.txt");
+    let annotated = get_json(&harness, "/filesystem/entry?path=%2Fdocs%2Freport.txt");
     assert_projection(&annotated, true);
     assert_eq!(annotated["attributes"]["owner"], "platform");
     assert_eq!(annotated["attributes_revision_no"], 1);
     assert!(annotated.pointer("/attributes/attributes").is_none());
 
-    let bare = get_json(&harness, "/filesystem/stat?path=%2Fdocs%2Fnotes.txt");
+    let bare = get_json(&harness, "/filesystem/entry?path=%2Fdocs%2Fnotes.txt");
     assert_projection(&bare, true);
     assert_eq!(bare["attributes"], serde_json::json!({}));
     assert_eq!(bare["attributes_revision_no"], 0);
 
     let opted_out = get_json(
         &harness,
-        "/filesystem/stat?path=%2Fdocs%2Freport.txt&include_attributes=false",
+        "/filesystem/entry?path=%2Fdocs%2Freport.txt&include_attributes=false",
     );
     assert_projection(&opted_out, false);
 
     // Listing's default is off.
-    let listing = get_json(&harness, "/filesystem/list?path=%2Fdocs");
+    let listing = get_json(&harness, "/filesystem/entries?path=%2Fdocs");
     let entries = listing["entries"].as_array().expect("entries");
     assert_eq!(entries.len(), 2);
     for entry in entries {
@@ -128,7 +128,7 @@ async fn http_reads_project_flat_attribute_siblings_together() {
 
     let projected = get_json(
         &harness,
-        "/filesystem/list?path=%2Fdocs&include_attributes=true",
+        "/filesystem/entries?path=%2Fdocs&include_attributes=true",
     );
     let entries = projected["entries"].as_array().expect("entries");
     assert_eq!(entries.len(), 2);
@@ -162,8 +162,8 @@ async fn http_include_attributes_accepts_true_and_false_and_nothing_else() {
     served_namespace(&harness).await;
 
     for (endpoint, target) in [
-        ("/filesystem/stat", "%2Fdocs%2Freport.txt"),
-        ("/filesystem/list", "%2Fdocs"),
+        ("/filesystem/entry", "%2Fdocs%2Freport.txt"),
+        ("/filesystem/entries", "%2Fdocs"),
     ] {
         for value in ["true", "false"] {
             assert_eq!(
@@ -191,16 +191,16 @@ async fn http_include_attributes_accepts_true_and_false_and_nothing_else() {
     assert_eq!(
         get_json(
             &harness,
-            "/filesystem/stat?path=%2Fdocs%2Freport.txt&include_attributes=true"
+            "/filesystem/entry?path=%2Fdocs%2Freport.txt&include_attributes=true"
         ),
-        get_json(&harness, "/filesystem/stat?path=%2Fdocs%2Freport.txt")
+        get_json(&harness, "/filesystem/entry?path=%2Fdocs%2Freport.txt")
     );
     assert_eq!(
         get_json(
             &harness,
-            "/filesystem/list?path=%2Fdocs&include_attributes=false"
+            "/filesystem/entries?path=%2Fdocs&include_attributes=false"
         ),
-        get_json(&harness, "/filesystem/list?path=%2Fdocs")
+        get_json(&harness, "/filesystem/entries?path=%2Fdocs")
     );
 }
 
