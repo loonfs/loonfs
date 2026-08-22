@@ -293,9 +293,11 @@ pub struct CheckpointRecordState {
 
 /// Links one accepted WAL segment identity to its verified sequence range.
 ///
+/// Pointers in immutable WAL segments accept unknown fields. The mutable head
+/// uses a strict decoder for the same shape so a rewrite cannot discard data.
+///
 /// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WalSegmentPointer {
     /// Segment identity used to derive the immutable object key and expected
     /// to agree with the decoded payload.
@@ -307,6 +309,48 @@ pub struct WalSegmentPointer {
     /// Checksum of the referenced segment's payload bytes, in `sha256:<hex>`
     /// form. Must equal the `payload_checksum` in the referenced envelope.
     pub payload_checksum: String,
+}
+
+/// Strict WAL pointer shape used only while decoding the mutable head.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictWalSegmentPointer {
+    segment_id: WalSegmentId,
+    start_seq: ChangeSeq,
+    end_seq: ChangeSeq,
+    payload_checksum: String,
+}
+
+impl From<StrictWalSegmentPointer> for WalSegmentPointer {
+    fn from(pointer: StrictWalSegmentPointer) -> Self {
+        Self {
+            segment_id: pointer.segment_id,
+            start_seq: pointer.start_seq,
+            end_seq: pointer.end_seq,
+            payload_checksum: pointer.payload_checksum,
+        }
+    }
+}
+
+/// Decodes the head's visible WAL tip without accepting unknown fields.
+fn strict_wal_segment_pointer<'de, D>(
+    deserializer: D,
+) -> Result<Option<WalSegmentPointer>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<StrictWalSegmentPointer>::deserialize(deserializer)?.map(Into::into))
+}
+
+/// Decodes the head's predecessor hints without accepting unknown fields.
+fn strict_wal_segment_pointers<'de, D>(deserializer: D) -> Result<Vec<WalSegmentPointer>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Vec::<StrictWalSegmentPointer>::deserialize(deserializer)?
+        .into_iter()
+        .map(Into::into)
+        .collect())
 }
 
 /// Who most recently acquired the writer epoch, and when.
@@ -423,13 +467,21 @@ pub struct HeadState {
     /// First namespace-scoped inode identity available for allocation.
     pub next_inode_id: InodeId,
     /// Accepted tip of the visible WAL chain, or `None` before the first commit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "strict_wal_segment_pointer"
+    )]
     pub visible_wal_tip: Option<WalSegmentPointer>,
     /// Bounded newest-first predecessor accelerator below `visible_wal_tip`.
     /// Chain links remain the only history authority — any disagreement
     /// resolves in favor of the chain, and this array never protects anything
     /// from GC.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "strict_wal_segment_pointers"
+    )]
     pub recent_segments: Vec<WalSegmentPointer>,
     /// Lifecycle state. Absent means active, on read and on write, so the
     /// field appears only in deleted heads.
@@ -1132,15 +1184,21 @@ mod tests {
         );
     }
 
+    /// The mutable head rejects pointer fields that it cannot preserve during
+    /// a rewrite.
     #[test]
-    fn old_pointer_object_key_is_rejected() {
+    fn head_rejects_a_pointer_field_it_does_not_define() {
         let mut tip = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
         tip["object_key"] = serde_json::json!(
             "namespaces/demo/wal/segments/00000000000000000002-fedcba9876543210.wal.zst"
         );
 
-        serde_json::from_value::<HeadState>(head_json(Some(tip), Vec::new()))
-            .expect_err("the v1 hard cutover rejects the former stored object key");
+        serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), Vec::new()))
+            .expect_err("the head rejects a field its tip pointer does not define");
+
+        let older = wal_pointer_json("00000000000000000001-0123456789abcdef", 1, 1);
+        serde_json::from_value::<HeadState>(head_json(Some(older), vec![tip]))
+            .expect_err("the head rejects a field a predecessor hint does not define");
     }
 
     #[test]

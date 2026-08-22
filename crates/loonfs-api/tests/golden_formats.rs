@@ -15,8 +15,11 @@
 //!   another implementation of the same format version wrote — a
 //!   compatibility break once that format is deployed.
 //! - Additive payload fields in immutable families must keep decoding
-//!   (`*_tolerates_additive_*`). Mutable control objects reject unknown
-//!   fields so an older reader cannot erase them during a guarded rewrite.
+//!   (`*_tolerates_additive_*`), at every level of nesting. Mutable control
+//!   objects reject unknown fields so an older reader cannot erase them
+//!   during a guarded rewrite. `ContentRef`, `Checksum`, and `ActorRef` are
+//!   closed shapes: they reject unknown fields everywhere, because the same
+//!   types decode HTTP request bodies.
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
@@ -804,11 +807,23 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         ControlObjectKind::WalHead,
         |payload| payload["writer"]["field_from_the_future"] = serde_json::Value::from(true),
     );
+    // Both head pointer fields must reject data that a rewrite would drop.
     assert_control_payload_edit_is_corrupt::<HeadState>(
         "control_wal_head.v1.json",
         ControlObjectKind::WalHead,
         |payload| {
             payload["visible_wal_tip"]["field_from_the_future"] = serde_json::Value::from(true);
+        },
+    );
+    assert_control_payload_edit_is_corrupt::<HeadState>(
+        "control_wal_head.v1.json",
+        ControlObjectKind::WalHead,
+        |payload| {
+            // The fixture has no predecessor hints, so add one based on the
+            // visible tip and include an unknown field.
+            let mut hint = payload["visible_wal_tip"].clone();
+            hint["field_from_the_future"] = serde_json::Value::from(true);
+            payload["recent_segments"] = serde_json::Value::Array(vec![hint]);
         },
     );
     assert_control_payload_edit_is_corrupt::<HeadState>(
@@ -1251,6 +1266,71 @@ fn content_store_id() -> ContentStoreId {
 // Version, kind, and corruption semantics
 // ---------------------------------------------------------------------------
 
+/// Edits a WAL payload and updates its checksum.
+fn wal_document_with_payload_edit(
+    envelope: &WalSegmentEnvelope,
+    edit: impl FnOnce(&mut ciborium::Value),
+) -> Vec<u8> {
+    let document = unzstd(&encode_wal_segment_envelope_zstd(envelope).expect("wal"));
+    let document_value: ciborium::Value =
+        ciborium::de::from_reader(document.as_slice()).expect("decode document map");
+    let payload_bytes = document_value
+        .as_map()
+        .expect("document is a map")
+        .iter()
+        .find(|(key, _)| key.as_text() == Some("payload"))
+        .and_then(|(_, value)| value.as_bytes())
+        .expect("payload is a byte string")
+        .clone();
+    let mut payload: ciborium::Value =
+        ciborium::de::from_reader(payload_bytes.as_slice()).expect("decode payload");
+    edit(&mut payload);
+    let mut edited = Vec::new();
+    ciborium::ser::into_writer(&payload, &mut edited).expect("encode edited payload");
+
+    let with_payload = with_cbor_document_entry(&document, "payload", |value| {
+        *value = ciborium::Value::Bytes(edited.clone());
+    });
+    let restated = with_cbor_document_entry(&with_payload, "payload_checksum", |value| {
+        *value = ciborium::Value::from(sha256_digest(&edited));
+    });
+    rezstd(&restated)
+}
+
+/// Adds an unknown field to a CBOR map.
+fn with_future_field(value: &mut ciborium::Value) {
+    cbor_map_of(value).push((
+        ciborium::Value::from("field_from_the_future"),
+        ciborium::Value::from(true),
+    ));
+}
+
+/// Returns the sample WAL payload's only commit.
+fn payload_commit(payload: &mut ciborium::Value) -> &mut ciborium::Value {
+    cbor_entry(payload, "records")
+        .as_array_mut()
+        .expect("records is an array")
+        .first_mut()
+        .expect("the sample carries one commit")
+}
+
+/// Returns the delta at `position` in the sample commit.
+fn commit_delta(payload: &mut ciborium::Value, position: usize) -> &mut ciborium::Value {
+    let delta = cbor_entry(payload_commit(payload), "deltas")
+        .as_array_mut()
+        .expect("deltas is an array")
+        .get_mut(position)
+        .expect("the commit carries this delta");
+    cbor_entry(delta, "delta")
+}
+
+/// Builds a sample segment with the supplied deltas.
+fn wal_envelope_with_deltas(deltas: Vec<WalCommitDelta>) -> WalSegmentEnvelope {
+    let mut payload = sample_wal_envelope().payload;
+    payload.records[0].deltas = deltas;
+    WalSegmentEnvelope::from_payload(payload).expect("wal envelope")
+}
+
 /// Rewrites one top-level entry of a CBOR document map.
 fn with_cbor_document_entry(
     document: &[u8],
@@ -1360,110 +1440,89 @@ fn wal_decode_tolerates_additive_payload_fields() {
     // payload bytes change (and so does their checksum), but readers that do
     // not know the field must still decode the segment.
     let envelope = sample_wal_envelope();
-    let document = unzstd(&encode_wal_segment_envelope_zstd(&envelope).expect("wal"));
+    let document = wal_document_with_payload_edit(&envelope, with_future_field);
 
-    let document_value: ciborium::Value =
-        ciborium::de::from_reader(document.as_slice()).expect("decode document map");
-    let payload_bytes = document_value
-        .as_map()
-        .expect("document is a map")
-        .iter()
-        .find(|(key, _)| key.as_text() == Some("payload"))
-        .and_then(|(_, value)| value.as_bytes())
-        .expect("payload is a byte string")
-        .clone();
-    let mut payload_value: ciborium::Value =
-        ciborium::de::from_reader(payload_bytes.as_slice()).expect("decode payload");
-    payload_value.as_map_mut().expect("payload is a map").push((
-        ciborium::Value::from("field_from_the_future"),
-        ciborium::Value::from(true),
-    ));
-    let mut future_payload = Vec::new();
-    ciborium::ser::into_writer(&payload_value, &mut future_payload).expect("encode payload");
-
-    let with_payload = with_cbor_document_entry(&document, "payload", |value| {
-        *value = ciborium::Value::Bytes(future_payload.clone());
-    });
-    let future_document = with_cbor_document_entry(&with_payload, "payload_checksum", |value| {
-        *value = ciborium::Value::from(sha256_digest(&future_payload));
-    });
-
-    let decoded = decode_wal_segment_envelope_zstd(&rezstd(&future_document))
+    let decoded = decode_wal_segment_envelope_zstd(&document)
         .expect("additive payload fields must remain readable");
     assert_eq!(decoded.payload, envelope.payload);
 }
 
+/// Immutable WAL segments accept unknown predecessor-pointer fields.
 #[test]
-fn wal_decode_rejects_old_key_bearing_predecessor_pointer() {
-    let document = unzstd(&encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("wal"));
-    let document_value: ciborium::Value =
-        ciborium::de::from_reader(document.as_slice()).expect("decode document map");
-    let payload_bytes = document_value
-        .as_map()
-        .expect("document is a map")
-        .iter()
-        .find(|(key, _)| key.as_text() == Some("payload"))
-        .and_then(|(_, value)| value.as_bytes())
-        .expect("payload is a byte string");
-    let mut payload: ciborium::Value =
-        ciborium::de::from_reader(payload_bytes.as_slice()).expect("decode payload");
-    cbor_map_of(cbor_entry(&mut payload, "prev_visible_segment")).push((
-        ciborium::Value::from("object_key"),
-        ciborium::Value::from(
-            "namespaces/demo/wal/segments/00000000000000000002-fedcba9876543210.wal.zst",
-        ),
-    ));
-    let mut key_bearing_payload = Vec::new();
-    ciborium::ser::into_writer(&payload, &mut key_bearing_payload)
-        .expect("encode old key-bearing payload");
-
-    let with_payload = with_cbor_document_entry(&document, "payload", |value| {
-        *value = ciborium::Value::Bytes(key_bearing_payload.clone());
+fn wal_decode_tolerates_an_additive_field_inside_the_predecessor_pointer() {
+    let envelope = sample_wal_envelope();
+    let document = wal_document_with_payload_edit(&envelope, |payload| {
+        with_future_field(cbor_entry(payload, "prev_visible_segment"));
     });
-    let key_bearing_document =
-        with_cbor_document_entry(&with_payload, "payload_checksum", |value| {
-            *value = ciborium::Value::from(sha256_digest(&key_bearing_payload));
-        });
 
-    let error = decode_wal_segment_envelope_zstd(&rezstd(&key_bearing_document))
-        .expect_err("version-one predecessor pointers reject the former stored object key");
+    let decoded = decode_wal_segment_envelope_zstd(&document)
+        .expect("an additive field inside the predecessor pointer must remain readable");
+    assert_eq!(decoded.payload, envelope.payload);
+}
+
+/// Immutable WAL segments accept unknown fields nested in tombstone deltas.
+#[test]
+fn wal_decode_tolerates_additive_fields_inside_tombstone_deltas() {
+    let envelope = wal_envelope_with_deltas(vec![
+        WalCommitDelta {
+            semantic_op_index: 0,
+            delta: WalDelta::TombstoneSubtree {
+                delta_index: 0,
+                root_inode_id: InodeId(9),
+                deleted_direntry: Some(DeletedDirentry {
+                    parent_inode_id: InodeId(1),
+                    name_key: name_key("old.txt"),
+                    display_name: loonfs_api::DisplayName::parse("Old.txt")
+                        .expect("valid display name"),
+                }),
+            },
+        },
+        WalCommitDelta {
+            semantic_op_index: 1,
+            delta: WalDelta::RevokeSubtreeTombstone {
+                delta_index: 1,
+                root_inode_id: InodeId(9),
+                target: TombstoneGeneration {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
+            },
+        },
+    ]);
+    let document = wal_document_with_payload_edit(&envelope, |payload| {
+        with_future_field(cbor_entry(commit_delta(payload, 0), "deleted_direntry"));
+        with_future_field(cbor_entry(commit_delta(payload, 1), "target"));
+    });
+
+    let decoded = decode_wal_segment_envelope_zstd(&document)
+        .expect("additive fields inside a delta must remain readable");
+    assert_eq!(decoded.payload, envelope.payload);
+}
+
+/// Actor references reject unknown fields in every context because the same
+/// type is also used in request bodies.
+#[test]
+fn wal_decode_rejects_an_additive_field_inside_the_commit_actor() {
+    let document = wal_document_with_payload_edit(&sample_wal_envelope(), |payload| {
+        with_future_field(cbor_entry(payload_commit(payload), "actor"));
+    });
+
+    let error = decode_wal_segment_envelope_zstd(&document)
+        .expect_err("the actor rejects a field it does not define");
     assert!(
         matches!(&error, EnvelopeCodecError::PayloadDecode(message)
-            if message.contains("unknown field") && message.contains("object_key")),
+            if message.contains("unknown field") && message.contains("field_from_the_future")),
         "unexpected corruption error: {error}"
     );
 }
 
 #[test]
 fn wal_decode_rejects_a_version_one_commit_without_an_actor() {
-    let document = unzstd(&encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("wal"));
-    let document_value: ciborium::Value =
-        ciborium::de::from_reader(document.as_slice()).expect("decode document map");
-    let payload_bytes = document_value
-        .as_map()
-        .expect("document is a map")
-        .iter()
-        .find(|(key, _)| key.as_text() == Some("payload"))
-        .and_then(|(_, value)| value.as_bytes())
-        .expect("payload is a byte string");
-    let mut payload: ciborium::Value =
-        ciborium::de::from_reader(payload_bytes.as_slice()).expect("decode payload");
-    let records = cbor_entry(&mut payload, "records")
-        .as_array_mut()
-        .expect("records is an array");
-    cbor_map_of(records.first_mut().expect("one commit"))
-        .retain(|(key, _)| key.as_text() != Some("actor"));
-    let mut actorless_payload = Vec::new();
-    ciborium::ser::into_writer(&payload, &mut actorless_payload).expect("encode actorless payload");
-
-    let with_payload = with_cbor_document_entry(&document, "payload", |value| {
-        *value = ciborium::Value::Bytes(actorless_payload.clone());
-    });
-    let actorless_document = with_cbor_document_entry(&with_payload, "payload_checksum", |value| {
-        *value = ciborium::Value::from(sha256_digest(&actorless_payload));
+    let document = wal_document_with_payload_edit(&sample_wal_envelope(), |payload| {
+        cbor_map_of(payload_commit(payload)).retain(|(key, _)| key.as_text() != Some("actor"));
     });
 
-    let error = decode_wal_segment_envelope_zstd(&rezstd(&actorless_document))
+    let error = decode_wal_segment_envelope_zstd(&document)
         .expect_err("version-one WAL commits require an actor");
     assert!(
         matches!(&error, EnvelopeCodecError::PayloadDecode(message) if message.contains("actor")),
@@ -2119,6 +2178,14 @@ fn assert_row_is_corrupt(row: &ciborium::Value, why: &str) -> String {
     }
 }
 
+/// Decodes a row after applying an edit to its CBOR representation.
+fn decode_edited_row(row: &ciborium::Value, why: &str) -> MetadataRow {
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(row, &mut encoded).expect("encode edited row");
+    ciborium::de::from_reader::<MetadataRow, _>(encoded.as_slice())
+        .unwrap_or_else(|error| panic!("{why}, but the row failed to decode: {error}"))
+}
+
 #[test]
 fn commit_receipt_rows_without_an_actor_are_corrupt() {
     let mut row = row_cbor(&MetadataRow::CommitReceipt {
@@ -2154,20 +2221,47 @@ fn tombstone_rows_reject_a_partial_deleted_direntry() {
     }
 }
 
-/// Only a `set` deletes something, so only a `set` has a binding to record.
-/// A `revoke` carrying one is bytes no writer produces, and reading it as a
-/// revoke that happens to have extra baggage would hide that.
+/// Immutable metadata rows accept unknown tombstone fields at every level.
 #[test]
-fn tombstone_revoke_rows_reject_a_deleted_direntry() {
-    let mut row = row_cbor(&sample_tombstone_revoke_row());
+fn tombstone_rows_tolerate_additive_fields_at_every_level() {
+    let expected = sample_tombstone_set_row();
+    let paths: [&[&str]; 3] = [
+        &["generation"],
+        &["action"],
+        &["action", "deleted_direntry"],
+    ];
+
+    for path in paths {
+        let mut row = row_cbor(&expected);
+        let mut target = &mut row;
+        for key in path {
+            target = cbor_entry(target, key);
+        }
+        with_future_field(target);
+        assert_eq!(
+            decode_edited_row(
+                &row,
+                "an immutable row tolerates a field it does not define"
+            ),
+            expected,
+            "the unknown field under {path:?} changed the decoded row"
+        );
+    }
+}
+
+/// A `revoke` ignores `deleted_direntry`, which is valid only for `set`.
+#[test]
+fn tombstone_revoke_rows_ignore_a_deleted_direntry() {
+    let expected = sample_tombstone_revoke_row();
+    let mut row = row_cbor(&expected);
     cbor_map_of(cbor_entry(&mut row, "action")).push((
         ciborium::Value::from("deleted_direntry"),
         sample_deleted_direntry_cbor(),
     ));
-    let refusal = assert_row_is_corrupt(&row, "a revoke has no binding to carry");
-    assert!(
-        refusal.contains("unknown field `deleted_direntry`"),
-        "unexpected refusal: {refusal}"
+
+    assert_eq!(
+        decode_edited_row(&row, "a revoke tolerates a field it does not define"),
+        expected
     );
 }
 

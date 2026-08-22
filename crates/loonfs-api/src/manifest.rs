@@ -271,10 +271,11 @@ pub enum MetadataRow {
 ///
 /// Shared by the tombstone row and the WAL delta that revokes one, so a
 /// revoke names its target in the same spelling everywhere.
+///
+/// This type appears only in immutable data, so it accepts unknown fields.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-#[serde(deny_unknown_fields)]
 pub struct TombstoneGeneration {
     /// Commit sequence that published the event.
     pub seq: ChangeSeq,
@@ -286,8 +287,9 @@ pub struct TombstoneGeneration {
 ///
 /// Tombstones retain this binding after the corresponding unbind row may be
 /// collected. Undelete uses it to restore the original parent and name.
+///
+/// This type appears only in immutable data, so it accepts unknown fields.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DeletedDirentry {
     /// Directory that held the binding.
     pub parent_inode_id: InodeId,
@@ -312,8 +314,10 @@ where
 }
 
 /// Tombstone-row event vocabulary (format spec, "Tombstones and deletion").
+///
+/// This type appears only in immutable rows, so it accepts unknown fields.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TombstoneRowAction {
     /// The subtree rooted at the row's inode is deleted.
     Set {
