@@ -932,14 +932,14 @@ fn openapi_names_tagged_one_of_alternatives() {
         (
             "FilesystemOperation",
             &[
-                "FsOpCreateDirectory",
-                "FsOpPutFile",
-                "FsOpDeletePath",
-                "FsOpMovePath",
-                "FsOpCopyPath",
-                "FsOpUndelete",
-                "FsOpRestoreRevision",
-                "FsOpUpdateAttributes",
+                "FilesystemOperationCreateDirectory",
+                "FilesystemOperationPutFile",
+                "FilesystemOperationDeletePath",
+                "FilesystemOperationMovePath",
+                "FilesystemOperationCopyPath",
+                "FilesystemOperationUndelete",
+                "FilesystemOperationRestoreRevision",
+                "FilesystemOperationUpdateAttributes",
             ][..],
         ),
         (
@@ -1436,8 +1436,8 @@ fn openapi_documents_delete_path_behavior() {
         .and_then(Value::as_object)
         .expect("openapi schemas object");
     let delete_schema = schemas
-        .get("FsOpDeletePath")
-        .expect("FsOpDeletePath component schema");
+        .get("FilesystemOperationDeletePath")
+        .expect("FilesystemOperationDeletePath component schema");
 
     assert!(!delete_schema
         .get("required")
