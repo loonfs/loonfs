@@ -359,8 +359,8 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
     assert_eq!(record.manifest_id, first.manifest_id);
     assert_eq!(record.manifest_head_seq, first.checkpoint_seq);
     assert_eq!(
-        record.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
+        record.status,
+        loonfs_api::wire::control::CheckpointStatus::Active {}
     );
 
     // A new basis mints a new record; both files exist side by side.

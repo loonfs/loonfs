@@ -9,7 +9,7 @@ use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, FsWriter, NamespaceId, PutFileOptions,
     RuntimeCacheConfig, RuntimeError, SharedObjectStore, WriterFence,
 };
-use loonfs_api::wire::control::{HeadState, NamespaceState};
+use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass, RecordingStore};
 use std::sync::Arc;
@@ -230,7 +230,7 @@ async fn fenced_session_cannot_delete_namespace() {
 
     // The namespace is untouched: same epoch, still active, still writer B's.
     let head = head_state(&store, &namespace_id).await;
-    assert_eq!(head.state, NamespaceState::Active);
+    assert_eq!(head.status, NamespaceStatus::Active {});
     assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
     assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
     writer_b
@@ -371,7 +371,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
         "a fenced session must not touch the fenced namespace's head"
     );
     let head = head_state(&store, &ns_fence).await;
-    assert_eq!(head.state, NamespaceState::Active);
+    assert_eq!(head.status, NamespaceStatus::Active {});
     assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
     writer_b
         .put_file_bytes(

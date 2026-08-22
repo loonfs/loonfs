@@ -92,7 +92,7 @@ pub(crate) fn prepare_commit_head_publish(
         next_inode_id: plan.resulting_next_inode_id,
         recent_segments: next_recent_segments(current_head),
         visible_wal_tip: Some(new_tip),
-        state: current_head.state,
+        status: current_head.status,
     };
     current_head
         .ensure_successor_identity(&resulting_head)
@@ -196,7 +196,7 @@ mod tests {
             CommitHeadPublishError::Store { .. }
         ));
     }
-    use loonfs_api::wire::control::WriterBlock;
+    use loonfs_api::wire::control::{NamespaceStatus, WriterBlock};
     use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
     use loonfs_api::{CommitId, InodeId, NamespaceId, WalSegmentId, WriterEpoch, MAX_ID_BYTES};
 
@@ -220,7 +220,7 @@ mod tests {
             next_inode_id: InodeId(10),
             visible_wal_tip: None,
             recent_segments: Vec::new(),
-            state: Default::default(),
+            status: NamespaceStatus::Active {},
         }
     }
 

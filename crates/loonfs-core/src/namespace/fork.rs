@@ -13,7 +13,7 @@ use crate::namespace::bootstrap::{install_namespace_head, NamespaceHeadInstall};
 use crate::options::DeleteNamespaceOptions;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordLifecycle, ForkBasis, HeadState, NamespaceState, WriterBlock,
+    CheckpointOwner, CheckpointStatus, ForkBasis, HeadState, NamespaceStatus, WriterBlock,
 };
 use loonfs_api::{Namespace, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
@@ -97,7 +97,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         next_inode_id: source_manifest.payload.next_inode_id,
         visible_wal_tip: None,
         recent_segments: Vec::new(),
-        state: NamespaceState::Active,
+        status: NamespaceStatus::Active {},
     };
     match install_namespace_head(store, new_namespace_id, &head).await? {
         NamespaceHeadInstall::Landed => {}
@@ -186,8 +186,8 @@ async fn ensure_fork_checkpoint_lease_holds<S: ObjectStore + ?Sized>(
     else {
         return lost("the record is gone".to_owned());
     };
-    if record.state != (CheckpointRecordLifecycle::Active {}) {
-        return lost(format!("the record is `{}`", record.state));
+    if record.status != (CheckpointStatus::Active {}) {
+        return lost(format!("the record is `{}`", record.status));
     }
     let CheckpointOwner::Fork { expires_at_ms, .. } = record.owner else {
         return lost("the record is not fork-owned".to_owned());

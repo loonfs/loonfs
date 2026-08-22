@@ -104,10 +104,10 @@ pub struct MetadataFileRef {
     /// identical (same length and CRC32C) or the manifest is corrupt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_inline: Option<String>,
-    /// Checksum of the segment object's full bytes, in `sha256:<hex>` form.
-    /// The ranged read path verifies per-block CRCs instead; this digest is
-    /// the segment's identity in the decoded-block cache.
-    pub payload_checksum: String,
+    /// SHA-256 of the complete stored segment, formatted as
+    /// `sha256:<64 lowercase hex>`. Caches and offline verification use this
+    /// value. Ranged reads verify each block with its CRC32C instead.
+    pub object_checksum: String,
 }
 
 /// Stores one materialized metadata event in an SST segment.
@@ -1491,7 +1491,7 @@ mod tests {
                 crc32c: 0,
             },
             filter_inline: None,
-            payload_checksum: "sha256:unused".to_owned(),
+            object_checksum: "sha256:unused".to_owned(),
         }
     }
 }

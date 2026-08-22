@@ -14,7 +14,7 @@ use loonfs_api::{
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
     LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, PROFILE_QUERY_V0,
 };
-use loonfs_grep::root::{load_grep_root, GrepLifecycle};
+use loonfs_grep::root::{load_grep_root, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
@@ -259,8 +259,8 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         .expect("load disabled root")
         .expect("disabled root");
     assert!(matches!(
-        disabled.manifest_state().lifecycle(),
-        GrepLifecycle::Disabled
+        disabled.manifest_state().status(),
+        GrepIndexStatus::Disabled {}
     ));
     settle(&server).await;
     assert!(
@@ -270,8 +270,8 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
                 .expect("reload disabled root")
                 .expect("disabled root")
                 .manifest_state()
-                .lifecycle(),
-            GrepLifecycle::Disabled
+                .status(),
+            GrepIndexStatus::Disabled {}
         ),
         "no step may resurrect a root the operator disabled"
     );
@@ -371,8 +371,8 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         .expect("load root")
         .expect("backfill root");
     assert!(matches!(
-        root.manifest_state().lifecycle(),
-        GrepLifecycle::Backfilling { .. }
+        root.manifest_state().status(),
+        GrepIndexStatus::Backfilling { .. }
     ));
     writer.shutdown().await.expect("shutdown writer");
     drop(writer);
@@ -544,8 +544,8 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .expect("load root")
         .expect("maintained root");
     assert!(matches!(
-        root.manifest_state().lifecycle(),
-        GrepLifecycle::Active { .. }
+        root.manifest_state().status(),
+        GrepIndexStatus::Active { .. }
     ));
     assert!(
         !root.manifest_state().segments().is_empty(),
@@ -686,13 +686,13 @@ async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Cha
 }
 
 /// This namespace's durable grep lifecycle, read where an operator reads it.
-async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> GrepLifecycle {
+async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> GrepIndexStatus {
     load_grep_root(&**store, namespace_id)
         .await
         .expect("load grep root")
         .expect("an enabled namespace has a grep root")
         .manifest_state()
-        .lifecycle()
+        .status()
         .clone()
 }
 

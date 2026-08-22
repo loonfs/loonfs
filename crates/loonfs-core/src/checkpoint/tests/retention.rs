@@ -470,8 +470,8 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
         .expect("record exists")
         .state;
     assert_eq!(
-        released.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Released {
+        released.status,
+        loonfs_api::wire::control::CheckpointStatus::Released {
             released_at_ms: context.now_ms
         }
     );
@@ -502,8 +502,8 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
             .expect("read checkpoint record")
             .expect("record exists")
             .state
-            .state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Released {
+            .status,
+        loonfs_api::wire::control::CheckpointStatus::Released {
             released_at_ms: context.now_ms
         }
     );
@@ -565,8 +565,8 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         assert_eq!(record.owner.expires_at_ms(), expiry);
         assert_eq!(record.created_at_ms, 2_000);
         assert_eq!(
-            record.state,
-            loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
+            record.status,
+            loonfs_api::wire::control::CheckpointStatus::Active {}
         );
     }
 
@@ -580,8 +580,8 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     assert_eq!(original.created_at_ms, 1_000, "creation instant is history");
     assert_eq!(original.owner.expires_at_ms(), Some(10_000));
     assert_eq!(
-        original.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
+        original.status,
+        loonfs_api::wire::control::CheckpointStatus::Active {}
     );
 }
 
@@ -626,8 +626,8 @@ async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
             .expect("read checkpoint record")
             .expect("record exists")
             .state
-            .state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
+            .status,
+        loonfs_api::wire::control::CheckpointStatus::Active {}
     );
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
@@ -695,8 +695,8 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_released() {
         .expect("an unexpiring pin survives every pass")
         .state;
     assert_eq!(
-        record.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
+        record.status,
+        loonfs_api::wire::control::CheckpointStatus::Active {}
     );
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
@@ -755,7 +755,7 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
             name: "test-pin".to_owned(),
             expires_at_ms: None,
         },
-        state: loonfs_api::wire::control::CheckpointRecordLifecycle::Active {},
+        status: loonfs_api::wire::control::CheckpointStatus::Active {},
     };
     let verified = super::record::verify_checkpoint_basis(&store, &stale)
         .await
@@ -839,8 +839,8 @@ async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_recor
         .expect("record remains for cleanup inspection")
         .state;
     assert_eq!(
-        record.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Released {
+        record.status,
+        loonfs_api::wire::control::CheckpointStatus::Released {
             released_at_ms: context.now_ms
         }
     );
@@ -914,8 +914,8 @@ async fn checkpoint_checksum_disagreement_is_terminal_corruption_and_releases_re
         .expect("record remains for cleanup inspection")
         .state;
     assert_eq!(
-        record.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Released {
+        record.status,
+        loonfs_api::wire::control::CheckpointStatus::Released {
             released_at_ms: context.now_ms
         }
     );

@@ -22,11 +22,11 @@
 //!   types decode HTTP request bodies.
 
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
-    CheckpointRecordState, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HeadState,
-    MetadataCompactionLeaseState, MetadataCompactionLeaseStatus, MetadataRootState, NamespaceState,
-    ProxiedStaging, UploadSessionLifecycle, UploadSessionState, UploadSessionTransport,
-    WalFloorState, WalSegmentPointer, WriterBlock,
+    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordState,
+    CheckpointStatus, CompactionLeaseStatus, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
+    HeadState, MetadataCompactionLeaseState, MetadataRootState, NamespaceStatus, ProxiedStaging,
+    UploadSessionRecordStatus, UploadSessionState, UploadSessionTransport, WalFloorState,
+    WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -65,6 +65,9 @@ fn actor() -> ActorRef {
     ActorRef::service(ActorId::parse("loonfs-golden").expect("valid actor id"))
 }
 
+// Regenerate with `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1`:
+// without the single thread, tests that read a fixture race the tests rewriting
+// it and fail on a half-written file.
 fn assert_matches_golden(name: &str, actual: &[u8]) {
     let path = golden_path(name);
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
@@ -73,7 +76,7 @@ fn assert_matches_golden(name: &str, actual: &[u8]) {
         std::fs::write(&path, actual).expect("write golden fixture");
     }
     let expected = std::fs::read(&path).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1` to generate it")
     });
     if expected != actual {
         let offset = expected
@@ -94,7 +97,7 @@ fn assert_matches_golden(name: &str, actual: &[u8]) {
 
 fn read_golden(name: &str) -> Vec<u8> {
     std::fs::read(golden_path(name)).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1` to generate it")
     })
 }
 
@@ -367,7 +370,7 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
             // Only small filters are inlined; this descriptor's filter
             // is read through its handle, so the field is omitted.
             filter_inline: None,
-            payload_checksum: sha256_digest(b"sst payload"),
+            object_checksum: sha256_digest(b"sst payload"),
         }],
     })
     .expect("manifest envelope")
@@ -389,13 +392,13 @@ fn sample_head_state() -> HeadState {
         next_inode_id: InodeId(10),
         visible_wal_tip: Some(sample_wal_pointer()),
         recent_segments: Vec::new(),
-        state: NamespaceState::Active,
+        status: NamespaceStatus::Active {},
     }
 }
 
 fn sample_deleted_head_state() -> HeadState {
     HeadState {
-        state: NamespaceState::Deleted,
+        status: NamespaceStatus::Deleted {},
         ..sample_head_state()
     }
 }
@@ -502,26 +505,66 @@ where
 }
 
 #[test]
-fn head_state_reading_is_fail_closed_on_unknown_lifecycle_states() {
-    // An active head encodes without the field at all: the golden fixture
-    // for the pre-state format decodes as Active (additive evolution), and
-    // re-encoding it stays byte-identical.
+fn head_status_reading_is_fail_closed_on_unknown_statuses() {
+    // Every head writes the field, active heads included, and an active
+    // head round-trips through the tagged object it writes.
     let active = sample_head_state();
     let encoded = serde_json::to_string(&active).expect("encode active head");
     assert!(
-        !encoded.contains("\"state\""),
-        "active heads must omit the lifecycle field"
+        encoded.contains("\"status\":{\"kind\":\"active\"}"),
+        "an active head writes its status: {encoded}"
     );
+    let round_tripped =
+        serde_json::from_str::<HeadState>(&encoded).expect("an active head round-trips");
+    assert_eq!(round_tripped, active);
 
-    // A state this build does not know must fail decode, never default:
-    // serving a namespace in an unrecognized lifecycle state is the one
-    // mistake the field exists to prevent.
-    let future = encoded.replacen('{', "{\"state\":\"frozen\",", 1);
-    let decoded = serde_json::from_str::<HeadState>(&future);
-    assert!(decoded.is_err(), "unknown lifecycle state must fail closed");
+    // A status this build does not know must fail decode, never default:
+    // serving a namespace in an unrecognized status is the one mistake the
+    // field exists to prevent.
+    let future = encoded.replacen(
+        "\"status\":{\"kind\":\"active\"}",
+        "\"status\":{\"kind\":\"frozen\"}",
+        1,
+    );
+    serde_json::from_str::<HeadState>(&future).expect_err("an unknown status must fail closed");
 
     let deleted = serde_json::to_string(&sample_deleted_head_state()).expect("encode deleted");
-    assert!(deleted.contains("\"state\":\"deleted\""));
+    assert!(deleted.contains("\"status\":{\"kind\":\"deleted\"}"));
+}
+
+/// The field is required. A head that omits it is malformed, exactly like a
+/// head that omits its content store, and nothing defaults it to active.
+#[test]
+fn head_without_a_status_is_rejected() {
+    let mut document =
+        serde_json::to_value(sample_head_state()).expect("encode active head as a document");
+    document
+        .as_object_mut()
+        .expect("head document")
+        .remove("status");
+
+    let error = serde_json::from_value::<HeadState>(document)
+        .expect_err("a head without its status must be rejected");
+    assert!(
+        error.to_string().contains("status"),
+        "the rejection should name the field: {error}"
+    );
+}
+
+/// The status object holds a tag and nothing else, so a stray field inside
+/// it is corruption a guarded rewrite must not erase.
+#[test]
+fn head_status_rejects_unknown_fields_as_corruption() {
+    let mut document =
+        serde_json::to_value(sample_head_state()).expect("encode active head as a document");
+    document["status"]["field_from_the_future"] = serde_json::Value::from(true);
+
+    let error = serde_json::from_value::<HeadState>(document)
+        .expect_err("a status carrying an unknown field must be rejected");
+    assert!(
+        error.to_string().contains("field_from_the_future"),
+        "the rejection should name the field: {error}"
+    );
 }
 
 #[test]
@@ -581,7 +624,7 @@ fn control_objects_match_golden_bytes() {
                 name: "nightly".to_owned(),
                 expires_at_ms: None,
             },
-            state: CheckpointRecordLifecycle::Active {},
+            status: CheckpointStatus::Active {},
         },
     );
     // The fork owner is a durable encoding of its own: the tagged `owner`
@@ -603,7 +646,7 @@ fn control_objects_match_golden_bytes() {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
                 expires_at_ms: 2_463_000,
             },
-            state: CheckpointRecordLifecycle::Active {},
+            status: CheckpointStatus::Active {},
         },
     );
     // The lease is a control object of its own family, and the two things
@@ -619,7 +662,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid compaction id"),
             namespace_id: namespace_id(),
             owner_id: "writer-1".to_owned(),
-            status: MetadataCompactionLeaseStatus::Active,
+            status: CompactionLeaseStatus::Active {},
             started_at_ms: 1_000,
             heartbeat_at_ms: 3_000,
         },
@@ -636,16 +679,16 @@ fn control_objects_match_golden_bytes() {
             transport: UploadSessionTransport::ServiceProxied {
                 staging: ProxiedStaging::Staged(sample_content_ref()),
             },
-            state: UploadSessionLifecycle::Completed {
+            status: UploadSessionRecordStatus::Completed {
                 completed_at_ms: 2_000,
                 content_ref: sample_content_ref(),
             },
         },
     );
-    // The released lifecycle and the direct-put session shape are durable
-    // encodings of their own: `state` and `mode` change the document. A
+    // The released status and the direct-put session shape are durable
+    // encodings of their own: `status` and `mode` change the document. A
     // released record carries the instant its grace window runs from, and
-    // there is no third checkpoint state to pin.
+    // there is no third checkpoint status to pin.
     check_control_golden(
         "control_checkpoint_record_released.v1.json",
         ControlObjectKind::CheckpointRecord,
@@ -663,7 +706,7 @@ fn control_objects_match_golden_bytes() {
                 name: "nightly".to_owned(),
                 expires_at_ms: Some(9_000),
             },
-            state: CheckpointRecordLifecycle::Released {
+            status: CheckpointStatus::Released {
                 released_at_ms: 9_000,
             },
         },
@@ -680,7 +723,7 @@ fn control_objects_match_golden_bytes() {
             transport: UploadSessionTransport::DirectPut {
                 checksum_algorithm: ChecksumAlgorithm::Sha256,
             },
-            state: UploadSessionLifecycle::Open {
+            status: UploadSessionRecordStatus::Open {
                 expires_at_ms: 87_400_000,
             },
         },
@@ -703,7 +746,7 @@ fn control_objects_match_golden_bytes() {
                 part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
                 checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             },
-            state: UploadSessionLifecycle::Open {
+            status: UploadSessionRecordStatus::Open {
                 expires_at_ms: 87_400_000,
             },
         },
@@ -722,7 +765,7 @@ fn control_objects_match_golden_bytes() {
             transport: UploadSessionTransport::ServiceProxied {
                 staging: ProxiedStaging::Staged(sample_content_ref()),
             },
-            state: UploadSessionLifecycle::Open {
+            status: UploadSessionRecordStatus::Open {
                 expires_at_ms: 87_400_000,
             },
         },
@@ -739,7 +782,7 @@ fn control_objects_match_golden_bytes() {
             transport: UploadSessionTransport::ServiceProxied {
                 staging: ProxiedStaging::Claimed,
             },
-            state: UploadSessionLifecycle::Open {
+            status: UploadSessionRecordStatus::Open {
                 expires_at_ms: 87_400_000,
             },
         },
@@ -756,11 +799,52 @@ fn control_objects_match_golden_bytes() {
             transport: UploadSessionTransport::ServiceProxied {
                 staging: ProxiedStaging::Idle,
             },
-            state: UploadSessionLifecycle::Aborted {
+            status: UploadSessionRecordStatus::Aborted {
                 aborted_at_ms: 5_000,
             },
         },
     );
+}
+
+/// Every durable record with a lifecycle spells that field `status` and
+/// writes a `kind`-tagged object into it.
+///
+/// The fixtures are the durable bytes, so this reads the committed payloads
+/// rather than a re-encoding. The fifth family, the grep manifest, is
+/// checked the same way in `loonfs-grep`, which owns those bytes.
+#[test]
+fn every_durable_status_is_a_kind_tagged_object() {
+    let fixtures = [
+        "control_wal_head.v1.json",
+        "control_namespace_head.deleted.v1.json",
+        "control_checkpoint_record.v1.json",
+        "control_checkpoint_record_released.v1.json",
+        "control_upload_session.v1.json",
+        "control_compaction_lease.v1.json",
+    ];
+    for fixture in fixtures {
+        let document: serde_json::Value =
+            serde_json::from_slice(&read_golden(fixture)).expect("decode control fixture");
+        let payload = document["payload"]
+            .as_object()
+            .unwrap_or_else(|| panic!("`{fixture}` has an object payload"));
+        assert!(
+            !payload.contains_key("state") && !payload.contains_key("lifecycle"),
+            "`{fixture}` spells its lifecycle field `status`"
+        );
+        let status = payload
+            .get("status")
+            .unwrap_or_else(|| panic!("`{fixture}` writes a `status`"));
+        let tag = status
+            .as_object()
+            .unwrap_or_else(|| panic!("`{fixture}` writes `status` as an object"))
+            .get("kind")
+            .unwrap_or_else(|| panic!("`{fixture}` tags its `status` with `kind`"));
+        assert!(
+            tag.is_string(),
+            "`{fixture}` tags its `status` with a string, got {tag}"
+        );
+    }
 }
 
 #[test]
@@ -839,7 +923,7 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
-        |payload| payload["state"]["field_from_the_future"] = serde_json::Value::from(true),
+        |payload| payload["status"]["field_from_the_future"] = serde_json::Value::from(true),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_staged.v1.json",
@@ -869,30 +953,29 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
     );
 }
 
-/// The monotonic checkpoint lifecycle is a hard cutover. The pre-cutover
-/// encoding wrote `state` as a bare string over three variants; the current
-/// decoder takes a tagged object over two, so no record written before the
-/// change reads as one written after it — not even an `active` one.
+/// The checkpoint status is a tagged object over two variants. A bare
+/// string is not one of them, whatever it spells, and neither is a tag this
+/// format does not define.
 #[test]
-fn checkpoint_records_reject_the_pre_monotonic_lifecycle_encoding() {
-    for legacy_state in ["active", "released", "condemned"] {
+fn checkpoint_records_reject_an_untagged_or_unknown_status() {
+    for untagged in ["active", "released", "condemned"] {
         assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
             "control_checkpoint_record.v1.json",
             ControlObjectKind::CheckpointRecord,
-            |payload| payload["state"] = serde_json::Value::from(legacy_state),
+            |payload| payload["status"] = serde_json::Value::from(untagged),
         );
     }
-    // The deleted third state is not a tag this format knows either.
+    // A third status is not a tag this format knows either.
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
         "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
-        |payload| payload["state"]["kind"] = serde_json::Value::from("condemned"),
+        |payload| payload["status"]["kind"] = serde_json::Value::from("condemned"),
     );
     // A release without its stamp cannot be aged, so it is not a release.
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
         "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
-        |payload| payload["state"]["kind"] = serde_json::Value::from("released"),
+        |payload| payload["status"]["kind"] = serde_json::Value::from("released"),
     );
 }
 
@@ -901,7 +984,7 @@ fn active_checkpoint_records_reject_release_stamps() {
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
         "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
-        |payload| payload["state"]["released_at_ms"] = serde_json::Value::from(9_000),
+        |payload| payload["status"]["released_at_ms"] = serde_json::Value::from(9_000),
     );
 }
 
@@ -928,36 +1011,35 @@ fn fork_checkpoint_records_reject_a_missing_lease_expiry() {
     );
 }
 
-/// The monotonic upload lifecycle is a hard cutover too. The pre-cutover
-/// encoding wrote `state` as a bare string over `active` and `condemned`;
-/// the current decoder takes a tagged object over three states, each
-/// carrying the instant its own transition happened, so nothing written
-/// before the change reads as anything written after it.
+/// The upload status is a tagged object over three variants, each carrying
+/// the instant its own transition happened. A bare string is not one of
+/// them, an undefined tag is not one of them, and neither is a defined tag
+/// without its stamp.
 #[test]
-fn upload_sessions_reject_the_pre_monotonic_lifecycle_encoding() {
-    for legacy_state in ["active", "condemned"] {
+fn upload_sessions_reject_an_untagged_or_incomplete_status() {
+    for untagged in ["open", "condemned"] {
         assert_control_payload_edit_is_corrupt::<UploadSessionState>(
             "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
-            |payload| payload["state"] = serde_json::Value::from(legacy_state),
+            |payload| payload["status"] = serde_json::Value::from(untagged),
         );
     }
-    // The deleted states are not tags this format knows either.
-    for legacy_kind in ["active", "condemned"] {
+    // Statuses this format does not define are refused by tag alone.
+    for unknown_kind in ["active", "condemned"] {
         assert_control_payload_edit_is_corrupt::<UploadSessionState>(
             "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
-            |payload| payload["state"]["kind"] = serde_json::Value::from(legacy_kind),
+            |payload| payload["status"]["kind"] = serde_json::Value::from(unknown_kind),
         );
     }
-    // Every state is defined by its own stamp: without one it cannot be
-    // aged, so it is not that state.
+    // Every status is defined by its own stamp: without one it cannot be
+    // aged, so it is not that status.
     for tagged_without_its_stamp in ["open", "completed", "aborted"] {
         assert_control_payload_edit_is_corrupt::<UploadSessionState>(
             "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| {
-                payload["state"] = serde_json::json!({ "kind": tagged_without_its_stamp });
+                payload["status"] = serde_json::json!({ "kind": tagged_without_its_stamp });
             },
         );
     }
@@ -968,7 +1050,7 @@ fn mutable_control_enums_fail_closed_on_unknown_variants() {
     assert_control_payload_edit_is_corrupt::<HeadState>(
         "control_wal_head.v1.json",
         ControlObjectKind::WalHead,
-        |payload| payload["state"] = serde_json::Value::from("future_state"),
+        |payload| payload["status"] = serde_json::Value::from("future_status"),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_staged.v1.json",
@@ -997,7 +1079,7 @@ fn upload_sessions_reject_the_pre_transport_flat_encoding() {
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            let content_ref = payload["state"]["content_ref"].clone();
+            let content_ref = payload["status"]["content_ref"].clone();
             let object = payload.as_object_mut().expect("payload object");
             object.remove("transport");
             object.insert("mode".to_owned(), serde_json::Value::from("direct_put"));
@@ -1048,7 +1130,7 @@ fn upload_sessions_reject_a_reference_to_another_content_object() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
-        |payload| payload["state"]["content_ref"]["content_id"] = other.clone(),
+        |payload| payload["status"]["content_ref"]["content_id"] = other.clone(),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_staged.v1.json",
@@ -1179,7 +1261,7 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                     name: "nightly".to_owned(),
                     expires_at_ms: None,
                 },
-                state: CheckpointRecordLifecycle::Released {
+                status: CheckpointStatus::Released {
                     released_at_ms: 4_000,
                 },
             })
@@ -1196,7 +1278,7 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                 transport: UploadSessionTransport::ServiceProxied {
                     staging: ProxiedStaging::Idle,
                 },
-                state: UploadSessionLifecycle::Aborted {
+                status: UploadSessionRecordStatus::Aborted {
                     aborted_at_ms: 5_000,
                 },
             })

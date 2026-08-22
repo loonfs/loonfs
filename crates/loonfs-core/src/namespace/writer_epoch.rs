@@ -6,7 +6,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
 use crate::error::StoreFailureClass;
 use crate::limits::CONTENTION_RETRY_LIMIT;
-use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState, WriterBlock};
+use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceStatus, WriterBlock};
 use loonfs_api::{next_public_ordinal, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         let head = &loaded_head.state;
         // A deleted namespace cannot grant another writer epoch, even to the
         // writer recorded in its tombstone.
-        if head.state == NamespaceState::Deleted {
+        if head.status == (NamespaceStatus::Deleted {}) {
             return Err(WriterEpochAcquireError::NamespaceDeleted {
                 namespace_id: head.namespace_id.clone(),
             });
@@ -109,7 +109,7 @@ fn head_with_writer(
         next_inode_id: current_head.next_inode_id,
         visible_wal_tip: current_head.visible_wal_tip.clone(),
         recent_segments: current_head.recent_segments.clone(),
-        state: current_head.state,
+        status: current_head.status,
     }
 }
 
@@ -173,7 +173,7 @@ mod tests {
     use futures::stream::BoxStream;
     use loonfs_api::wire::control::{
         decode_control_object, encode_control_object, ControlObjectKind, HeadStateEnvelope,
-        NamespaceState,
+        NamespaceStatus,
     };
     use loonfs_api::{ChangeSeq, CommitId, NamespaceId, MAX_PUBLIC_INTEGER};
     use loonfs_objectstore::keys::wal_head;
@@ -322,7 +322,7 @@ mod tests {
         // The tombstone names the deleting writer in its writer block: even
         // that writer must be refused, so the guard precedes the bump.
         let mut tombstone = head_owned_by(&namespace_id, "writer-a", WriterEpoch(7));
-        tombstone.state = NamespaceState::Deleted;
+        tombstone.status = NamespaceStatus::Deleted {};
         write_head(&store, &namespace_id, tombstone).await;
         let etag_before = head_etag(&store, &namespace_id).await;
 
@@ -348,7 +348,7 @@ mod tests {
             .await
             .expect("read head")
             .state;
-        assert_eq!(head.state, NamespaceState::Deleted);
+        assert_eq!(head.status, NamespaceStatus::Deleted {});
         assert_eq!(head.writer_epoch, WriterEpoch(7));
     }
 
@@ -522,7 +522,7 @@ mod tests {
             .await
             .expect("read head")
             .state;
-        assert_eq!(head.state, NamespaceState::Active);
+        assert_eq!(head.status, NamespaceStatus::Active {});
         let writer = head.writer.expect("writer block");
         assert_eq!(writer.writer_id, "writer-b");
     }

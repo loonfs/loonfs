@@ -43,7 +43,9 @@ pub(crate) enum GrepBlockKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GrepBlockCacheKey {
-    pub(crate) payload_checksum: String,
+    /// Immutable cache identity. Manifest entries use `payload_checksum`;
+    /// segment blocks use `object_checksum`.
+    pub(crate) identity: String,
     pub(crate) block_kind: GrepBlockKind,
     pub(crate) block_offset: u64,
 }
@@ -363,7 +365,7 @@ mod tests {
 
     fn key(checksum: &str) -> GrepBlockCacheKey {
         GrepBlockCacheKey {
-            payload_checksum: checksum.to_owned(),
+            identity: checksum.to_owned(),
             block_kind: GrepBlockKind::Data,
             block_offset: 0,
         }

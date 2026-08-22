@@ -5,7 +5,7 @@
 //! a scheduling conclusion. The shared runner provides admission, permits,
 //! backoff, and shutdown; grep does not create another scheduler.
 
-use crate::root::{load_grep_root, GrepLifecycle};
+use crate::root::{load_grep_root, GrepIndexStatus};
 use crate::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcOptions, GrepGcReport,
     GrepReorganizeOutcome, GrepWorker,
@@ -97,18 +97,18 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         else {
             return Ok(MaintenanceProbe::Idle);
         };
-        match root.manifest_state().lifecycle() {
+        match root.manifest_state().status() {
             // Nothing to maintain: the runner forgets this namespace until
             // an enable nudges it back.
-            GrepLifecycle::Disabled => Ok(MaintenanceProbe::Idle),
+            GrepIndexStatus::Disabled {} => Ok(MaintenanceProbe::Idle),
             // A backfill always has its next page to walk.
-            GrepLifecycle::Backfilling { .. } => Ok(MaintenanceProbe::Due),
+            GrepIndexStatus::Backfilling { .. } => Ok(MaintenanceProbe::Due),
             // A watermark inside a commit has the rest of that commit left,
             // which no question about later commits would reveal.
-            GrepLifecycle::Active {
+            GrepIndexStatus::Active {
                 next_event_index, ..
             } if *next_event_index != 0 => Ok(MaintenanceProbe::Due),
-            GrepLifecycle::Active {
+            GrepIndexStatus::Active {
                 built_through_seq, ..
             } => {
                 let built_through_seq = *built_through_seq;

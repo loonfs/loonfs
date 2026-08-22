@@ -258,7 +258,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no head, so it does not exist. |
-| `namespace_deleted` | 410 | The namespace's head records the terminal deleted state. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
+| `namespace_deleted` | 410 | The namespace's head records the terminal deleted status. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
 | `path_not_found` | 404 | No visible entry at the path. |
 | `inode_not_found` | 404 | The requested visible or retained inode does not exist. |
 | `revision_not_found` | 404 | The file has no such revision. |

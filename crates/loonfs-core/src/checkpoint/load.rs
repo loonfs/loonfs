@@ -295,7 +295,7 @@ pub(crate) fn head_from_manifest(
         next_inode_id: manifest.payload.next_inode_id,
         visible_wal_tip: None,
         recent_segments: Vec::new(),
-        state: current_head.state,
+        status: current_head.status,
     }
 }
 

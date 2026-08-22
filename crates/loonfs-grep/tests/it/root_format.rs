@@ -7,7 +7,7 @@ use loonfs_api::wire::sst_blocks::BlockHandle;
 use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId};
 use loonfs_grep::root::{
     decode_grep_manifest, decode_grep_root, encode_grep_manifest, encode_grep_root,
-    GrepEnvelopeCodecError, GrepIndexState, GrepLifecycle, GrepManifestEnvelope, GrepManifestId,
+    GrepEnvelopeCodecError, GrepIndexState, GrepIndexStatus, GrepManifestEnvelope, GrepManifestId,
     GrepManifestState, GrepManifestStateError, GrepReorganizeState, GrepRootEnvelope,
     GrepRootPointer, GrepSegmentRef,
 };
@@ -15,14 +15,14 @@ use loonfs_test_support::ids::namespace_id;
 
 // Frozen format pins. These byte strings are the durable fixtures: changing
 // field names, ordering, enum tags, or omission rules must change them
-// deliberately. Together they represent every lifecycle state.
+// deliberately. Together they represent every index status.
 //
 // Every pre-release grep format stays at version 1. These current bytes pin
 // the schema where each phase owns its own watermark.
-const BACKFILLING_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:de7c0a92722040ae68768f4bbe7250a85ac6dc4eb06dd1485e481d1a6eaae66b","payload":{"namespace_id":"docs","lifecycle":{"kind":"backfilling","target_seq":7,"cursor":7,"checkpoint_id":"chk_00000000000000000000000000000009"},"index":{"format_version":1,"reorganize":{"snapshot_segment_ids":["idx_00000000000000000000000000000001","idx_00000000000000000000000000000002"],"output_segment_ids":["idx_00000000000000000000000000000003"],"row_key_cursor":"gram-6d6e6f-00000000000000000042","output_level":1,"run_ordinal":3},"next_run_ordinal":4},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_seq":8,"run_ordinal":1,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","payload_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000002","run_seq":9,"run_ordinal":2,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"payload_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000003","run_seq":10,"run_ordinal":3,"level":1,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"payload_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
-const ACTIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:78c0d1b0031a4286cf6668202a35d8de8fdfdaef8b97f3b5388d06fb2ea5d7cd","payload":{"namespace_id":"docs","lifecycle":{"kind":"active","built_through_seq":11,"next_event_index":5},"index":{"format_version":1,"next_run_ordinal":2},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_seq":8,"run_ordinal":1,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","payload_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
-const DISABLED_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:dd73bacf797be51a706ba8737ba11eef2097fd8d547f8024461184ef4a4927c6","payload":{"namespace_id":"docs","lifecycle":{"kind":"disabled"},"index":{"format_version":1,"next_run_ordinal":4},"segments":[]}}"#;
-const ADDITIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:0e6089d2807ba8ee47db058cc5ea17a27ff3b78dbd55f20cc4e8f225c817312c","payload":{"namespace_id":"docs","lifecycle":{"kind":"active","built_through_seq":11,"future_lifecycle":"ignored"},"index":{"format_version":1,"next_run_ordinal":2,"future_index":17},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_seq":8,"run_ordinal":1,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","payload_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","future_segment":"ignored"}],"future_root":true},"future_envelope":{"retained":true}}"#;
+const BACKFILLING_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:9830f4c85251848be5281ba26973b0696fd124976be41990079b3f2547857d64","payload":{"namespace_id":"docs","status":{"kind":"backfilling","target_seq":7,"cursor":7,"checkpoint_id":"chk_00000000000000000000000000000009"},"index":{"format_version":1,"reorganize":{"snapshot_segment_ids":["idx_00000000000000000000000000000001","idx_00000000000000000000000000000002"],"output_segment_ids":["idx_00000000000000000000000000000003"],"row_key_cursor":"gram-6d6e6f-00000000000000000042","output_level":1,"run_ordinal":3},"next_run_ordinal":4},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_seq":8,"run_ordinal":1,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000002","run_seq":9,"run_ordinal":2,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000003","run_seq":10,"run_ordinal":3,"level":1,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
+const ACTIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271","payload":{"namespace_id":"docs","status":{"kind":"active","built_through_seq":11,"next_event_index":5},"index":{"format_version":1,"next_run_ordinal":2},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_seq":8,"run_ordinal":1,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
+const DISABLED_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:23df5ecd9b434d54cd161da837a68125b58876f21015262840cd8924fcebef90","payload":{"namespace_id":"docs","status":{"kind":"disabled"},"index":{"format_version":1,"next_run_ordinal":4},"segments":[]}}"#;
+const ADDITIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:0686ca1af01c1081a560dd41599fb09371574df010d5f6724c876a1847ec68f7","payload":{"namespace_id":"docs","status":{"kind":"active","built_through_seq":11,"future_status":"ignored"},"index":{"format_version":1,"next_run_ordinal":2,"future_index":17},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_seq":8,"run_ordinal":1,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","future_segment":"ignored"}],"future_root":true},"future_envelope":{"retained":true}}"#;
 
 // Pointer ids are minted, not derived, so each fixture names an arbitrary
 // id and carries the digest of the manifest it points at. That pairing is
@@ -31,14 +31,14 @@ const BACKFILLING_MANIFEST_ID: &str = "gmf_1a2b3c4d5e6f70819a2b3c4d5e6f7081";
 const ACTIVE_MANIFEST_ID: &str = "gmf_2b3c4d5e6f70819a2b3c4d5e6f708192";
 const DISABLED_MANIFEST_ID: &str = "gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b";
 
-const BACKFILLING_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:0606a247e11f23e938081a0ff717d018b27f563ea8f59f9a1b09bfd2f6135563","payload":{"namespace_id":"docs","manifest_id":"gmf_1a2b3c4d5e6f70819a2b3c4d5e6f7081","manifest_payload_checksum":"sha256:de7c0a92722040ae68768f4bbe7250a85ac6dc4eb06dd1485e481d1a6eaae66b"}}"#;
-const ACTIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:a2022cd5caef40768e90d5df381f2b1f36cc1e0617b70619fd9a10f4efd08e1a","payload":{"namespace_id":"docs","manifest_id":"gmf_2b3c4d5e6f70819a2b3c4d5e6f708192","manifest_payload_checksum":"sha256:78c0d1b0031a4286cf6668202a35d8de8fdfdaef8b97f3b5388d06fb2ea5d7cd"}}"#;
-const DISABLED_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:3aa5e6a5f1be03c8f70581f6d5992c4b350188b55af2c7c03544935031cb850d","payload":{"namespace_id":"docs","manifest_id":"gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b","manifest_payload_checksum":"sha256:dd73bacf797be51a706ba8737ba11eef2097fd8d547f8024461184ef4a4927c6"}}"#;
-const ADDITIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:cbe44cbeee7aa8159062e46671dd576660a2bb2e434830348621af5d51ebb6f7","payload":{"namespace_id":"docs","manifest_id":"gmf_4d5e6f70819a2b3c4d5e6f70819a2b3c","manifest_payload_checksum":"sha256:78c0d1b0031a4286cf6668202a35d8de8fdfdaef8b97f3b5388d06fb2ea5d7cd","future_pointer":true},"future_envelope":{"retained":true}}"#;
+const BACKFILLING_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:da26d9831f13dc8e5ddde25d2fab527d5f7680fb6e04d4ef2b5c7b9e0d2c17e9","payload":{"namespace_id":"docs","manifest_id":"gmf_1a2b3c4d5e6f70819a2b3c4d5e6f7081","manifest_payload_checksum":"sha256:9830f4c85251848be5281ba26973b0696fd124976be41990079b3f2547857d64"}}"#;
+const ACTIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:b7e10bc96ab45a12553e905fbdbcd8306bdd7ce3f5535c8fc1277fbbee7370a2","payload":{"namespace_id":"docs","manifest_id":"gmf_2b3c4d5e6f70819a2b3c4d5e6f708192","manifest_payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271"}}"#;
+const DISABLED_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:a9e26310c31bcf2c8e51ec8372116a9728a41dd5b97f802a30fd0072dfd5bca6","payload":{"namespace_id":"docs","manifest_id":"gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b","manifest_payload_checksum":"sha256:23df5ecd9b434d54cd161da837a68125b58876f21015262840cd8924fcebef90"}}"#;
+const ADDITIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:7e69ef2152b1f24c139e7531679b774eb5e70c10dee482a677cec917383a233b","payload":{"namespace_id":"docs","manifest_id":"gmf_4d5e6f70819a2b3c4d5e6f70819a2b3c","manifest_payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271","future_pointer":true},"future_envelope":{"retained":true}}"#;
 
 // The string spelling every grep envelope carried before the version became
 // a number, kept only to prove it is refused.
-const STRING_VERSION_MANIFEST: &str = r#"{"kind":"grep_manifest","format_version":"v1","payload_checksum":"sha256:dd73bacf797be51a706ba8737ba11eef2097fd8d547f8024461184ef4a4927c6","payload":{"namespace_id":"docs","lifecycle":{"kind":"disabled"},"index":{"format_version":1,"next_run_ordinal":4},"segments":[]}}"#;
+const STRING_VERSION_MANIFEST: &str = r#"{"kind":"grep_manifest","format_version":"v1","payload_checksum":"sha256:23df5ecd9b434d54cd161da837a68125b58876f21015262840cd8924fcebef90","payload":{"namespace_id":"docs","status":{"kind":"disabled"},"index":{"format_version":1,"next_run_ordinal":4},"segments":[]}}"#;
 
 #[test]
 fn encoded_manifests_and_pointers_match_frozen_bytes() {
@@ -55,10 +55,12 @@ fn encoded_manifests_and_pointers_match_frozen_bytes() {
                 .expect("manifest JSON is UTF-8");
         assert_eq!(actual, expected);
 
-        let (manifest_id, expected) = match manifest.manifest_state().lifecycle() {
-            GrepLifecycle::Backfilling { .. } => (BACKFILLING_MANIFEST_ID, BACKFILLING_POINTER_V1),
-            GrepLifecycle::Active { .. } => (ACTIVE_MANIFEST_ID, ACTIVE_POINTER_V1),
-            GrepLifecycle::Disabled => (DISABLED_MANIFEST_ID, DISABLED_POINTER_V1),
+        let (manifest_id, expected) = match manifest.manifest_state().status() {
+            GrepIndexStatus::Backfilling { .. } => {
+                (BACKFILLING_MANIFEST_ID, BACKFILLING_POINTER_V1)
+            }
+            GrepIndexStatus::Active { .. } => (ACTIVE_MANIFEST_ID, ACTIVE_POINTER_V1),
+            GrepIndexStatus::Disabled {} => (DISABLED_MANIFEST_ID, DISABLED_POINTER_V1),
         };
         let pointer = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
             namespace_id("docs"),
@@ -90,7 +92,7 @@ fn identical_manifest_state_mints_distinct_ids() {
 /// Every phase survives a round trip carrying exactly its own fields, and
 /// the encoded bytes never name the other phase's sequence.
 #[test]
-fn every_lifecycle_phase_round_trips_carrying_only_its_own_position() {
+fn every_status_round_trips_carrying_only_its_own_position() {
     for (state, absent_field) in [
         (sample_backfilling_root(), "built_through_seq"),
         (sample_active_root(ChangeSeq(11), 5), "target_seq"),
@@ -105,7 +107,7 @@ fn every_lifecycle_phase_round_trips_carrying_only_its_own_position() {
                 .expect("manifest JSON is UTF-8")
                 .contains(absent_field),
             "{:?} must not spell `{absent_field}`",
-            state.lifecycle()
+            state.status()
         );
         assert_eq!(
             decode_grep_manifest(&encoded)
@@ -113,6 +115,30 @@ fn every_lifecycle_phase_round_trips_carrying_only_its_own_position() {
                 .manifest_state(),
             &state
         );
+    }
+}
+
+/// The manifest spells its lifecycle field `status` and writes a
+/// `kind`-tagged object into it, exactly as every durable control object
+/// does. The control families are checked the same way in `loonfs-api`.
+#[test]
+fn the_manifest_status_is_a_kind_tagged_object() {
+    for fixture in [BACKFILLING_V1, ACTIVE_V1, DISABLED_V1] {
+        let document: serde_json::Value =
+            serde_json::from_str(fixture).expect("decode manifest fixture");
+        let payload = document["payload"].as_object().expect("object payload");
+        assert!(
+            !payload.contains_key("lifecycle") && !payload.contains_key("state"),
+            "the manifest spells its lifecycle field `status`: {fixture}"
+        );
+        let tag = payload
+            .get("status")
+            .expect("the manifest writes a `status`")
+            .as_object()
+            .expect("the manifest writes `status` as an object")
+            .get("kind")
+            .expect("the manifest tags its `status` with `kind`");
+        assert!(tag.is_string(), "the tag is a string, got {tag}");
     }
 }
 
@@ -255,7 +281,7 @@ fn constructor_rejects_reorganization_segment_mismatch() {
     assert!(matches!(
         GrepManifestState::new(
             namespace_id("docs"),
-            GrepLifecycle::Active {
+            GrepIndexStatus::Active {
                 built_through_seq: ChangeSeq(7),
                 next_event_index: 0,
             },
@@ -276,7 +302,7 @@ fn sample_backfilling_root() -> GrepManifestState {
     };
     GrepManifestState::new(
         namespace_id("docs"),
-        GrepLifecycle::Backfilling {
+        GrepIndexStatus::Backfilling {
             target_seq: ChangeSeq(7),
             cursor: Some(InodeId(7)),
             checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
@@ -295,7 +321,7 @@ fn sample_backfilling_root() -> GrepManifestState {
 fn sample_active_root(built_through_seq: ChangeSeq, next_event_index: u32) -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
-        GrepLifecycle::Active {
+        GrepIndexStatus::Active {
             built_through_seq,
             next_event_index,
         },
@@ -308,7 +334,7 @@ fn sample_active_root(built_through_seq: ChangeSeq, next_event_index: u32) -> Gr
 fn sample_disabled_root() -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
-        GrepLifecycle::Disabled,
+        GrepIndexStatus::Disabled {},
         GrepIndexState::new(None, 4),
         Vec::new(),
     )
@@ -337,7 +363,7 @@ fn segment_ref(number: u8, run_ordinal: u64, level: u32, segment_index: u32) -> 
             crc32c: 2_591_069_104,
         },
         filter_inline: (number == 1).then(|| "00112233445566778899aabbccddeeff".to_owned()),
-        payload_checksum: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        object_checksum: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
             .to_owned(),
     }
 }

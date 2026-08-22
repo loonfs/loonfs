@@ -12,7 +12,7 @@ use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::control::load_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, HeadState, NamespaceState, WriterBlock,
+    encode_control_state, ControlObjectKind, HeadState, NamespaceStatus, WriterBlock,
 };
 use loonfs_api::{
     ChangeSeq, ContentStoreId, ErrorCode, InodeKind, Namespace, NamespaceId, ROOT_INODE_ID,
@@ -182,7 +182,7 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
                 // cannot support.
                 Err(error) => return Err(CoreError::load_head(error)),
             };
-            if existing.state == NamespaceState::Deleted {
+            if existing.status == (NamespaceStatus::Deleted {}) {
                 return Ok(NamespaceHeadInstall::Deleted);
             }
             Ok(NamespaceHeadInstall::Exists)

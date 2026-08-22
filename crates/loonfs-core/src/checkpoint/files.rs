@@ -13,7 +13,7 @@ use super::load::load_verified_manifest_tables_with_cache;
 use super::record::load_checkpoint_record;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::MetadataView;
-use loonfs_api::wire::control::{CheckpointRecordLifecycle, CheckpointRecordState};
+use loonfs_api::wire::control::{CheckpointRecordState, CheckpointStatus};
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{
@@ -210,10 +210,10 @@ async fn load_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
             "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
         )));
     };
-    if record.state != (CheckpointRecordLifecycle::Active {}) {
+    if record.status != (CheckpointStatus::Active {}) {
         return Err(CoreError::CheckpointUnavailable(format!(
             "checkpoint `{checkpoint_id}` is `{}` and no longer pins its basis",
-            record.state
+            record.status
         )));
     }
     Ok(record)

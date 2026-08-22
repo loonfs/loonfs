@@ -25,7 +25,7 @@ pub use codec::{
 pub use error::{GrepEnvelopeCodecError, GrepManifestStateError, GrepRootError};
 pub(crate) use state::ChangeFeedResume;
 pub use state::{
-    GrepIndexState, GrepLifecycle, GrepManifestId, GrepManifestState, GrepReorganizeState,
+    GrepIndexState, GrepIndexStatus, GrepManifestId, GrepManifestState, GrepReorganizeState,
     GrepRootPointer, GrepSegmentRef, GREP_INDEX_FORMAT_VERSION,
 };
 pub use store::{

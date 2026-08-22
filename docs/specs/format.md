@@ -15,9 +15,10 @@ a deployment exposes.
 
 Encoding conventions used by every durable and wire shape in this specification:
 field names and enum values are `snake_case`; fields holding typed identifiers
-are suffixed `_id`; tagged-union discriminators default to `kind`, but a union
-may use its domain word where that reads better. The current exceptions are
-`mode`, `state`, `phase`, and `inode_kind`.
+are suffixed `_id`; every durable tagged union uses `kind` as its
+discriminator. The HTTP binding uses `kind` too, and additionally uses `mode`,
+`status`, `outcome`, and `inode_kind` as tag words where those read better at
+the call site.
 
 Unknown fields are tolerated where a reader must accept what a newer writer
 added, and rejected where accepting one would lose information the sender
@@ -86,11 +87,11 @@ The required durable object families and standard key patterns are:
 | **WAL head** | Mutable | Defines the namespace's durable identity and current state: content store, fork provenance, visible sequence, writer epoch, writer metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
-| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The lifecycle is monotonic: a record is created active under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
+| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
 | **Compaction staging** | Immutable | Hold metadata segments one streaming compaction job has written before any manifest references them ("Compaction"). The object is an ordinary metadata segment; only the directory differs. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/tables/{table_id}.sst.zst` |
-| **Compaction leases** | Mutable lifecycle | Say who owns the objects under one streaming compaction job's prefix. Carries lifecycle ownership only — job, namespace, owner, status, start, and last heartbeat. The lifecycle is monotonic: the job creates the lease `active` and refreshes it by compare-and-swap on a heartbeat interval, garbage collection moves an expired lease once to `reaping` by compare-and-swap, and `reaping` is terminal. A published job stops refreshing its lease and leaves it to expire. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/lease.json` |
-| **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The lifecycle is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
+| **Compaction leases** | Mutable lifecycle | Record ownership of a compaction output prefix. A job creates and refreshes an `active` lease. Garbage collection may change an expired lease to terminal `reaping` before reclaiming the output. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/lease.json` |
+| **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
@@ -771,24 +772,26 @@ lets reorganization discard both rows together.
 The recoverable set is read as a range scan in deletion order. Tombstone rows
 remain authoritative because this family is derived from them.
 
-A namespace head has exactly two recorded states: `active` (the default; an
-absent field reads as active) and terminal `deleted`. There is no
-initialization state and no intermediate state of any kind, because there is
+A namespace head records its `status`, and that status has exactly two
+values: `active` and terminal `deleted`. Every head writes the field; there is
+no default, and a head that omits it fails to decode. There is no
+initialization status and no intermediate status of any kind, because there is
 no initialization to observe: the head is published complete by one
 conditional write, so a namespace either has a head or does not exist.
 Deletion is the one transition the head must record, and it keeps that head
 forever as the tombstone that retires its `namespace_id`. Readers MUST refuse
-to serve a namespace whose head state they do not recognize; decoding is
+to serve a namespace whose head status they do not recognize; decoding is
 fail-closed, never best-effort.
 
 Deleting a namespace is a fenced control-plane transition, not a logical
 commit: the deleting writer acquires the namespace writer epoch and
-compare-and-swaps the head into `state: deleted`. The delete linearizes at that swap. Every
-commit whose head advance serialized before it remains committed and
-durable — deletion never retroactively falsifies an acknowledgment; it ends
-the namespace's history at that `seq`. Every operation that observes the
-deleted head afterward — reads, commits, forks from the namespace, status,
-and re-creation of the same id — fails with `namespace_deleted`.
+compare-and-swaps the head into `status: {"kind": "deleted"}`. The delete
+linearizes at that swap. Every commit whose head advance serialized before it
+remains committed and durable — deletion never retroactively falsifies an
+acknowledgment; it ends the namespace's history at that `seq`. Every operation
+that observes the deleted head afterward — reads, commits, forks from the
+namespace, status, and re-creation of the same id — fails with
+`namespace_deleted`.
 
 Namespace deletion does not imply content-store deletion. In v0, deleting a
 content store is unsupported operator-only work, and the only content garbage
@@ -897,7 +900,7 @@ including at minimum:
 
 - `seq`
 - `head_commit_id`
-- `state` (absent or `active`, or terminal `deleted`)
+- `status` (`active`, or terminal `deleted`)
 - `next_inode_id`
 - `visible_wal_tip` and the bounded `recent_segments` accelerator
 
@@ -975,7 +978,7 @@ A checkpoint is a durable pin to a namespace manifest version, stored as a
 first-class record under `checkpoints/` — never inside a manifest, and never
 an input to latest visibility. A record carries its basis facts (manifest id,
 seq, payload checksum, head commit id), a required tagged `owner`, and a
-tagged lifecycle `state`. A `user` owner carries a name label and an optional
+tagged `status`. A `user` owner carries a name label and an optional
 `expires_at_ms`; a `fork` owner carries the target namespace the pin protects
 and a required `expires_at_ms`. There is no expiry field at the record's top
 level.
@@ -988,7 +991,7 @@ re-verification, this closes the create-vs-collect race: a record whose
 `created_at_ms` is inside the grace window is still inside its own verify
 budget, so nothing releases it for a basis it may yet prove.
 
-The lifecycle is monotonic. It has two states and one transition:
+The `status` is monotonic. It has two values and one transition:
 
 ```text
 Missing
@@ -1008,8 +1011,8 @@ generated, never derived and never supplied by a caller, so a pin can never
 land on a released record's key and a released id is never reused. Distinct
 pins over one basis are distinct records with independent lifecycles.
 
-No checkpoint state transition consults a provider object timestamp. Every
-instant the lifecycle depends on lives in the record: `created_at_ms` for the
+No checkpoint status transition consults a provider object timestamp. Every
+instant the status depends on lives in the record: `created_at_ms` for the
 create-vs-collect grace, `owner.expires_at_ms` for the release, and
 `released_at_ms` for the deletion.
 
@@ -1764,7 +1767,7 @@ Examples include:
 v0 uses upload sessions for resumable uploads. It does not define read
 sessions or put intents.
 
-A durable upload session has three states:
+A durable upload session has three statuses:
 
 - `open { expires_at_ms }`: accepts upload work until its lease expires.
 - `completed { completed_at_ms, content_ref }`: contains the verified content
@@ -1772,13 +1775,13 @@ A durable upload session has three states:
 - `aborted { aborted_at_ms }`: cannot be completed or reopened.
 
 Completion and abort use compare-and-swap. Only one terminal transition can
-succeed. Completion verifies the object before changing the state. Abort
-changes the state before deleting the object. This prevents cleanup from
+succeed. Completion verifies the object before changing the status. Abort
+changes the status before deleting the object. This prevents cleanup from
 deleting an object for a session that is still open. Cleanup is safe to retry.
 
 Each session has `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, a
-tagged `transport`, and a tagged `state`. The content identity is assigned when
-the session begins.
+tagged `transport`, and a tagged `status`. The content identity is assigned
+when the session begins.
 
 The transport does not change:
 
@@ -1796,7 +1799,7 @@ The following invariants are checked when a record is read:
 
 - Every staged or completed content reference uses the session's
   `content_id`.
-- The record carries a `transport` and a `state`. Neither has a default and
+- The record carries a `transport` and a `status`. Neither has a default and
   neither may be omitted.
 - A completed `direct_put` session's checksum uses the transport's stored
   `checksum_algorithm`.
@@ -1845,6 +1848,9 @@ payload as an opaque sub-document:
 | `payload_checksum` | `sha256:<64 lowercase hex>` digest of the exact payload bytes as stored. |
 | `payload` | The payload: a raw JSON sub-document in JSON families, a CBOR byte string in CBOR families. |
 
+`payload_checksum` covers the payload inside an envelope. `object_checksum`
+covers a complete object that has no envelope.
+
 Two rules make these envelopes evolvable:
 
 1. **Checksums cover stored bytes, never a re-encoding.** Readers verify
@@ -1855,6 +1861,10 @@ Two rules make these envelopes evolvable:
    `format_version`, so an object written with an unknown kind or an
    unsupported format version fails with a precise, typed error rather than a
    generic decode error.
+
+Every durable lifecycle field is named `status`, is always present, and uses a
+`kind`-tagged object. HTTP responses flatten the same data beside their
+`status` field.
 
 ### 4.2 Format families and versions
 
@@ -1883,28 +1893,28 @@ independently readable sections — prefix-compressed data blocks holding rows
 in ascending row-key order, one bloom filter block over per-family lookup
 prefixes, then one index block naming each data block's last key and byte
 range. There is no footer and no self-describing header; the referencing
-manifest's segment descriptor carries the index and
-filter block handles, and is the only entry point into the object. Each
-section's CRC32C is computed over its stored (compressed) bytes and lives in
-the handle that names it — index entries for data blocks, the manifest
-descriptor for the index and filter — so a reader verifies every ranged read
-before decoding it, and the manifest transitively binds the object's exact
-bytes. The descriptor also records a whole-object `sha256` digest for
-publication conflict checks and offline verification; the read path never
-consults it. When the filter block is small (delta-run segments), the
-descriptor additionally inlines the filter's stored bytes as lowercase hex
+manifest's segment descriptor carries the index and filter block handles, and
+is the only entry point into the object. Each section's CRC32C is computed
+over its stored (compressed) bytes and lives in the handle that names it —
+index entries for data blocks, the manifest descriptor for the index and
+filter — so a reader verifies every ranged read before decoding it, and the
+manifest transitively binds the object's exact bytes. The descriptor also
+stores `object_checksum`, the SHA-256 digest of the full segment, for
+publication conflict checks and offline verification. Normal reads use the
+per-block checksums instead. When the filter block is small (delta-run segments),
+the descriptor additionally inlines the filter's stored bytes as lowercase hex
 (`filter_inline`), so a point lookup can rule the segment out without any
 object fetch. The inline copy is bound by the same filter handle — it must
 decode against the handle's stored length and CRC32C exactly like a fetched
-block, and a mismatch is corruption. When the field is absent (large
-filters are not inlined), readers fetch the filter block by its handle. The
-filter block sits directly before the index block at the end of the object;
-manifest loading rejects a descriptor whose handles disagree with that
-layout, or whose inline copy's length disagrees with its handle, so the
-read path assumes both. Readers reject out-of-order rows,
-out-of-order index entries, and checksum failures as malformed. The segment
-format is versioned by the manifest that references it (`namespace_manifest`
-`format_version`), since a segment is unreachable except through a manifest.
+block, and a mismatch is corruption. When the field is absent (large filters
+are not inlined), readers fetch the filter block by its handle. The filter
+block sits directly before the index block at the end of the object; manifest
+loading rejects a descriptor whose handles disagree with that layout, or whose
+inline copy's length disagrees with its handle, so the read path assumes both.
+Readers reject out-of-order rows, out-of-order index entries, and checksum
+failures as malformed. The segment format is versioned by the manifest that
+references it (`namespace_manifest` `format_version`), since a segment is
+unreachable except through a manifest.
 
 A run is identified by its `run_seq` and `level` together, and holds one
 family's segments from one producer: a WAL flush's delta run or a rebuild's
@@ -1935,7 +1945,7 @@ rebuild reuse the object an earlier publication left behind, and that reuse
 is what would let collection race a publication for a manifest the winner is
 about to point at. The bytes are bound to the pointer instead, through
 `manifest_payload_checksum`. Namespace manifests carry no
-grep pointer, watermark, lifecycle, or segment references. A fork therefore
+grep pointer, watermark, status, or segment references. A fork therefore
 starts without grep state until grep is enabled for the target.
 
 `root.json` is a small mutable pointer envelope with these fields, in order:
@@ -1947,11 +1957,11 @@ starts without grep state until grep is enabled for the target.
 
 Each immutable manifest has the same envelope grammar with
 `kind = "grep_manifest"` and `format_version = 1`. Its payload is the full
-grep state: `namespace_id`, `lifecycle`, nested `index` bookkeeping, and the
+grep state: `namespace_id`, `status`, nested `index` bookkeeping, and the
 `segments` descriptors. Both decoders verify the checksum over the exact
 stored payload fragment before decoding, reject unknown versions and kind
-mismatches without fallback, and validate namespace, lifecycle,
-fold, run-allocation, and segment invariants at every boundary. A manifest
+mismatches without fallback, and validate namespace, status, fold,
+run-allocation, and segment invariants at every boundary. A manifest
 load additionally requires the loaded envelope's `payload_checksum` to equal
 what the pointer promised, which is the same binding a metadata root holds
 over its namespace manifest. The mutable
@@ -1961,7 +1971,7 @@ immutable manifest decoder tolerates additive fields.
 The nested `index` object carries its own `format_version`, currently `1`.
 It holds what every phase has — the in-progress `reorganize` state and the
 `next_run_ordinal` allocator — while each phase's own position lives in the
-`lifecycle` tag beside it:
+`status` tag beside it:
 
 - `backfilling`: `target_seq` (the namespace sequence the pinned checkpoint
   captured), optional `cursor` (the inode the walk resumes strictly after),
@@ -1978,10 +1988,11 @@ checkpoint.
 A gram-index segment uses the section 4.2.1 block grammar unchanged —
 prefix-compressed data blocks, one bloom filter block, one index block,
 handles and checksums in the grep-manifest descriptor — with a grep-owned row
-payload instead of metadata rows. The tokenizer, row shapes, and posting
-encoding below are frozen by grep manifest format version 1; their evolution
-follows the rules in section 4.3 and always permits rebuilding this derived
-work (section 6.6).
+payload instead of metadata rows. Its `object_checksum` is the SHA-256 digest
+of the complete stored segment, with the same meaning as the metadata segment
+field. The tokenizer, row shapes, and posting encoding below are
+frozen by grep manifest format version 1; their evolution follows the rules in
+section 4.3 and always permits rebuilding this derived work (section 6.6).
 
 - The **tokenizer** is every overlapping three-byte window (gram) of an
   eligible revision's content, after folding ASCII letters to lower case.
@@ -2110,11 +2121,11 @@ For file revisions, a valid manifest includes the canonical `revisions` table
 and the `revisions_by_inode_desc` index table. The index table must contain
 exactly the same revision rows as the canonical table, keyed for newest-first
 inode revision scans. Readers treat a missing, extra, duplicate, or changed
-revision index row as namespace corruption. Segment reads enforce per-segment
-checksums and key ranges; manifest-table loads enforce per-run row-count
-equality between canonical and index families; full row-level index equality
-is enforced by every reorganization rewrite over the complete input runs that
-the rewrite selected.
+revision index row as namespace corruption. Segment reads verify the per-block
+checksums in the block handles and enforce key ranges. Manifest-table loads
+enforce per-run row-count equality between canonical and index families; full
+row-level index equality is enforced by every reorganization rewrite over the
+complete input runs that the rewrite selected.
 
 ### 6.2 Compaction
 
@@ -2435,9 +2446,9 @@ publishing CAS) — under these rules:
    The lease says so instead. Every job owns the prefix
    `namespaces/{namespace_id}/metadata/compactions/{job_id}/`, writes its
    output under `tables/` inside it, and holds a lease at `lease.json` beside
-   that directory. The lease carries lifecycle ownership only — job,
-   namespace, owner, `status`, `started_at_ms`, `heartbeat_at_ms` — and never
-   a cursor, an output descriptor, an offset, or resumable progress. The job
+   that directory. The lease carries ownership only — job, namespace, owner,
+   the tagged `status`, `started_at_ms`, `heartbeat_at_ms` — and never a
+   cursor, an output descriptor, an offset, or resumable progress. The job
    creates it `active` with create-if-absent before its first output object,
    and refreshes it by compare-and-swap on the etag it last observed, every
    `METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS` while it runs and at the top of
@@ -2445,8 +2456,8 @@ publishing CAS) — under these rules:
 
    The lease is a fence, not a timestamp. An expired lease alone proves
    nothing — the job may be resuming from a long stall — so a pass claims one
-   by compare-and-swapping its `status` from `active` to `reaping`, and only
-   the winner of that compare-and-swap may act:
+   by compare-and-swapping its tagged `status` from `active` to `reaping`, and
+   only the winner of that compare-and-swap may act:
 
    ```
    the job's heartbeat wins    -> the pass retains the prefix

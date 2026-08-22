@@ -12,7 +12,8 @@ use crate::keyspace::{manifest_key, segment_key};
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReads};
 use crate::root::{
-    load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepLifecycle, GrepManifestState,
+    load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepIndexStatus,
+    GrepManifestState,
 };
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
@@ -82,7 +83,7 @@ struct GrepQuerySegment {
     index_block: BlockHandle,
     filter_block: BlockHandle,
     filter_inline: Option<String>,
-    payload_checksum: String,
+    object_checksum: String,
 }
 
 impl GrepService {
@@ -98,7 +99,7 @@ impl GrepService {
             .ok_or(GrepError::NotEnabled)?;
         let manifest_id = pointer.pointer().manifest_id();
         let cache_key = GrepBlockCacheKey {
-            payload_checksum: pointer.pointer().manifest_payload_checksum().to_owned(),
+            identity: pointer.pointer().manifest_payload_checksum().to_owned(),
             block_kind: GrepBlockKind::Manifest,
             block_offset: 0,
         };
@@ -167,10 +168,10 @@ fn materialized_snapshot_from_state(
 ) -> Result<MaterializedGrepIndexSnapshot> {
     // Queries require an active index and its watermark. Disabled and
     // backfilling indexes return their corresponding errors.
-    let (built_through_seq, next_event_index) = match root.lifecycle() {
-        GrepLifecycle::Disabled => return Err(GrepError::NotEnabled),
-        GrepLifecycle::Backfilling { .. } => return Err(GrepError::Backfilling),
-        GrepLifecycle::Active {
+    let (built_through_seq, next_event_index) = match root.status() {
+        GrepIndexStatus::Disabled {} => return Err(GrepError::NotEnabled),
+        GrepIndexStatus::Backfilling { .. } => return Err(GrepError::Backfilling),
+        GrepIndexStatus::Active {
             built_through_seq,
             next_event_index,
         } => (*built_through_seq, *next_event_index),
@@ -185,7 +186,7 @@ fn materialized_snapshot_from_state(
             index_block: segment.index_block,
             filter_block: segment.filter_block,
             filter_inline: segment.filter_inline.clone(),
-            payload_checksum: segment.payload_checksum.clone(),
+            object_checksum: segment.object_checksum.clone(),
         })
         .collect();
     Ok(MaterializedGrepIndexSnapshot {
@@ -379,7 +380,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
                 store,
                 block_cache,
                 &descriptor.object_key,
-                &descriptor.payload_checksum,
+                &descriptor.object_checksum,
                 &descriptor.filter_block,
             )
             .await?;
@@ -393,7 +394,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
         store,
         block_cache,
         &descriptor.object_key,
-        &descriptor.payload_checksum,
+        &descriptor.object_checksum,
         &descriptor.index_block,
     )
     .await?;
@@ -409,7 +410,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
                 store,
                 block_cache,
                 &descriptor.object_key,
-                &descriptor.payload_checksum,
+                &descriptor.object_checksum,
                 &entry.block,
             )
         }))

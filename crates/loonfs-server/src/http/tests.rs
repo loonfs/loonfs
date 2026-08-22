@@ -1365,7 +1365,7 @@ async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> Chan
         .expect("load grep root")
         .expect("an enabled namespace has a grep root")
         .manifest_state()
-        .lifecycle()
+        .status()
         .active_watermark()
         .expect("an active grep root has a watermark")
         .0
