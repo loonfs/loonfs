@@ -3536,10 +3536,7 @@
             "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
           },
           "feature": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
           },
           "message": {
@@ -3547,17 +3544,11 @@
             "description": "Human-readable error message."
           },
           "param": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
           },
           "request_id": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Correlation id the server assigned to the failed request; the same\nvalue is sent as the `x-request-id` response header."
           }
         }
@@ -3602,10 +3593,7 @@
             "description": "The attribute revision this projection represents."
           },
           "attributes_updated_at_ms": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int64",
             "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
             "minimum": 0
@@ -3944,10 +3932,7 @@
             "minimum": 0
           },
           "expires_at_ms": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int64",
             "description": "When garbage collection may release the record without being asked,\nin Unix milliseconds. Absent means the pin holds until it is\nreleased. An instant already in the past is a record whose expiry\nhas passed and which no collection pass has reached yet: it is still\na root, so it is still listed.",
             "minimum": 0
@@ -4121,10 +4106,7 @@
             "description": "Semantic filesystem events for this commit, in the order the commit\napplied them. One request operation may produce more than one event\n(see [`FilesystemChange`])."
           },
           "message": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Caller annotation, omitted when absent and carrying no filesystem semantics."
           }
         }
@@ -4414,10 +4396,7 @@
         "description": "Optional machine-readable details for an [`ApiError`].\n\nClients make retry decisions from the error code and use these fields for\nrelevant identifiers such as commit ids, writer epochs, and revisions.\nFields may be absent and clients must ignore fields they do not use.",
         "properties": {
           "active_acquired_at_ms": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int64",
             "description": "Unix milliseconds at which the current epoch's acquirer took it, when\nthe head recorded one. Writer ids are process labels, so two runs on\none machine can share one; the stamp is what tells them apart.",
             "minimum": 0
@@ -4427,10 +4406,7 @@
             "description": "Deletion generation actually active for the inode."
           },
           "active_writer": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Writer id recorded by the current epoch's acquirer, when the head\nrecorded one."
           },
           "active_writer_epoch": {
@@ -4458,10 +4434,7 @@
             "description": "Idempotency key of the commit the error concerns."
           },
           "committed_fingerprint": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Semantic identity of the mutation that already landed under that\ncommit id, from the same receipt as `committed_seq` and present\nexactly when it is. A retry recomputes this value from the request it\njust made — see\n[`put_retry_fingerprint`](crate::put_retry_fingerprint) — and equality\nis what proves the two are the same request."
           },
           "committed_seq": {
@@ -4491,10 +4464,7 @@
             "pattern": "^ino_[1-9][0-9]*$"
           },
           "operation_index": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int32",
             "description": "Position, in the request's operation list, of the operation that\nfailed. A commit applies all of its operations or none of them, so\nthis names the one that stopped the whole request.",
             "minimum": 0
@@ -4692,8 +4662,15 @@
           "deleted_manifests",
           "deleted_checkpoint_records",
           "released_fork_checkpoints",
+          "released_expired_checkpoints",
+          "deleted_upload_sessions",
+          "deleted_content_objects",
+          "released_missing_basis_checkpoints",
           "retained_candidates",
-          "degraded_retention"
+          "retained",
+          "degraded_retention",
+          "content_reclamation_deferred",
+          "budget_exhausted"
         ],
         "properties": {
           "budget_exhausted": {
@@ -4749,17 +4726,11 @@
             "description": "Namespace the pass ran against."
           },
           "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Opaque resume token when more candidates remain. Resuming rebuilds\nevery safety proof; the token carries enumeration position only and\nis valid only against the same namespace."
           },
           "next_reclamation_at_ms": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int64",
             "description": "The soonest instant still ahead of this pass at which something it\nretained becomes reclaimable: an open session's lease plus the grace\nwindow, an aborted session's grace, or a completed session's derived\ncontent-reclamation grace. A scheduler reads this to decide when to\ncome back, so a namespace needs no other side channel to have its\nreclamation happen.\n\nIt reports what this pass saw and nothing more. A pass that stopped\non `next_cursor` examined only part of the keyspace, and candidates\nthat age out under a plain grace window on their object timestamps\ncarry no deadline here at all, so absence is never a claim that\nnothing is owed.",
             "minimum": 0
@@ -4854,10 +4825,7 @@
             "description": "Whether an absent or tombstoned namespace had extension state reaped."
           },
           "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Present when the budget stopped the pass with keys left to examine."
           },
           "retained_candidates": {
@@ -4933,7 +4901,8 @@
           "revision_no",
           "line_number",
           "byte_offset",
-          "line"
+          "line",
+          "line_truncated"
         ],
         "properties": {
           "byte_offset": {
@@ -5003,10 +4972,7 @@
             "description": "Namespace searched."
           },
           "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Present when another page follows."
           },
           "tail_scanned": {
@@ -5043,10 +5009,7 @@
             "description": "Namespace the records belong to."
           },
           "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Opaque cursor for the next page."
           }
         }
@@ -5076,10 +5039,7 @@
             "description": "Namespace that was read."
           },
           "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Opaque cursor for the next page, if more revisions are available."
           },
           "revisions": {
@@ -5117,10 +5077,7 @@
             "description": "Namespace that was read."
           },
           "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Cursor for the next page, if more entries remain."
           },
           "path": {
@@ -5154,10 +5111,7 @@
             "description": "Namespace that was read."
           },
           "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "Present when another page follows."
           }
         }
@@ -5556,10 +5510,7 @@
         ],
         "properties": {
           "message": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "What was expected and what happened instead. Present only on\n`failed`."
           },
           "name": {
@@ -7000,10 +6951,7 @@
                   "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
                 },
                 "feature": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
+                  "type": "string",
                   "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
                 },
                 "message": {
@@ -7011,17 +6959,11 @@
                   "description": "Human-readable error message."
                 },
                 "param": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
+                  "type": "string",
                   "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
                 },
                 "request_id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
+                  "type": "string",
                   "description": "Correlation id the server assigned to the failed request; the same\nvalue is sent as the `x-request-id` response header."
                 }
               }
