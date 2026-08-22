@@ -14,16 +14,16 @@ use thiserror::Error;
 
 /// Identifies one encoded section of an immutable metadata SST segment.
 ///
-/// `payload_checksum` identifies the segment bytes. `kind` and `offset`
-/// identify the section within that segment. Lengths and CRCs are validated by
-/// the decoder and therefore are not part of the cache key.
+/// `object_checksum` identifies the complete segment. `kind` and `offset`
+/// identify one section within it. The decoder validates lengths and CRCs, so
+/// the cache key does not include them.
 ///
 /// Implementations may version their own on-disk format. Namespace manifests
 /// are excluded because they are keyed by object path rather than content
 /// digest.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StoredMetadataBlockKey {
-    pub payload_checksum: String,
+    pub object_checksum: String,
     pub kind: StoredMetadataBlockKind,
     pub offset: u64,
 }

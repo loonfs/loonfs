@@ -842,7 +842,7 @@ fn stored_key(
     offset: u64,
 ) -> StoredMetadataBlockKey {
     StoredMetadataBlockKey {
-        payload_checksum: descriptor.payload_checksum.clone(),
+        object_checksum: descriptor.object_checksum.clone(),
         kind,
         offset,
     }
@@ -1119,7 +1119,7 @@ async fn multi_block_direntry_segment() -> (
     descriptor.max_key = built.max_key;
     descriptor.index_block = built.index;
     descriptor.filter_block = built.filter;
-    descriptor.payload_checksum = loonfs_api::sha256_digest(&built.bytes);
+    descriptor.object_checksum = loonfs_api::sha256_digest(&built.bytes);
     // A one-byte target closes a block on every push, the last row
     // included, so this fixture carries the shape that used to drop a
     // segment's max key. Keyed scans prune on that key, so it has to name

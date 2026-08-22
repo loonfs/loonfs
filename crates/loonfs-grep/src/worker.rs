@@ -1102,7 +1102,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
         index_block: built.index,
         filter_block: built.filter,
         filter_inline,
-        payload_checksum: sha256_digest(&built.bytes),
+        object_checksum: sha256_digest(&built.bytes),
     })
 }
 
@@ -1639,7 +1639,7 @@ fn reorganize_snapshot_row(
 
 struct SegmentRangeReader {
     object_key: String,
-    payload_checksum: String,
+    object_checksum: String,
     entries: Arc<Vec<SegmentIndexEntry>>,
     next_entry: usize,
     current: Option<CurrentDataBlock>,
@@ -1664,7 +1664,7 @@ impl SegmentRangeReader {
             store,
             block_cache,
             &object_key,
-            &segment.payload_checksum,
+            &segment.object_checksum,
             &segment.index_block,
         )
         .await?;
@@ -1676,7 +1676,7 @@ impl SegmentRangeReader {
         let range = index_blocks_for_key_range(&entries, start, None);
         Ok(Self {
             object_key,
-            payload_checksum: segment.payload_checksum.clone(),
+            object_checksum: segment.object_checksum.clone(),
             next_entry: range.start,
             entries,
             current: None,
@@ -1717,7 +1717,7 @@ impl SegmentRangeReader {
                 store,
                 block_cache,
                 &self.object_key,
-                &self.payload_checksum,
+                &self.object_checksum,
                 &entry.block,
             )
             .await?;

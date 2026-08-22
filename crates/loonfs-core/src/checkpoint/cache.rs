@@ -72,7 +72,7 @@ pub(super) enum MetadataTableBlockKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MetadataTableCacheKey {
-    /// The cached object's identity: a segment's payload checksum for block
+    /// The cached object's identity: a segment's object checksum for block
     /// entries, or the manifest object key for manifest entries — both
     /// immutable, so entries can never go stale.
     pub(super) identity: String,

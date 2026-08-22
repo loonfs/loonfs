@@ -22,12 +22,12 @@ pub(crate) fn index_segment_corrupt(
 }
 
 fn cache_key(
-    payload_checksum: &str,
+    object_checksum: &str,
     block_kind: GrepBlockKind,
     handle: &BlockHandle,
 ) -> GrepBlockCacheKey {
     GrepBlockCacheKey {
-        payload_checksum: payload_checksum.to_owned(),
+        identity: object_checksum.to_owned(),
         block_kind,
         block_offset: handle.offset,
     }
@@ -70,10 +70,10 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: &GrepBlockCache,
     object_key: &str,
-    payload_checksum: &str,
+    object_checksum: &str,
     handle: &BlockHandle,
 ) -> Result<Arc<SegmentFilter>> {
-    let key = cache_key(payload_checksum, GrepBlockKind::Filter, handle);
+    let key = cache_key(object_checksum, GrepBlockKind::Filter, handle);
     let decoded = cache
         .get_or_load(&key, || async {
             let bytes = load_index_section_bytes(store, object_key, handle).await?;
@@ -97,10 +97,10 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: &GrepBlockCache,
     object_key: &str,
-    payload_checksum: &str,
+    object_checksum: &str,
     handle: &BlockHandle,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
-    let key = cache_key(payload_checksum, GrepBlockKind::Index, handle);
+    let key = cache_key(object_checksum, GrepBlockKind::Index, handle);
     let decoded = cache
         .get_or_load(&key, || async {
             let bytes = load_index_section_bytes(store, object_key, handle).await?;
@@ -124,10 +124,10 @@ pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: &GrepBlockCache,
     object_key: &str,
-    payload_checksum: &str,
+    object_checksum: &str,
     handle: &BlockHandle,
 ) -> Result<Arc<DecodedDataBlock<IndexRow>>> {
-    let key = cache_key(payload_checksum, GrepBlockKind::Data, handle);
+    let key = cache_key(object_checksum, GrepBlockKind::Data, handle);
     let decoded = cache
         .get_or_load(&key, || async {
             let bytes = load_index_section_bytes(store, object_key, handle).await?;

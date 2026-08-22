@@ -83,7 +83,7 @@ struct GrepQuerySegment {
     index_block: BlockHandle,
     filter_block: BlockHandle,
     filter_inline: Option<String>,
-    payload_checksum: String,
+    object_checksum: String,
 }
 
 impl GrepService {
@@ -99,7 +99,7 @@ impl GrepService {
             .ok_or(GrepError::NotEnabled)?;
         let manifest_id = pointer.pointer().manifest_id();
         let cache_key = GrepBlockCacheKey {
-            payload_checksum: pointer.pointer().manifest_payload_checksum().to_owned(),
+            identity: pointer.pointer().manifest_payload_checksum().to_owned(),
             block_kind: GrepBlockKind::Manifest,
             block_offset: 0,
         };
@@ -186,7 +186,7 @@ fn materialized_snapshot_from_state(
             index_block: segment.index_block,
             filter_block: segment.filter_block,
             filter_inline: segment.filter_inline.clone(),
-            payload_checksum: segment.payload_checksum.clone(),
+            object_checksum: segment.object_checksum.clone(),
         })
         .collect();
     Ok(MaterializedGrepIndexSnapshot {
@@ -380,7 +380,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
                 store,
                 block_cache,
                 &descriptor.object_key,
-                &descriptor.payload_checksum,
+                &descriptor.object_checksum,
                 &descriptor.filter_block,
             )
             .await?;
@@ -394,7 +394,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
         store,
         block_cache,
         &descriptor.object_key,
-        &descriptor.payload_checksum,
+        &descriptor.object_checksum,
         &descriptor.index_block,
     )
     .await?;
@@ -410,7 +410,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
                 store,
                 block_cache,
                 &descriptor.object_key,
-                &descriptor.payload_checksum,
+                &descriptor.object_checksum,
                 &entry.block,
             )
         }))

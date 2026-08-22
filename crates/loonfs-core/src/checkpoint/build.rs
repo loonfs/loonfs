@@ -270,7 +270,7 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         index_block: built.index,
         filter_block: built.filter,
         filter_inline,
-        payload_checksum: sha256_digest(&built.bytes),
+        object_checksum: sha256_digest(&built.bytes),
     })
 }
 

@@ -243,8 +243,10 @@ pub struct GrepSegmentRef {
     /// Small filters may be inlined while retaining the same block handle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_inline: Option<String>,
-    /// SHA-256 identity of the full immutable segment payload.
-    pub payload_checksum: String,
+    /// SHA-256 of the complete stored segment, formatted as
+    /// `sha256:<64 lowercase hex>`. Caches and offline verification use this
+    /// value. Ranged reads verify each block with its CRC32C instead.
+    pub object_checksum: String,
 }
 
 /// One namespace's complete immutable grep manifest state.
