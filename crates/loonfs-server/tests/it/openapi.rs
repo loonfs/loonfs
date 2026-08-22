@@ -957,7 +957,7 @@ fn openapi_names_tagged_one_of_alternatives() {
 
     for (schema_name, expected_names) in [
         (
-            "AuthoritativePathEntryKind",
+            "AuthoritativePathEntry",
             &[
                 "AuthoritativePathEntryDirectory",
                 "AuthoritativePathEntryFile",
@@ -1009,7 +1009,7 @@ fn openapi_names_tagged_one_of_alternatives() {
             &["ObjectTransferAccessPresignedUrl"][..],
         ),
         (
-            "UploadSessionStatus",
+            "UploadSessionResponse",
             &[
                 "UploadSessionStatusOpen",
                 "UploadSessionStatusCompleted",
@@ -1029,7 +1029,7 @@ fn openapi_names_tagged_one_of_alternatives() {
             ][..],
         ),
         (
-            "GrepIndexLifecycle",
+            "GrepIndexStatusResponse",
             &[
                 "GrepIndexLifecycleDisabled",
                 "GrepIndexLifecycleBackfilling",
@@ -1063,6 +1063,93 @@ fn openapi_names_tagged_one_of_alternatives() {
             names, expected_names,
             "unexpected oneOf schema names for `{schema_name}`"
         );
+    }
+}
+
+/// Responses that flatten a Rust enum, and the fields their envelope adds to
+/// every variant.
+const UNION_COMPOSITE_ENVELOPES: &[(&str, &[&str])] = &[
+    (
+        "AuthoritativePathEntry",
+        &[
+            "namespace_id",
+            "path",
+            "inode_id",
+            "created_by",
+            "created_at_ms",
+            "head_seq",
+        ],
+    ),
+    (
+        "UploadSessionResponse",
+        &["mode", "namespace_id", "upload_id"],
+    ),
+    (
+        "GrepIndexStatusResponse",
+        &["namespace_id", "next_run_ordinal", "reorganize_pending"],
+    ),
+];
+
+/// A response that flattens an enum is one discriminated union, never an
+/// `allOf` wrapped around one. SDK generators keep the envelope half of such
+/// an `allOf` and drop the union half, so the generated type would lose every
+/// field the variants carry.
+#[test]
+fn no_openapi_schema_wraps_an_all_of_around_a_one_of() {
+    for document_path in [OPENAPI_JSON_PATH, PROXY_OPENAPI_JSON_PATH] {
+        let spec: Value = serde_json::from_str(
+            &std::fs::read_to_string(document_path).expect("read static openapi json"),
+        )
+        .expect("parse openapi json");
+        let schemas = spec
+            .pointer("/components/schemas")
+            .and_then(Value::as_object)
+            .expect("openapi schemas object");
+        let mut composites = Vec::new();
+        collect_all_of_members(&spec, "openapi", &mut composites);
+
+        for (location, members) in composites {
+            for member in members {
+                let member = match member.get("$ref").and_then(Value::as_str) {
+                    Some(reference) => {
+                        component_schema_for_ref(schemas, reference).unwrap_or_else(|| {
+                            panic!("{location} references a missing component: {reference}")
+                        })
+                    }
+                    None => member,
+                };
+                assert!(
+                    member.get("oneOf").is_none(),
+                    "{location} in {document_path} wraps an allOf around a oneOf"
+                );
+            }
+        }
+
+        for (composite_name, envelope) in UNION_COMPOSITE_ENVELOPES {
+            // The proxy document publishes only the operations it serves.
+            let Some(composite) = schemas.get(*composite_name) else {
+                continue;
+            };
+            let discriminator = composite
+                .get("discriminator")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{composite_name} has no discriminator"));
+            assert!(discriminator.contains_key("propertyName"));
+            assert!(discriminator.contains_key("mapping"));
+
+            for variant_name in one_of_schema_names(schemas, composite_name) {
+                let variant = schemas
+                    .get(variant_name)
+                    .unwrap_or_else(|| panic!("{variant_name} schema"));
+                let required = required_fields(variant);
+                for field in *envelope {
+                    assert!(
+                        required.contains(field),
+                        "{variant_name} in {document_path} must require `{field}`"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1136,18 +1223,18 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
         "public inode fields use inline string schemas"
     );
 
-    assert_eq!(
-        schemas
-            .get("GrepIndexStatusResponse")
-            .and_then(|schema| schema.get("allOf"))
-            .and_then(Value::as_array)
-            .and_then(|schemas| schemas.iter().find_map(|schema| schema.get("properties")))
-            .and_then(|properties| properties.get("next_run_ordinal"))
-            .and_then(|schema| schema.get("maximum"))
-            .and_then(Value::as_u64),
-        Some(loonfs_api::MAX_PUBLIC_INTEGER),
-        "next_run_ordinal must use the public maximum"
-    );
+    for variant in one_of_schema_names(schemas, "GrepIndexStatusResponse") {
+        let schema = schemas
+            .get(variant)
+            .unwrap_or_else(|| panic!("{variant} schema"));
+        assert_eq!(
+            schema
+                .pointer("/properties/next_run_ordinal/maximum")
+                .and_then(Value::as_u64),
+            Some(loonfs_api::MAX_PUBLIC_INTEGER),
+            "next_run_ordinal must use the public maximum in {variant}"
+        );
+    }
 }
 
 #[test]
@@ -1279,7 +1366,6 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     assert!(schemas.contains_key("ContentToken"));
     assert!(schemas.contains_key("UploadMode"));
     assert!(schemas.contains_key("UploadSessionResponse"));
-    assert!(schemas.contains_key("UploadSessionStatus"));
     for retired_response in [
         "CompleteUploadResponse",
         "AbortUploadResponse",
@@ -1305,28 +1391,22 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     let session_response = schemas
         .get("UploadSessionResponse")
         .expect("UploadSessionResponse schema");
-    let session_response_refs: BTreeSet<_> = session_response
-        .get("allOf")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|schema| schema.get("$ref").and_then(Value::as_str))
-        .collect();
-    assert!(session_response_refs.contains("#/components/schemas/UploadSessionStatus"));
-    assert!(serde_json::to_string(
-        schemas
-            .get("UploadSessionStatus")
-            .expect("UploadSessionStatus schema")
-    )
-    .expect("serialize UploadSessionStatus schema")
-    .contains(r#""status""#));
-    assert!(!serde_json::to_string(
-        schemas
-            .get("UploadSessionStatus")
-            .expect("UploadSessionStatus schema")
-    )
-    .expect("serialize UploadSessionStatus schema")
-    .contains(r#""state""#));
+    assert_eq!(
+        session_response
+            .pointer("/discriminator/propertyName")
+            .and_then(Value::as_str),
+        Some("status"),
+        "the upload session union tags on `status`"
+    );
+    for variant_name in one_of_schema_names(schemas, "UploadSessionResponse") {
+        let variant = schemas
+            .get(variant_name)
+            .unwrap_or_else(|| panic!("{variant_name} schema"));
+        let encoded =
+            serde_json::to_string(variant).expect("serialize upload session variant schema");
+        assert!(encoded.contains(r#""status""#));
+        assert!(!encoded.contains(r#""state""#));
+    }
 
     for (path, method) in [
         ("/v0/namespaces/{namespace_id}/uploads/{upload_id}", "get"),
@@ -1454,36 +1534,36 @@ fn openapi_flattens_the_path_entry_attribute_projection() {
         .and_then(Value::as_object)
         .expect("openapi schemas object");
     assert!(!schemas.contains_key("AuthoritativeAttributes"));
-
-    let projection = schemas
-        .get("AttributesProjection")
-        .expect("AttributesProjection schema");
-    let projection_properties = projection
-        .get("properties")
-        .and_then(Value::as_object)
-        .expect("attribute projection properties");
-    assert!(projection_properties.contains_key("attributes_revision_no"));
-    assert!(projection_properties.contains_key("attributes"));
-    let required = required_fields(projection);
     assert!(
-        !required.contains("attributes_revision_no") && !required.contains("attributes"),
-        "path entries may omit attribute fields when attributes are not requested"
+        !schemas.contains_key("AttributesProjection"),
+        "the attribute fields are flattened into each path entry variant"
     );
 
-    let path_entry = schemas
-        .get("AuthoritativePathEntry")
-        .expect("AuthoritativePathEntry schema");
-    let flattened_projection_ref = path_entry
-        .get("allOf")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|schema| schema.get("$ref").and_then(Value::as_str))
-        .any(|reference| reference == "#/components/schemas/AttributesProjection");
-    assert!(
-        flattened_projection_ref,
-        "path entries must flatten AttributesProjection at the top level"
-    );
+    for variant_name in one_of_schema_names(schemas, "AuthoritativePathEntry") {
+        let variant = schemas
+            .get(variant_name)
+            .unwrap_or_else(|| panic!("{variant_name} schema"));
+        let properties = variant
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{variant_name} properties"));
+        let required = required_fields(variant);
+        for attribute_field in [
+            "attributes",
+            "attributes_revision_no",
+            "attributes_updated_at_ms",
+            "attributes_updated_by",
+        ] {
+            assert!(
+                properties.contains_key(attribute_field),
+                "{variant_name} must carry `{attribute_field}` at the top level"
+            );
+            assert!(
+                !required.contains(attribute_field),
+                "path entries may omit attribute fields when attributes are not requested"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1613,6 +1693,30 @@ fn collect_one_of_objects<'a>(
         Value::Array(values) => {
             for child in values {
                 collect_one_of_objects(child, unions);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// Collects each `allOf` member list with its document location.
+fn collect_all_of_members<'a>(
+    value: &'a Value,
+    location: &str,
+    composites: &mut Vec<(String, &'a Vec<Value>)>,
+) {
+    match value {
+        Value::Object(object) => {
+            if let Some(members) = object.get("allOf").and_then(Value::as_array) {
+                composites.push((location.to_owned(), members));
+            }
+            for (name, child) in object {
+                collect_all_of_members(child, &format!("{location}.{name}"), composites);
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                collect_all_of_members(child, &format!("{location}[{index}]"), composites);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}

@@ -128,10 +128,10 @@ async function getFileProxied(client: LoonFSClient, input: GetFileInput): Promis
     let revisionNo = input.revision_no;
     let claim: LoonFS.ContentRef | undefined;
     if (revisionNo === undefined) {
-        const entry = (await client.filesystem.statPath({
+        const entry = await client.filesystem.statPath({
             namespace_alias: input.namespace_alias,
             path: input.path,
-        })) as LoonFS.AuthoritativePathEntry & LoonFS.AuthoritativePathEntryKind.File;
+        });
         if (entry.inode_kind !== "file") {
             throw new Error(`path ${input.path} is a ${entry.inode_kind}, not a file`);
         }
@@ -356,13 +356,12 @@ function splitBytes(bytes: Uint8Array, partSize: number): Uint8Array[] {
 }
 
 function stagedContent(response: LoonFS.UploadSessionResponse): StagedContent {
-    const completed = response as LoonFS.UploadSessionResponse & LoonFS.UploadSessionStatus.Completed;
-    if (completed.status !== "completed") {
-        throw new Error(`upload ${response.upload_id} completed with status ${completed.status}`);
+    if (response.status !== "completed") {
+        throw new Error(`upload ${response.upload_id} completed with status ${response.status}`);
     }
     return {
-        contentRef: completed.content_ref,
-        contentToken: completed.content_token,
+        contentRef: response.content_ref,
+        contentToken: response.content_token,
     };
 }
 
