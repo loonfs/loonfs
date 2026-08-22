@@ -7,7 +7,7 @@
 //!
 //! Every content object is created through a session. Before metadata
 //! references the object, the session record gives garbage collection a
-//! durable owner and lifecycle state.
+//! durable owner and status.
 
 use crate::context::MutationContext;
 use crate::control_update::{
@@ -37,8 +37,8 @@ use loonfs_api::v0::{
     UploadPartChecksumClaim, UploadSessionResponse, UploadSessionStatus,
 };
 use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, NamespaceState, ProxiedStaging,
-    UploadSessionLifecycle, UploadSessionState, UploadSessionTransport,
+    encode_control_state, ControlObjectKind, NamespaceStatus, ProxiedStaging,
+    UploadSessionRecordStatus, UploadSessionState, UploadSessionTransport,
 };
 use loonfs_api::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId,
@@ -258,7 +258,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     }
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let session = load_upload_session_state(store, namespace_id, upload_id).await?;
-    if let Some(error) = terminal_session_error(&session.state, upload_id.clone()) {
+    if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
         return Err(error);
     }
     let (provider_upload_id, checksum_algorithm) = multipart_session_upload(&session)?;
@@ -434,7 +434,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         content_id: session.content_id,
         created_at_ms: context.now_ms,
         transport: session.transport,
-        state: UploadSessionLifecycle::Open {
+        status: UploadSessionRecordStatus::Open {
             expires_at_ms: context.now_ms.saturating_add(UPLOAD_SESSION_LEASE_MS),
         },
     };
@@ -468,7 +468,7 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?
         .state;
-    if head.state == NamespaceState::Deleted {
+    if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: namespace_id.clone(),
         });
@@ -476,18 +476,18 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-/// Converts a terminal upload state into the error returned by an operation
+/// Converts a terminal upload status into the error returned by an operation
 /// that requires an open session.
 fn terminal_session_error(
-    state: &UploadSessionLifecycle,
+    status: &UploadSessionRecordStatus,
     upload_id: UploadId,
 ) -> Option<CoreError> {
-    match state {
-        UploadSessionLifecycle::Open { .. } => None,
-        UploadSessionLifecycle::Completed { .. } => {
+    match status {
+        UploadSessionRecordStatus::Open { .. } => None,
+        UploadSessionRecordStatus::Completed { .. } => {
             Some(CoreError::UploadAlreadyCompleted { upload_id })
         }
-        UploadSessionLifecycle::Aborted { .. } => Some(CoreError::UploadNotFound { upload_id }),
+        UploadSessionRecordStatus::Aborted { .. } => Some(CoreError::UploadNotFound { upload_id }),
     }
 }
 
@@ -526,7 +526,7 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
         |mut state| {
             let upload_id = upload_id.to_owned();
             async move {
-                if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
+                if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
                     return Err(error);
                 }
                 let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport
@@ -573,7 +573,7 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
         upload_id,
         CONTENTION_RETRY_LIMIT,
         |mut state| async move {
-            if !matches!(state.state, UploadSessionLifecycle::Open { .. }) {
+            if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
                 return Ok(UploadSessionUpdate::Noop(()));
             }
             let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport else {
@@ -617,7 +617,7 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
 ) -> Result<(ContentStoreId, UploadSessionState)> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let session = load_upload_session_state(store, namespace_id, upload_id).await?;
-    if let Some(error) = terminal_session_error(&session.state, upload_id.clone()) {
+    if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
         return Err(error);
     }
     if !matches!(
@@ -708,7 +708,7 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
             let upload_id = upload_id.to_owned();
             let content_ref = content_ref.clone();
             async move {
-                if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
+                if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
                     return Err(error);
                 }
                 let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport
@@ -854,7 +854,7 @@ where
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
     // An aborted session answers the same absence its physical deletion
     // will, before anything about the request's shape is examined.
-    if matches!(loaded.state, UploadSessionLifecycle::Aborted { .. }) {
+    if matches!(loaded.status, UploadSessionRecordStatus::Aborted { .. }) {
         return Err(CoreError::UploadNotFound {
             upload_id: upload_id.clone(),
         });
@@ -863,7 +863,7 @@ where
     let completion = resolve(mode).map_err(CoreError::InvalidUploadContent)?;
     let plan = completion_plan(&loaded, &completion)?;
     if let Some(completed) = already_completed_outcome(
-        &loaded.state,
+        &loaded.status,
         namespace_id,
         content_store_id,
         upload_id,
@@ -934,7 +934,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
                 // between the read above and this swap. Whatever the durable
                 // record says now is what happened.
                 if let Some(completed) = already_completed_outcome(
-                    &state.state,
+                    &state.status,
                     &namespace_id,
                     &content_store_id,
                     &upload_id,
@@ -948,7 +948,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
                 // The completed state is where a session's reference lives,
                 // and the only place: whatever the open state was holding
                 // is replaced by it rather than kept beside it.
-                state.state = UploadSessionLifecycle::Completed {
+                state.status = UploadSessionRecordStatus::Completed {
                     completed_at_ms: now_ms,
                     content_ref: verified.clone(),
                 };
@@ -1119,18 +1119,18 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
                     mode,
                     status: UploadSessionStatus::Aborted { aborted_at_ms },
                 };
-                match state.state {
-                    UploadSessionLifecycle::Aborted { aborted_at_ms } => Ok(
+                match state.status {
+                    UploadSessionRecordStatus::Aborted { aborted_at_ms } => Ok(
                         UploadSessionUpdate::Noop((aborted(aborted_at_ms), abandoned)),
                     ),
                     // Completion is final in the other direction: the
                     // content may already be published, so an abort cannot
                     // quietly succeed over it.
-                    UploadSessionLifecycle::Completed { .. } => {
+                    UploadSessionRecordStatus::Completed { .. } => {
                         Err(CoreError::UploadAlreadyCompleted { upload_id })
                     }
-                    UploadSessionLifecycle::Open { .. } => {
-                        state.state = UploadSessionLifecycle::Aborted {
+                    UploadSessionRecordStatus::Open { .. } => {
+                        state.status = UploadSessionRecordStatus::Aborted {
                             aborted_at_ms: now_ms,
                         };
                         Ok(UploadSessionUpdate::Replace {
@@ -1206,14 +1206,14 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
 ) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
     let mode = upload_mode(&loaded.transport);
-    let (status, receipt) = match loaded.state {
-        UploadSessionLifecycle::Open { expires_at_ms, .. } => {
+    let (status, receipt) = match loaded.status {
+        UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
             (UploadSessionStatus::Open { expires_at_ms }, None)
         }
-        UploadSessionLifecycle::Aborted { aborted_at_ms } => {
+        UploadSessionRecordStatus::Aborted { aborted_at_ms } => {
             (UploadSessionStatus::Aborted { aborted_at_ms }, None)
         }
-        UploadSessionLifecycle::Completed {
+        UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
         } => (
@@ -1313,10 +1313,10 @@ fn receipt_within_window(
 }
 
 /// Answers a completion against a session that has already reached a
-/// terminal state: a replay of the same content succeeds idempotently,
-/// anything else is the terminal error for that state.
+/// terminal status: a replay of the same content succeeds idempotently,
+/// anything else is the terminal error for that status.
 fn already_completed_outcome(
-    state: &UploadSessionLifecycle,
+    status: &UploadSessionRecordStatus,
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
@@ -1324,12 +1324,12 @@ fn already_completed_outcome(
     mode: UploadMode,
     now_ms: u64,
 ) -> Result<Option<CompletedUpload>> {
-    match state {
-        UploadSessionLifecycle::Open { .. } => Ok(None),
-        UploadSessionLifecycle::Aborted { .. } => Err(CoreError::UploadNotFound {
+    match status {
+        UploadSessionRecordStatus::Open { .. } => Ok(None),
+        UploadSessionRecordStatus::Aborted { .. } => Err(CoreError::UploadNotFound {
             upload_id: upload_id.clone(),
         }),
-        UploadSessionLifecycle::Completed {
+        UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
         } => {
@@ -1653,7 +1653,7 @@ mod tests {
                 // session reopened after that default changed.
                 checksum_algorithm: ChecksumAlgorithm::Crc32c,
             },
-            state: UploadSessionLifecycle::Open { expires_at_ms: 2 },
+            status: UploadSessionRecordStatus::Open { expires_at_ms: 2 },
         };
         let (_, required_algorithm) =
             multipart_session_upload(&session).expect("multipart session");
@@ -1746,7 +1746,10 @@ mod tests {
         let open = load_upload_session_state(&store, &namespace_id, &begin.upload_id)
             .await
             .expect("session remains readable");
-        assert!(matches!(open.state, UploadSessionLifecycle::Open { .. }));
+        assert!(matches!(
+            open.status,
+            UploadSessionRecordStatus::Open { .. }
+        ));
 
         store
             .put(
@@ -1823,8 +1826,8 @@ mod tests {
             .await
             .expect("session still readable");
         assert!(matches!(
-            state.state,
-            UploadSessionLifecycle::Aborted {
+            state.status,
+            UploadSessionRecordStatus::Aborted {
                 aborted_at_ms: 2_000
             }
         ));
@@ -1880,8 +1883,8 @@ mod tests {
             .await
             .expect("session remains readable");
         assert!(matches!(
-            state.state,
-            UploadSessionLifecycle::Aborted {
+            state.status,
+            UploadSessionRecordStatus::Aborted {
                 aborted_at_ms: 2_000
             }
         ));

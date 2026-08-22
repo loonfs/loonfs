@@ -16,7 +16,7 @@ use crate::namespace::basis::{
 use crate::wal::{load_wal_chain_within, WalChainLoad, WalChainLoadRequest};
 use futures::StreamExt;
 use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState, HeadState, NamespaceState,
+    CheckpointOwner, CheckpointRecordState, CheckpointStatus, HeadState, NamespaceStatus,
 };
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ContentId, ManifestObjectId, NamespaceId};
@@ -281,7 +281,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             .manifest_object_id
             .clone()
     });
-    let namespace_deleted = head.state == NamespaceState::Deleted;
+    let namespace_deleted = head.status == NamespaceStatus::Deleted {};
     let collected: CollectResult<LiveSet> = async {
         // Without a stored floor, retain WAL from the namespace's first
         // sequence.
@@ -392,7 +392,7 @@ async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
     // User checkpoints expire by time. Fork checkpoints remain active while
     // their target namespace exists.
     match &record.owner {
-        _ if record.state != (CheckpointRecordLifecycle::Active {}) => Ok(true),
+        _ if record.status != (CheckpointStatus::Active {}) => Ok(true),
         CheckpointOwner::User { .. } => Ok(lease_expired(record, context.now_ms)),
         CheckpointOwner::Fork {
             target_namespace_id,

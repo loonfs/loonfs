@@ -13,7 +13,7 @@ use crate::commit::{
 };
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
-use loonfs_api::wire::control::{HeadState, WriterBlock};
+use loonfs_api::wire::control::{HeadState, NamespaceStatus, WriterBlock};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
     next_public_ordinal, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
@@ -200,7 +200,7 @@ fn validation_context(
         next_inode_id,
         visible_wal_tip: None,
         recent_segments: Vec::new(),
-        state: Default::default(),
+        status: NamespaceStatus::Active {},
     };
     TestValidationContext {
         head,

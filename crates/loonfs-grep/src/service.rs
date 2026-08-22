@@ -12,7 +12,8 @@ use crate::keyspace::{manifest_key, segment_key};
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReads};
 use crate::root::{
-    load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepLifecycle, GrepManifestState,
+    load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepIndexStatus,
+    GrepManifestState,
 };
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
@@ -167,10 +168,10 @@ fn materialized_snapshot_from_state(
 ) -> Result<MaterializedGrepIndexSnapshot> {
     // Queries require an active index and its watermark. Disabled and
     // backfilling indexes return their corresponding errors.
-    let (built_through_seq, next_event_index) = match root.lifecycle() {
-        GrepLifecycle::Disabled => return Err(GrepError::NotEnabled),
-        GrepLifecycle::Backfilling { .. } => return Err(GrepError::Backfilling),
-        GrepLifecycle::Active {
+    let (built_through_seq, next_event_index) = match root.status() {
+        GrepIndexStatus::Disabled {} => return Err(GrepError::NotEnabled),
+        GrepIndexStatus::Backfilling { .. } => return Err(GrepError::Backfilling),
+        GrepIndexStatus::Active {
             built_through_seq,
             next_event_index,
         } => (*built_through_seq, *next_event_index),

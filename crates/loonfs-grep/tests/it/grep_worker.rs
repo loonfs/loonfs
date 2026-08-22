@@ -10,7 +10,7 @@ use loonfs::{
     FsWriter, GcConfig, MaintenancePlan, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
     RuntimeError, SharedObjectStore,
 };
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
 use loonfs_api::{
     sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId, PageRequest,
     PaginationPolicy, MAX_PUBLIC_INTEGER,
@@ -19,7 +19,7 @@ use loonfs_grep::keyspace::{
     grep_prefix, manifest_key, manifests_prefix, root_key, segment_key, segments_prefix,
 };
 use loonfs_grep::root::{
-    advance_grep_root, encode_grep_root, load_grep_root, GrepIndexState, GrepLifecycle,
+    advance_grep_root, encode_grep_root, load_grep_root, GrepIndexState, GrepIndexStatus,
     GrepManifestId, GrepManifestState, GrepRootEnvelope, GrepRootPointer,
 };
 use loonfs_grep::{
@@ -155,7 +155,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("load root")
         .expect("root exists");
-    let GrepLifecycle::Backfilling { checkpoint_id, .. } = root.manifest_state().lifecycle() else {
+    let GrepIndexStatus::Backfilling { checkpoint_id, .. } = root.manifest_state().status() else {
         panic!(
             "enable must publish checkpointed backfill: {:?}",
             root.manifest_state()
@@ -188,8 +188,8 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("released checkpoint record remains until core GC");
     assert!(matches!(
-        checkpoint.state,
-        CheckpointRecordLifecycle::Released { .. }
+        checkpoint.status,
+        CheckpointStatus::Released { .. }
     ));
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
@@ -225,8 +225,8 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .expect("load disabled root")
         .expect("disabled root remains");
     assert!(matches!(
-        disabled_root.manifest_state().lifecycle(),
-        GrepLifecycle::Disabled
+        disabled_root.manifest_state().status(),
+        GrepIndexStatus::Disabled {}
     ));
     assert_eq!(
         worker
@@ -246,8 +246,8 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .expect("root exists");
     assert!(root.manifest_state().segments().is_empty());
     assert!(matches!(
-        root.manifest_state().lifecycle(),
-        GrepLifecycle::Backfilling { .. }
+        root.manifest_state().status(),
+        GrepIndexStatus::Backfilling { .. }
     ));
     writer.shutdown().await.expect("shutdown");
 }
@@ -289,7 +289,7 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
     let current_state = current.manifest_state();
     let maximum_state = GrepManifestState::new(
         namespace_id.clone(),
-        current_state.lifecycle().clone(),
+        current_state.status().clone(),
         GrepIndexState::new(current_state.index().reorganize.clone(), MAX_PUBLIC_INTEGER),
         current_state.segments().to_vec(),
     )
@@ -730,7 +730,7 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
         .await
         .expect("the record survives until core GC reaps it");
     assert!(
-        matches!(finished.state, CheckpointRecordLifecycle::Released { .. }),
+        matches!(finished.status, CheckpointStatus::Released { .. }),
         "the attempt completed the backfill using that pin and then released it"
     );
     let response = new_query(&store, &namespace_id, &request("needle"))
@@ -751,11 +751,11 @@ async fn assert_fresh_backfill_attempt(
         .await
         .expect("load grep root")
         .expect("grep root exists");
-    let GrepLifecycle::Backfilling {
+    let GrepIndexStatus::Backfilling {
         cursor,
         checkpoint_id,
         ..
-    } = root.manifest_state().lifecycle()
+    } = root.manifest_state().status()
     else {
         panic!(
             "expected a checkpointed backfill: {:?}",
@@ -774,8 +774,8 @@ async fn assert_fresh_backfill_attempt(
         .await
         .expect("the new attempt's checkpoint record exists");
     assert_eq!(
-        record.state,
-        CheckpointRecordLifecycle::Active {},
+        record.status,
+        CheckpointStatus::Active {},
         "a fresh backfill attempt must hold a checkpoint that still pins its basis"
     );
     checkpoint_id.clone()
@@ -807,7 +807,7 @@ async fn grep_built_through_seq(
         .expect("load grep root")
         .expect("grep root exists")
         .manifest_state()
-        .lifecycle()
+        .status()
         .active_watermark()
         .expect("an active grep root has a watermark")
         .0
@@ -1283,9 +1283,9 @@ async fn write_manifest_without_checkpoint_id(
 ) -> (GrepManifestId, String) {
     let mut document: serde_json::Value =
         serde_json::from_slice(manifest_bytes).expect("decode valid manifest document");
-    document["payload"]["lifecycle"]
+    document["payload"]["status"]
         .as_object_mut()
-        .expect("backfilling lifecycle is an object")
+        .expect("backfilling status is an object")
         .remove("checkpoint_id")
         .expect("valid backfilling manifest carries checkpoint id");
     let payload_bytes =
@@ -1367,7 +1367,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         .expect("load grep root")
         .expect("grep root exists");
     assert_eq!(
-        grep_root.manifest_state().lifecycle().active_watermark(),
+        grep_root.manifest_state().status().active_watermark(),
         Some((head.seq, 0)),
         "the independent worker can advance past metadata materialization"
     );
@@ -1784,7 +1784,7 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
     let current_state = current.manifest_state();
     let next = GrepManifestState::new(
         namespace_id.clone(),
-        current_state.lifecycle().clone(),
+        current_state.status().clone(),
         GrepIndexState::new(
             current_state.index().reorganize.clone(),
             current_state.index().next_run_ordinal + 1,
@@ -2453,7 +2453,7 @@ async fn a_backfilling_root_never_reports_a_built_through_sequence() {
             target_seq: ChangeSeq(1),
             cursor_inode_id: None,
             checkpoint_id: match &state {
-                GrepLifecycle::Backfilling { checkpoint_id, .. } => checkpoint_id.clone(),
+                GrepIndexStatus::Backfilling { checkpoint_id, .. } => checkpoint_id.clone(),
                 other => panic!("expected a backfill: {other:?}"),
             },
         }

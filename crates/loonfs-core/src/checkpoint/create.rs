@@ -18,9 +18,7 @@ use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 #[cfg(test)]
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
 use loonfs_api::{CheckpointId, CreateCheckpointResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
@@ -77,7 +75,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             head_commit_id: basis.head_commit_id.clone(),
             created_at_ms: context.now_ms,
             owner: owner.clone(),
-            state: CheckpointRecordLifecycle::Active {},
+            status: CheckpointStatus::Active {},
         };
         let verify_started_ms = timer.monotonic_now_ms();
         write_checkpoint_record(store, &record).await?;

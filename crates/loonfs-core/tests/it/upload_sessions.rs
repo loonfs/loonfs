@@ -497,7 +497,7 @@ mod streamed_content {
 mod direct_multipart {
     use super::*;
     use loonfs_api::v0::{CompletedUploadPart, DirectMultipartUploadOptions, UploadContentClaim};
-    use loonfs_api::wire::control::{decode_control_object, UploadSessionLifecycle};
+    use loonfs_api::wire::control::{decode_control_object, UploadSessionRecordStatus};
     use loonfs_core::{gc_namespace, GcConfig};
     use loonfs_objectstore::keys::content_blob;
     use loonfs_test_support::stores::{MultipartChecksumEnforcement, MultipartStore};
@@ -820,8 +820,8 @@ mod direct_multipart {
             matches!(
                 session_state(&store, &session.namespace_id, &session.upload_id)
                     .await
-                    .state,
-                UploadSessionLifecycle::Aborted { .. }
+                    .status,
+                UploadSessionRecordStatus::Aborted { .. }
             ),
             "a failed verification is terminal, not retryable"
         );
@@ -893,8 +893,8 @@ mod direct_multipart {
             matches!(
                 session_state(&store, &session.namespace_id, &session.upload_id)
                     .await
-                    .state,
-                UploadSessionLifecycle::Open { .. }
+                    .status,
+                UploadSessionRecordStatus::Open { .. }
             ),
             "a provider failure the server cannot read is not proof about content"
         );
@@ -912,8 +912,8 @@ mod direct_multipart {
         assert!(matches!(
             session_state(&store, &session.namespace_id, &session.upload_id)
                 .await
-                .state,
-            UploadSessionLifecycle::Aborted { .. }
+                .status,
+            UploadSessionRecordStatus::Aborted { .. }
         ));
         assert!(store
             .head(&session.object_key)
@@ -958,8 +958,8 @@ mod direct_multipart {
             matches!(
                 session_state(&store, &session.namespace_id, &session.upload_id)
                     .await
-                    .state,
-                UploadSessionLifecycle::Open { .. }
+                    .status,
+                UploadSessionRecordStatus::Open { .. }
             ),
             "a store failure must not end the session"
         );
@@ -1005,10 +1005,10 @@ mod direct_multipart {
         // The session carries its own expiry, so collection is decided
         // against that stamp and never against an object's provider
         // timestamp.
-        let UploadSessionLifecycle::Open { expires_at_ms, .. } =
+        let UploadSessionRecordStatus::Open { expires_at_ms, .. } =
             session_state(&store, &session.namespace_id, &session.upload_id)
                 .await
-                .state
+                .status
         else {
             panic!("a fresh session is open");
         };
@@ -1024,8 +1024,8 @@ mod direct_multipart {
         assert!(matches!(
             session_state(&store, &session.namespace_id, &session.upload_id)
                 .await
-                .state,
-            UploadSessionLifecycle::Aborted { .. }
+                .status,
+            UploadSessionRecordStatus::Aborted { .. }
         ));
         assert_eq!(
             store.open_uploads(),

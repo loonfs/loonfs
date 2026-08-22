@@ -410,7 +410,7 @@ async fn wait_for_watermark<S: ObjectStore + 'static>(
             {
                 if root
                     .manifest_state()
-                    .lifecycle()
+                    .status()
                     .active_watermark()
                     .is_some_and(|(reached, _)| reached >= built_through_seq)
                 {

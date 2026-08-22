@@ -6,7 +6,7 @@ use crate::namespace::control::load_head_object;
 use crate::options::DeleteNamespaceOptions;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, AcquiredWriter, ControlObjectKind, HeadState, NamespaceState,
+    encode_control_state, AcquiredWriter, ControlObjectKind, HeadState, NamespaceStatus,
 };
 use loonfs_api::{DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
@@ -54,7 +54,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         // Terminal state first, ahead of the fence and the precondition
         // below: both of those decide whether this call may swap, and there
         // is nothing left to swap. See the fence paragraph above.
-        if head.state == NamespaceState::Deleted {
+        if head.status == (NamespaceStatus::Deleted {}) {
             // If we already sent a swap, the delete is done regardless of
             // whose swap landed; if we never sent one, the namespace was
             // already deleted when we arrived.
@@ -91,7 +91,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
 
         let head_etag = loaded.etag;
         let deleted_head = HeadState {
-            state: NamespaceState::Deleted,
+            status: NamespaceStatus::Deleted {},
             ..head.clone()
         };
         let encoded =

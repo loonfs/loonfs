@@ -20,7 +20,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
-use loonfs_api::wire::control::{HeadState, NamespaceState};
+use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::{
     AbsolutePath, AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,
     AuthoritativePathEntryKind, ChangeSeq, ContentRef, ContentStoreId, DirectoryPageCursor,
@@ -208,7 +208,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 head.namespace_id, namespace_id
             )));
         }
-        if head.state == NamespaceState::Deleted {
+        if head.status == (NamespaceStatus::Deleted {}) {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
             });

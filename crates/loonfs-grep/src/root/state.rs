@@ -54,14 +54,14 @@ impl GrepRootPointer {
     }
 }
 
-/// Durable lifecycle of grep indexing for one namespace.
+/// Durable status of grep indexing for one namespace.
 ///
 /// Each phase stores only the position it needs. A backfill records its
 /// target and progress. An active index records how far indexing has
 /// progressed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum GrepLifecycle {
+pub enum GrepIndexStatus {
     /// Initial materialization is walking the checkpointed file set.
     Backfilling {
         /// Namespace sequence the pinned checkpoint captured. The walk ends
@@ -92,27 +92,31 @@ pub enum GrepLifecycle {
         next_event_index: u32,
     },
     /// Grep indexing and queries are disabled for this namespace.
-    Disabled,
+    ///
+    /// The braces spell this status the same way as the other two and as
+    /// every durable control object's status. A manifest is immutable, so
+    /// this decoder still tolerates fields it does not know.
+    Disabled {},
 }
 
-impl GrepLifecycle {
-    /// Returns the index position for the active lifecycle.
+impl GrepIndexStatus {
+    /// Returns the index position for the active status.
     pub fn active_watermark(&self) -> Option<(ChangeSeq, u32)> {
         match self {
             Self::Active {
                 built_through_seq,
                 next_event_index,
             } => Some((*built_through_seq, *next_event_index)),
-            Self::Backfilling { .. } | Self::Disabled => None,
+            Self::Backfilling { .. } | Self::Disabled {} => None,
         }
     }
 }
 
-impl From<&GrepLifecycle> for loonfs_api::v0::GrepIndexLifecycle {
-    fn from(lifecycle: &GrepLifecycle) -> Self {
-        match lifecycle {
-            GrepLifecycle::Disabled => Self::Disabled,
-            GrepLifecycle::Backfilling {
+impl From<&GrepIndexStatus> for loonfs_api::v0::GrepIndexLifecycle {
+    fn from(status: &GrepIndexStatus) -> Self {
+        match status {
+            GrepIndexStatus::Disabled {} => Self::Disabled,
+            GrepIndexStatus::Backfilling {
                 target_seq,
                 cursor,
                 checkpoint_id,
@@ -121,7 +125,7 @@ impl From<&GrepLifecycle> for loonfs_api::v0::GrepIndexLifecycle {
                 cursor_inode_id: *cursor,
                 checkpoint_id: checkpoint_id.clone(),
             },
-            GrepLifecycle::Active {
+            GrepIndexStatus::Active {
                 built_through_seq,
                 next_event_index,
             } => Self::Active {
@@ -151,7 +155,7 @@ pub struct GrepReorganizeState {
 ///
 /// Segments can be written and reorganized during both backfill and active
 /// indexing. Shared state therefore lives here, while phase-specific state
-/// lives in [`GrepLifecycle`].
+/// lives in [`GrepIndexStatus`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepIndexState {
     /// Version of this nested index-state schema.
@@ -250,7 +254,7 @@ pub struct GrepSegmentRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepManifestState {
     namespace_id: NamespaceId,
-    lifecycle: GrepLifecycle,
+    status: GrepIndexStatus,
     index: GrepIndexState,
     segments: Vec<GrepSegmentRef>,
 }
@@ -259,13 +263,13 @@ impl GrepManifestState {
     /// Creates a manifest payload after validating its cross-field invariants.
     pub fn new(
         namespace_id: NamespaceId,
-        lifecycle: GrepLifecycle,
+        status: GrepIndexStatus,
         index: GrepIndexState,
         segments: Vec<GrepSegmentRef>,
     ) -> Result<Self, GrepManifestStateError> {
         let state = Self {
             namespace_id,
-            lifecycle,
+            status,
             index,
             segments,
         };
@@ -277,8 +281,8 @@ impl GrepManifestState {
         &self.namespace_id
     }
 
-    pub fn lifecycle(&self) -> &GrepLifecycle {
-        &self.lifecycle
+    pub fn status(&self) -> &GrepIndexStatus {
+        &self.status
     }
 
     pub fn index(&self) -> &GrepIndexState {
@@ -296,7 +300,7 @@ impl GrepManifestState {
                 supported: GREP_INDEX_FORMAT_VERSION,
             });
         }
-        if matches!(self.lifecycle, GrepLifecycle::Disabled) {
+        if matches!(self.status, GrepIndexStatus::Disabled {}) {
             if !self.segments.is_empty() {
                 return Err(GrepManifestStateError::DisabledHasSegments);
             }

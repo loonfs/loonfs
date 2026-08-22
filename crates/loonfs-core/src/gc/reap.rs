@@ -15,9 +15,7 @@ use crate::checkpoint::record::{encode_checkpoint_record, load_checkpoint_record
 use crate::context::MutationContext;
 use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
-use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
 use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, NamespaceId, RetainedReason};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -67,7 +65,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
         Err(error) => return Err(core_control_load_error(error)),
     };
     let record = loaded.state;
-    if let CheckpointRecordLifecycle::Released { released_at_ms } = record.state {
+    if let CheckpointStatus::Released { released_at_ms } = record.status {
         let aged = context.now_ms.saturating_sub(released_at_ms) >= grace_window_ms;
         return Ok(if aged {
             CheckpointSweep::Delete
@@ -92,7 +90,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
         return Ok(CheckpointSweep::Retain);
     }
     let mut released = record;
-    released.state = CheckpointRecordLifecycle::Released {
+    released.status = CheckpointStatus::Released {
         released_at_ms: context.now_ms,
     };
     let bytes = encode_checkpoint_record(&released)?;

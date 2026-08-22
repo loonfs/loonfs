@@ -15,7 +15,7 @@ use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_head_object;
 use futures::StreamExt;
-use loonfs_api::wire::control::CheckpointRecordLifecycle;
+use loonfs_api::wire::control::CheckpointStatus;
 use loonfs_api::{Checkpoint, NamespaceCursor, NamespaceId, Page, PageCursor, PageRequest};
 use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_objectstore::ObjectStore;
@@ -111,7 +111,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,
             Err(error) => return Err(core_control_load_error(error)),
         };
-        if loaded.state.state != (CheckpointRecordLifecycle::Active {}) {
+        if loaded.state.status != (CheckpointStatus::Active {}) {
             continue;
         }
         let record = loaded.state;

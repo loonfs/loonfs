@@ -15,7 +15,7 @@ use crate::keyspace::{grep_prefix, manifest_key, parse_key, root_key, segment_ke
 use crate::reads::{published_revision, NamespaceReads};
 use crate::root::{
     advance_grep_root, load_grep_root, seed_grep_root, ChangeFeedResume, GrepIndexState,
-    GrepLifecycle, GrepManifestState, GrepReorganizeState, GrepRootError, GrepSegmentRef,
+    GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepRootError, GrepSegmentRef,
     LoadedGrepRoot,
 };
 use crate::service::is_indexable_text_content;
@@ -124,8 +124,8 @@ impl Default for GramIndexBuildPolicy {
 /// already-enabled namespace may be backfilling or active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrepEnableOutcome {
-    Enabled { state: GrepLifecycle },
-    AlreadyEnabled { state: GrepLifecycle },
+    Enabled { state: GrepIndexStatus },
+    AlreadyEnabled { state: GrepIndexStatus },
     Superseded,
 }
 
@@ -278,11 +278,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
         if let Some(current) = load_grep_root(&self.store, namespace_id).await? {
             if !matches!(
-                current.manifest_state().lifecycle(),
-                GrepLifecycle::Disabled
+                current.manifest_state().status(),
+                GrepIndexStatus::Disabled {}
             ) {
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
-                    state: current.manifest_state().lifecycle().clone(),
+                    state: current.manifest_state().status().clone(),
                 });
             }
         }
@@ -298,13 +298,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         if let Some(current) = &current {
             if !matches!(
-                current.manifest_state().lifecycle(),
-                GrepLifecycle::Disabled
+                current.manifest_state().status(),
+                GrepIndexStatus::Disabled {}
             ) {
                 self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
-                    state: current.manifest_state().lifecycle().clone(),
+                    state: current.manifest_state().status().clone(),
                 });
             }
         }
@@ -330,7 +330,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         match published {
             Ok(published) => Ok(GrepEnableOutcome::Enabled {
-                state: published.manifest_state().lifecycle().clone(),
+                state: published.manifest_state().status().clone(),
             }),
             Err(GrepRootError::Conflict { .. }) => {
                 self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
@@ -352,18 +352,18 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
         if matches!(
-            current.manifest_state().lifecycle(),
-            GrepLifecycle::Disabled
+            current.manifest_state().status(),
+            GrepIndexStatus::Disabled {}
         ) {
             return Ok(GrepDisableOutcome::NotEnabled);
         }
-        let checkpoint_id = match current.manifest_state().lifecycle() {
-            GrepLifecycle::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
-            GrepLifecycle::Active { .. } | GrepLifecycle::Disabled => None,
+        let checkpoint_id = match current.manifest_state().status() {
+            GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
+            GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
-            GrepLifecycle::Disabled,
+            GrepIndexStatus::Disabled {},
             GrepIndexState::new(None, current.manifest_state().index().next_run_ordinal),
             Vec::new(),
         )
@@ -392,20 +392,20 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let reads = self.reads(namespace_id);
 
-        let collected = match current.manifest_state().lifecycle() {
-            GrepLifecycle::Backfilling {
+        let collected = match current.manifest_state().status() {
+            GrepIndexStatus::Backfilling {
                 target_seq,
                 cursor,
                 checkpoint_id,
             } => collect_backfill_unit(&reads, checkpoint_id, *target_seq, *cursor, policy).await,
-            GrepLifecycle::Active {
+            GrepIndexStatus::Active {
                 built_through_seq,
                 next_event_index,
             } => {
                 collect_incremental_unit(&reads, *built_through_seq, *next_event_index, policy)
                     .await
             }
-            GrepLifecycle::Disabled => {
+            GrepIndexStatus::Disabled {} => {
                 return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled))
             }
         };
@@ -417,7 +417,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Ok(None) => {
                 let built_through_seq = current
                     .manifest_state()
-                    .lifecycle()
+                    .status()
                     .active_watermark()
                     .map(|(built_through_seq, _)| built_through_seq)
                     .ok_or_else(|| GrepError::CorruptIndex {
@@ -451,11 +451,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     ///
     /// One object read and no side effects: this is what a status surface
     /// and a caller waiting on a captured target both ask.
-    pub async fn lifecycle(&self, namespace_id: &NamespaceId) -> Result<GrepLifecycle> {
+    pub async fn lifecycle(&self, namespace_id: &NamespaceId) -> Result<GrepIndexStatus> {
         Ok(load_grep_root(&self.store, namespace_id)
             .await?
-            .map_or(GrepLifecycle::Disabled, |root| {
-                root.manifest_state().lifecycle().clone()
+            .map_or(GrepIndexStatus::Disabled {}, |root| {
+                root.manifest_state().status().clone()
             }))
     }
 
@@ -478,7 +478,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let root = self.root_state(namespace_id).await?;
         let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
             Some(root) => (
-                GrepIndexLifecycle::from(root.lifecycle()),
+                GrepIndexLifecycle::from(root.status()),
                 root.index().next_run_ordinal,
                 root.index().reorganize.is_some(),
             ),
@@ -541,9 +541,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         current: &LoadedGrepRoot,
     ) -> Result<GrepBuildReport> {
-        let previous_checkpoint_id = match current.manifest_state().lifecycle() {
-            GrepLifecycle::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
-            GrepLifecycle::Active { .. } | GrepLifecycle::Disabled => None,
+        let previous_checkpoint_id = match current.manifest_state().status() {
+            GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
+            GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
         };
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
         let next = match backfilling_root(
@@ -621,14 +621,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         segments.extend(new_segments);
         // A completed backfill is current through the sequence captured by
         // its checkpoint. The change feed resumes after that sequence.
-        let (lifecycle, completed_checkpoint_id, built_through_seq) = match progress {
+        let (status, completed_checkpoint_id, built_through_seq) = match progress {
             CollectedProgress::Backfill {
                 checkpoint_id,
                 target_seq,
                 next_cursor,
             } => match next_cursor {
                 Some(after_inode_id) => (
-                    GrepLifecycle::Backfilling {
+                    GrepIndexStatus::Backfilling {
                         target_seq,
                         cursor: Some(after_inode_id),
                         checkpoint_id,
@@ -637,7 +637,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     target_seq,
                 ),
                 None => (
-                    GrepLifecycle::Active {
+                    GrepIndexStatus::Active {
                         built_through_seq: target_seq,
                         next_event_index: 0,
                     },
@@ -650,7 +650,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 built_through_seq,
                 next_event_index,
             } => (
-                GrepLifecycle::Active {
+                GrepIndexStatus::Active {
                     built_through_seq,
                     next_event_index,
                 },
@@ -658,10 +658,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 built_through_seq,
             ),
         };
-        let materialized = matches!(lifecycle, GrepLifecycle::Active { .. });
+        let materialized = matches!(status, GrepIndexStatus::Active { .. });
         let next = GrepManifestState::new(
             namespace_id.clone(),
-            lifecycle,
+            status,
             GrepIndexState::new(
                 current.manifest_state().index().reorganize.clone(),
                 next_run_ordinal,
@@ -710,7 +710,7 @@ fn backfilling_root(
 ) -> Result<GrepManifestState> {
     GrepManifestState::new(
         namespace_id.clone(),
-        GrepLifecycle::Backfilling {
+        GrepIndexStatus::Backfilling {
             target_seq,
             cursor: None,
             checkpoint_id,
@@ -1120,8 +1120,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             ));
         };
         if matches!(
-            current.manifest_state().lifecycle(),
-            GrepLifecycle::Disabled
+            current.manifest_state().status(),
+            GrepIndexStatus::Disabled {}
         ) {
             return Ok(reorganize_report(
                 namespace_id,
@@ -1252,7 +1252,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
-            current.manifest_state().lifecycle().clone(),
+            current.manifest_state().status().clone(),
             GrepIndexState::new(reorganize, next_run_ordinal),
             segments,
         )

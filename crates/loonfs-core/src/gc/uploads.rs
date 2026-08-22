@@ -20,7 +20,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
 use crate::protocol::AbandonedUpload;
 use crate::storage::content::delete_unpublished_content_object;
-use loonfs_api::wire::control::{UploadSessionLifecycle, UploadSessionState};
+use loonfs_api::wire::control::{UploadSessionRecordStatus, UploadSessionState};
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{ContentId, ContentStoreId, NamespaceId, UploadId};
@@ -83,8 +83,8 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
         Err(error) => return Err(error),
     };
 
-    match state.state {
-        UploadSessionLifecycle::Open { expires_at_ms, .. } => {
+    match state.status {
+        UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
             abort_expired_session(
                 store,
                 namespace_id,
@@ -96,7 +96,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             )
             .await
         }
-        UploadSessionLifecycle::Aborted { aborted_at_ms } => {
+        UploadSessionRecordStatus::Aborted { aborted_at_ms } => {
             if context.now_ms.saturating_sub(aborted_at_ms) < grace_window_ms {
                 return Ok(retain_until(aborted_at_ms.saturating_add(grace_window_ms)));
             }
@@ -112,7 +112,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                 reclaimed_content: false,
             })
         }
-        UploadSessionLifecycle::Completed {
+        UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
         } => {
@@ -184,11 +184,11 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
         namespace_id,
         upload_id,
         |mut state: UploadSessionState| async move {
-            if !matches!(state.state, UploadSessionLifecycle::Open { .. }) {
+            if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
                 return Ok(UploadSessionUpdate::Noop(None));
             }
             let abandoned = AbandonedUpload::of(&state);
-            state.state = UploadSessionLifecycle::Aborted {
+            state.status = UploadSessionRecordStatus::Aborted {
                 aborted_at_ms: context.now_ms,
             };
             Ok(UploadSessionUpdate::Replace {

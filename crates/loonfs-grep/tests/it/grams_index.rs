@@ -76,7 +76,7 @@ async fn grams_built_through_seq(
         .expect("load grep root")
         .expect("grep root exists")
         .manifest_state()
-        .lifecycle()
+        .status()
         .active_watermark()
         .expect("an active grep root has a watermark")
         .0
@@ -249,8 +249,8 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .expect("load grep root")
         .expect("grep root exists");
     assert!(matches!(
-        root.manifest_state().lifecycle(),
-        loonfs_grep::root::GrepLifecycle::Backfilling { .. }
+        root.manifest_state().status(),
+        loonfs_grep::root::GrepIndexStatus::Backfilling { .. }
     ));
     let error = host
         .grep(&namespace_id, &request("needle"))
@@ -451,7 +451,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .expect("partial grep root");
     let (partial_seq, partial_event_index) = partial
         .manifest_state()
-        .lifecycle()
+        .status()
         .active_watermark()
         .expect("the partial root is active");
     assert_eq!(partial_seq, commit.committed_seq);
@@ -528,7 +528,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     assert_eq!(
         complete
             .manifest_state()
-            .lifecycle()
+            .status()
             .active_watermark()
             .expect("the complete root is active"),
         (commit.committed_seq, 0)

@@ -12,7 +12,7 @@ use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::{
     wire::control::{
-        decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
+        decode_control_object, encode_control_object, CheckpointOwner, CheckpointStatus,
         ControlObjectKind, HeadState, HeadStateEnvelope,
     },
     wire::manifest::{
@@ -306,8 +306,8 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     );
     let head = head_state(store.as_ref(), &contested).await;
     assert_eq!(
-        head.state,
-        loonfs_api::wire::control::NamespaceState::Active
+        head.status,
+        loonfs_api::wire::control::NamespaceStatus::Active {}
     );
     if created.is_ok() {
         assert!(head.fork_basis.is_none(), "the create won");
@@ -674,8 +674,8 @@ async fn a_fork_whose_source_pin_is_released_deletes_its_own_target() {
         .expect_err("a released source pin fails the fork");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     assert_eq!(
-        head_state(&store, &clone).await.state,
-        loonfs_api::wire::control::NamespaceState::Deleted,
+        head_state(&store, &clone).await.status,
+        loonfs_api::wire::control::NamespaceStatus::Deleted {},
         "the fork deletes the target it published"
     );
     let retry = fork_namespace(&store, &source, &clone, &context)
@@ -708,8 +708,8 @@ async fn a_fork_whose_source_lease_runs_out_deletes_its_own_target() {
         .expect_err("a lease inside the guard margin fails the fork");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     assert_eq!(
-        head_state(&store, &clone).await.state,
-        loonfs_api::wire::control::NamespaceState::Deleted,
+        head_state(&store, &clone).await.status,
+        loonfs_api::wire::control::NamespaceStatus::Deleted {},
         "the fork deletes the target it published"
     );
 }
@@ -733,8 +733,8 @@ async fn a_fork_with_lease_to_spare_survives_a_concurrent_gc_pass() {
     forked.expect("a fresh lease survives a concurrent pass");
     collected.expect("the pass finishes");
     assert_eq!(
-        head_state(store.as_ref(), &clone).await.state,
-        loonfs_api::wire::control::NamespaceState::Active
+        head_state(store.as_ref(), &clone).await.status,
+        loonfs_api::wire::control::NamespaceStatus::Active {}
     );
     assert_eq!(
         read_file_bytes(store.as_ref(), &clone, "/docs/shared.txt")
@@ -1097,7 +1097,7 @@ impl ReleasePinAfterHeadStore {
             }
             match self.after_head {
                 ForkPinAfterHead::Released => {
-                    record.state = CheckpointRecordLifecycle::Released {
+                    record.status = CheckpointStatus::Released {
                         released_at_ms: 2_000,
                     };
                 }

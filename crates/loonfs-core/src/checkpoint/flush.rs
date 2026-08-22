@@ -28,7 +28,7 @@ use crate::namespace::basis::{
 };
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
-use loonfs_api::wire::control::{HeadState, NamespaceState};
+use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{
     next_public_ordinal, ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestId,
@@ -232,7 +232,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::load_head)?;
     let head = loaded.head.state;
-    if head.state == NamespaceState::Deleted {
+    if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
