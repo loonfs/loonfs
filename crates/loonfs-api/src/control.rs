@@ -124,49 +124,39 @@ pub struct MetadataRootState {
     pub updated_at_ms: u64,
 }
 
-/// Lifecycle of a compaction lease: two states and one transition.
+/// Status of a compaction lease.
 ///
-/// A lease is created `active` by the job that owns the prefix. Garbage
-/// collection moves it to `reaping` by compare-and-swap once it has expired,
-/// and that transition is the fence: the worker's next heartbeat
-/// compare-and-swap fails, so it can never publish, and only then may the
-/// collector treat the prefix as orphaned. `reaping` is terminal — nothing
-/// returns a lease to `active`, and the collector deletes the object once the
-/// prefix's unreferenced segments are gone.
+/// A job creates an `active` lease. Garbage collection may change an expired
+/// lease to `reaping` by compare-and-swap. That update fences the job and is
+/// permanent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MetadataCompactionLeaseStatus {
-    /// The job owns its prefix. Whether it is still running is a question
-    /// about `heartbeat_at_ms`, not about this field.
-    Active,
-    /// Terminal: garbage collection claimed the prefix, so the job that
-    /// wrote it is fenced and the objects under it are orphans.
-    Reaping,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompactionLeaseStatus {
+    /// The job owns its output prefix. `heartbeat_at_ms` determines whether
+    /// the lease has expired.
+    ///
+    /// The braces make serde reject a stray field; a unit variant would
+    /// silently accept and discard one.
+    Active {},
+    /// Garbage collection owns the prefix and the job is fenced.
+    Reaping {},
 }
 
-impl fmt::Display for MetadataCompactionLeaseStatus {
+impl fmt::Display for CompactionLeaseStatus {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Active => "active",
-            Self::Reaping => "reaping",
+            Self::Active {} => "active",
+            Self::Reaping {} => "reaping",
         })
     }
 }
 
-/// Says who owns the objects under one streaming metadata compaction's job
-/// prefix.
+/// Records ownership of a streaming compaction's output prefix.
 ///
-/// The lease carries lifecycle ownership and nothing else: no cursor, no
-/// output descriptor, no offset, no progress. Two parties write it. The job
-/// creates it, refreshes it by compare-and-swap while it runs, and stops
-/// writing it once its output is published. Garbage collection claims an
-/// expired lease by compare-and-swap and reclaims the prefix behind it
-/// (format spec, "Garbage collection", rule 12). Whoever wins that
-/// compare-and-swap owns the prefix; the loser has lost it for good.
-///
-/// Nothing about a job's correctness depends on the object surviving — a job
-/// that loses its lease loses its output to a later pass and runs again,
-/// which is what every other way a job can end already costs.
+/// The lease contains no cursor, output descriptor, or progress. The job
+/// refreshes it while running. Garbage collection claims an expired lease by
+/// compare-and-swap before reclaiming the prefix (format spec, "Garbage
+/// collection", rule 12).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataCompactionLeaseState {
@@ -180,7 +170,7 @@ pub struct MetadataCompactionLeaseState {
     pub owner_id: String,
     /// Who owns the prefix: the job that wrote the lease, or the collector
     /// that claimed it.
-    pub status: MetadataCompactionLeaseStatus,
+    pub status: CompactionLeaseStatus,
     /// Unix-millisecond stamp of the job's first lease write.
     pub started_at_ms: u64,
     /// Unix-millisecond stamp of the most recent lease write, and the only
@@ -188,16 +178,16 @@ pub struct MetadataCompactionLeaseState {
     pub heartbeat_at_ms: u64,
 }
 
-/// Monotonic lifecycle of a durable checkpoint record.
+/// Monotonic status of a durable checkpoint record.
 ///
 /// A new record starts active and pins its basis. Explicit release or expiry
-/// moves it to the terminal released state by compare-and-swap. Released
+/// moves it to the terminal released status by compare-and-swap. Released
 /// records serve no reads and are deleted after the release grace period.
 /// Creating another pin always creates a new record id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CheckpointRecordLifecycle {
-    /// Protects the checkpoint basis. The sole state a read may serve from.
+pub enum CheckpointStatus {
+    /// Protects the checkpoint basis and permits reads.
     ///
     /// The braces make serde reject a stray `released_at_ms`; a unit variant
     /// would silently accept and discard that field.
@@ -210,13 +200,13 @@ pub enum CheckpointRecordLifecycle {
     },
 }
 
-impl std::fmt::Display for CheckpointRecordLifecycle {
+impl std::fmt::Display for CheckpointStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = match self {
+        let status = match self {
             Self::Active {} => "active",
             Self::Released { .. } => "released",
         };
-        formatter.write_str(state)
+        formatter.write_str(status)
     }
 }
 
@@ -287,8 +277,8 @@ pub struct CheckpointRecordState {
     pub created_at_ms: u64,
     /// Party and expiry policy that determine when this pin can be released.
     pub owner: CheckpointOwner,
-    /// Current lifecycle, advanced only by the one-way release compare-and-swap.
-    pub state: CheckpointRecordLifecycle,
+    /// Current status, advanced only by the one-way release compare-and-swap.
+    pub status: CheckpointStatus,
 }
 
 /// Links one accepted WAL segment identity to its verified sequence range.
@@ -338,34 +328,21 @@ pub struct AcquiredWriter {
     pub writer_epoch: WriterEpoch,
 }
 
-/// Lifecycle state recorded in the namespace head.
+/// Status recorded in every namespace head.
 ///
-/// There is no initialization state: the head is published complete by one
-/// conditional write, so a namespace either has a head (active or deleted)
-/// or does not exist. The one transition the head must record is deletion,
-/// because a deleted namespace keeps its head forever as the id-reuse
-/// tombstone.
-///
-/// Decoding is fail-closed: a reader presented with a state it does not
-/// recognize fails with a typed decode error instead of serving the
-/// namespace.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NamespaceState {
+/// A namespace is either active or permanently deleted. Missing and unknown
+/// status values fail decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NamespaceStatus {
     /// The namespace serves reads and accepts commits.
-    #[default]
-    Active,
+    ///
+    /// The braces make serde reject a stray field; a unit variant would
+    /// silently accept and discard one.
+    Active {},
     /// Terminal: the namespace's history has ended. Reads, commits, forks,
     /// and re-creation of the same id are all refused.
-    Deleted,
-}
-
-impl NamespaceState {
-    /// Whether this is the default state, used to keep active heads encoded
-    /// exactly as before the field existed.
-    pub fn is_active(&self) -> bool {
-        matches!(self, NamespaceState::Active)
-    }
+    Deleted {},
 }
 
 /// Where a fork target's metadata basis lives before the target publishes
@@ -431,10 +408,9 @@ pub struct HeadState {
     /// from GC.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_segments: Vec<WalSegmentPointer>,
-    /// Lifecycle state. Absent means active, on read and on write, so the
-    /// field appears only in deleted heads.
-    #[serde(default, skip_serializing_if = "NamespaceState::is_active")]
-    pub state: NamespaceState,
+    /// Whether the namespace is active or terminally deleted. Every head
+    /// writes it, and a head that omits it fails to decode.
+    pub status: NamespaceStatus,
 }
 
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
@@ -484,7 +460,7 @@ impl HeadState {
             next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
             visible_wal_tip: None,
             recent_segments: Vec::new(),
-            state: NamespaceState::Active,
+            status: NamespaceStatus::Active {},
         }
     }
 
@@ -616,37 +592,30 @@ impl UploadSessionTransport {
     }
 }
 
-/// Monotonic lifecycle of a durable upload session.
+/// Monotonic status of a durable upload session.
 ///
-/// A session starts open and ends either completed or aborted. The
-/// compare-and-swap that writes the terminal state decides which transition
-/// won; provider cleanup happens afterward. Terminal sessions never reopen,
-/// so another attempt requires a new session and content id.
+/// A session starts open and ends as completed or aborted. The terminal update
+/// uses compare-and-swap and cannot be reversed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum UploadSessionLifecycle {
-    /// The one state that may stage bytes and complete. Live until its lease
-    /// passes, after which garbage collection aborts it.
+pub enum UploadSessionRecordStatus {
+    /// Accepts staged bytes until its lease expires.
     Open {
         /// Unix-millisecond instant after which the session is abandoned.
         /// The record carries it so no session transition depends on an
         /// object's provider timestamp.
         expires_at_ms: u64,
     },
-    /// Terminal: the content is durable and verified. This is the only state
-    /// a receipt may be minted from, and the content reference it carries is
-    /// what every re-mint and idempotent completion retry answers with.
+    /// The content is durable and verified. Only completed sessions can issue
+    /// receipts or replay completion.
     Completed {
         /// Unix-millisecond stamp written by the completing compare-and-swap,
         /// and the only input to when the content may be reclaimed.
         completed_at_ms: u64,
-        /// Verified immutable content this session settled on, and the one
-        /// place a completed session's reference exists.
+        /// Verified immutable content produced by this session.
         content_ref: ContentRef,
     },
-    /// Terminal: the session will never select content. Its content
-    /// identity was never published — a receipt exists only for a completed
-    /// session — so the object it named belongs to nobody and is deleted.
+    /// The session cannot publish content. Its unreferenced object is deleted.
     Aborted {
         /// Unix-millisecond stamp written by the aborting compare-and-swap,
         /// and the only input to when the record may be deleted.
@@ -654,8 +623,8 @@ pub enum UploadSessionLifecycle {
     },
 }
 
-impl UploadSessionLifecycle {
-    /// The content reference this state names, whichever state names one.
+impl UploadSessionRecordStatus {
+    /// Returns the completed content reference, if present.
     fn content_ref(&self) -> Option<&ContentRef> {
         match self {
             Self::Open { .. } => None,
@@ -665,25 +634,21 @@ impl UploadSessionLifecycle {
     }
 }
 
-impl std::fmt::Display for UploadSessionLifecycle {
+impl std::fmt::Display for UploadSessionRecordStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = match self {
+        let status = match self {
             Self::Open { .. } => "open",
             Self::Completed { .. } => "completed",
             Self::Aborted { .. } => "aborted",
         };
-        formatter.write_str(state)
+        formatter.write_str(status)
     }
 }
 
 /// Tracks one durable content-upload workflow independently of commit publication.
 ///
-/// The record is an identity, a transport, and a state. Everything a
-/// transport needs lives in its own variant and everything a state needs
-/// lives in its own variant, so the combinations that used to be spelled
-/// with independent optional fields — a proxied session holding a provider
-/// upload or a multipart session promising content — are not shapes this
-/// type has.
+/// The tagged transport and status variants permit only valid field
+/// combinations.
 ///
 /// See [upload before publish](../../../docs/specs/format.md#242-upload-before-publish).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -703,9 +668,9 @@ pub struct UploadSessionState {
     pub created_at_ms: u64,
     /// How the bytes reach object storage, settled when the session opened.
     pub transport: UploadSessionTransport,
-    /// The session's lifecycle, and the field every upload operation
+    /// The session's status, and the field every upload operation
     /// compare-and-swaps against.
-    pub state: UploadSessionLifecycle,
+    pub status: UploadSessionRecordStatus,
 }
 
 impl UploadSessionState {
@@ -723,7 +688,7 @@ impl UploadSessionState {
             .transport
             .content_ref()
             .into_iter()
-            .chain(self.state.content_ref())
+            .chain(self.status.content_ref())
         {
             content_ref.validate().map_err(|error| {
                 format!(
@@ -740,8 +705,8 @@ impl UploadSessionState {
         }
         if let (
             UploadSessionTransport::DirectPut { checksum_algorithm },
-            UploadSessionLifecycle::Completed { content_ref, .. },
-        ) = (&self.transport, &self.state)
+            UploadSessionRecordStatus::Completed { content_ref, .. },
+        ) = (&self.transport, &self.status)
         {
             if content_ref.checksum.algorithm != *checksum_algorithm {
                 return Err(format!(
@@ -763,7 +728,7 @@ struct StrictUploadSessionState {
     content_id: ContentId,
     created_at_ms: u64,
     transport: StrictUploadSessionTransport,
-    state: StrictUploadSessionLifecycle,
+    status: StrictUploadSessionRecordStatus,
 }
 
 /// The transport read back through the same strict content-ref decoder the
@@ -824,12 +789,12 @@ impl From<StrictProxiedStaging> for ProxiedStaging {
     }
 }
 
-/// The lifecycle read back through the same strict content-ref decoder the
+/// The status read back through the same strict content-ref decoder the
 /// rest of the record uses, so a completed session's reference is held to
 /// the durable schema rather than the wire one.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StrictUploadSessionLifecycle {
+enum StrictUploadSessionRecordStatus {
     Open {
         expires_at_ms: u64,
     },
@@ -842,18 +807,18 @@ enum StrictUploadSessionLifecycle {
     },
 }
 
-impl From<StrictUploadSessionLifecycle> for UploadSessionLifecycle {
-    fn from(state: StrictUploadSessionLifecycle) -> Self {
-        match state {
-            StrictUploadSessionLifecycle::Open { expires_at_ms } => Self::Open { expires_at_ms },
-            StrictUploadSessionLifecycle::Completed {
+impl From<StrictUploadSessionRecordStatus> for UploadSessionRecordStatus {
+    fn from(status: StrictUploadSessionRecordStatus) -> Self {
+        match status {
+            StrictUploadSessionRecordStatus::Open { expires_at_ms } => Self::Open { expires_at_ms },
+            StrictUploadSessionRecordStatus::Completed {
                 completed_at_ms,
                 content_ref,
             } => Self::Completed {
                 completed_at_ms,
                 content_ref: content_ref.into(),
             },
-            StrictUploadSessionLifecycle::Aborted { aborted_at_ms } => {
+            StrictUploadSessionRecordStatus::Aborted { aborted_at_ms } => {
                 Self::Aborted { aborted_at_ms }
             }
         }
@@ -897,14 +862,14 @@ impl<'de> Deserialize<'de> for UploadSessionState {
     where
         D: Deserializer<'de>,
     {
-        let state = StrictUploadSessionState::deserialize(deserializer)?;
+        let record = StrictUploadSessionState::deserialize(deserializer)?;
         let session = Self {
-            namespace_id: state.namespace_id,
-            upload_id: state.upload_id,
-            content_id: state.content_id,
-            created_at_ms: state.created_at_ms,
-            transport: state.transport.into(),
-            state: state.state.into(),
+            namespace_id: record.namespace_id,
+            upload_id: record.upload_id,
+            content_id: record.content_id,
+            created_at_ms: record.created_at_ms,
+            transport: record.transport.into(),
+            status: record.status.into(),
         };
         session.validate().map_err(serde::de::Error::custom)?;
         Ok(session)
@@ -1067,7 +1032,8 @@ mod tests {
             "seq": 0,
             "head_commit_id": GENESIS_COMMIT_ID,
             "writer_epoch": 0,
-            "next_inode_id": 2
+            "next_inode_id": 2,
+            "status": { "kind": "active" }
         });
 
         serde_json::from_value::<HeadState>(missing)
@@ -1098,7 +1064,8 @@ mod tests {
             "seq": 2,
             "head_commit_id": GENESIS_COMMIT_ID,
             "writer_epoch": 0,
-            "next_inode_id": 2
+            "next_inode_id": 2,
+            "status": { "kind": "active" }
         });
         if let Some(tip) = visible_wal_tip {
             head["visible_wal_tip"] = tip;

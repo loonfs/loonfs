@@ -7,7 +7,7 @@ use crate::context::MutationContext;
 use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_head_object;
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle, NamespaceState};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, NamespaceStatus};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
@@ -43,7 +43,7 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
         Err(error) => return Err(core_control_load_error(error)),
     };
     let record = loaded.state;
-    if record.state != (CheckpointRecordLifecycle::Active {}) {
+    if record.status != (CheckpointStatus::Active {}) {
         return Ok(false);
     }
     if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
@@ -81,7 +81,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
         Err(error) => return Err(core_control_load_error(error)),
     };
     let record = loaded.state;
-    if record.state != (CheckpointRecordLifecycle::Active {}) {
+    if record.status != (CheckpointStatus::Active {}) {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     }
     let CheckpointOwner::Fork {
@@ -95,7 +95,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
         return Ok(ForkCheckpointSweep::Retained);
     }
     let mut released = record;
-    released.state = CheckpointRecordLifecycle::Released {
+    released.status = CheckpointStatus::Released {
         released_at_ms: context.now_ms,
     };
     let encoded = encode_checkpoint_record(&released)?;
@@ -132,7 +132,7 @@ pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<bool> {
     match load_head_object(store, target_namespace_id).await {
-        Ok(loaded) => Ok(loaded.state.state == NamespaceState::Deleted),
+        Ok(loaded) => Ok(loaded.state.status == NamespaceStatus::Deleted {}),
         Err(ControlObjectLoadError::MissingObject { .. }) => {
             Ok(lease_expires_at_ms <= context.now_ms)
         }

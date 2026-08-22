@@ -25,8 +25,8 @@ use crate::limits::{
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
-    decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-    ControlObjectKind, ProxiedStaging, UploadSessionLifecycle, UploadSessionState,
+    decode_control_object, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
+    ControlObjectKind, ProxiedStaging, UploadSessionRecordStatus, UploadSessionState,
     UploadSessionTransport,
 };
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
@@ -109,13 +109,13 @@ async fn checkpoint_lifecycle<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &loonfs_api::CheckpointId,
-) -> CheckpointRecordLifecycle {
+) -> CheckpointStatus {
     crate::checkpoint::load_checkpoint_record(store, namespace_id, checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("checkpoint record exists")
         .state
-        .state
+        .status
 }
 
 /// Derives "now" from durable object ages so the tests never touch a
@@ -193,10 +193,7 @@ impl BlockingControlCasTarget {
                 ) else {
                     return false;
                 };
-                matches!(
-                    envelope.state.state,
-                    CheckpointRecordLifecycle::Released { .. }
-                )
+                matches!(envelope.state.status, CheckpointStatus::Released { .. })
             }
             BlockingControlCasTarget::UploadCompleted | BlockingControlCasTarget::UploadAborted => {
                 let Ok(envelope) = decode_control_object::<UploadSessionState>(
@@ -207,11 +204,14 @@ impl BlockingControlCasTarget {
                 };
                 match self {
                     BlockingControlCasTarget::UploadCompleted => matches!(
-                        envelope.state.state,
-                        UploadSessionLifecycle::Completed { .. }
+                        envelope.state.status,
+                        UploadSessionRecordStatus::Completed { .. }
                     ),
                     BlockingControlCasTarget::UploadAborted => {
-                        matches!(envelope.state.state, UploadSessionLifecycle::Aborted { .. })
+                        matches!(
+                            envelope.state.status,
+                            UploadSessionRecordStatus::Aborted { .. }
+                        )
                     }
                     _ => false,
                 }
@@ -400,7 +400,7 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         transport: UploadSessionTransport::ServiceProxied {
             staging: ProxiedStaging::Idle,
         },
-        state: loonfs_api::wire::control::UploadSessionLifecycle::Open {
+        status: loonfs_api::wire::control::UploadSessionRecordStatus::Open {
             expires_at_ms: 1_000 + UPLOAD_SESSION_LEASE_MS,
         },
     };
@@ -530,8 +530,8 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
     .expect("record still present")
     .state;
     assert_eq!(
-        released.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Released {
+        released.status,
+        loonfs_api::wire::control::CheckpointStatus::Released {
             released_at_ms: aged.now_ms
         }
     );
@@ -734,8 +734,8 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
         .await
         .expect("aborted session retained");
     assert!(matches!(
-        session.state,
-        UploadSessionLifecycle::Aborted { .. }
+        session.status,
+        UploadSessionRecordStatus::Aborted { .. }
     ));
     assert!(
         store.head(&content_key).await.expect("head").is_none(),
@@ -934,8 +934,8 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         .await
         .expect("completed session retained");
     assert!(matches!(
-        session.state,
-        UploadSessionLifecycle::Completed { .. }
+        session.status,
+        UploadSessionRecordStatus::Completed { .. }
     ));
     assert!(
         store.head(&content_key).await.expect("head").is_some(),
@@ -981,8 +981,8 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
         .await
         .expect("aborted session retained for a grace window");
     assert!(matches!(
-        session.state,
-        UploadSessionLifecycle::Aborted { .. }
+        session.status,
+        UploadSessionRecordStatus::Aborted { .. }
     ));
     assert!(
         store.head(&content_key).await.expect("head").is_none(),
@@ -2189,7 +2189,7 @@ async fn write_compaction_lease<S: ObjectStore + ?Sized>(
         namespace_id,
         metadata_compaction_id,
         heartbeat_at_ms,
-        loonfs_api::wire::control::MetadataCompactionLeaseStatus::Active,
+        loonfs_api::wire::control::CompactionLeaseStatus::Active {},
     )
     .await;
 }
@@ -2200,7 +2200,7 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     metadata_compaction_id: &loonfs_api::MetadataCompactionId,
     heartbeat_at_ms: u64,
-    status: loonfs_api::wire::control::MetadataCompactionLeaseStatus,
+    status: loonfs_api::wire::control::CompactionLeaseStatus,
 ) {
     let envelope = loonfs_api::wire::control::MetadataCompactionLeaseEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::CompactionLease,
@@ -3313,7 +3313,7 @@ async fn caller_release_and_expiry_release_converge_on_the_winners_stamp() {
     );
     assert_eq!(
         checkpoint_lifecycle(&store, &namespace_id, &caller_first.checkpoint_id).await,
-        CheckpointRecordLifecycle::Released {
+        CheckpointStatus::Released {
             released_at_ms: caller_stamp
         },
         "the winner's stamp stands"
@@ -3323,7 +3323,7 @@ async fn caller_release_and_expiry_release_converge_on_the_winners_stamp() {
     // the pass's stamp is what ages the record out.
     assert_eq!(
         checkpoint_lifecycle(&store, &namespace_id, &pass_first.checkpoint_id).await,
-        CheckpointRecordLifecycle::Released {
+        CheckpointStatus::Released {
             released_at_ms: expired.now_ms
         }
     );
@@ -3338,7 +3338,7 @@ async fn caller_release_and_expiry_release_converge_on_the_winners_stamp() {
     assert_eq!(late.checkpoint_id, pass_first.checkpoint_id);
     assert_eq!(
         checkpoint_lifecycle(&store, &namespace_id, &pass_first.checkpoint_id).await,
-        CheckpointRecordLifecycle::Released {
+        CheckpointStatus::Released {
             released_at_ms: expired.now_ms
         },
         "the loser rewrites nothing"
@@ -3398,7 +3398,7 @@ async fn a_release_that_loses_its_etag_retains_without_erroring() {
     assert_eq!(report.deleted_checkpoint_records, 0);
     assert_eq!(
         checkpoint_lifecycle(&store, &namespace_id, &pinned.checkpoint_id).await,
-        CheckpointRecordLifecycle::Released {
+        CheckpointStatus::Released {
             released_at_ms: caller_stamp
         }
     );
@@ -3433,7 +3433,7 @@ async fn gc_deletes_a_released_record_only_after_its_release_ages() {
         .expect("release");
     assert_eq!(
         checkpoint_lifecycle(&store, &namespace_id, &pinned.checkpoint_id).await,
-        CheckpointRecordLifecycle::Released {
+        CheckpointStatus::Released {
             released_at_ms: aged.now_ms
         }
     );
@@ -3528,7 +3528,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     assert_eq!(first_pass.deleted_checkpoint_records, 0);
     assert_eq!(
         checkpoint_lifecycle(&store, &namespace_id, &expiring.checkpoint_id).await,
-        CheckpointRecordLifecycle::Released {
+        CheckpointStatus::Released {
             released_at_ms: expired.now_ms
         }
     );
@@ -3787,7 +3787,7 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     assert_eq!(first_pass.deleted_checkpoint_records, 0);
     assert_eq!(
         checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
-        CheckpointRecordLifecycle::Released {
+        CheckpointStatus::Released {
             released_at_ms: aged.now_ms
         }
     );
@@ -3881,7 +3881,7 @@ async fn gc_retains_a_fork_checkpoint_when_the_target_head_does_not_read() {
     assert_eq!(report.released_fork_checkpoints, 0);
     assert_eq!(
         checkpoint_lifecycle(store.inner(), &source, &fork_record.checkpoint_id).await,
-        CheckpointRecordLifecycle::Active {}
+        CheckpointStatus::Active {}
     );
 }
 
@@ -3929,7 +3929,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         assert_eq!(report.released_expired_checkpoints, 0, "at {now_ms}");
         assert_eq!(
             checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
-            CheckpointRecordLifecycle::Active {},
+            CheckpointStatus::Active {},
             "a live target keeps its pin at {now_ms}"
         );
     }
@@ -4007,7 +4007,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
         assert_eq!(report.released_fork_checkpoints, 0, "at {now_ms}");
         assert_eq!(
             checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
-            CheckpointRecordLifecycle::Active {}
+            CheckpointStatus::Active {}
         );
         assert!(crate::checkpoint::load_namespace_manifest_envelope(
             &store,
@@ -4026,7 +4026,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     assert_eq!(report.released_fork_checkpoints, 1);
     assert_eq!(
         checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
-        CheckpointRecordLifecycle::Released {
+        CheckpointStatus::Released {
             released_at_ms: expired.now_ms
         }
     );
@@ -4078,7 +4078,7 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
     assert_eq!(retry, 2, "the retry pins for itself instead of reusing");
     assert_eq!(
         checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
-        CheckpointRecordLifecycle::Active {},
+        CheckpointStatus::Active {},
         "the abandoned record is untouched; its lease ends it"
     );
     load_current_metadata_view(&store, &clone)

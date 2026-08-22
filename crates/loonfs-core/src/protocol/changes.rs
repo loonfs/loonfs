@@ -6,7 +6,7 @@ use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::load_namespace_head_control;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use loonfs_api::v0::{ChangesResponse, CommittedChange, FilesystemChange};
-use loonfs_api::wire::control::NamespaceState;
+use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -23,7 +23,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?
         .state;
-    if head.state == NamespaceState::Deleted {
+    if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: namespace_id.clone(),
         });

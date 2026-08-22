@@ -5,7 +5,7 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::{load_head_and_metadata_basis, resolve_retention_floor_seq};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
-use loonfs_api::wire::control::{HeadState, NamespaceState};
+use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::{ChangeSeq, ManifestId, Namespace, NamespaceDiagnostics, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
@@ -36,7 +36,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
     let head = loaded.head.state;
-    if head.state == NamespaceState::Deleted {
+    if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: expected_namespace_id.clone(),
         });
@@ -89,7 +89,7 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::load_head)?
         .state;
-    if head.state == NamespaceState::Deleted {
+    if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: expected_namespace_id.clone(),
         });
@@ -164,7 +164,7 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?
         .state;
-    if head.state != NamespaceState::Deleted {
+    if head.status != (NamespaceStatus::Deleted {}) {
         return Err(CoreError::Internal(format!(
             "namespace `{expected_namespace_id}` is live; deleted diagnostics require a deleted namespace"
         )));

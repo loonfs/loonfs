@@ -43,8 +43,7 @@ use crate::limits::{
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, MetadataCompactionLeaseState,
-    MetadataCompactionLeaseStatus,
+    encode_control_state, CompactionLeaseStatus, ControlObjectKind, MetadataCompactionLeaseState,
 };
 use loonfs_api::{MetadataCompactionId, NamespaceId};
 use loonfs_objectstore::keys::metadata_compaction_lease;
@@ -112,7 +111,7 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
     let state = loaded.state;
     // Terminal: somebody already fenced this job, so the reap goes on from
     // wherever the pass that started it stopped.
-    if state.status == MetadataCompactionLeaseStatus::Reaping {
+    if state.status == (CompactionLeaseStatus::Reaping {}) {
         return Ok(CompactionPrefixOwner::ThisCollector);
     }
     if now_ms
@@ -125,7 +124,7 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
 
     // Expired. Nothing is decided until the claim lands.
     let mut reaping = state;
-    reaping.status = MetadataCompactionLeaseStatus::Reaping;
+    reaping.status = CompactionLeaseStatus::Reaping {};
     let encoded = encode_lease(&reaping)?;
     match store
         .compare_and_swap(&object_key, &expected_etag, encoded)
@@ -196,7 +195,7 @@ impl<'a> CompactionLease<'a> {
                 job_id: job_id.clone(),
                 namespace_id: namespace_id.clone(),
                 owner_id: owner_id.to_owned(),
-                status: MetadataCompactionLeaseStatus::Active,
+                status: CompactionLeaseStatus::Active {},
                 started_at_ms,
                 heartbeat_at_ms: started_at_ms,
             },

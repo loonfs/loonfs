@@ -8,7 +8,7 @@ use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_grep::keyspace::{manifest_key, manifests_prefix, root_key};
 use loonfs_grep::root::{
     advance_grep_root, encode_grep_manifest, encode_grep_root, load_grep_root, seed_grep_root,
-    GrepIndexState, GrepLifecycle, GrepManifestEnvelope, GrepManifestId, GrepManifestState,
+    GrepIndexState, GrepIndexStatus, GrepManifestEnvelope, GrepManifestId, GrepManifestState,
     GrepRootEnvelope, GrepRootError, GrepRootPointer,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -211,7 +211,7 @@ async fn racing_advancers_have_one_winner_and_loser_can_reload_and_retry() {
         .expect("final load succeeds")
         .expect("root exists");
     assert_eq!(
-        final_root.manifest_state().lifecycle().active_watermark(),
+        final_root.manifest_state().status().active_watermark(),
         Some((ChangeSeq(3), 0))
     );
 }
@@ -237,7 +237,7 @@ async fn stale_etag_advance_fails_after_concurrent_advance() {
 fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepManifestState {
     GrepManifestState::new(
         namespace_id,
-        GrepLifecycle::Active {
+        GrepIndexStatus::Active {
             built_through_seq,
             next_event_index: 0,
         },

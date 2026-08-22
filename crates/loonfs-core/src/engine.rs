@@ -27,7 +27,7 @@ use loonfs_api::v0::{
     CompleteMultipartUploadRequest, DirectMultipartUploadOptions, UploadContentResponse,
     UploadMode, UploadPartChecksumClaim, UploadSessionResponse,
 };
-use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
+use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceStatus};
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
@@ -448,7 +448,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 context.head.namespace_id, self.namespace_id
             )));
         }
-        if context.head.state == NamespaceState::Deleted {
+        if context.head.status == (NamespaceStatus::Deleted {}) {
             return Err(crate::error::CoreError::NamespaceDeleted {
                 namespace_id: self.namespace_id.clone(),
             });

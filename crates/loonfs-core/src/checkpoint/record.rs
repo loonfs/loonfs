@@ -21,7 +21,7 @@ use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::load_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
+    encode_control_state, CheckpointRecordState, CheckpointStatus, ControlObjectKind,
 };
 use loonfs_api::{CheckpointId, NamespaceId};
 use loonfs_objectstore::keys::checkpoint_record;
@@ -172,14 +172,11 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
             // what the release asked for.
             return Ok(());
         };
-        if matches!(
-            loaded.state.state,
-            CheckpointRecordLifecycle::Released { .. }
-        ) {
+        if matches!(loaded.state.status, CheckpointStatus::Released { .. }) {
             return Ok(());
         }
         let mut next = loaded.state;
-        next.state = CheckpointRecordLifecycle::Released { released_at_ms };
+        next.status = CheckpointStatus::Released { released_at_ms };
         let encoded = encode_checkpoint_record(&next)?;
         match store
             .compare_and_swap(&object_key, &loaded.etag, encoded)
@@ -258,7 +255,7 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle};
+    use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
     use loonfs_api::{ChangeSeq, CommitId, ManifestId, ManifestObjectId};
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -294,7 +291,7 @@ mod tests {
                 name: "test".to_owned(),
                 expires_at_ms: None,
             },
-            state: CheckpointRecordLifecycle::Active {},
+            status: CheckpointStatus::Active {},
         }
     }
 

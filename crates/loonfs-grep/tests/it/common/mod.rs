@@ -10,7 +10,7 @@
 use loonfs::{FsAdmin, FsReader, MaintenanceJob, MaintenanceStepConclusion, SharedObjectStore};
 use loonfs_api::v0::{GrepIndexLifecycle, GrepIndexStatusResponse};
 use loonfs_api::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId};
-use loonfs_grep::root::GrepLifecycle;
+use loonfs_grep::root::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
     GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
@@ -93,9 +93,9 @@ impl GrepHost {
             }
         };
         let target_seq = match &lifecycle {
-            GrepLifecycle::Disabled => None,
-            GrepLifecycle::Backfilling { target_seq, .. } => Some(*target_seq),
-            GrepLifecycle::Active { .. } => Some(
+            GrepIndexStatus::Disabled {} => None,
+            GrepIndexStatus::Backfilling { target_seq, .. } => Some(*target_seq),
+            GrepIndexStatus::Active { .. } => Some(
                 NamespaceReads::new(&self.reader, namespace_id)
                     .head_seq()
                     .await?,
@@ -113,7 +113,7 @@ impl GrepHost {
         &self,
         namespace_id: &NamespaceId,
         target_seq: ChangeSeq,
-    ) -> Result<GrepLifecycle, GrepError> {
+    ) -> Result<GrepIndexStatus, GrepError> {
         let job = GrepMaintenanceJob::new(self.worker.clone(), GramIndexBuildPolicy::default());
         loop {
             let lifecycle = self.worker.lifecycle(namespace_id).await?;
@@ -155,7 +155,7 @@ impl GrepHost {
         let root = self.worker.root_state(namespace_id).await?;
         let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
             Some(root) => (
-                GrepIndexLifecycle::from(root.lifecycle()),
+                GrepIndexLifecycle::from(root.status()),
                 root.index().next_run_ordinal,
                 root.index().reorganize.is_some(),
             ),
