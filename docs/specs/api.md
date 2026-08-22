@@ -637,10 +637,10 @@ The error's `details` name the epoch and writer that displaced it, so an
 operator can tell a planned failover from two writers misconfigured against
 one namespace.
 
-The standard lower-level mutation set is defined in `format.md` ("Standard
-mutation operations"). The path-oriented filesystem surface compiles into
-that lower-level model server-side, preserving the same identity,
-content-durability, and visibility rules.
+The standard mutation operations are defined in `format.md` ("Standard
+mutation operations"). `POST /commits` (section 6.8) exposes those operations
+over HTTP. The same identity, durability, and visibility rules apply to every
+API that implements them.
 
 ## 6. Representative HTTP binding
 
@@ -2409,10 +2409,11 @@ rejected with `index_lagging` unless `allow_stale` accepts indexed-only
 results (reported via `tail_scanned: false`); stale results are a
 consistent cut at the index watermark — files whose newest revision
 postdates it are omitted entirely rather than mixed in. The `path_prefix`
-value is a complete absolute path, not a partial textual segment prefix. Its
-scope resolves to an inode under the namespace's name policy and filters by
-ancestry, so it requires the same canonical spelling and validation as every
-other path read. A scope that does not exist answers `path_not_found`; an
+value is a complete absolute path, not a partial textual segment prefix. The
+server resolves it using the name-key folding rule (format spec, section
+2.3.1), then limits results to descendants of that inode. It must therefore
+use the same canonical spelling as any other path. A scope that does not exist
+answers `path_not_found`; an
 empty existing scope answers successfully with no matches. A missing data half answers `not_supported` with the
 `feature` field naming `query.grep`, the same key capability discovery
 advertises the serving half under.

@@ -79,7 +79,7 @@ The required durable object families and standard key patterns are:
 
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
-| **WAL head** | Mutable | The namespace itself. Carries its immutable identity — content store, name policy, and fork provenance — together with the hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
+| **WAL head** | Mutable | Defines the namespace's durable identity and current state: content store, fork provenance, visible sequence, writer epoch, writer metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The lifecycle is monotonic: a record is created active under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
@@ -150,7 +150,7 @@ The namespace tree's lifecycle can be read off its grammar:
   singleton cannot be explained in one sentence, it is too broad.
 - **Collections are never authoritative via enumeration** (`wal/segments/`,
   `metadata/manifests/`, `metadata/tables/`, `uploads/`,
-  `content-stores/.../blobs/`). A record in a collection matters only when a
+  `content-stores/.../objects/`). A record in a collection matters only when a
   pointer, chain link, or checkpoint reaches it — except to GC, which
   lists collections to find garbage and roots. WAL segments and metadata
   manifests use ordered prefixes plus random suffixes so listings stay useful
@@ -417,17 +417,16 @@ user-facing names may be reused only if they map to a new `namespace_id`.
 
 Each namespace has:
 
-- a head that records its namespace id, content-store id, name policy, and
-  fork provenance, and that carries its current visible boundary
+- a head that records its namespace id, content-store id, fork provenance,
+  and current visible boundary
 - an ordered WAL of logical commits stored in immutable segments
 - immutable namespace manifests that describe recoverable file-set versions
 - zero or more checkpoints
 - a retention policy
 
-The head is the whole of a namespace's durable identity. Nothing else records
-which content store holds its bytes, which name policy compares its sibling
-names, or which namespace it was forked from, so a head that is missing or
-unreadable is not a namespace with a lost accessory: it is not a namespace.
+The head is the namespace's durable identity. No other object records its
+content store or fork source. If the head is missing or unreadable, the
+namespace does not exist or cannot be read.
 
 The head also carries the next monotonic inode id for that namespace. New
 inode ids are allocated from the head as part of commit publication.
@@ -1451,35 +1450,51 @@ writers.
 
 ### 3.5 Standard mutation operations
 
-The first standard lower-level mutation set includes:
+A commit request contains an ordered list of path operations. These are the
+eight supported operations:
 
-- `create_directory(parent_inode_id, display_name)`
-- `create_file(parent_inode_id, display_name, content_ref)`
-- `replace_file(inode_id, base_revision_no, content_ref)`
-- `rename(inode_id, new_parent_inode_id, new_display_name)`
-- `delete_file(inode_id)`
-- `delete_subtree(inode_id)`
-- `restore_revision(inode_id, source_revision_no, base_revision_no)`
-- `undelete(inode_id, deletion_seq, parent_inode_id, display_name)`
-- `update_attributes(inode_id, base_attributes_revision_no, attributes_revision_no, attributes)`
+- `create_directory(path, parents)`
+- `put_file(path, content_ref, behavior, expected_revision_no?)`
+- `delete_path(path, behavior, expected_inode_id?)`
+- `move_path(from_path, to_path, behavior)`
+- `copy_path(from_path, to_path, behavior)`
+- `undelete(inode_id, deletion_seq, path?)`
+- `restore_revision(path, source_revision_no)`
+- `update_attributes(path, set, remove, expected_inode_id?, expected_attributes_revision_no?)`
 
-The path-oriented filesystem surface may compile higher-level operations into
-these lower-level mutations.
+Every `path`, `from_path`, and `to_path` is a canonical absolute path
+(section 2.3).
 
-`rename` is always no-replace: a destination binding that already exists
-fails validation. Replacing moves exist on the path-oriented surface
-(`move_path` with its behavior enum); if commit-level replace-rename is ever
-needed it arrives as a new capability-gated field, not a silently tolerated
-one.
+Parameters marked `?` are optional and have no default. The three `expected_*`
+parameters prevent races; omitting one disables that check. `undelete.path`
+overrides the original parent and name, and is required if the deletion did
+not record a binding.
 
-`update_attributes` states the map the inode holds after the update, not the
-writes and removals that produced it. Its `attributes_revision_no` is exactly
-one past `base_attributes_revision_no`, and the operation applies only while
-the inode is still at the base revision. An update whose resulting map equals
-the current one is rejected: attributes are current state with no history, so
-a revision that restates the same map has nothing behind it. Attributes are
-held against inode identity, so an inode is the operation's target whether it
-is a file or a directory, and every other operation leaves them alone.
+`parents`, `behavior`, `set`, and `remove` are also optional, but they have
+defaults. `parents` defaults to false. `behavior` defaults to `no_replace` for
+`put_file`, `move_path`, and `copy_path`, and to `non_recursive` for
+`delete_path`. `set` and `remove` default to empty collections.
+
+The operation kind and parameters are part of the durable commit fingerprint
+(section 3.3.1), so this list is part of the format. The server converts each
+operation into internal inode changes and then writes the WAL deltas below.
+Those internal changes are not part of the wire format.
+
+`move_path` is no-replace by default. Under `no_replace` a destination that
+is already bound fails validation. Under `replace` the move replaces the
+destination: the commit deletes the destination file and rebinds the source.
+Only a file destination can be replaced, and a path never replaces itself.
+
+`update_attributes` describes the requested changes, not the complete result.
+`set` contains attributes to write, `remove` contains keys to delete, and all
+other keys remain unchanged.
+The published `attributes_revision_no` is exactly one past the inode's
+current attribute revision, and validation derives it rather than taking it
+from the request. An update whose resulting map equals the current one is
+rejected: attributes are current state with no history, so a revision that
+restates the same map has nothing behind it. Attributes are held against
+inode identity, so an inode is the operation's target whether it is a file
+or a directory, and every other operation leaves them alone.
 
 These are semantic commit operations. Durable WAL payloads store normalized
 metadata deltas derived from the semantic operations: `create_inode`,
@@ -1633,8 +1648,8 @@ before it, and everything written after it is ordinary namespace history.
 The request supplies only the new namespace id; the server supplies the
 mutation context. The protocol is one step: build the complete active genesis
 head — sequence 0, the genesis commit id, writer epoch 0, the next inode id
-after the root inode, a freshly minted content store id, the namespace's name
-policy, and no fork basis — and write it with create-if-absent.
+after the root inode, a freshly minted content store id, and no fork basis —
+and write it with create-if-absent.
 
 That write is the whole protocol. No manifest, root, or floor is prepared
 before it, and none is written after it: the genesis basis is built in
