@@ -716,7 +716,7 @@ async fn admin_namespace_diagnostics_route_answers_storage_fields() {
 #[tokio::test]
 #[allow(clippy::disallowed_methods)]
 // The sleeping handler is the controlled work the deadline cancels.
-async fn request_deadline_answers_408_and_leaves_fast_handlers_untouched() {
+async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
     use tower::ServiceExt;
 
     let request_deadline_ms = 10;
@@ -746,7 +746,13 @@ async fn request_deadline_answers_408_and_leaves_fast_handlers_untouched() {
         )
         .await
         .expect("slow response");
-    assert_eq!(slow.status(), axum::http::StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(slow.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    // Do not advertise an automatic retry when the cancelled work may still
+    // complete.
+    assert!(slow
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .is_none());
     let request_id = slow
         .headers()
         .get(super::REQUEST_ID_HEADER)

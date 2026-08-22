@@ -25,7 +25,8 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome};
         responses(
             (status = 200, description = "Probe completed; per-check outcomes are in the body", body = StoreProbeResponse),
             (status = 400, description = "Malformed request body", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError)
+            (status = 401, description = "Unauthorized", body = ApiError),
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]

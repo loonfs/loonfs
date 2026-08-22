@@ -552,6 +552,12 @@ mod tests {
             &api("maintenance_required")
         ));
         assert!(!retryable_transport_failure(false, &api("index_lagging")));
+        // A server deadline uses 503 but is not safe to retry automatically.
+        // The caller must first determine whether a mutation completed.
+        assert!(!retryable_transport_failure(
+            false,
+            &api("deadline_exceeded")
+        ));
         assert!(!retryable_transport_failure(
             false,
             &ClientError::Http("http status 502 with a non-envelope body".to_owned())

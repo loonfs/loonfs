@@ -51,7 +51,7 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
             (status = 404, description = "Namespace, path, or revision not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 501, description = "Direct download is unsupported", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -119,7 +119,7 @@ pub(super) async fn begin_download(
             (status = 409, description = "Inode is not a file", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 501, description = "Direct download is unsupported", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]

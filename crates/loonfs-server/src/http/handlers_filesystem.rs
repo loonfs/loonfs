@@ -187,7 +187,7 @@ impl utoipa::ToSchema for OpenApiDefaultFalseBoolean {}
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -246,7 +246,7 @@ pub(super) async fn list_path_entries(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -296,7 +296,7 @@ pub(super) async fn stat_path(
             (status = 404, description = "Namespace, path, or revision not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 413, description = "Content exceeds the advertised `download.max_content_bytes` limit", body = ApiError),
-            (status = 503, description = "The server is at its concurrent content-read limit; retry shortly", body = ApiError)
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -360,7 +360,7 @@ pub(super) async fn get_file_bytes(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -408,7 +408,7 @@ pub(super) async fn list_trash(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -458,8 +458,7 @@ pub(super) async fn list_file_revisions(
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 409, description = "Operation conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 503, description = "Commit unavailable", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -573,7 +572,7 @@ pub(super) async fn apply_commit(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]

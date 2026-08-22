@@ -30,7 +30,7 @@ pub use self::serve::{
 };
 pub use self::tls::TlsConfigError;
 
-use self::error::{ApiResponseError, ServedErrorCode};
+use self::error::{status_for_core_error_code, ApiResponseError, ServedErrorCode};
 use self::extractors::{
     authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, OptionalAppJson,
     UploadBodyBytes, UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES,
@@ -147,7 +147,7 @@ async fn with_request_deadline(request_deadline_ms: u64, request: Request, next:
     {
         Ok(response) => response,
         Err(_) => ApiResponseError::new(
-            StatusCode::REQUEST_TIMEOUT,
+            status_for_core_error_code(ErrorCode::DeadlineExceeded),
             ErrorCode::DeadlineExceeded,
             &format!(
                 "the server cancelled the request at the configured deadline; \
@@ -450,7 +450,7 @@ async fn method_not_allowed() -> ApiResponseError {
         security(()),
         responses(
             (status = 200, description = "Server health check", body = String),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -473,8 +473,7 @@ async fn health() -> &'static str {
         security(()),
         responses(
             (status = 200, description = "The server admits new work", body = String),
-            (status = 503, description = "Shutdown has begun; admission is closed", body = loonfs_api::ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -510,7 +509,7 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
         responses(
             (status = 200, description = "Prometheus text exposition", body = String),
             (status = 401, description = "Missing or invalid bearer token", body = loonfs_api::ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]

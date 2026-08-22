@@ -64,7 +64,7 @@ pub(super) struct StatInodeQuery {
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or visible inode not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -113,7 +113,7 @@ pub(super) async fn stat_inode(
             (status = 404, description = "Namespace or inode not found", body = ApiError),
             (status = 409, description = "Inode is not a file", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -165,7 +165,7 @@ pub(super) async fn list_file_revisions_by_inode(
             (status = 409, description = "Inode is not a file", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 413, description = "Content exceeds the advertised `download.max_content_bytes` limit", body = ApiError),
-            (status = 503, description = "The server is at its concurrent content-read limit; retry shortly", body = ApiError)
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]

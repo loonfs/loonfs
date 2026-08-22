@@ -59,7 +59,7 @@ pub(super) struct CheckpointPageQuery {
         responses(
             (status = 200, description = "Capability document", body = loonfs_api::CapabilityDocument),
             (status = 401, description = "Unauthorized", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -178,7 +178,7 @@ pub(super) async fn capabilities(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 409, description = "Namespace already exists or is partial", body = ApiError),
             (status = 410, description = "Namespace id was deleted and retired", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -210,7 +210,7 @@ pub(super) async fn create_namespace(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -245,7 +245,7 @@ pub(super) async fn get_namespace(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -284,7 +284,7 @@ pub(super) async fn get_namespace_diagnostics(
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Delete conflict", body = ApiError),
             (status = 410, description = "Namespace already deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -334,7 +334,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
             (status = 404, description = "Source namespace not found", body = ApiError),
             (status = 409, description = "Fork conflict", body = ApiError),
             (status = 410, description = "Source namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -369,8 +369,7 @@ pub(super) async fn fork_namespace(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 503, description = "Checkpoint unavailable", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -413,7 +412,7 @@ pub(super) async fn create_checkpoint(
             (status = 400, description = "Invalid namespace id, limit, or cursor", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -471,7 +470,7 @@ pub(super) async fn list_checkpoints(
             (status = 400, description = "Invalid id, or the checkpoint is fork-owned", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -525,7 +524,8 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
             (status = 400, description = "Invalid namespace id or options", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]

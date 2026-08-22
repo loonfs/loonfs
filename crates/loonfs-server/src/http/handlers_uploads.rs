@@ -114,7 +114,7 @@ pub(super) struct UploadPathParams {
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 413, description = "Body exceeds the 1 MiB upload-control limit", body = ApiError),
             (status = 501, description = "Requested upload mode is unsupported", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -276,7 +276,7 @@ async fn begin_direct_multipart_upload(
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 413, description = "Body exceeds the 1 MiB upload-control limit", body = ApiError),
             (status = 501, description = "Direct multipart upload is unsupported", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -514,7 +514,7 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
             (status = 409, description = "Upload content conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 413, description = "Body exceeds the advertised `upload.max_content_bytes` limit", body = ApiError),
-            (status = 503, description = "The server is at its concurrent proxied-upload limit; retry shortly", body = ApiError)
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -578,7 +578,7 @@ pub(super) async fn upload_content(
             (status = 409, description = "Upload completion conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 413, description = "Completion body exceeds the advertised `upload.completion_max_body_bytes` limit", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -790,7 +790,7 @@ mod completion_body_tests {
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
@@ -838,7 +838,7 @@ pub(super) async fn get_upload_status(
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload already completed", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::DeadlineExceededResponses
+            crate::http::openapi::UnavailableResponses
         )
     )
 )]
