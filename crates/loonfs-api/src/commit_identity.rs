@@ -421,11 +421,10 @@ where
     {
         return Err(conflict);
     }
-    Ok(crate::v0::CommitResponse {
-        namespace_id: attempt.namespace_id.clone(),
-        commit_id: committed.commit_id,
-        committed_seq: committed.committed_seq,
-    })
+    Ok(crate::v0::CommitResponse::from_committed_change(
+        attempt.namespace_id.clone(),
+        committed,
+    ))
 }
 
 /// Returns the content reference when a committed change wrote exactly one

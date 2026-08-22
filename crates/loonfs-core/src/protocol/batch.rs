@@ -5,6 +5,7 @@
 use super::candidates::{
     prepare_candidate_request, validate_commit_content_references, BatchDedup, CandidateAdmission,
 };
+use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
 use crate::commit::{
     materialize_commit, prepare_commit_head_publish, publish_commit_head,
@@ -230,16 +231,12 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     };
 
     let wal_records = wal.envelope.payload.records.clone();
-    for (accepted_index, (outcome_index, record)) in accepted_indexes
-        .into_iter()
-        .zip(accepted_commits)
-        .enumerate()
-    {
-        outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
-            namespace_id: namespace_id.clone(),
-            commit_id: record.commit.commit_id,
-            committed_seq: wal_records[accepted_index].seq,
-        }));
+    // Build responses from the WAL records already in memory.
+    for (outcome_index, record) in accepted_indexes.into_iter().zip(&wal_records) {
+        outcomes[outcome_index] =
+            Some(committed_change_from_wal_record(record).map(|change| {
+                ApiCommitResponse::from_committed_change(namespace_id.clone(), change)
+            }));
     }
     PublishBatchAgainstViewResult {
         results: dedup.finish(outcomes),

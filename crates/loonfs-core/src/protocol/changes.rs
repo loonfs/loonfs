@@ -7,9 +7,10 @@ use crate::namespace::control::load_namespace_head_control;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use loonfs_api::v0::{ChangesResponse, CommittedChange, FilesystemChange};
 use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
+use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use std::num::NonZeroU32;
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     store: &S,
@@ -72,14 +73,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         for record in segment.records() {
             if record.seq > after_seq {
                 let committed_seq = record.seq;
-                changes.push(CommittedChange {
-                    committed_seq,
-                    commit_id: record.commit_id.clone(),
-                    committed_by: record.actor.clone(),
-                    committed_at_ms: record.committed_at_ms,
-                    message: record.message.clone(),
-                    events: events_from_wal_deltas(&record.deltas)?,
-                });
+                changes.push(committed_change_from_wal_record(record)?);
                 if changes.len() == limit.as_usize() {
                     through_seq = committed_seq;
                     if committed_seq < head.seq {
@@ -97,6 +91,41 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         through_seq,
         next_after_seq,
         changes,
+    })
+}
+
+/// Reads the committed change at `committed_seq` through the normal change
+/// feed path. Returns `None` when no commit exists at that sequence and
+/// `RebootstrapRequired` when its WAL history is no longer retained.
+pub(super) async fn find_committed_change_at<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    committed_seq: ChangeSeq,
+) -> Result<Option<CommittedChange>> {
+    let page = list_changes_after(
+        store,
+        namespace_id,
+        ChangeSeq(committed_seq.0.saturating_sub(1)),
+        EffectiveLimit::new(NonZeroU32::MIN),
+    )
+    .await?;
+    Ok(page
+        .changes
+        .into_iter()
+        .find(|change| change.committed_seq == committed_seq))
+}
+
+/// Converts one WAL commit record into the shared API change shape.
+pub(super) fn committed_change_from_wal_record(
+    record: &WalCommitPayload,
+) -> Result<CommittedChange> {
+    Ok(CommittedChange {
+        committed_seq: record.seq,
+        commit_id: record.commit_id.clone(),
+        committed_by: record.actor.clone(),
+        committed_at_ms: record.committed_at_ms,
+        message: record.message.clone(),
+        events: events_from_wal_deltas(&record.deltas)?,
     })
 }
 

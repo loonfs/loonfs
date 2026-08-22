@@ -503,6 +503,10 @@ became visible. When the caller did not supply a commit id, the surface that
 accepted the request generates one and returns it, so every caller holds the
 identity it needs to reconcile an uncertain outcome.
 
+The response also includes `committed_by`, `committed_at_ms`, the optional `message`, and `events`. These match the change feed, so the caller immediately receives values such as newly created inode IDs.
+
+A replay reads these fields from the retained WAL record. If that record has been retired but its commit receipt has not yet been removed, the response omits `events`. The receipt still supplies the commit ID, sequence, actor, timestamp, and message.
+
 The retry rule has three cases:
 
 - Resubmitting the semantically identical commit with the same `commit_id`
@@ -1770,7 +1774,20 @@ Representative response:
 {
   "namespace_id": "demo",
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "committed_seq": 419
+  "committed_seq": 419,
+  "committed_by": { "kind": "user", "id": "usr_8f3c" },
+  "committed_at_ms": 1752624000000,
+  "message": "import the January report",
+  "events": [
+    {
+      "kind": "file_created",
+      "inode_id": "ino_43",
+      "parent_inode_id": "ino_12",
+      "display_name": "january.pdf",
+      "revision_no": 1,
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
+    }
+  ]
 }
 ```
 

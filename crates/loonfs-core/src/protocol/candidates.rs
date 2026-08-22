@@ -205,22 +205,52 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
                     committed_fingerprint: Some(existing.semantic_commit_fingerprint.clone()),
                 })
             } else {
-                Ok(commit_response_from_commit_receipt(namespace_id, &existing))
+                commit_response_from_commit_receipt(namespace_id, view, &existing).await
             },
         )));
     }
     Ok(dedup.admit(index, commit_id, semantic_identity))
 }
 
-fn commit_response_from_commit_receipt(
+/// Builds a replay response from the commit receipt and retained WAL record.
+/// A recent replay usually reads one WAL segment. If the WAL record has been
+/// retired but the receipt remains, the response omits `events`.
+async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
+    view: &PublishMetadataView<'_, S>,
     record: &CommitReceiptRecord,
-) -> ApiCommitResponse {
-    ApiCommitResponse {
-        namespace_id: namespace_id.clone(),
-        commit_id: record.commit_id.clone(),
-        committed_seq: record.committed_seq,
+) -> Result<ApiCommitResponse> {
+    let change = match view.find_committed_change_at(record.committed_seq).await {
+        Ok(Some(change)) => change,
+        Ok(None) => {
+            return Err(CoreError::Internal(format!(
+            "commit receipt for `{}` names sequence `{}`, where the change feed reports no commit",
+            record.commit_id, record.committed_seq
+        )))
+        }
+        Err(CoreError::RebootstrapRequired { .. }) => {
+            return Ok(ApiCommitResponse {
+                namespace_id: namespace_id.clone(),
+                commit_id: record.commit_id.clone(),
+                committed_seq: record.committed_seq,
+                committed_by: record.actor.clone(),
+                committed_at_ms: record.committed_at_ms,
+                message: record.message.clone(),
+                events: None,
+            })
+        }
+        Err(error) => return Err(error),
+    };
+    if change.commit_id != record.commit_id {
+        return Err(CoreError::Internal(format!(
+            "commit receipt for `{}` names sequence `{}`, where the change feed reports commit `{}`",
+            record.commit_id, record.committed_seq, change.commit_id
+        )));
     }
+    Ok(ApiCommitResponse::from_committed_change(
+        namespace_id.clone(),
+        change,
+    ))
 }
 
 struct CommitContentAdmissions<'a> {

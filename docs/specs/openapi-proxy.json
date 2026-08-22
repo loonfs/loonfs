@@ -2165,20 +2165,43 @@
       },
       "CommitResponse": {
         "type": "object",
-        "description": "Result of one commit.\n\nEvery commit resolves to this envelope — path-oriented operations and\nexplicit commits, embedded or remote. The commit id is the caller's\nreconciliation handle: resubmitting the same request with the same id\nreplays this result instead of committing twice.",
+        "description": "Result of one commit.\n\nEvery commit resolves to this envelope — path-oriented operations and\nexplicit commits, embedded or remote. The commit id is the caller's\nreconciliation handle: resubmitting the same request with the same id\nreplays this result instead of committing twice.\n\nThe response includes the same attribution and events as\n[`CommittedChange`], including IDs created by the commit.",
         "required": [
           "namespace_id",
           "commit_id",
-          "committed_seq"
+          "committed_seq",
+          "committed_by",
+          "committed_at_ms"
         ],
         "properties": {
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Idempotency key the commit landed under: caller-supplied, or\ngenerated on the caller's behalf when the request carried none."
           },
+          "committed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Wall-clock stamp of the commit, in Unix milliseconds.\nObservational: `committed_seq` is the order.",
+            "minimum": 0
+          },
+          "committed_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the commit, as supplied by the application."
+          },
           "committed_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Sequence number where the commit became visible."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilesystemChange"
+            },
+            "description": "Semantic filesystem events in commit order. This is omitted only when\nreplaying a commit whose WAL history is no longer retained."
+          },
+          "message": {
+            "type": "string",
+            "description": "Caller annotation, omitted when absent and carrying no filesystem\nsemantics."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
