@@ -165,7 +165,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         loonfs_api::v0::StoreProbeCheckResult,
         loonfs_api::v0::StoreProbeResponse
         ),
-        responses(DeadlineExceededResponse)
+        responses(UnavailableResponse)
     ),
     // Applies to every operation that does not override it. `/health` and
     // `/readiness` do, with `security(())`: they are the probe surface and
@@ -185,28 +185,28 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
 )]
 struct LoonfsOpenApi;
 
-/// OpenAPI definition for the 408 response returned after a request deadline.
+/// OpenAPI definition for the 503 response every operation can return.
 #[derive(utoipa::ToResponse)]
 #[response(
-    description = "The request exceeded `request_deadline_ms`. A timed-out mutation may still complete, so clients must determine its outcome before retrying."
+    description = "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, or required maintenance. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
 )]
 #[expect(
     dead_code,
     reason = "used only to generate the reusable OpenAPI response schema"
 )]
-pub(super) struct DeadlineExceededResponse(#[to_schema] ApiError);
+pub(super) struct UnavailableResponse(#[to_schema] ApiError);
 
-/// Adds the shared 408 response to an OpenAPI operation.
-pub(super) struct DeadlineExceededResponses;
+/// Adds the shared 503 response to an OpenAPI operation.
+pub(super) struct UnavailableResponses;
 
-impl utoipa::IntoResponses for DeadlineExceededResponses {
+impl utoipa::IntoResponses for UnavailableResponses {
     fn responses() -> std::collections::BTreeMap<
         String,
         utoipa::openapi::RefOr<utoipa::openapi::response::Response>,
     > {
-        let (name, _) = <DeadlineExceededResponse as utoipa::ToResponse>::response();
+        let (name, _) = <UnavailableResponse as utoipa::ToResponse>::response();
         utoipa::openapi::ResponsesBuilder::new()
-            .response("408", utoipa::openapi::Ref::from_response_name(name))
+            .response("503", utoipa::openapi::Ref::from_response_name(name))
             .build()
             .into()
     }

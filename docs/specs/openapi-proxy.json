@@ -39,8 +39,8 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe"
@@ -128,9 +128,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -140,6 +137,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe"
@@ -215,9 +215,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "409": {
             "description": "Operation conflict",
             "content": {
@@ -239,14 +236,7 @@
             }
           },
           "503": {
-            "description": "Commit unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "replay"
@@ -356,14 +346,7 @@
             }
           },
           "503": {
-            "description": "The server is at its concurrent content-read limit; retry shortly",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe"
@@ -439,9 +422,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -461,6 +441,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe"
@@ -567,9 +550,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -579,6 +559,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe",
@@ -680,9 +663,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -692,6 +672,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe",
@@ -781,9 +764,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -793,6 +773,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe"
@@ -870,9 +853,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -882,6 +862,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe",
@@ -1032,9 +1015,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -1066,14 +1046,7 @@
             }
           },
           "503": {
-            "description": "The index trails the head past the scan budget",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe",
@@ -1154,9 +1127,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -1186,6 +1156,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "new_attempt"
@@ -1260,9 +1233,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -1272,6 +1242,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe"
@@ -1346,9 +1319,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "409": {
             "description": "Upload already completed",
             "content": {
@@ -1368,6 +1338,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe"
@@ -1453,9 +1426,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "409": {
             "description": "Upload completion conflict",
             "content": {
@@ -1485,6 +1455,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "replay"
@@ -1605,14 +1578,7 @@
             }
           },
           "503": {
-            "description": "The server is at its concurrent proxied-upload limit; retry shortly",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe"
@@ -1697,9 +1663,6 @@
               }
             }
           },
-          "408": {
-            "$ref": "#/components/responses/DeadlineExceededResponse"
-          },
           "409": {
             "description": "Upload already completed",
             "content": {
@@ -1739,6 +1702,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
           }
         },
         "x-loonfs-retry": "safe"
@@ -4080,8 +4046,8 @@
       }
     },
     "responses": {
-      "DeadlineExceededResponse": {
-        "description": "The request exceeded `request_deadline_ms`. A timed-out mutation may still complete, so clients must determine its outcome before retrying.",
+      "UnavailableResponse": {
+        "description": "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, or required maintenance. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying.",
         "content": {
           "application/json": {
             "schema": {

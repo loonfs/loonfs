@@ -142,9 +142,13 @@ fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
         ErrorKind::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
         ErrorKind::Gone => StatusCode::GONE,
         ErrorKind::AlreadyExists | ErrorKind::Conflict => StatusCode::CONFLICT,
-        ErrorKind::DeadlineExceeded => StatusCode::REQUEST_TIMEOUT,
         ErrorKind::NotSupported => StatusCode::NOT_IMPLEMENTED,
-        ErrorKind::Unavailable | ErrorKind::OutcomeUnknown => StatusCode::SERVICE_UNAVAILABLE,
+        // HTTP 408 means the client did not finish sending its request. A
+        // server-side deadline uses 503 instead. The error code remains
+        // non-retryable because a cancelled mutation may still complete.
+        ErrorKind::DeadlineExceeded | ErrorKind::Unavailable | ErrorKind::OutcomeUnknown => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         ErrorKind::DataCorruption | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         // A kind without an explicit arm serves as 500 until someone decides
         // its real status. The spec-table test in `super::tests` fails on any
