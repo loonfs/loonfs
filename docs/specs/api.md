@@ -254,7 +254,6 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | --- | --- | --- |
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
-| `permission_denied` | 403 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; retrying unchanged will not succeed. |
 | `content_too_large` | 413 | A request or proxied response exceeds its advertised size limit. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.completion_max_body_bytes`. For large reads, request a download grant when `core.downloads.direct_get` is available. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
@@ -288,18 +287,20 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, released during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
 | `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
+| `storage_permission_denied` | 503 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; an unchanged retry will not succeed. |
 | `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it; core filesystem state remains available. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | Unclassified internal failure. |
 
-Automated retry is deliberately narrower than the shared HTTP status. Raw
-transport failures may be retried, and among registered error codes only
-`commit_queue_full`, `server_busy`, and `shutting_down` can clear without
-caller or operator action. `checkpoint_unavailable`, `maintenance_required`,
-and `index_lagging` remain 503 status groupings but require maintenance before
-an unchanged request can succeed; `commit_outcome_unknown` and
-`deadline_exceeded` require reconciliation before retrying a mutation.
-Responses carrying any of those three immediately retryable codes include
+Automated retry is narrower than the HTTP status. Raw transport failures may
+be retried. Of the registered error codes, only `commit_queue_full`,
+`server_busy`, and `shutting_down` can clear without caller or operator action.
+`checkpoint_unavailable`, `maintenance_required`, and `index_lagging` require
+maintenance. `storage_permission_denied` requires the operator to fix the
+storage credentials or bucket policy. `commit_outcome_unknown` and
+`deadline_exceeded` require the caller to determine whether a mutation
+completed before retrying it.
+Responses carrying one of the three immediately retryable codes include
 `Retry-After: 1`.
 
 Precondition failures surface as `409` resource-state conflicts

@@ -54,7 +54,7 @@ impl BootstrapNamespaceError {
             BootstrapNamespaceError::Head(ControlObjectLoadError::Store {
                 class: StoreFailureClass::PermissionDenied,
                 ..
-            }) => ErrorCode::PermissionDenied,
+            }) => ErrorCode::StoragePermissionDenied,
             BootstrapNamespaceError::Head(_) => ErrorCode::ServerError,
             BootstrapNamespaceError::Core(error) => error.code(),
         }

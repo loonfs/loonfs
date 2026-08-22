@@ -477,16 +477,6 @@
               }
             }
           },
-          "403": {
-            "description": "The backing store rejected its configured credentials",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
           "500": {
             "description": "The grep index is corrupt or its backing store is unavailable",
             "content": {
@@ -546,16 +536,6 @@
           },
           "401": {
             "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The backing store rejected its configured credentials",
             "content": {
               "application/json": {
                 "schema": {
@@ -643,16 +623,6 @@
           },
           "401": {
             "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The backing store rejected its configured credentials",
             "content": {
               "application/json": {
                 "schema": {
@@ -759,16 +729,6 @@
           },
           "401": {
             "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The backing store rejected its configured credentials",
             "content": {
               "application/json": {
                 "schema": {
@@ -2742,16 +2702,6 @@
           },
           "401": {
             "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The backing store rejected its configured credentials",
             "content": {
               "application/json": {
                 "schema": {
@@ -6931,7 +6881,7 @@
     },
     "responses": {
       "UnavailableResponse": {
-        "description": "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, or required maintenance. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying.",
+        "description": "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, required maintenance, or invalid storage credentials. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying.",
         "content": {
           "application/json": {
             "schema": {

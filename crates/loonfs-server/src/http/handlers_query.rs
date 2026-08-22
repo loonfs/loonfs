@@ -57,7 +57,6 @@ pub(super) struct GrepQuery {
             (status = 200, description = "One page of matches", body = GrepResponse),
             (status = 400, description = "Invalid pattern, cursor, or an unindexable pattern without allow_scan", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 501, description = "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace", body = ApiError),
@@ -182,7 +181,6 @@ pub(super) async fn grep_index_not_maintained(
         responses(
             (status = 200, description = "Grep root enabled or already enabled", body = GrepIndexStatusResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
@@ -232,7 +230,6 @@ pub(super) async fn enable_grep_index(
         responses(
             (status = 200, description = "Grep index status and build progress", body = GrepIndexStatusResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
             crate::http::openapi::UnavailableResponses
@@ -273,7 +270,6 @@ async fn read_grep_index_status(
         responses(
             (status = 200, description = "Grep root disabled or already disabled", body = GrepIndexStatusResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
@@ -325,7 +321,6 @@ pub(super) async fn disable_grep_index(
             (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
             (status = 400, description = "Invalid budget or cursor", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
             crate::http::openapi::UnavailableResponses
