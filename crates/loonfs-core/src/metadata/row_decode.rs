@@ -155,11 +155,11 @@ pub(crate) fn active_deletion_from_manifest_row(
     match row {
         MetadataRow::ActiveDeletion {
             root_inode_id,
-            deleted_at_seq,
+            deletion_seq,
             action,
         } => Ok(ActiveDeletionRecord {
             root_inode_id,
-            deleted_at_seq,
+            deletion_seq,
             action: match action {
                 ActiveDeletionRowAction::Listed {
                     deleted_at_ms,
@@ -170,8 +170,8 @@ pub(crate) fn active_deletion_from_manifest_row(
                     deleted_by,
                     deleted_direntry,
                 },
-                ActiveDeletionRowAction::Removed { revoked_at_seq } => {
-                    ActiveDeletionAction::Removed { revoked_at_seq }
+                ActiveDeletionRowAction::Removed { revocation_seq } => {
+                    ActiveDeletionAction::Removed { revocation_seq }
                 }
             },
         }),

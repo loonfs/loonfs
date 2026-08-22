@@ -414,24 +414,24 @@ async fn undelete_newest_deletion<S: ObjectStore + ?Sized>(
     let rows =
         group_rows_of_current_manifest(store, namespace_id, MetadataFamilyGroup::ActiveDeletions)
             .await;
-    let (root_inode_id, deleted_at_seq) = rows[&ApiMetadataTableFamily::ActiveDeletions]
+    let (root_inode_id, deletion_seq) = rows[&ApiMetadataTableFamily::ActiveDeletions]
         .iter()
         .filter_map(|row| match row {
             MetadataRow::ActiveDeletion {
                 root_inode_id,
-                deleted_at_seq,
+                deletion_seq,
                 action: ActiveDeletionRowAction::Listed { .. },
-            } => Some((*root_inode_id, *deleted_at_seq)),
+            } => Some((*root_inode_id, *deletion_seq)),
             _ => None,
         })
-        .max_by_key(|(_, deleted_at_seq)| *deleted_at_seq)
+        .max_by_key(|(_, deletion_seq)| *deletion_seq)
         .expect("the namespace holds a recoverable deletion");
     publish_one_operation(
         store,
         namespace_id,
         FilesystemOperation::Undelete {
             inode_id: root_inode_id,
-            deletion_seq: deleted_at_seq,
+            deletion_seq,
             path: None,
         },
         context,

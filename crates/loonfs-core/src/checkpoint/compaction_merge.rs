@@ -41,7 +41,7 @@ const ITERATOR_FETCH_CONCURRENCY: usize = 8;
 /// | families | grouped by | key components after the family prefix |
 /// | --- | --- | --- |
 /// | binds, unbinds | one binding generation | `{parent}-{name}-{bind_seq}-{bind_delta}` |
-/// | active deletions | one deletion | `{deleted_at_seq}-{root}` |
+/// | active deletions | one deletion | `{deletion_seq}-{root}` |
 /// | attributes | one inode | `{inode}` |
 /// | everything else | one row | — |
 ///

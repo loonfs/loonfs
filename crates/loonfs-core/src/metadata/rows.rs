@@ -158,11 +158,11 @@ pub(crate) struct ActiveDeletionRecord {
     pub(crate) root_inode_id: InodeId,
     /// The deletion's committed sequence. Together with `root_inode_id` this
     /// is the handle `undelete` addresses and the trash entry renders.
-    pub(crate) deleted_at_seq: ChangeSeq,
+    pub(crate) deletion_seq: ChangeSeq,
     pub(crate) action: ActiveDeletionAction,
 }
 
-/// What one active-deletion row says about its generation.
+/// Data stored for one active-deletion generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ActiveDeletionAction {
     /// The deletion is recoverable, and the trash lists it with these
@@ -173,12 +173,11 @@ pub(crate) enum ActiveDeletionAction {
         deleted_direntry: Option<DeletedDirentry>,
     },
     /// An undelete cancelled the deletion, so the listing skips the key.
-    Removed { revoked_at_seq: ChangeSeq },
+    Removed { revocation_seq: ChangeSeq },
 }
 
-/// The `ActiveDeletions` reducer, and the only mapping from a tombstone event
-/// to its derived row: a `set` adds the deletion to the listing, and a
-/// `revoke` removes the exact generation it names.
+/// Converts a tombstone event into its derived `ActiveDeletions` row. A `set`
+/// adds a deletion to the listing, and a `revoke` removes that generation.
 ///
 /// It reduces target-aware where the newest-event-wins rule in
 /// [`active_tombstone_from_records`] reduces target-blind. Commit validation
@@ -192,7 +191,7 @@ pub(crate) fn active_deletion_from_tombstone(
     match &tombstone.action {
         SubtreeTombstoneAction::Set { deleted_direntry } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
-            deleted_at_seq: tombstone.generation.seq,
+            deletion_seq: tombstone.generation.seq,
             action: ActiveDeletionAction::Listed {
                 deleted_at_ms: tombstone.deleted_at_ms,
                 deleted_by: tombstone.actor.clone(),
@@ -201,9 +200,9 @@ pub(crate) fn active_deletion_from_tombstone(
         },
         SubtreeTombstoneAction::Revoke { target } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
-            deleted_at_seq: target.seq,
+            deletion_seq: target.seq,
             action: ActiveDeletionAction::Removed {
-                revoked_at_seq: tombstone.generation.seq,
+                revocation_seq: tombstone.generation.seq,
             },
         },
     }
@@ -214,7 +213,7 @@ impl ActiveDeletionRecord {
     /// listing's order.
     pub(crate) fn row_key(&self) -> String {
         lookup_keys::active_deletion_row_key(
-            self.deleted_at_seq,
+            self.deletion_seq,
             self.root_inode_id,
             match &self.action {
                 ActiveDeletionAction::Listed { .. } => lookup_keys::ACTIVE_DELETION_RANK_LISTED,
@@ -233,7 +232,7 @@ impl ActiveDeletionRecord {
                 deleted_direntry,
             } => Some(RecoverableDeletion {
                 root_inode_id: self.root_inode_id,
-                deleted_at_seq: self.deleted_at_seq,
+                deletion_seq: self.deletion_seq,
                 deleted_at_ms,
                 deleted_by,
                 deleted_direntry,
@@ -247,7 +246,7 @@ impl ActiveDeletionRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecoverableDeletion {
     pub(crate) root_inode_id: InodeId,
-    pub(crate) deleted_at_seq: ChangeSeq,
+    pub(crate) deletion_seq: ChangeSeq,
     pub(crate) deleted_at_ms: u64,
     pub(crate) deleted_by: ActorRef,
     /// The binding the delete removed, and so the one undelete restores in

@@ -483,7 +483,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let start_after = request
             .cursor
             .as_ref()
-            .map(|cursor| (cursor.last_deleted_at_seq, cursor.last_root_inode_id));
+            .map(|cursor| (cursor.last_deletion_seq, cursor.last_root_inode_id));
         let mut deletions = self
             .metadata_view()
             .session()
@@ -493,7 +493,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .limit
             .finish_page(&mut deletions, |last| TrashPageCursor {
                 head_seq: self.head.seq,
-                last_deleted_at_seq: last.deleted_at_seq,
+                last_deletion_seq: last.deletion_seq,
                 last_root_inode_id: last.root_inode_id,
             });
         // The entry keeps parent, key, and name as separate optional fields,
@@ -503,7 +503,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .into_iter()
             .map(|deletion| TrashEntry {
                 inode_id: deletion.root_inode_id,
-                deletion_seq: deletion.deleted_at_seq,
+                deletion_seq: deletion.deletion_seq,
                 deleted_at_ms: deletion.deleted_at_ms,
                 deleted_by: deletion.deleted_by,
                 parent_inode_id: deletion

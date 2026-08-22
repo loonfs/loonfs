@@ -210,13 +210,12 @@ pub enum MetadataRow {
     /// each revoke. This lets trash listing use an ordered range scan instead of
     /// replaying all historical deletion events.
     ActiveDeletion {
-        /// Subtree root the deletion covers. With `deleted_at_seq` this is
+        /// Subtree root the deletion covers. With `deletion_seq` this is
         /// exactly the handle `undelete` addresses.
         root_inode_id: InodeId,
-        /// Commit sequence of the deletion this row speaks for. A `removed`
-        /// row repeats its target's sequence, not the undelete's, so the two
-        /// rows sort together.
-        deleted_at_seq: ChangeSeq,
+        /// Commit sequence of the deletion. A `removed` row repeats the
+        /// original deletion sequence so both rows sort together.
+        deletion_seq: ChangeSeq,
         /// Whether the deletion is still recoverable, and the listing detail
         /// it carries while it is.
         action: ActiveDeletionRowAction,
@@ -357,11 +356,10 @@ pub enum ActiveDeletionRowAction {
         #[serde(deserialize_with = "required_option")]
         deleted_direntry: Option<DeletedDirentry>,
     },
-    /// An undelete at `revoked_at_seq` cancelled the deletion this row's key
-    /// names, so the listing skips the key.
+    /// The deletion was cancelled by an undelete at `revocation_seq`.
     Removed {
         /// Commit sequence of the undelete that cancelled the deletion.
-        revoked_at_seq: ChangeSeq,
+        revocation_seq: ChangeSeq,
     },
 }
 
@@ -506,10 +504,10 @@ impl MetadataRow {
             }
             Self::ActiveDeletion {
                 root_inode_id,
-                deleted_at_seq,
+                deletion_seq,
                 action,
             } => lookup_keys::active_deletion_row_key(
-                *deleted_at_seq,
+                *deletion_seq,
                 *root_inode_id,
                 action.sort_rank(),
             ),
@@ -755,13 +753,13 @@ pub mod lookup_keys {
     ///
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn active_deletion_row_key(
-        deleted_at_seq: ChangeSeq,
+        deletion_seq: ChangeSeq,
         root_inode_id: InodeId,
         sort_rank: u8,
     ) -> String {
         format!(
             "{ACTIVE_DELETION_ROW_PREFIX}{:020}-{:020}-{sort_rank}",
-            deleted_at_seq.0, root_inode_id.0
+            deletion_seq.0, root_inode_id.0
         )
     }
 
@@ -771,10 +769,10 @@ pub mod lookup_keys {
     /// generation and nothing else.
     ///
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
-    pub fn active_deletion_key_after(deleted_at_seq: ChangeSeq, root_inode_id: InodeId) -> String {
+    pub fn active_deletion_key_after(deletion_seq: ChangeSeq, root_inode_id: InodeId) -> String {
         format!(
             "{}\0",
-            active_deletion_row_key(deleted_at_seq, root_inode_id, ACTIVE_DELETION_RANK_LISTED)
+            active_deletion_row_key(deletion_seq, root_inode_id, ACTIVE_DELETION_RANK_LISTED)
         )
     }
 
@@ -1311,9 +1309,9 @@ mod tests {
                 MetadataTableFamily::ActiveDeletions,
                 super::MetadataRow::ActiveDeletion {
                     root_inode_id: InodeId(42),
-                    deleted_at_seq: ChangeSeq(12),
+                    deletion_seq: ChangeSeq(12),
                     action: super::ActiveDeletionRowAction::Removed {
-                        revoked_at_seq: ChangeSeq(15),
+                        revocation_seq: ChangeSeq(15),
                     },
                 },
             ),
@@ -1410,7 +1408,7 @@ mod tests {
                     MetadataTableFamily::ActiveDeletions,
                     super::MetadataRow::ActiveDeletion {
                         root_inode_id: InodeId(42),
-                        deleted_at_seq: ChangeSeq(12),
+                        deletion_seq: ChangeSeq(12),
                         action: super::ActiveDeletionRowAction::Listed {
                             deleted_at_ms: 12_000,
                             deleted_by: actor.clone(),

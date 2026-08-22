@@ -477,14 +477,14 @@ mod tests {
         let mut operator = RetentionRule::ActiveDeletions.operator();
         let removed = MetadataRow::ActiveDeletion {
             root_inode_id: InodeId(9),
-            deleted_at_seq: ChangeSeq(3),
+            deletion_seq: ChangeSeq(3),
             action: ActiveDeletionRowAction::Removed {
-                revoked_at_seq: ChangeSeq(4),
+                revocation_seq: ChangeSeq(4),
             },
         };
         let listed = MetadataRow::ActiveDeletion {
             root_inode_id: InodeId(9),
-            deleted_at_seq: ChangeSeq(3),
+            deletion_seq: ChangeSeq(3),
             action: ActiveDeletionRowAction::Listed {
                 deleted_at_ms: 1_000,
                 deleted_by: loonfs_api::ActorRef::loonfs_system(),
