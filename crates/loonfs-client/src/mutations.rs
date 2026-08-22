@@ -702,6 +702,10 @@ mod tests {
             namespace_id: namespace_id.clone(),
             commit_id: commit_id.clone(),
             committed_seq: ChangeSeq(1),
+            committed_by: loonfs_test_support::test_actor(),
+            committed_at_ms: 1_752_624_000_000,
+            message: None,
+            events: Some(Vec::new()),
         };
         let transport = crate::transport::test_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),

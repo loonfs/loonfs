@@ -1311,6 +1311,12 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
     create_checkpoint(&store, &namespace_id, &first_context)
         .await
         .expect("compact commit into receipt row");
+    // Retire the commit's history, which is what leaves the receipt as the
+    // only record of it.
+    namespace_engine(&store, &namespace_id, &first_context)
+        .advance_retention_floor()
+        .await
+        .expect("advance retention floor past the commit");
 
     // Corrupt the original WAL so the checks below can only use the commit
     // receipt stored in the checkpoint.
@@ -1339,7 +1345,18 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
     )
     .await
     .expect("same actor and request replay from receipt");
-    assert_eq!(replay, first, "committed_at_ms is outside identity");
+    assert_eq!(replay.committed_seq, first.committed_seq);
+    assert_eq!(replay.commit_id, first.commit_id);
+    assert_eq!(replay.committed_by, first.committed_by);
+    assert_eq!(
+        replay.committed_at_ms, first.committed_at_ms,
+        "committed_at_ms is outside identity"
+    );
+    assert_eq!(replay.message, first.message);
+    // The retired commit's events are gone with its history, so the receipt
+    // answers without them.
+    assert_eq!(replay.events, None);
+    assert!(first.events.is_some());
 
     for conflicting_actor in [
         ActorRef::user(ActorId::parse("different-id").expect("actor id")),

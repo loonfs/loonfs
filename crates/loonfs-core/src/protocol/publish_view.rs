@@ -14,6 +14,7 @@ use crate::namespace::basis::{load_head_and_metadata_basis, MetadataBasis, Metad
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::control::load_head_object;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
+use loonfs_api::v0::CommittedChange;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState};
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
 use loonfs_objectstore::keys::wal_head;
@@ -42,6 +43,19 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         commit_id: &CommitId,
     ) -> Result<Option<CommitReceiptRecord>> {
         self.metadata_view().find_commit_receipt(commit_id).await
+    }
+
+    /// Reads the retained change for a commit receipt.
+    pub(super) async fn find_committed_change_at(
+        &self,
+        committed_seq: ChangeSeq,
+    ) -> Result<Option<CommittedChange>> {
+        super::changes::find_committed_change_at(
+            self.manifest_tables.store(),
+            &self.head.namespace_id,
+            committed_seq,
+        )
+        .await
     }
 }
 

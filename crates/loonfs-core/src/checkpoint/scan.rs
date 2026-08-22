@@ -51,6 +51,11 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataTables<'a, S> {
+    /// Returns the store the tables were loaded from.
+    pub(crate) fn store(&self) -> &'a S {
+        self.store
+    }
+
     /// Wraps a manifest that was synthesized rather than loaded: the
     /// genesis basis of a namespace that has published none. It names no
     /// metadata files, so no scan it backs ever reaches the store, and its

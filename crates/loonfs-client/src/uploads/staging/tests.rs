@@ -287,6 +287,10 @@ fn commit_landed() -> Outcome {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id"),
         committed_seq: ChangeSeq(1),
+        committed_by: loonfs_test_support::test_actor(),
+        committed_at_ms: 1_752_624_000_000,
+        message: None,
+        events: Some(Vec::new()),
     })
 }
 

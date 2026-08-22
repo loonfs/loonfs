@@ -8,9 +8,12 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::CommitRequest as CoreCommitRequest;
 use loonfs::{CreateNamespaceOptions, FsWriter, ListChangesOptions, StoreConfig};
+use loonfs_api::v0::{CreateCheckpointRequest, MaintenanceStepRequest};
 use loonfs_api::{
-    v0::CommittedChange, AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, ContentRef,
+    v0::{CommittedChange, FilesystemChange},
+    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, ContentRef,
     DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, FilesystemOperation, RevisionNo,
+    ROOT_INODE_ID,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
@@ -18,6 +21,7 @@ use tempfile::tempdir;
 
 const REPORTS_DIR: &str = "/reports";
 const FIRST_FILE: &str = "/reports/january.txt";
+const ROOT_FILE: &str = "/january.txt";
 const SECOND_FILE: &str = "/reports/february.txt";
 const FIRST_BYTES: &[u8] = b"january numbers";
 const SECOND_BYTES: &[u8] = b"february numbers";
@@ -207,6 +211,208 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .shutdown()
         .await
         .expect("settle embedded background work");
+    harness.server.abort();
+}
+
+/// A commit answers with the change it committed, so a caller reads the
+/// inode id its put created out of the response instead of stating the path
+/// afterward. A replay of the same request answers with that same row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_returns_the_change_it_committed_and_replays_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-commit-row",
+        "http-commit-row",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
+    let request = || CommitRequest {
+        commit_id: commit_id("returns-its-change"),
+        actor: loonfs_test_support::test_actor(),
+        message: Some("the first report".to_owned()),
+        content_tokens: vec![content_token(&staged)],
+        operations: vec![FilesystemOperation::PutFile {
+            path: absolute(ROOT_FILE),
+            content_ref: staged.content_ref.clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        }],
+    };
+
+    let committed = harness
+        .client
+        .commit(&namespace, &request())
+        .await
+        .expect("the put commits");
+    assert_eq!(committed.committed_by, loonfs_test_support::test_actor());
+    assert_eq!(committed.message.as_deref(), Some("the first report"));
+    let events = committed
+        .events
+        .clone()
+        .expect("a fresh commit reports its events");
+    let created_inode_id = match events.as_slice() {
+        [FilesystemChange::FileCreated {
+            inode_id,
+            parent_inode_id,
+            display_name,
+            revision_no,
+            content_ref,
+        }] => {
+            assert_eq!(*parent_inode_id, ROOT_INODE_ID);
+            assert_eq!(display_name.as_str(), "january.txt");
+            assert_eq!(*revision_no, RevisionNo(1));
+            assert_eq!(*content_ref, staged.content_ref);
+            *inode_id
+        }
+        other => panic!("expected one file_created event, got {other:?}"),
+    };
+
+    // The id the response reported is the file's own.
+    let spec = NamespacePath::parse("demo", ROOT_FILE).expect("path");
+    let entry = harness
+        .client
+        .stat_path(&spec, &Default::default())
+        .await
+        .expect("stat the new file");
+    assert_eq!(entry.inode_id, created_inode_id);
+
+    // The response is the feed's row for that commit, field for field.
+    let feed = harness
+        .client
+        .list_changes(&namespace, ChangeSeq(0), None)
+        .await
+        .expect("changes");
+    assert_eq!(feed.changes.len(), 1, "{feed:?}");
+    let row = &feed.changes[0];
+    assert_eq!(row.committed_seq, committed.committed_seq);
+    assert_eq!(row.commit_id, committed.commit_id);
+    assert_eq!(row.committed_by, committed.committed_by);
+    assert_eq!(row.committed_at_ms, committed.committed_at_ms);
+    assert_eq!(row.message, committed.message);
+    assert_eq!(row.events, events);
+
+    // The replay answers with the same row, events included, and commits
+    // nothing new.
+    let replayed = harness
+        .client
+        .commit(&namespace, &request())
+        .await
+        .expect("an identical resubmission replays");
+    assert_eq!(replayed, committed);
+    assert_eq!(
+        harness
+            .client
+            .get_namespace(&namespace)
+            .await
+            .expect("status")
+            .head_seq,
+        committed.committed_seq,
+        "the replay committed nothing new"
+    );
+
+    harness.server.abort();
+}
+
+/// Retirement is the one case where a replay cannot report events. Once the
+/// retention floor passes a commit, the record holding its events is no
+/// longer readable while the commit receipt still is, so the replay answers
+/// from the receipt and omits `events`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_below_the_retention_floor_omits_its_events() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-retired-row",
+        "http-retired-row",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
+    // Resubmitting the same `content_ref` is what makes the retry
+    // semantically identical, so the server replays rather than conflicts.
+    let request = || CommitRequest {
+        commit_id: commit_id("outlives-its-history"),
+        actor: loonfs_test_support::test_actor(),
+        message: Some("retired later".to_owned()),
+        content_tokens: vec![content_token(&staged)],
+        operations: vec![FilesystemOperation::PutFile {
+            path: absolute(ROOT_FILE),
+            content_ref: staged.content_ref.clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        }],
+    };
+
+    let committed = harness
+        .client
+        .commit(&namespace, &request())
+        .await
+        .expect("the put commits");
+    assert!(
+        committed.events.is_some(),
+        "the fresh commit reports its events"
+    );
+
+    // Pin the head, then give up incremental replay below it.
+    harness
+        .client
+        .create_checkpoint(
+            &namespace,
+            &CreateCheckpointRequest {
+                name: "retired".to_owned(),
+                ttl_ms: None,
+            },
+        )
+        .await
+        .expect("create checkpoint");
+    let advanced = harness
+        .client
+        .maintenance_step(
+            &namespace,
+            &MaintenanceStepRequest {
+                advance_retention: true,
+                ..MaintenanceStepRequest::default()
+            },
+        )
+        .await
+        .expect("advance retention floor")
+        .retention
+        .expect("a step selecting the retention advance reports it");
+    assert!(
+        advanced.retention_floor_seq >= committed.committed_seq,
+        "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",
+        advanced.retention_floor_seq,
+        committed.committed_seq
+    );
+
+    let replayed = harness
+        .client
+        .commit(&namespace, &request())
+        .await
+        .expect("an identical resubmission still replays");
+    assert_eq!(replayed.committed_seq, committed.committed_seq);
+    assert_eq!(replayed.commit_id, committed.commit_id);
+    // The receipt keeps the commit's own attribution and annotation; only
+    // the events are gone.
+    assert_eq!(replayed.committed_by, committed.committed_by);
+    assert_eq!(replayed.committed_at_ms, committed.committed_at_ms);
+    assert_eq!(replayed.message, committed.message);
+    assert_eq!(replayed.events, None);
+
     harness.server.abort();
 }
 
