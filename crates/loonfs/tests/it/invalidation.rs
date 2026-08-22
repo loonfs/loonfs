@@ -467,7 +467,7 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
 
 /// A landed publish seeds the read caches with the state it just produced,
 /// so read-after-write on the same core issues no store GETs at all: the
-/// anchor, catalog, manifest, tail projection, and table blocks are all in
+/// anchor, catalog, manifest, tail projection, and segment blocks are all in
 /// memory.
 #[tokio::test]
 async fn read_after_write_is_served_from_seeded_caches() {

@@ -1,5 +1,5 @@
 //! The namespace manifest format: the durable document naming the
-//! metadata SST runs that materialize one namespace file-set version
+//! metadata segment runs that materialize one namespace file-set version
 //! (format spec, "Namespace manifests").
 
 use crate::envelope::EnvelopeCodecError;
@@ -7,7 +7,7 @@ use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    InodeKind, ManifestNo, ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
+    InodeKind, ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +39,7 @@ impl NamespaceManifestKind {
 /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MetadataTableFamily {
+pub enum MetadataRowFamily {
     /// Stores inode identity, kind, and creation position.
     Inodes,
     /// Orders directory bindings for parent-and-name visibility lookups.
@@ -66,15 +66,15 @@ pub enum MetadataTableFamily {
     Attributes,
 }
 
-/// Describes one immutable metadata SST object referenced by a namespace manifest.
+/// Reference to one immutable metadata segment in a namespace manifest.
 ///
 /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataFileRef {
-    /// Namespace whose keyspace owns the object, which may be a fork source rather than the reader.
+pub struct MetadataSegmentRef {
+    /// Namespace that stores the segment. This may be a fork source.
     pub owner_namespace_id: NamespaceId,
-    /// Immutable table identity incorporated into the object's durable key.
-    pub table_id: MetadataTableId,
+    /// Immutable segment id used in the durable object key.
+    pub segment_id: MetadataSegmentId,
     /// Fully resolved object-store key trusted only after descriptor validation.
     pub object_key: String,
     /// Namespace sequence at which this run was produced.
@@ -82,7 +82,7 @@ pub struct MetadataFileRef {
     /// Compaction tier used to order overlapping runs during reads and reorganization.
     pub level: u32,
     /// Row schema and lookup ordering encoded in this segment.
-    pub family: MetadataTableFamily,
+    pub family: MetadataRowFamily,
     /// Zero-based shard position among segments emitted for the same family and run.
     pub segment_index: u32,
     /// Number of row payloads in the segment, used for validation and planning.
@@ -110,7 +110,7 @@ pub struct MetadataFileRef {
     pub object_checksum: String,
 }
 
-/// Stores one materialized metadata event in an SST segment.
+/// One materialized metadata row stored in a segment.
 ///
 /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,16 +378,10 @@ impl ActiveDeletionRowAction {
     }
 }
 
-impl MetadataTableFamily {
-    /// The fixed text every row key in this family starts with, up to but
-    /// not including the family's first variable component.
-    ///
-    /// Defined here because it is the front of [`MetadataRow::row_key_for_family`]
-    /// and must change with it; `row_key_prefixes_match_the_row_keys_they_front`
-    /// holds the two together. A streaming compaction reads its retention
-    /// groupings out of the components that follow this prefix, so the
-    /// boundary between two groupings is this prefix followed by whole
-    /// component values (format spec, "Compaction").
+impl MetadataRowFamily {
+    /// Fixed prefix before the first variable component in this family's row
+    /// keys. Compaction uses the remaining components to group rows for
+    /// retention, so this must match [`MetadataRow::row_key_for_family`].
     pub const fn row_key_prefix(self) -> &'static str {
         match self {
             Self::Inodes => "inode-",
@@ -405,26 +399,26 @@ impl MetadataTableFamily {
 }
 
 impl MetadataRow {
-    /// Builds this row's canonical durable key in its primary table family.
+    /// Builds this row's canonical durable key in its primary row family.
     ///
     /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
     pub fn row_key(&self) -> String {
         self.row_key_for_family(match self {
-            Self::Inode { .. } => MetadataTableFamily::Inodes,
-            Self::DirentryBind { .. } => MetadataTableFamily::DirentryBinds,
-            Self::DirentryUnbind { .. } => MetadataTableFamily::DirentryUnbinds,
-            Self::Revision { .. } => MetadataTableFamily::Revisions,
-            Self::Tombstone { .. } => MetadataTableFamily::Tombstones,
-            Self::ActiveDeletion { .. } => MetadataTableFamily::ActiveDeletions,
-            Self::CommitReceipt { .. } => MetadataTableFamily::CommitReceipts,
-            Self::AttributesRevision { .. } => MetadataTableFamily::Attributes,
+            Self::Inode { .. } => MetadataRowFamily::Inodes,
+            Self::DirentryBind { .. } => MetadataRowFamily::DirentryBinds,
+            Self::DirentryUnbind { .. } => MetadataRowFamily::DirentryUnbinds,
+            Self::Revision { .. } => MetadataRowFamily::Revisions,
+            Self::Tombstone { .. } => MetadataRowFamily::Tombstones,
+            Self::ActiveDeletion { .. } => MetadataRowFamily::ActiveDeletions,
+            Self::CommitReceipt { .. } => MetadataRowFamily::CommitReceipts,
+            Self::AttributesRevision { .. } => MetadataRowFamily::Attributes,
         })
     }
 
     /// Builds this row's durable key using the selected primary or secondary ordering.
     ///
     /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
-    pub fn row_key_for_family(&self, family: MetadataTableFamily) -> String {
+    pub fn row_key_for_family(&self, family: MetadataRowFamily) -> String {
         match self {
             Self::Inode { inode_id, .. } => format!("inode-{:020}", inode_id.0),
             Self::DirentryBind {
@@ -437,7 +431,7 @@ impl MetadataRow {
             } => {
                 let name_key = hex_encode_row_key_component(name_key.as_str());
                 match family {
-                    MetadataTableFamily::DirentryChildBinds => {
+                    MetadataRowFamily::DirentryChildBinds => {
                         format!(
                             "direntry-child-{:020}-{:020}-{:010}-{:020}-{name_key}",
                             child_inode_id.0, bind_seq.0, bind_delta_index, parent_inode_id.0
@@ -477,7 +471,7 @@ impl MetadataRow {
                 revision_delta_index,
                 ..
             } => match family {
-                MetadataTableFamily::RevisionsByInodeDesc => {
+                MetadataRowFamily::RevisionsByInodeDesc => {
                     let reverse_revision_no = u64::MAX - revision_no.0;
                     let reverse_committed_seq = u64::MAX - committed_seq.0;
                     let reverse_delta_index = u32::MAX - revision_delta_index;
@@ -544,7 +538,7 @@ impl MetadataRow {
     /// structure — so both are defined here, next to the row keys they
     /// shorten. Range scans at coarser granularity (a whole directory, a
     /// wave of names) do not consult filters.
-    pub fn filter_key_for_family(&self, family: MetadataTableFamily) -> String {
+    pub fn filter_key_for_family(&self, family: MetadataRowFamily) -> String {
         match self {
             Self::Inode { .. } => self.row_key_for_family(family),
             Self::DirentryBind {
@@ -553,7 +547,7 @@ impl MetadataRow {
                 child_inode_id,
                 ..
             } => match family {
-                MetadataTableFamily::DirentryChildBinds => {
+                MetadataRowFamily::DirentryChildBinds => {
                     format!("direntry-child-{:020}", child_inode_id.0)
                 }
                 _ => {
@@ -570,7 +564,7 @@ impl MetadataRow {
                 format!("direntry-unbind-{:020}-{name_key}", parent_inode_id.0)
             }
             Self::Revision { inode_id, .. } => match family {
-                MetadataTableFamily::RevisionsByInodeDesc => {
+                MetadataRowFamily::RevisionsByInodeDesc => {
                     format!("revision-by-inode-desc-{:020}", inode_id.0)
                 }
                 _ => format!("revision-{:020}", inode_id.0),
@@ -893,7 +887,7 @@ pub struct NamespaceManifestPayload {
     pub head_seq: ChangeSeq,
     /// Commit id assigned to `head_seq`, used to validate agreement with the head.
     pub head_commit_id: CommitId,
-    /// Oldest run sequence still represented by `metadata_files`.
+    /// Oldest run sequence still represented by `segments`.
     pub base_seq: ChangeSeq,
     /// Fencing epoch of the writer that produced this candidate.
     pub writer_epoch: WriterEpoch,
@@ -902,7 +896,7 @@ pub struct NamespaceManifestPayload {
     /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: ChangeSeq,
     /// Complete ordered set of metadata segments required to reconstruct the snapshot.
-    pub metadata_files: Vec<MetadataFileRef>,
+    pub segments: Vec<MetadataSegmentRef>,
 }
 
 /// In-memory view of a namespace manifest envelope.
@@ -986,10 +980,10 @@ pub fn decode_namespace_manifest_json(
 mod tests {
     use super::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
-        MetadataFileRef, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
+        MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
     };
     use crate::{
-        ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataTableId, NameKey,
+        ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey,
         NamespaceId, WriterEpoch,
     };
 
@@ -1050,12 +1044,12 @@ mod tests {
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
             retention_floor_seq: ChangeSeq(0),
-            metadata_files: vec![metadata_file_ref(
+            segments: vec![metadata_segment_ref(
                 "demo",
-                "tbl_00000000000000000000000000000001",
+                "seg_00000000000000000000000000000001",
                 ChangeSeq(10),
                 1,
-                "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000001.sst.zst",
+                "namespaces/demo/metadata/segments/seg_00000000000000000000000000000001.sst.zst",
             )],
         })
         .expect("manifest");
@@ -1065,15 +1059,15 @@ mod tests {
 
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.payload.base_seq, ChangeSeq(10));
-        assert_eq!(decoded.payload.metadata_files.len(), 1);
-        assert_eq!(decoded.payload.metadata_files[0].run_seq, ChangeSeq(10));
+        assert_eq!(decoded.payload.segments.len(), 1);
+        assert_eq!(decoded.payload.segments[0].run_seq, ChangeSeq(10));
     }
 
     /// A fork target's first own manifest keeps referencing the source's
     /// metadata objects: ownership travels with each file reference, not
     /// with the manifest.
     #[test]
-    fn namespace_manifest_codec_round_trips_inherited_source_tables() {
+    fn namespace_manifest_codec_round_trips_inherited_source_segments() {
         let envelope = NamespaceManifestEnvelope::from_payload(
             NamespaceManifestPayload {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
@@ -1089,20 +1083,20 @@ mod tests {
                 writer_epoch: WriterEpoch(2),
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
-                metadata_files: vec![
-                    metadata_file_ref(
+                segments: vec![
+                    metadata_segment_ref(
                         "source",
-                        "tbl_00000000000000000000000000000001",
+                        "seg_00000000000000000000000000000001",
                         ChangeSeq(10),
                         1,
-                        "namespaces/source/tables/metadata/tbl_00000000000000000000000000000001.sst.zst",
+                        "namespaces/source/segments/metadata/seg_00000000000000000000000000000001.sst.zst",
                     ),
-                    metadata_file_ref(
+                    metadata_segment_ref(
                         "demo",
-                        "tbl_00000000000000000000000000000002",
+                        "seg_00000000000000000000000000000002",
                         ChangeSeq(12),
                         0,
-                        "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000002.sst.zst",
+                        "namespaces/demo/metadata/segments/seg_00000000000000000000000000000002.sst.zst",
                     ),
                 ],
             },
@@ -1113,11 +1107,11 @@ mod tests {
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
-        assert_eq!(decoded.payload.metadata_files[0].level, 1);
-        assert_eq!(decoded.payload.metadata_files[1].level, 0);
-        assert_eq!(decoded.payload.metadata_files[1].run_seq, ChangeSeq(12));
+        assert_eq!(decoded.payload.segments[0].level, 1);
+        assert_eq!(decoded.payload.segments[1].level, 0);
+        assert_eq!(decoded.payload.segments[1].run_seq, ChangeSeq(12));
         assert_eq!(
-            decoded.payload.metadata_files[0].owner_namespace_id,
+            decoded.payload.segments[0].owner_namespace_id,
             NamespaceId::parse("source").expect("valid namespace id")
         );
     }
@@ -1134,11 +1128,11 @@ mod tests {
         };
 
         assert_eq!(
-            row.row_key_for_family(MetadataTableFamily::DirentryBinds),
+            row.row_key_for_family(MetadataRowFamily::DirentryBinds),
             "direntry-00000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
         );
         assert_eq!(
-            row.row_key_for_family(MetadataTableFamily::DirentryChildBinds),
+            row.row_key_for_family(MetadataRowFamily::DirentryChildBinds),
             "direntry-child-00000000000000000042-00000000000000000017-0000000003-00000000000000000009-7265706f72742e747874"
         );
     }
@@ -1155,7 +1149,7 @@ mod tests {
         };
 
         assert_eq!(
-            row.row_key_for_family(MetadataTableFamily::DirentryBinds),
+            row.row_key_for_family(MetadataRowFamily::DirentryBinds),
             "direntry-00000000000000000009-7265706f72742d32303234-00000000000000000017-0000000003"
         );
     }
@@ -1178,11 +1172,11 @@ mod tests {
         };
 
         assert_eq!(
-            row.row_key_for_family(MetadataTableFamily::Revisions),
+            row.row_key_for_family(MetadataRowFamily::Revisions),
             "revision-00000000000000000042-00000000000000000007-0000000003"
         );
         assert_eq!(
-            row.row_key_for_family(MetadataTableFamily::RevisionsByInodeDesc),
+            row.row_key_for_family(MetadataRowFamily::RevisionsByInodeDesc),
             "revision-by-inode-desc-00000000000000000042-18446744073709551608-18446744073709551603-4294967292"
         );
     }
@@ -1207,12 +1201,12 @@ mod tests {
         let older = row_of(2, 11, 0);
 
         assert_eq!(
-            newest.row_key_for_family(MetadataTableFamily::Attributes),
+            newest.row_key_for_family(MetadataRowFamily::Attributes),
             "attributes-00000000000000000042-18446744073709551612-18446744073709551603-4294967294"
         );
         assert_eq!(
             newest.row_key(),
-            newest.row_key_for_family(MetadataTableFamily::Attributes)
+            newest.row_key_for_family(MetadataRowFamily::Attributes)
         );
         assert!(
             newest.row_key() < older.row_key(),
@@ -1224,7 +1218,7 @@ mod tests {
         // A point lookup probes the filter with the inode's shared key, and
         // the writer stores exactly that key.
         assert_eq!(
-            newest.filter_key_for_family(MetadataTableFamily::Attributes),
+            newest.filter_key_for_family(MetadataRowFamily::Attributes),
             super::lookup_keys::attributes_probe(InodeId(42))
         );
         // Another inode's rows sort outside the prefix.
@@ -1233,11 +1227,8 @@ mod tests {
             .starts_with(&super::lookup_keys::attributes_prefix(InodeId(43))));
     }
 
-    /// [`MetadataTableFamily::row_key_prefix`] states the front of every row
-    /// key in a family, and a streaming compaction reads its retention
-    /// groupings out of the components that follow it. A prefix that drifted
-    /// from the row-key format would put grouping boundaries in the wrong
-    /// place, so the two are pinned against each other for every family.
+    /// Compaction groups rows using the components after each family prefix.
+    /// This test keeps those prefixes consistent with the generated row keys.
     #[test]
     fn row_key_prefixes_match_the_row_keys_they_front() {
         let name_key = NameKey::parse("report.txt").expect("valid name key");
@@ -1264,9 +1255,9 @@ mod tests {
                 b"row key prefix sample",
             ),
         };
-        let rows: [(MetadataTableFamily, super::MetadataRow); 10] = [
+        let rows: [(MetadataRowFamily, super::MetadataRow); 10] = [
             (
-                MetadataTableFamily::Inodes,
+                MetadataRowFamily::Inodes,
                 super::MetadataRow::Inode {
                     inode_id: InodeId(42),
                     inode_kind: crate::InodeKind::File,
@@ -1276,10 +1267,10 @@ mod tests {
                     created_at_ms: 3_000,
                 },
             ),
-            (MetadataTableFamily::DirentryBinds, bind.clone()),
-            (MetadataTableFamily::DirentryChildBinds, bind),
+            (MetadataRowFamily::DirentryBinds, bind.clone()),
+            (MetadataRowFamily::DirentryChildBinds, bind),
             (
-                MetadataTableFamily::DirentryUnbinds,
+                MetadataRowFamily::DirentryUnbinds,
                 super::MetadataRow::DirentryUnbind {
                     parent_inode_id: InodeId(9),
                     name_key,
@@ -1291,10 +1282,10 @@ mod tests {
                     unbind_delta_index: 0,
                 },
             ),
-            (MetadataTableFamily::Revisions, revision.clone()),
-            (MetadataTableFamily::RevisionsByInodeDesc, revision),
+            (MetadataRowFamily::Revisions, revision.clone()),
+            (MetadataRowFamily::RevisionsByInodeDesc, revision),
             (
-                MetadataTableFamily::Tombstones,
+                MetadataRowFamily::Tombstones,
                 super::MetadataRow::Tombstone {
                     root_inode_id: InodeId(42),
                     generation: super::TombstoneGeneration {
@@ -1310,7 +1301,7 @@ mod tests {
                 },
             ),
             (
-                MetadataTableFamily::ActiveDeletions,
+                MetadataRowFamily::ActiveDeletions,
                 super::MetadataRow::ActiveDeletion {
                     root_inode_id: InodeId(42),
                     deletion_seq: ChangeSeq(12),
@@ -1320,7 +1311,7 @@ mod tests {
                 },
             ),
             (
-                MetadataTableFamily::CommitReceipts,
+                MetadataRowFamily::CommitReceipts,
                 super::MetadataRow::CommitReceipt {
                     commit_id: CommitId::parse("c_00000000000000000000000000000001")
                         .expect("commit id"),
@@ -1332,7 +1323,7 @@ mod tests {
                 },
             ),
             (
-                MetadataTableFamily::Attributes,
+                MetadataRowFamily::Attributes,
                 super::MetadataRow::AttributesRevision {
                     inode_id: InodeId(42),
                     attributes_revision_no: crate::AttributeRevisionNo(3),
@@ -1362,10 +1353,10 @@ mod tests {
 
     #[test]
     fn attribution_values_never_change_row_or_index_keys() {
-        fn rows(actor: crate::ActorRef) -> Vec<(MetadataTableFamily, super::MetadataRow)> {
+        fn rows(actor: crate::ActorRef) -> Vec<(MetadataRowFamily, super::MetadataRow)> {
             vec![
                 (
-                    MetadataTableFamily::Inodes,
+                    MetadataRowFamily::Inodes,
                     super::MetadataRow::Inode {
                         inode_id: InodeId(42),
                         inode_kind: crate::InodeKind::File,
@@ -1376,7 +1367,7 @@ mod tests {
                     },
                 ),
                 (
-                    MetadataTableFamily::RevisionsByInodeDesc,
+                    MetadataRowFamily::RevisionsByInodeDesc,
                     super::MetadataRow::Revision {
                         inode_id: InodeId(42),
                         revision_no: crate::RevisionNo(7),
@@ -1393,7 +1384,7 @@ mod tests {
                     },
                 ),
                 (
-                    MetadataTableFamily::Tombstones,
+                    MetadataRowFamily::Tombstones,
                     super::MetadataRow::Tombstone {
                         root_inode_id: InodeId(42),
                         generation: super::TombstoneGeneration {
@@ -1409,7 +1400,7 @@ mod tests {
                     },
                 ),
                 (
-                    MetadataTableFamily::ActiveDeletions,
+                    MetadataRowFamily::ActiveDeletions,
                     super::MetadataRow::ActiveDeletion {
                         root_inode_id: InodeId(42),
                         deletion_seq: ChangeSeq(12),
@@ -1421,7 +1412,7 @@ mod tests {
                     },
                 ),
                 (
-                    MetadataTableFamily::Attributes,
+                    MetadataRowFamily::Attributes,
                     super::MetadataRow::AttributesRevision {
                         inode_id: InodeId(42),
                         attributes_revision_no: crate::AttributeRevisionNo(2),
@@ -1460,20 +1451,20 @@ mod tests {
         }
     }
 
-    fn metadata_file_ref(
+    fn metadata_segment_ref(
         owner_namespace_id: &str,
-        table_id: &str,
+        segment_id: &str,
         run_seq: ChangeSeq,
         level: u32,
         object_key: &str,
-    ) -> MetadataFileRef {
-        MetadataFileRef {
+    ) -> MetadataSegmentRef {
+        MetadataSegmentRef {
             owner_namespace_id: NamespaceId::parse(owner_namespace_id).expect("valid namespace id"),
-            table_id: MetadataTableId::parse(table_id).expect("valid table id"),
+            segment_id: MetadataSegmentId::parse(segment_id).expect("valid segment id"),
             object_key: object_key.to_owned(),
             run_seq,
             level,
-            family: MetadataTableFamily::Inodes,
+            family: MetadataRowFamily::Inodes,
             segment_index: 0,
             row_count: 0,
             min_key: String::new(),

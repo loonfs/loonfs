@@ -4,7 +4,7 @@ use futures::stream::{self, BoxStream};
 use futures::TryStreamExt;
 use loonfs_api::ManifestObjectId;
 use loonfs_objectstore::keys::{
-    checkpoint_record, metadata_manifest_object, metadata_table, wal_head, wal_segment,
+    checkpoint_record, metadata_manifest_object, metadata_segment, wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
@@ -254,20 +254,20 @@ async fn classifies_wal_and_manifest_key_families() {
         .expect("put manifest");
     store
         .put_overwrite(
-            &metadata_table(
+            &metadata_segment(
                 &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &loonfs_api::MetadataTableId::parse("tbl_00000000000000000000000000000001")
-                    .expect("valid metadata table id"),
+                &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+                    .expect("valid metadata segment id"),
             ),
-            bytes(b"table"),
+            bytes(b"segment"),
         )
         .await
-        .expect("put table");
+        .expect("put segment");
 
     let samples = recorder.samples();
     assert_eq!(samples[0].key_class, KeyClass::WalSegment);
     assert_eq!(samples[1].key_class, KeyClass::NamespaceManifest);
-    assert_eq!(samples[2].key_class, KeyClass::MetadataSst);
+    assert_eq!(samples[2].key_class, KeyClass::MetadataSegment);
 }
 
 #[tokio::test]
@@ -289,15 +289,15 @@ async fn classifies_gc_namespace_layout_family() {
         .expect("put namespace manifest");
     store
         .put_overwrite(
-            &metadata_table(
+            &metadata_segment(
                 &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &loonfs_api::MetadataTableId::parse("tbl_00000000000000000000000000000001")
-                    .expect("valid metadata table id"),
+                &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+                    .expect("valid metadata segment id"),
             ),
             bytes(b"metadata"),
         )
         .await
-        .expect("put metadata sst");
+        .expect("put metadata segment");
     store
         .put_overwrite(
             &checkpoint_record(
@@ -312,7 +312,7 @@ async fn classifies_gc_namespace_layout_family() {
 
     let samples = recorder.samples();
     assert_eq!(samples[0].key_class, KeyClass::NamespaceManifest);
-    assert_eq!(samples[1].key_class, KeyClass::MetadataSst);
+    assert_eq!(samples[1].key_class, KeyClass::MetadataSegment);
     assert_eq!(samples[2].key_class, KeyClass::GcControl);
 }
 

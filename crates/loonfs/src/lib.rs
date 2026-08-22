@@ -105,7 +105,7 @@ pub use loonfs_api::{
     PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
-    MetadataTableCacheConfig, Recency, StoredMetadataBlockCache,
+    MetadataSegmentCacheConfig, Recency, StoredMetadataBlockCache,
     StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
 pub use loonfs_core::limits::{

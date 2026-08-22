@@ -3,16 +3,16 @@
 
 use crate::metadata::{active_deletion_from_tombstone, ActiveDeletionAction, MetadataState};
 use loonfs_api::wire::manifest::{
-    ActiveDeletionRowAction, MetadataRow, MetadataTableFamily, TombstoneRowAction,
+    ActiveDeletionRowAction, MetadataRow, MetadataRowFamily, TombstoneRowAction,
 };
 use loonfs_api::ChangeSeq;
 
 #[cfg(test)]
-use super::runs::CHECKPOINT_TABLE_FAMILIES;
+use super::runs::CHECKPOINT_ROW_FAMILIES;
 
 #[cfg(test)]
 pub(super) fn metadata_states_equivalent(left: &MetadataState, right: &MetadataState) -> bool {
-    CHECKPOINT_TABLE_FAMILIES.into_iter().all(|family| {
+    CHECKPOINT_ROW_FAMILIES.into_iter().all(|family| {
         manifest_rows_for_family(left, family) == manifest_rows_for_family(right, family)
     })
 }
@@ -54,10 +54,10 @@ fn active_deletion_row(tombstone: &crate::metadata::SubtreeTombstoneRecord) -> M
 
 pub(super) fn manifest_rows_for_family(
     metadata_state: &MetadataState,
-    family: MetadataTableFamily,
+    family: MetadataRowFamily,
 ) -> Vec<MetadataRow> {
     let mut rows = match family {
-        MetadataTableFamily::Inodes => metadata_state
+        MetadataRowFamily::Inodes => metadata_state
             .inodes()
             .iter()
             .map(|inode| MetadataRow::Inode {
@@ -69,21 +69,19 @@ pub(super) fn manifest_rows_for_family(
                 created_at_ms: inode.created_at_ms,
             })
             .collect::<Vec<_>>(),
-        MetadataTableFamily::DirentryBinds | MetadataTableFamily::DirentryChildBinds => {
-            metadata_state
-                .direntry_binds()
-                .iter()
-                .map(|direntry| MetadataRow::DirentryBind {
-                    parent_inode_id: direntry.parent_inode_id,
-                    name_key: direntry.name_key.clone(),
-                    display_name: direntry.display_name.clone(),
-                    child_inode_id: direntry.child_inode_id,
-                    bind_seq: direntry.bind_seq,
-                    bind_delta_index: direntry.bind_delta_index,
-                })
-                .collect::<Vec<_>>()
-        }
-        MetadataTableFamily::DirentryUnbinds => metadata_state
+        MetadataRowFamily::DirentryBinds | MetadataRowFamily::DirentryChildBinds => metadata_state
+            .direntry_binds()
+            .iter()
+            .map(|direntry| MetadataRow::DirentryBind {
+                parent_inode_id: direntry.parent_inode_id,
+                name_key: direntry.name_key.clone(),
+                display_name: direntry.display_name.clone(),
+                child_inode_id: direntry.child_inode_id,
+                bind_seq: direntry.bind_seq,
+                bind_delta_index: direntry.bind_delta_index,
+            })
+            .collect::<Vec<_>>(),
+        MetadataRowFamily::DirentryUnbinds => metadata_state
             .direntry_unbinds()
             .iter()
             .map(|unbind| MetadataRow::DirentryUnbind {
@@ -97,23 +95,21 @@ pub(super) fn manifest_rows_for_family(
                 unbind_delta_index: unbind.unbind_delta_index,
             })
             .collect::<Vec<_>>(),
-        MetadataTableFamily::Revisions | MetadataTableFamily::RevisionsByInodeDesc => {
-            metadata_state
-                .revisions()
-                .iter()
-                .map(|revision| MetadataRow::Revision {
-                    inode_id: revision.inode_id,
-                    revision_no: revision.revision_no,
-                    committed_seq: revision.committed_seq,
-                    commit_id: revision.commit_id.clone(),
-                    committed_at_ms: revision.committed_at_ms,
-                    actor: revision.actor.clone(),
-                    revision_delta_index: revision.revision_delta_index,
-                    content_ref: revision.content_ref.clone(),
-                })
-                .collect::<Vec<_>>()
-        }
-        MetadataTableFamily::Tombstones => metadata_state
+        MetadataRowFamily::Revisions | MetadataRowFamily::RevisionsByInodeDesc => metadata_state
+            .revisions()
+            .iter()
+            .map(|revision| MetadataRow::Revision {
+                inode_id: revision.inode_id,
+                revision_no: revision.revision_no,
+                committed_seq: revision.committed_seq,
+                commit_id: revision.commit_id.clone(),
+                committed_at_ms: revision.committed_at_ms,
+                actor: revision.actor.clone(),
+                revision_delta_index: revision.revision_delta_index,
+                content_ref: revision.content_ref.clone(),
+            })
+            .collect::<Vec<_>>(),
+        MetadataRowFamily::Tombstones => metadata_state
             .subtree_tombstones()
             .iter()
             .map(|tombstone| MetadataRow::Tombstone {
@@ -125,12 +121,12 @@ pub(super) fn manifest_rows_for_family(
                 actor: tombstone.actor.clone(),
             })
             .collect::<Vec<_>>(),
-        MetadataTableFamily::ActiveDeletions => metadata_state
+        MetadataRowFamily::ActiveDeletions => metadata_state
             .subtree_tombstones()
             .iter()
             .map(active_deletion_row)
             .collect::<Vec<_>>(),
-        MetadataTableFamily::CommitReceipts => metadata_state
+        MetadataRowFamily::CommitReceipts => metadata_state
             .commit_receipts()
             .iter()
             .map(|record| MetadataRow::CommitReceipt {
@@ -142,7 +138,7 @@ pub(super) fn manifest_rows_for_family(
                 message: record.message.clone(),
             })
             .collect::<Vec<_>>(),
-        MetadataTableFamily::Attributes => metadata_state
+        MetadataRowFamily::Attributes => metadata_state
             .attributes_revisions()
             .iter()
             .map(|record| MetadataRow::AttributesRevision {
@@ -163,7 +159,7 @@ pub(super) fn manifest_rows_for_family(
 
 pub(super) fn manifest_rows_for_family_after_seq(
     metadata_state: &MetadataState,
-    family: MetadataTableFamily,
+    family: MetadataRowFamily,
     after_seq: ChangeSeq,
 ) -> Vec<MetadataRow> {
     manifest_rows_for_family(metadata_state, family)

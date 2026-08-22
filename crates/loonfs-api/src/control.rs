@@ -400,7 +400,7 @@ pub enum NamespaceStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkBasis {
-    /// Namespace whose durable tree owns the basis manifest and its tables.
+    /// Namespace whose durable tree owns the basis manifest and its segments.
     pub source_namespace_id: NamespaceId,
     /// Immutable manifest the target starts from, under the source's prefix.
     pub source_manifest_object_id: ManifestObjectId,

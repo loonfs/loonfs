@@ -4543,7 +4543,7 @@
         "required": [
           "namespace_id",
           "deleted_wal_segments",
-          "deleted_metadata_tables",
+          "deleted_metadata_segments",
           "deleted_manifests",
           "deleted_checkpoint_records",
           "released_fork_checkpoints",
@@ -4568,7 +4568,7 @@
           },
           "degraded_retention": {
             "type": "boolean",
-            "description": "True when ambiguous roots suppressed manifest/table deletion."
+            "description": "True when ambiguous roots suppressed manifest/segment deletion."
           },
           "deleted_checkpoint_records": {
             "type": "integer",
@@ -4588,10 +4588,10 @@
             "description": "Unreferenced manifests deleted.",
             "minimum": 0
           },
-          "deleted_metadata_tables": {
+          "deleted_metadata_segments": {
             "type": "integer",
             "format": "int64",
-            "description": "Unreferenced metadata tables deleted.",
+            "description": "Unreferenced metadata segments deleted.",
             "minimum": 0
           },
           "deleted_upload_sessions": {
@@ -4981,7 +4981,7 @@
           },
           "metadata": {
             "$ref": "#/components/schemas/MetadataMaintenanceRequest",
-            "description": "Flush the visible WAL tail into metadata tables, then run one bounded\nreorganization step."
+            "description": "Flush the visible WAL tail into metadata segments, then run one bounded\nreorganization step."
           }
         },
         "additionalProperties": false
@@ -5226,7 +5226,7 @@
           "degraded_roots": {
             "type": "integer",
             "format": "int64",
-            "description": "Root resolution failed somewhere in this pass, so manifest and table\ndeletion was suppressed wholesale (`degraded_retention` is set too).",
+            "description": "Root resolution failed somewhere in this pass, so manifest and segment\ndeletion was suppressed wholesale (`degraded_retention` is set too).",
             "minimum": 0
           },
           "grace_window": {

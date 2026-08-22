@@ -13,7 +13,7 @@ use crate::{
     MaintenancePlan, MetadataCompactionOutcome, MetadataMaintenanceOptions, MoveOptions,
     NamespaceId, PutFileOptions, ReorganizeStepOutcome, SharedObjectStore,
 };
-use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataTableFamily};
+use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -137,7 +137,7 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
     );
     for (category, reclaimed) in [
         ("deleted_wal_segments", gc.deleted_wal_segments),
-        ("deleted_metadata_tables", gc.deleted_metadata_tables),
+        ("deleted_metadata_segments", gc.deleted_metadata_segments),
         ("deleted_manifests", gc.deleted_manifests),
         ("deleted_checkpoint_records", gc.deleted_checkpoint_records),
         ("released_fork_checkpoints", gc.released_fork_checkpoints),
@@ -296,7 +296,7 @@ async fn budget_that_starves_the_bindings_base<S: ObjectStore + ?Sized>(
 struct ManifestRun {
     run_seq: u64,
     level: u32,
-    family: MetadataTableFamily,
+    family: MetadataRowFamily,
     rows: u64,
 }
 
@@ -316,7 +316,7 @@ async fn manifest_runs<S: ObjectStore + ?Sized>(
     decode_namespace_manifest_json(&bytes)
         .expect("decode the manifest")
         .payload
-        .metadata_files
+        .segments
         .iter()
         .map(|descriptor| ManifestRun {
             run_seq: descriptor.run_seq.0,

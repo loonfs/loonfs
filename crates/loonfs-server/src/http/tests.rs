@@ -850,11 +850,11 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
 
     for name in [
         "loonfs_runtime_cache_latest_metadata_view_reads_total",
-        "loonfs_metadata_table_cache_gets_total",
-        "loonfs_metadata_table_cache_inserts_total",
-        "loonfs_metadata_table_cache_evictions_total",
-        "loonfs_metadata_table_cache_filter_skips_total",
-        "loonfs_metadata_table_cache_filter_false_positives_total",
+        "loonfs_metadata_segment_cache_gets_total",
+        "loonfs_metadata_segment_cache_inserts_total",
+        "loonfs_metadata_segment_cache_evictions_total",
+        "loonfs_metadata_segment_cache_filter_skips_total",
+        "loonfs_metadata_segment_cache_filter_false_positives_total",
         "loonfs_wal_tail_projection_cache_gets_total",
         "loonfs_wal_tail_projection_cache_inserts_total",
         "loonfs_wal_tail_projection_cache_evictions_total",
@@ -881,7 +881,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
             "missing gauge `{name}`"
         );
     }
-    assert!(!rendered.contains("loonfs_cache_metadata_table_cache_hits"));
+    assert!(!rendered.contains("loonfs_cache_metadata_segment_cache_hits"));
 }
 
 /// A configured cache is built at startup and reports itself on every

@@ -1233,7 +1233,7 @@ pub(crate) struct AdminCheckpointReleaseArgs {
 pub(crate) struct AdminStepArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Flush the visible WAL tail into metadata tables when it reaches this many
+    /// Flush the visible WAL tail into metadata segments when it reaches this many
     /// segments (server default when omitted).
     #[arg(long)]
     pub max_wal_tail_segments: Option<u64>,

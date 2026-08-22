@@ -16,7 +16,7 @@ use loonfs_api::{
         ControlObjectKind, HeadState, HeadStateEnvelope,
     },
     wire::manifest::{
-        decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataTableFamily,
+        decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
         NamespaceManifestEnvelope,
     },
     AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId,
@@ -85,10 +85,10 @@ async fn namespace_keys<S: ObjectStore + ?Sized>(
         .expect("list namespace prefix")
 }
 
-fn metadata_table_counting_store(root: impl AsRef<Path>) -> CountingStore<LocalFsStore> {
+fn metadata_segment_counting_store(root: impl AsRef<Path>) -> CountingStore<LocalFsStore> {
     CountingStore::new(
         LocalFsStore::new(root.as_ref()).expect("store"),
-        KeyPredicate::metadata_table(),
+        KeyPredicate::metadata_segment(),
     )
 }
 
@@ -321,7 +321,7 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
 #[tokio::test]
 async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = metadata_table_counting_store(temp_dir.path());
+    let store = metadata_segment_counting_store(temp_dir.path());
     let context = mutation_context();
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -353,7 +353,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(
         store.count(OperationClass::Read),
         0,
-        "fork should validate manifest descriptors without loading metadata SST payloads"
+        "fork should validate manifest descriptors without loading metadata segment payloads"
     );
 
     let blobs_after = store
@@ -486,7 +486,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_changes.changes.len(), 1);
     assert_eq!(clone_changes.changes[0].committed_seq, ChangeSeq(2));
 
-    // The target's own first flush inherits the source's tables by
+    // The target's own first flush inherits the source's segments by
     // reference and adds only its own delta run.
     namespace_engine(&store, &clone_namespace_id, &context)
         .flush_wal()
@@ -509,10 +509,10 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert!(
         clone_manifest
             .payload
-            .metadata_files
+            .segments
             .iter()
-            .any(|metadata_file| metadata_file.owner_namespace_id == source_namespace_id),
-        "the target keeps referencing source-owned metadata SSTs"
+            .any(|descriptor| descriptor.owner_namespace_id == source_namespace_id),
+        "the target keeps referencing source-owned metadata segments"
     );
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
@@ -524,7 +524,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 }
 
 /// The fork target keeps reading after the source namespace is deleted: the
-/// pinned basis and the source-owned tables it names both survive.
+/// pinned basis and the source-owned segments it names both survive.
 #[tokio::test]
 async fn fork_clone_survives_source_delete() {
     let temp_dir = tempdir().expect("tempdir");
@@ -781,8 +781,8 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         decode_namespace_manifest_json(&manifest_bytes).expect("decode source manifest");
     manifest
         .payload
-        .metadata_files
-        .retain(|metadata_file| metadata_file.family != MetadataTableFamily::RevisionsByInodeDesc);
+        .segments
+        .retain(|descriptor| descriptor.family != MetadataRowFamily::RevisionsByInodeDesc);
     let manifest = NamespaceManifestEnvelope::from_payload(manifest.payload)
         .expect("rebuild manifest checksum");
     let corrupted = encode_namespace_manifest_json(&manifest).expect("encode corrupt manifest");

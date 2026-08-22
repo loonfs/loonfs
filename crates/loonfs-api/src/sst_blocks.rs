@@ -1,4 +1,4 @@
-//! Block-granular encoding for metadata SST and derived-index segments.
+//! Block-granular encoding for metadata and derived-index segments.
 //!
 //! A segment object is a sequence of independently readable sections:
 //! data blocks, then one filter block, then one index block. There is no
@@ -9,7 +9,7 @@
 //!
 //! The block grammar is row-payload-agnostic: the builder and decoders
 //! carry any CBOR row type, and the segment's descriptor family says which
-//! one to expect — [`MetadataRow`] for metadata tables, `IndexRow` for gram
+//! one to expect — [`MetadataRow`] for metadata segments, `IndexRow` for gram
 //! index segments. The section framing, key compression, filter hashing,
 //! and checksums are identical either way.
 //!

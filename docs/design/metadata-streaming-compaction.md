@@ -55,7 +55,7 @@ The complete operation has five stages:
 
 1. Capture an immutable compaction specification containing a generated job ID, the family group, selected input runs, output identity, and retention floor.
 2. Create the job lease, open sorted iterators over the selected runs, and merge their rows in key order.
-3. Apply the retention rules and write completed output segments under `metadata/compactions/{job_id}/tables/`.
+3. Apply the retention rules and write completed output segments under `metadata/compactions/{job_id}/segments/`.
 4. Reload the current manifest and confirm that every selected input is still present and unchanged.
 5. Publish one manifest update that removes the selected inputs and adds the completed output.
 
@@ -100,7 +100,7 @@ Runs published after the snapshot was captured are not part of the compaction in
 
 ## Streaming executor
 
-This is the engine both paths run. Each family is read through a sorted iterator over its selected runs. A k-way merge selects the next row in family key order. Completed output segments are written as soon as they reach the normal segment target size. A background job writes them under its own prefix; a step-contained merge writes them at ordinary table keys, because the publication that names them lands in the same step and the ordinary write-time grace already covers them.
+This is the engine both paths run. Each family is read through a sorted iterator over its selected runs. A k-way merge selects the next row in family key order. Completed output segments are written as soon as they reach the normal segment target size. A background job writes them under its own prefix; a step-contained merge writes them at ordinary segment keys, because the publication that names them lands in the same step and the ordinary write-time grace already covers them.
 
 The following resources have explicit limits, and they bound both paths:
 
@@ -123,7 +123,7 @@ Rows are processed as follows:
 - Attribute rows arrive newest first for each inode. The operator tracks whether it has retained the newest row at or below the floor and detects repeated revision numbers without retaining the complete history.
 - Active-deletion rows are ordered so a removal marker arrives before the row it removes. One flag is enough to remove the pair together.
 - Forward binding rows are grouped by binding generation. The operator holds at most one bind row until the matching unbind rows arrive, and it retains one generation identity to validate the parent-and-name slot.
-- Reverse child-binding rows are resolved against the same below-floor unbound generations, reached by one of two routes because their key order differs from the forward binding table. The next section says which route and why.
+- Reverse child-binding rows are resolved against the same below-floor unbound generations, reached by one of two routes because their key order differs from the forward binding family. The next section says which route and why.
 
 Bindings and revisions have secondary indexes that must remain equivalent to their canonical families. The executor computes order-independent digests for the canonical and index rows selected for output, and a mismatch fails the merge before publication. This is the only index-parity check either path makes. It covers the rows a merge wrote rather than the rows it read, so it states that the two families dropped in lockstep and not only that their inputs matched.
 
@@ -149,7 +149,7 @@ Step budgets therefore price the selected logical input, and a step-contained me
 
 ## Job leases and garbage collection
 
-Each job owns `metadata/compactions/{job_id}/`. Output segments are stored in its `tables/` subdirectory, and lifecycle ownership is recorded in `lease.json` beside that directory.
+Each job owns `metadata/compactions/{job_id}/`. Output segments are stored in its `segments/` subdirectory, and lifecycle ownership is recorded in `lease.json` beside that directory.
 
 The lease records the job ID, namespace ID, owner ID, status, start time, and most recent heartbeat. It does not contain a cursor, output descriptors, offsets, or progress, so it cannot be used to resume a failed job.
 

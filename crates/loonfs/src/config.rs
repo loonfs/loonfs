@@ -3,7 +3,7 @@
 //! defaults the rest of the crate advertises.
 
 use crate::trace::{TraceMode, TraceStoreKind};
-use crate::{MetadataTableCacheConfig, Result, RuntimeError};
+use crate::{MetadataSegmentCacheConfig, Result, RuntimeError};
 
 /// Default maximum namespaces retained in runtime caches.
 pub(crate) const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
@@ -76,8 +76,8 @@ pub struct RuntimeCacheConfig {
     /// like the row budget. Both budgets also cap one projection: a publish
     /// whose tail outgrows either keeps nothing.
     pub max_cached_wal_tail_projection_decoded_bytes: usize,
-    /// Cache settings for decoded metadata tables.
-    pub metadata_table_cache: MetadataTableCacheConfig,
+    /// Cache settings for decoded metadata segments.
+    pub metadata_segment_cache: MetadataSegmentCacheConfig,
 }
 
 impl RuntimeCacheConfig {
@@ -87,7 +87,7 @@ impl RuntimeCacheConfig {
             max_cached_namespaces: 0,
             max_cached_wal_tail_projection_rows: 0,
             max_cached_wal_tail_projection_decoded_bytes: 0,
-            metadata_table_cache: MetadataTableCacheConfig {
+            metadata_segment_cache: MetadataSegmentCacheConfig {
                 max_decoded_bytes: 0,
             },
         }
@@ -101,7 +101,7 @@ impl Default for RuntimeCacheConfig {
             max_cached_wal_tail_projection_rows: DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS,
             max_cached_wal_tail_projection_decoded_bytes:
                 DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
-            metadata_table_cache: MetadataTableCacheConfig::default(),
+            metadata_segment_cache: MetadataSegmentCacheConfig::default(),
         }
     }
 }

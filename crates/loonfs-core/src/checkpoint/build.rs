@@ -1,62 +1,61 @@
 //! Segments metadata rows into runs and writes the immutable metadata
-//! SST objects a manifest references.
+//! segments a manifest references.
 
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq};
 use super::runs::{
-    MetadataTableManifest, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
-    MAX_MAINTENANCE_TABLE_IO,
+    MetadataFamilySegments, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_ROW_FAMILIES,
+    MAX_MAINTENANCE_SEGMENT_IO,
 };
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
 use bytes::Bytes;
 use futures::future::try_join_all;
 use loonfs_api::wire::hex::hex_encode_bytes;
-use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
-use loonfs_api::{sha256_digest, ChangeSeq, MetadataCompactionId, MetadataTableId, NamespaceId};
-use loonfs_objectstore::keys::{metadata_compaction_table, metadata_table};
+use loonfs_api::{sha256_digest, ChangeSeq, MetadataCompactionId, MetadataSegmentId, NamespaceId};
+use loonfs_objectstore::keys::{metadata_compaction_segment, metadata_segment};
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroUsize;
 
-pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
+pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
     level: u32,
     metadata_state: &MetadataState,
     max_rows_per_segment: NonZeroUsize,
-) -> Result<Vec<MetadataTableManifest>> {
-    build_manifest_tables_from_rows(
+) -> Result<Vec<MetadataFamilySegments>> {
+    build_manifest_segments_from_rows(
         store,
         namespace_id,
         run_seq,
         level,
         |family| manifest_rows_for_family(metadata_state, family),
-        MetadataTableSegmentation::Base {
+        MetadataSegmentation::Base {
             max_rows_per_segment,
         },
     )
     .await
 }
 
-/// The layout invariant manifest load enforces for real, checked eagerly on a
-/// run a test just built. Production merges write through
-/// [`super::compaction_output::MergeSegmentWriter`], which never holds a run's
-/// tables in this shape.
+/// Checks newly built test segments for the same non-overlap invariant that
+/// manifest loading enforces. Production merges stream through
+/// [`super::compaction_output::MergeSegmentWriter`].
 #[cfg(test)]
-pub(super) fn debug_assert_manifest_table_segments_do_not_overlap(
-    _tables: &[MetadataTableManifest],
+pub(super) fn debug_assert_manifest_segments_do_not_overlap(
+    _segments_by_family: &[MetadataFamilySegments],
 ) {
     #[cfg(debug_assertions)]
-    for table in _tables {
+    for family_segments in _segments_by_family {
         let mut previous_max_key: Option<&str> = None;
-        for descriptor in &table.segments {
+        for descriptor in &family_segments.segments {
             if let Some(previous) = previous_max_key {
                 debug_assert!(
                     previous < descriptor.min_key.as_str(),
-                    "overlapping metadata SST ranges for `{:?}`",
-                    table.family
+                    "overlapping metadata segment ranges for `{:?}`",
+                    family_segments.family
                 );
             }
             previous_max_key = Some(descriptor.max_key.as_str());
@@ -64,31 +63,31 @@ pub(super) fn debug_assert_manifest_table_segments_do_not_overlap(
     }
 }
 
-pub(super) async fn build_manifest_l0_run_tables<S: ObjectStore + ?Sized>(
+pub(super) async fn build_manifest_l0_run_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
-) -> Result<Vec<MetadataTableManifest>> {
-    build_manifest_tables_from_rows(
+) -> Result<Vec<MetadataFamilySegments>> {
+    build_manifest_segments_from_rows(
         store,
         namespace_id,
         run_seq,
         CHECKPOINT_L0_RUN_LEVEL,
         |family| manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
-        MetadataTableSegmentation::Full,
+        MetadataSegmentation::Full,
     )
     .await
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum MetadataTableSegmentation {
+pub(super) enum MetadataSegmentation {
     Base { max_rows_per_segment: NonZeroUsize },
     Full,
 }
 
-pub(super) struct MetadataSstRows {
+pub(super) struct MetadataSegmentRows {
     rows: Vec<MetadataRow>,
 }
 
@@ -97,26 +96,26 @@ pub(super) struct MetadataSstRows {
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "write_manifest_tables", key_class = "metadata_sst")
+    fields(phase = "write_manifest_segments", key_class = "metadata_segment")
 )]
-pub(super) async fn build_manifest_tables_from_rows<S, RowsForFamily>(
+pub(super) async fn build_manifest_segments_from_rows<S, RowsForFamily>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
     level: u32,
     mut rows_for_family: RowsForFamily,
-    segmentation: MetadataTableSegmentation,
-) -> Result<Vec<MetadataTableManifest>>
+    segmentation: MetadataSegmentation,
+) -> Result<Vec<MetadataFamilySegments>>
 where
     S: ObjectStore + ?Sized,
-    RowsForFamily: FnMut(MetadataTableFamily) -> Vec<MetadataRow>,
+    RowsForFamily: FnMut(MetadataRowFamily) -> Vec<MetadataRow>,
 {
-    let destination = MetadataTableDestination::Published { namespace_id };
-    let mut tables = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
-    for family in CHECKPOINT_TABLE_FAMILIES {
+    let destination = MetadataSegmentDestination::Published { namespace_id };
+    let mut segments_by_family = Vec::with_capacity(CHECKPOINT_ROW_FAMILIES.len());
+    for family in CHECKPOINT_ROW_FAMILIES {
         let rows = rows_for_family(family);
         if rows.is_empty() {
-            tables.push(MetadataTableManifest {
+            segments_by_family.push(MetadataFamilySegments {
                 family,
                 segments: Vec::new(),
             });
@@ -127,7 +126,7 @@ where
         let mut requests = Vec::with_capacity(segments.len());
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
-                .map_err(|_| CoreError::Internal("metadata SST index overflow".to_owned()))?;
+                .map_err(|_| CoreError::Internal("metadata segment index overflow".to_owned()))?;
             requests.push(destination.write_request(
                 run_seq,
                 level,
@@ -142,7 +141,7 @@ where
         loop {
             let chunk = pending
                 .by_ref()
-                .take(MAX_MAINTENANCE_TABLE_IO)
+                .take(MAX_MAINTENANCE_SEGMENT_IO)
                 .collect::<Vec<_>>();
             if chunk.is_empty() {
                 break;
@@ -156,19 +155,17 @@ where
                 .await?,
             );
         }
-        tables.push(MetadataTableManifest {
+        segments_by_family.push(MetadataFamilySegments {
             family,
             segments: descriptors,
         });
     }
-    Ok(tables)
+    Ok(segments_by_family)
 }
 
-/// The two physical locations a logically identical metadata table may use.
-/// Keeping namespace and staging-job identity here makes the object key a
-/// consequence of the destination instead of a caller-supplied coordinate.
+/// Selects the published or compaction-staging location for a segment.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum MetadataTableDestination<'a> {
+pub(super) enum MetadataSegmentDestination<'a> {
     Published {
         namespace_id: &'a NamespaceId,
     },
@@ -178,7 +175,7 @@ pub(super) enum MetadataTableDestination<'a> {
     },
 }
 
-impl<'a> MetadataTableDestination<'a> {
+impl<'a> MetadataSegmentDestination<'a> {
     fn namespace_id(self) -> &'a NamespaceId {
         match self {
             Self::Published { namespace_id } | Self::CompactionStaging { namespace_id, .. } => {
@@ -187,13 +184,13 @@ impl<'a> MetadataTableDestination<'a> {
         }
     }
 
-    fn object_key(self, table_id: &MetadataTableId) -> String {
+    fn object_key(self, segment_id: &MetadataSegmentId) -> String {
         match self {
-            Self::Published { namespace_id } => metadata_table(namespace_id, table_id),
+            Self::Published { namespace_id } => metadata_segment(namespace_id, segment_id),
             Self::CompactionStaging {
                 namespace_id,
                 job_id,
-            } => metadata_compaction_table(namespace_id, job_id, table_id),
+            } => metadata_compaction_segment(namespace_id, job_id, segment_id),
         }
     }
 
@@ -201,13 +198,13 @@ impl<'a> MetadataTableDestination<'a> {
         self,
         run_seq: ChangeSeq,
         level: u32,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         segment_index: u32,
         rows: Vec<MetadataRow>,
-    ) -> MetadataSstWriteRequest<'a> {
-        MetadataSstWriteRequest {
+    ) -> MetadataSegmentWriteRequest<'a> {
+        MetadataSegmentWriteRequest {
             destination: self,
-            table_id: MetadataTableId::generate(),
+            segment_id: MetadataSegmentId::generate(),
             run_seq,
             level,
             family,
@@ -217,35 +214,35 @@ impl<'a> MetadataTableDestination<'a> {
     }
 }
 
-pub(super) struct MetadataSstWriteRequest<'a> {
-    destination: MetadataTableDestination<'a>,
-    table_id: MetadataTableId,
+pub(super) struct MetadataSegmentWriteRequest<'a> {
+    destination: MetadataSegmentDestination<'a>,
+    segment_id: MetadataSegmentId,
     run_seq: ChangeSeq,
     level: u32,
-    family: MetadataTableFamily,
+    family: MetadataRowFamily,
     segment_index: u32,
     rows: Vec<MetadataRow>,
 }
 
 pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
-    request: MetadataSstWriteRequest<'_>,
-) -> Result<MetadataFileRef> {
-    let object_key = request.destination.object_key(&request.table_id);
+    request: MetadataSegmentWriteRequest<'_>,
+) -> Result<MetadataSegmentRef> {
+    let object_key = request.destination.object_key(&request.segment_id);
     let mut builder = SegmentBlocksBuilder::default();
     for row in &request.rows {
         let row_key = row.row_key_for_family(request.family);
         let filter_key = row.filter_key_for_family(request.family);
         builder.push(&row_key, &filter_key, row).map_err(|err| {
             CoreError::Internal(format!(
-                "failed to build metadata SST `{}`: {err}",
+                "failed to build metadata segment `{}`: {err}",
                 object_key
             ))
         })?;
     }
     let built = builder.finish().map_err(|err| {
         CoreError::Internal(format!(
-            "failed to build metadata SST `{}`: {err}",
+            "failed to build metadata segment `{}`: {err}",
             object_key
         ))
     })?;
@@ -256,9 +253,9 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         let start = built.filter.offset as usize;
         hex_encode_bytes(&built.bytes[start..start + built.filter.stored_len as usize])
     });
-    Ok(MetadataFileRef {
+    Ok(MetadataSegmentRef {
         owner_namespace_id: request.destination.namespace_id().clone(),
-        table_id: request.table_id,
+        segment_id: request.segment_id,
         object_key,
         run_seq: request.run_seq,
         level: request.level,
@@ -276,11 +273,11 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
 
 pub(super) fn segment_manifest_rows(
     rows: Vec<MetadataRow>,
-    segmentation: MetadataTableSegmentation,
-) -> Vec<MetadataSstRows> {
+    segmentation: MetadataSegmentation,
+) -> Vec<MetadataSegmentRows> {
     match segmentation {
-        MetadataTableSegmentation::Full => vec![MetadataSstRows { rows }],
-        MetadataTableSegmentation::Base {
+        MetadataSegmentation::Full => vec![MetadataSegmentRows { rows }],
+        MetadataSegmentation::Base {
             max_rows_per_segment,
         } => segment_rows_by_row_key_range(rows, max_rows_per_segment),
     }
@@ -289,9 +286,9 @@ pub(super) fn segment_manifest_rows(
 pub(super) fn segment_rows_by_row_key_range(
     rows: Vec<MetadataRow>,
     max_rows_per_segment: NonZeroUsize,
-) -> Vec<MetadataSstRows> {
+) -> Vec<MetadataSegmentRows> {
     rows.chunks(max_rows_per_segment.get())
-        .map(|rows| MetadataSstRows {
+        .map(|rows| MetadataSegmentRows {
             rows: rows.to_vec(),
         })
         .collect()
@@ -306,26 +303,26 @@ mod destination_tests {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
         let job_id =
             MetadataCompactionId::parse("cmp_00000000000000000000000000000001").expect("job id");
-        let table_id =
-            MetadataTableId::parse("tbl_00000000000000000000000000000001").expect("table id");
+        let segment_id =
+            MetadataSegmentId::parse("seg_00000000000000000000000000000001").expect("segment id");
 
         assert_eq!(
-            MetadataTableDestination::Published {
+            MetadataSegmentDestination::Published {
                 namespace_id: &namespace_id,
             }
-            .object_key(&table_id),
-            "namespaces/ns-1/metadata/tables/\
-             tbl_00000000000000000000000000000001.sst.zst",
+            .object_key(&segment_id),
+            "namespaces/ns-1/metadata/segments/\
+             seg_00000000000000000000000000000001.sst.zst",
         );
         assert_eq!(
-            MetadataTableDestination::CompactionStaging {
+            MetadataSegmentDestination::CompactionStaging {
                 namespace_id: &namespace_id,
                 job_id: &job_id,
             }
-            .object_key(&table_id),
+            .object_key(&segment_id),
             "namespaces/ns-1/metadata/compactions/\
-             cmp_00000000000000000000000000000001/tables/\
-             tbl_00000000000000000000000000000001.sst.zst",
+             cmp_00000000000000000000000000000001/segments/\
+             seg_00000000000000000000000000000001.sst.zst",
         );
     }
 }

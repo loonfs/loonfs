@@ -1,12 +1,12 @@
 //! SST block-range selection and per-view decoded-block memoization.
 
 use super::block_fetch::load_segment_index;
-use super::cache::{DecodedMetadataTableBlock, MetadataTableCache, MetadataTableCacheKey};
+use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
 use super::data_block_load::load_segment_data_block_span;
 use super::error::ManifestLoadError;
 use super::scan::Readahead;
 use super::validate::validate_manifest_row_seq_range;
-use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow};
+use loonfs_api::wire::manifest::{MetadataRow, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, DecodedDataBlock};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, VecDeque};
@@ -76,16 +76,16 @@ pub(super) struct SessionBlockMemo {
 
 #[derive(Debug, Default)]
 struct SessionBlockMemoInner {
-    blocks: HashMap<Arc<MetadataTableCacheKey>, DecodedMetadataTableBlock>,
-    data_insertion_order: VecDeque<Arc<MetadataTableCacheKey>>,
+    blocks: HashMap<Arc<MetadataSegmentCacheKey>, DecodedMetadataSegmentBlock>,
+    data_insertion_order: VecDeque<Arc<MetadataSegmentCacheKey>>,
     data_decoded_bytes: usize,
 }
 
 impl SessionBlockMemo {
     pub(super) fn get(
         &self,
-        cache_key: &MetadataTableCacheKey,
-    ) -> Option<DecodedMetadataTableBlock> {
+        cache_key: &MetadataSegmentCacheKey,
+    ) -> Option<DecodedMetadataSegmentBlock> {
         self.inner
             .lock()
             .expect("session block memo lock should not be poisoned")
@@ -96,11 +96,11 @@ impl SessionBlockMemo {
 
     pub(super) fn record(
         &self,
-        cache_key: &MetadataTableCacheKey,
-        block: &DecodedMetadataTableBlock,
+        cache_key: &MetadataSegmentCacheKey,
+        block: &DecodedMetadataSegmentBlock,
     ) {
         let cache_key = Arc::new(cache_key.clone());
-        let DecodedMetadataTableBlock::Data { decoded_bytes, .. } = block else {
+        let DecodedMetadataSegmentBlock::Data { decoded_bytes, .. } = block else {
             self.inner
                 .lock()
                 .expect("session block memo lock should not be poisoned")
@@ -150,14 +150,14 @@ const RANGE_SCAN_READAHEAD_BLOCKS: usize = 32;
 /// [`SegmentKeyRangeBlocks::rows_in_key_range`].
 pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
-    table_cache: Option<&MetadataTableCache>,
+    segment_cache: Option<&MetadataSegmentCache>,
     memo: &SessionBlockMemo,
-    descriptor: &MetadataFileRef,
+    descriptor: &MetadataSegmentRef,
     lower_bound: &str,
     upper_bound: Option<&str>,
     readahead: Readahead,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
-    let index = load_segment_index(store, table_cache, memo, descriptor).await?;
+    let index = load_segment_index(store, segment_cache, memo, descriptor).await?;
     let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
 
     // A paged scan marches onward through the segment: read ahead so the
@@ -173,7 +173,7 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     };
     let blocks: Vec<_> = load_segment_data_block_span(
         store,
-        table_cache,
+        segment_cache,
         memo,
         descriptor,
         &index[needed.start..extended_end],
@@ -193,22 +193,22 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
 
 #[cfg(test)]
 mod tests {
-    use super::super::cache::MetadataTableBlockKind;
+    use super::super::cache::MetadataSegmentBlockKind;
     use super::super::load::genesis_basis_manifest;
     use super::*;
     use loonfs_api::wire::sst_blocks::{decode_filter_block, SegmentBlocksBuilder};
     use loonfs_api::NamespaceId;
 
-    fn key(kind: MetadataTableBlockKind, offset: u64) -> MetadataTableCacheKey {
-        MetadataTableCacheKey {
+    fn key(kind: MetadataSegmentBlockKind, offset: u64) -> MetadataSegmentCacheKey {
+        MetadataSegmentCacheKey {
             identity: format!("memo-{offset}"),
             block_kind: kind,
             block_offset: offset,
         }
     }
 
-    fn data_block(decoded_bytes: usize) -> DecodedMetadataTableBlock {
-        DecodedMetadataTableBlock::Data {
+    fn data_block(decoded_bytes: usize) -> DecodedMetadataSegmentBlock {
+        DecodedMetadataSegmentBlock::Data {
             block: Arc::new(DecodedDataBlock {
                 row_keys: Vec::new(),
                 rows: Vec::new(),
@@ -217,7 +217,7 @@ mod tests {
         }
     }
 
-    fn filter_block() -> DecodedMetadataTableBlock {
+    fn filter_block() -> DecodedMetadataSegmentBlock {
         let mut builder = SegmentBlocksBuilder::default();
         builder
             .push("key", "key", &0_u8)
@@ -227,15 +227,15 @@ mod tests {
         let end = start + built.filter.stored_len as usize;
         let filter = decode_filter_block(&built.bytes[start..end], &built.filter)
             .expect("filter fixture should decode");
-        DecodedMetadataTableBlock::Filter {
+        DecodedMetadataSegmentBlock::Filter {
             filter: Arc::new(filter),
             decoded_bytes: 1,
         }
     }
 
-    fn manifest_block() -> DecodedMetadataTableBlock {
+    fn manifest_block() -> DecodedMetadataSegmentBlock {
         let namespace_id = NamespaceId::parse("memo").expect("namespace id");
-        DecodedMetadataTableBlock::Manifest {
+        DecodedMetadataSegmentBlock::Manifest {
             manifest: Arc::new(genesis_basis_manifest(&namespace_id)),
             scan_runs: Arc::new(Vec::new()),
             decoded_bytes: 1,
@@ -245,12 +245,12 @@ mod tests {
     #[test]
     fn data_budget_evicts_oldest_data_and_preserves_metadata_entries() {
         let memo = SessionBlockMemo::default();
-        let index_key = key(MetadataTableBlockKind::Index, 1);
-        let filter_key = key(MetadataTableBlockKind::Filter, 2);
-        let manifest_key = key(MetadataTableBlockKind::Manifest, 3);
+        let index_key = key(MetadataSegmentBlockKind::Index, 1);
+        let filter_key = key(MetadataSegmentBlockKind::Filter, 2);
+        let manifest_key = key(MetadataSegmentBlockKind::Manifest, 3);
         memo.record(
             &index_key,
-            &DecodedMetadataTableBlock::Index {
+            &DecodedMetadataSegmentBlock::Index {
                 entries: Arc::new(Vec::new()),
                 decoded_bytes: 1,
             },
@@ -258,9 +258,9 @@ mod tests {
         memo.record(&filter_key, &filter_block());
         memo.record(&manifest_key, &manifest_block());
 
-        let oldest_data_key = key(MetadataTableBlockKind::Data, 4);
-        let newer_data_key = key(MetadataTableBlockKind::Data, 5);
-        let newest_data_key = key(MetadataTableBlockKind::Data, 6);
+        let oldest_data_key = key(MetadataSegmentBlockKind::Data, 4);
+        let newer_data_key = key(MetadataSegmentBlockKind::Data, 5);
+        let newest_data_key = key(MetadataSegmentBlockKind::Data, 6);
         memo.record(
             &oldest_data_key,
             &data_block(SESSION_BLOCK_MEMO_DATA_DECODED_BYTES / 2),

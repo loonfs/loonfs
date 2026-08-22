@@ -1,4 +1,4 @@
-//! [`MetadataView`]: seq-scoped metadata lookups over manifest tables
+//! [`MetadataView`]: seq-scoped metadata lookups over manifest segments
 //! merged with the WAL tail, plus the caching session wide reads use.
 
 use super::durable_cache::{
@@ -6,7 +6,7 @@ use super::durable_cache::{
 };
 use super::manifest_index;
 use super::visibility::{self, MetadataVisibilityReads};
-use crate::checkpoint::VerifiedMetadataTables;
+use crate::checkpoint::VerifiedMetadataSegments;
 use crate::error::CoreError;
 use crate::metadata::{
     active_deletion_from_tombstone, unbind_matches_binding, ActiveDeletionRecord,
@@ -71,7 +71,7 @@ pub(crate) struct MetadataSnapshot {
 pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
     overlay: Option<&'a MetadataState>,
     wal_tail: Option<&'a MetadataState>,
-    manifest: Option<&'a VerifiedMetadataTables<'store, S>>,
+    manifest: Option<&'a VerifiedMetadataSegments<'store, S>>,
     durable_cache: Option<&'a DurableVisibilityCache>,
 }
 
@@ -121,7 +121,7 @@ impl<'a> InMemoryMetadataView<'a> {
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) fn from_loaded_head(
         head: &'a HeadState,
-        tables: &'a VerifiedMetadataTables<'store, S>,
+        segments: &'a VerifiedMetadataSegments<'store, S>,
         wal_tail_rows: &'a MetadataState,
     ) -> Self {
         Self {
@@ -131,7 +131,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             sources: MetadataSourceStack {
                 overlay: None,
                 wal_tail: Some(wal_tail_rows),
-                manifest: Some(tables),
+                manifest: Some(segments),
                 durable_cache: None,
             },
         }
@@ -142,8 +142,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// Unlike [`Self::from_loaded_head`], this view does not replay the current
     /// WAL tail. It is used for pinned manifests such as checkpoints, so later
     /// commits cannot affect the result.
-    pub(crate) fn over_manifest_tables(
-        tables: &'a VerifiedMetadataTables<'store, S>,
+    pub(crate) fn over_manifest_segments(
+        segments: &'a VerifiedMetadataSegments<'store, S>,
         materialized_seq: ChangeSeq,
     ) -> Self {
         Self {
@@ -153,7 +153,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             sources: MetadataSourceStack {
                 overlay: None,
                 wal_tail: None,
-                manifest: Some(tables),
+                manifest: Some(segments),
                 durable_cache: None,
             },
         }
@@ -206,7 +206,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         self.sources.wal_tail.into_iter()
     }
 
-    pub(super) fn manifest_tables(&self) -> Option<&'a VerifiedMetadataTables<'store, S>> {
+    pub(super) fn manifest_segments(&self) -> Option<&'a VerifiedMetadataSegments<'store, S>> {
         self.sources.manifest
     }
 }
@@ -277,8 +277,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .durable_row_states()
             .find_map(|state| state.inode_at_seq(inode_id, self.visible_seq()));
         if durable.is_none() {
-            if let Some(tables) = self.manifest_tables() {
-                durable = manifest_index::inode_at_seq(tables, inode_id).await?;
+            if let Some(segments) = self.manifest_segments() {
+                durable = manifest_index::inode_at_seq(segments, inode_id).await?;
             }
         }
         if let Some(cache) = self.sources.durable_cache {
@@ -302,8 +302,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         inode_id: InodeId,
     ) -> Result<Option<RevisionRecord>, CoreError> {
         let row_revision = self.row_latest_revision_for_inode(inode_id);
-        let manifest_revision = if let Some(tables) = self.manifest_tables() {
-            manifest_index::latest_revision_for_inode(tables, inode_id).await?
+        let manifest_revision = if let Some(segments) = self.manifest_segments() {
+            manifest_index::latest_revision_for_inode(segments, inode_id).await?
         } else {
             None
         };
@@ -342,8 +342,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         revision_no: RevisionNo,
     ) -> Result<Option<RevisionRecord>, CoreError> {
         let row_revision = self.row_revision_for_inode_no(inode_id, revision_no);
-        let manifest_revision = if let Some(tables) = self.manifest_tables() {
-            manifest_index::revision_for_inode_no(tables, inode_id, revision_no).await?
+        let manifest_revision = if let Some(segments) = self.manifest_segments() {
+            manifest_index::revision_for_inode_no(segments, inode_id, revision_no).await?
         } else {
             None
         };
@@ -362,8 +362,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut revisions = if let Some(tables) = self.manifest_tables() {
-            manifest_index::revisions_for_inode_page_desc(tables, inode_id, start_after, limit)
+        let mut revisions = if let Some(segments) = self.manifest_segments() {
+            manifest_index::revisions_for_inode_page_desc(segments, inode_id, start_after, limit)
                 .await?
         } else {
             Vec::new()
@@ -397,8 +397,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             })
             .max_by_key(|record| attributes_order_key(record))
             .cloned();
-        let manifest_record = if let Some(tables) = self.manifest_tables() {
-            manifest_index::attributes_for_inode(tables, inode_id, self.visible_seq()).await?
+        let manifest_record = if let Some(segments) = self.manifest_segments() {
+            manifest_index::attributes_for_inode(segments, inode_id, self.visible_seq()).await?
         } else {
             None
         };
@@ -467,8 +467,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .filter(|receipt| receipt.committed_seq <= self.visible_seq())
             .max_by_key(|receipt| receipt.committed_seq)
             .cloned();
-        let manifest_receipt = if let Some(tables) = self.manifest_tables() {
-            manifest_index::commit_receipt(tables, commit_id).await?
+        let manifest_receipt = if let Some(segments) = self.manifest_segments() {
+            manifest_index::commit_receipt(segments, commit_id).await?
         } else {
             None
         };
@@ -573,8 +573,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         {
             cached
         } else {
-            let mut durable = if let Some(tables) = self.manifest_tables() {
-                manifest_index::direntry_binds_for_parent_name(tables, parent_inode_id, name_key)
+            let mut durable = if let Some(segments) = self.manifest_segments() {
+                manifest_index::direntry_binds_for_parent_name(segments, parent_inode_id, name_key)
                     .await?
             } else {
                 Vec::new()
@@ -627,8 +627,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         {
             cached
         } else {
-            let mut durable = if let Some(tables) = self.manifest_tables() {
-                manifest_index::direntry_binds_for_child(tables, child_inode_id).await?
+            let mut durable = if let Some(segments) = self.manifest_segments() {
+                manifest_index::direntry_binds_for_child(segments, child_inode_id).await?
             } else {
                 Vec::new()
             };
@@ -675,8 +675,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         {
             cached
         } else {
-            let mut durable = if let Some(tables) = self.manifest_tables() {
-                manifest_index::direntry_unbinds_for_binding(tables, direntry).await?
+            let mut durable = if let Some(segments) = self.manifest_segments() {
+                manifest_index::direntry_unbinds_for_binding(segments, direntry).await?
             } else {
                 Vec::new()
             };
@@ -819,7 +819,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .collect();
         tail.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-        let mut durable = ActiveDeletionScan::new(lower_bound, self.manifest_tables().is_none());
+        let mut durable = ActiveDeletionScan::new(lower_bound, self.manifest_segments().is_none());
         let mut tail_index = 0usize;
         let mut entries = Vec::with_capacity(limit);
         let mut removed_generation: Option<(ChangeSeq, InodeId)> = None;
@@ -827,11 +827,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         while entries.len() < limit {
             if durable.buffered.is_empty() && !durable.exhausted {
                 let raw_limit = limit.max(ACTIVE_DELETION_RAW_SCAN_LIMIT);
-                let tables = self
-                    .manifest_tables()
-                    .expect("a view without manifest tables starts its scan exhausted");
+                let segments = self
+                    .manifest_segments()
+                    .expect("a view without manifest segments starts its scan exhausted");
                 let page = manifest_index::active_deletions_page(
-                    tables,
+                    segments,
                     &durable.lower_bound,
                     upper_bound.as_deref(),
                     raw_limit,
@@ -883,8 +883,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         {
             cached
         } else {
-            let mut durable = if let Some(tables) = self.manifest_tables() {
-                manifest_index::tombstones_for_root(tables, root_inode_id).await?
+            let mut durable = if let Some(segments) = self.manifest_segments() {
+                manifest_index::tombstones_for_root(segments, root_inode_id).await?
             } else {
                 Vec::new()
             };
@@ -920,7 +920,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     /// Every unbind for `parent_inode_id` with a name key in
-    /// `[first_name_key, last_name_key]`, merged across manifest tables and
+    /// `[first_name_key, last_name_key]`, merged across manifest segments and
     /// row states. Complete over the range: callers treat absence as "no
     /// unbind exists".
     pub(super) async fn direntry_unbinds_for_parent_name_range(
@@ -929,9 +929,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         first_name_key: &NameKey,
         last_name_key: &NameKey,
     ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
-        let mut unbinds = if let Some(tables) = self.manifest_tables() {
+        let mut unbinds = if let Some(segments) = self.manifest_segments() {
             manifest_index::direntry_unbinds_for_parent_name_range(
-                tables,
+                segments,
                 parent_inode_id,
                 first_name_key,
                 last_name_key,
@@ -956,7 +956,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 }
 
 /// [`MetadataView`] as a [`MetadataVisibilityReads`] source: it answers only
-/// the primitive lookups (over the manifest tables merged with the row-state
+/// the primitive lookups (over the manifest segments merged with the row-state
 /// tail) and takes every composite rule from the provided trait methods, so
 /// the object-store-backed view decides visibility through the exact same
 /// bodies as the in-memory state.

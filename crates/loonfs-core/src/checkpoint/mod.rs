@@ -1,6 +1,6 @@
-//! Checkpoints, namespace manifests, and metadata SSTs.
+//! Checkpoints, namespace manifests, and metadata segments.
 //!
-//! A namespace manifest references the immutable metadata SST runs for one
+//! A namespace manifest references the immutable metadata segment runs for one
 //! namespace state. A checkpoint pins a manifest for retention, forks, stable
 //! reads, or restore.
 //!
@@ -50,8 +50,8 @@ pub(crate) mod tests;
 mod validate;
 
 pub use self::cache::{
-    MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheObserver,
-    MetadataTableCacheStats, WalTailProjectionCache, WalTailProjectionCacheConfig,
+    MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheObserver,
+    MetadataSegmentCacheStats, WalTailProjectionCache, WalTailProjectionCacheConfig,
     WalTailProjectionCacheKey, WalTailProjectionCacheObserver, WalTailProjectionCacheStats,
     DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
@@ -77,15 +77,15 @@ pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::flush::flush_wal;
 pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::load::{
-    head_from_manifest, load_basis_metadata_tables, load_namespace_manifest_envelope,
-    load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
+    head_from_manifest, load_basis_metadata_segments, load_namespace_manifest_envelope,
+    load_namespace_manifest_envelope_if_present, load_verified_manifest_segments,
     LoadedMetadataBasis,
 };
 pub(crate) use self::record::load_checkpoint_record;
 pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
-pub(crate) use self::scan::{Readahead, VerifiedMetadataTables};
+pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
 pub(crate) use self::streaming_compaction::run_metadata_compaction_job;
 
 fn checkpoint_summary(

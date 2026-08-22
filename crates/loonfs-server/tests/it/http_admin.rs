@@ -342,7 +342,7 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
     // keep working.
     let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
     assert_eq!(report.deleted_wal_segments, 0);
-    assert_eq!(report.deleted_metadata_tables, 0);
+    assert_eq!(report.deleted_metadata_segments, 0);
     assert_eq!(report.deleted_manifests, 0);
     assert_eq!(report.deleted_checkpoint_records, 0);
     assert!(!report.degraded_retention);

@@ -1,6 +1,6 @@
 //! Retention floor advancement against the current verified manifest.
 
-use super::load::{ensure_root_matches_manifest, load_verified_manifest_tables};
+use super::load::{ensure_root_matches_manifest, load_verified_manifest_segments};
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
@@ -50,16 +50,16 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         });
     };
     let root = loaded_root.state;
-    let manifest_tables =
-        load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+    let manifest_segments =
+        load_verified_manifest_segments(store, namespace_id, &root.manifest_object_id)
             .await
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
-    ensure_root_matches_manifest(namespace_id, &root, manifest_tables.manifest())?;
+    ensure_root_matches_manifest(namespace_id, &root, manifest_segments.manifest())?;
     // Grep tolerates retention gaps by checkpointed rebootstrap, so its
     // independent watermark never holds the core WAL floor back.
-    let target_floor = manifest_tables.manifest().payload.head_seq;
+    let target_floor = manifest_segments.manifest().payload.head_seq;
     let current_floor = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;

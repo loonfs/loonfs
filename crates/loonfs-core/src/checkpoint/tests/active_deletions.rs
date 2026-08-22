@@ -62,10 +62,10 @@ fn state_from_tombstones(tombstones: Vec<SubtreeTombstoneRecord>) -> MetadataSta
 /// The family's rows for a state, as `(row key, listed or removed)` pairs in
 /// scan order.
 fn active_deletion_rows(state: &MetadataState) -> Vec<(String, &'static str)> {
-    manifest_rows_for_family(state, ApiMetadataTableFamily::ActiveDeletions)
+    manifest_rows_for_family(state, ApiMetadataRowFamily::ActiveDeletions)
         .into_iter()
         .map(|row| {
-            let row_key = row.row_key_for_family(ApiMetadataTableFamily::ActiveDeletions);
+            let row_key = row.row_key_for_family(ApiMetadataRowFamily::ActiveDeletions);
             let kind = match row {
                 MetadataRow::ActiveDeletion {
                     action: ActiveDeletionRowAction::Listed { .. },
@@ -140,7 +140,7 @@ fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
     ]);
     let delta_rows = super::super::row::manifest_rows_for_family_after_seq(
         &state,
-        ApiMetadataTableFamily::ActiveDeletions,
+        ApiMetadataRowFamily::ActiveDeletions,
         ChangeSeq(5),
     );
     assert_eq!(
@@ -170,8 +170,8 @@ fn the_fold_drops_cancelled_pairs_and_keeps_every_live_deletion() {
         tombstone_set(InodeId(7), 12, "notes.txt"),
     ]);
     let mut rows_by_family = std::collections::BTreeMap::from([(
-        ApiMetadataTableFamily::ActiveDeletions,
-        manifest_rows_for_family(&state, ApiMetadataTableFamily::ActiveDeletions),
+        ApiMetadataRowFamily::ActiveDeletions,
+        manifest_rows_for_family(&state, ApiMetadataRowFamily::ActiveDeletions),
     )]);
     // Far above every row: the floor must not touch this family.
     fold_rows_with_retention(
@@ -182,10 +182,10 @@ fn the_fold_drops_cancelled_pairs_and_keeps_every_live_deletion() {
     .expect("fold active deletions");
 
     let kept = rows_by_family
-        .remove(&ApiMetadataTableFamily::ActiveDeletions)
+        .remove(&ApiMetadataRowFamily::ActiveDeletions)
         .expect("family rows")
         .into_iter()
-        .map(|row| row.row_key_for_family(ApiMetadataTableFamily::ActiveDeletions))
+        .map(|row| row.row_key_for_family(ApiMetadataRowFamily::ActiveDeletions))
         .collect::<Vec<_>>();
     assert_eq!(
         kept,
@@ -704,7 +704,7 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
     /// deletions, measured after the family is folded into its base.
     async fn page_reads(deletions: u32) -> usize {
         let temp = tempdir().expect("tempdir");
-        let store = CountingStore::metadata_tables(
+        let store = CountingStore::metadata_segments(
             LocalFsStore::new(temp.path()).expect("create local-fs store"),
         );
         let namespace_id = NamespaceId::parse("trash-bounded").expect("namespace id");

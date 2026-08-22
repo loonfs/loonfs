@@ -31,7 +31,7 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
-    DeletedDirentry, MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
+    DeletedDirentry, MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
     NamespaceManifestPayload, TombstoneGeneration, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
@@ -42,7 +42,7 @@ use loonfs_api::{
     sha256_digest, ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue,
     Attributes, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId,
     ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo, ManifestObjectId,
-    MetadataCompactionId, MetadataTableId, NameKey, NamespaceId, RevisionNo, UploadId,
+    MetadataCompactionId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, UploadId,
     WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
@@ -205,8 +205,8 @@ fn content_ref_decode_rejects_unknown_fields() {
     );
 }
 
-fn table_id() -> MetadataTableId {
-    MetadataTableId::parse("tbl_0123456789abcdef0123456789abcdef").expect("valid table id")
+fn segment_id() -> MetadataSegmentId {
+    MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdef").expect("valid segment id")
 }
 
 fn name_key(value: &str) -> NameKey {
@@ -342,15 +342,15 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
         writer_epoch: WriterEpoch(3),
         next_inode_id: InodeId(10),
         retention_floor_seq: ChangeSeq(0),
-        metadata_files: vec![MetadataFileRef {
+        segments: vec![MetadataSegmentRef {
             owner_namespace_id: namespace_id(),
-            table_id: table_id(),
+            segment_id: segment_id(),
             object_key:
-                "namespaces/demo/metadata/tables/tbl_0123456789abcdef0123456789abcdef.sst.zst"
+                "namespaces/demo/metadata/segments/seg_0123456789abcdef0123456789abcdef.sst.zst"
                     .to_owned(),
             run_seq: ChangeSeq(2),
             level: 0,
-            family: MetadataTableFamily::Inodes,
+            family: MetadataRowFamily::Inodes,
             segment_index: 0,
             row_count: 6,
             min_key: "commit-receipt".to_owned(),
@@ -1306,18 +1306,18 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
 }
 
 #[test]
-fn metadata_table_family_wire_tags_are_pinned() {
+fn metadata_row_family_wire_tags_are_pinned() {
     let tags: Vec<String> = [
-        MetadataTableFamily::Inodes,
-        MetadataTableFamily::DirentryBinds,
-        MetadataTableFamily::DirentryChildBinds,
-        MetadataTableFamily::DirentryUnbinds,
-        MetadataTableFamily::Revisions,
-        MetadataTableFamily::RevisionsByInodeDesc,
-        MetadataTableFamily::Tombstones,
-        MetadataTableFamily::ActiveDeletions,
-        MetadataTableFamily::CommitReceipts,
-        MetadataTableFamily::Attributes,
+        MetadataRowFamily::Inodes,
+        MetadataRowFamily::DirentryBinds,
+        MetadataRowFamily::DirentryChildBinds,
+        MetadataRowFamily::DirentryUnbinds,
+        MetadataRowFamily::Revisions,
+        MetadataRowFamily::RevisionsByInodeDesc,
+        MetadataRowFamily::Tombstones,
+        MetadataRowFamily::ActiveDeletions,
+        MetadataRowFamily::CommitReceipts,
+        MetadataRowFamily::Attributes,
     ]
     .iter()
     .map(|family| serde_json::to_string(family).expect("family tag"))
@@ -1776,7 +1776,7 @@ fn wal_delta_wire_tags_match_spec_names() {
 }
 
 // ---------------------------------------------------------------------------
-// Metadata SST blocks
+// Metadata segment blocks
 // ---------------------------------------------------------------------------
 
 /// A delete by path: the tombstone records the binding it removed.

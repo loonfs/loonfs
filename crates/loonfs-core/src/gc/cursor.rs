@@ -6,8 +6,8 @@ use loonfs_api::{
     PageCursor,
 };
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_compaction_prefix, metadata_manifest_prefix, metadata_table_prefix,
-    upload_session_prefix, wal_segment_prefix,
+    checkpoint_prefix, metadata_compaction_prefix, metadata_manifest_prefix,
+    metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub(super) enum CandidateFamily {
     WalSegments,
-    MetadataTables,
+    MetadataSegments,
     /// Everything one streaming compaction job owns: the segments it wrote
     /// and the lease that says it is still running. Its own family because
     /// its objects are decided by that lease rather than by age alone — a job
@@ -30,7 +30,7 @@ pub(super) enum CandidateFamily {
 impl CandidateFamily {
     pub(super) const ALL: [Self; 6] = [
         Self::WalSegments,
-        Self::MetadataTables,
+        Self::MetadataSegments,
         Self::CompactionStaging,
         Self::Manifests,
         Self::Checkpoints,
@@ -48,7 +48,7 @@ impl CandidateFamily {
     pub(super) fn prefix(self, namespace_id: &NamespaceId) -> String {
         match self {
             Self::WalSegments => wal_segment_prefix(namespace_id),
-            Self::MetadataTables => metadata_table_prefix(namespace_id),
+            Self::MetadataSegments => metadata_segment_prefix(namespace_id),
             Self::CompactionStaging => metadata_compaction_prefix(namespace_id),
             Self::Manifests => metadata_manifest_prefix(namespace_id),
             Self::Checkpoints => checkpoint_prefix(namespace_id),
@@ -138,16 +138,16 @@ mod tests {
             "v": 1,
             "kind": "core_gc",
             "namespace_id": "demo",
-            "family": "metadata_tables",
-            "last_key": "namespaces/demo/metadata/tables/table.sst.zst",
+            "family": "metadata_segments",
+            "last_key": "namespaces/demo/metadata/segments/segment.sst.zst",
             "future_field": {"ignored": true}
         }));
 
         let cursor = GcCursor::decode(&token, &namespace_id).expect("decode cursor");
-        assert_eq!(cursor.family, CandidateFamily::MetadataTables);
+        assert_eq!(cursor.family, CandidateFamily::MetadataSegments);
         assert_eq!(
             cursor.last_key.as_deref(),
-            Some("namespaces/demo/metadata/tables/table.sst.zst")
+            Some("namespaces/demo/metadata/segments/segment.sst.zst")
         );
     }
 

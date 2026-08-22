@@ -711,7 +711,7 @@ async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
 // Durability: across a flush, and across a fork
 // ---------------------------------------------------------------------------
 
-/// After a flush the attributes live in metadata tables rather than in the
+/// After a flush the attributes live in metadata segments rather than in the
 /// replayed WAL tail. The next update's revision number is what says the
 /// write path read them from there: a lost map would restart the counter.
 #[tokio::test]
@@ -750,7 +750,7 @@ async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
     namespace_engine(&store, &namespace_id, &context)
         .flush_wal()
         .await
-        .expect("flush the WAL tail into metadata tables");
+        .expect("flush the WAL tail into metadata segments");
 
     // A repeat of the current state is still a no-op, which it could only be
     // if the flushed map is what the planner read.

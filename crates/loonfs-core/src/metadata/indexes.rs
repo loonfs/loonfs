@@ -244,7 +244,7 @@ impl MetadataIndexes {
 
     /// Revisions contribute only the seq watermark: no read consults an
     /// in-memory revision index — revision lookups scan the rows, which stay
-    /// tail-sized in memory (the manifest tables answer the bulk).
+    /// tail-sized in memory (the manifest segments answer the bulk).
     pub(super) fn record_revision(&mut self, record: &RevisionRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
     }
@@ -269,7 +269,7 @@ impl MetadataIndexes {
 
     /// Attribute revisions contribute only the seq watermark, like revisions:
     /// attribute lookups scan the rows, which stay tail-sized in memory
-    /// because the manifest tables answer the bulk.
+    /// because the manifest segments answer the bulk.
     pub(super) fn record_attributes_revision(&mut self, record: &AttributesRevisionRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
     }

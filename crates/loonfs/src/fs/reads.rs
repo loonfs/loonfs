@@ -325,7 +325,7 @@ impl FsReader {
         let entry = engine
             .resolve_path(absolute_path, options, &read_context)
             .await?;
-        tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_TABLES);
+        tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_SEGMENTS);
         Ok(entry)
     }
 
@@ -353,7 +353,7 @@ impl FsReader {
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let entry = engine.stat_inode(inode_id, options, &read_context).await?;
-        tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_TABLES);
+        tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_SEGMENTS);
         Ok(entry)
     }
 

@@ -3,9 +3,10 @@
 use super::*;
 
 #[tokio::test]
-async fn byte_budgeted_cache_admits_large_table_scans() {
+async fn byte_budgeted_cache_admits_large_segment_scans() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -25,18 +26,18 @@ async fn byte_budgeted_cache_admits_large_table_scans() {
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     // The default cache config carries a decoded-byte budget, so a scan wider
     // than the small-scan limit populates the cache instead of reading through.
-    let cache = super::MetadataTableCache::new(Default::default());
-    let tables = super::load_verified_manifest_tables_with_cache(
+    let cache = super::MetadataSegmentCache::new(Default::default());
+    let segments = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load tables");
+    .expect("load segments");
 
-    let revisions = tables
-        .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
+    let revisions = segments
+        .scan_prefix(ApiMetadataRowFamily::Revisions, "revision-")
         .await
         .expect("scan revisions");
     let after_first = cache.stats();
@@ -48,17 +49,17 @@ async fn byte_budgeted_cache_admits_large_table_scans() {
 
     // A fresh view has no per-view segment memo; only the shared cache can
     // answer, so the repeated scan must issue no segment fetches.
-    let fresh_tables = super::load_verified_manifest_tables_with_cache(
+    let fresh_segments = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load fresh tables");
+    .expect("load fresh segments");
     store.reset();
-    let repeated = fresh_tables
-        .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
+    let repeated = fresh_segments
+        .scan_prefix(ApiMetadataRowFamily::Revisions, "revision-")
         .await
         .expect("repeated scan");
     let after_repeat = cache.stats();
@@ -75,7 +76,8 @@ async fn byte_budgeted_cache_admits_large_table_scans() {
 #[tokio::test]
 async fn concurrent_scans_share_one_fetch_per_segment() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -96,20 +98,20 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     // Concurrent scans over one shared cache must not multiply fetches:
     // single-flight covers blocks racing before the first insert lands, and
     // population covers everything after.
-    let cache = super::MetadataTableCache::new(MetadataTableCacheConfig::default());
+    let cache = super::MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
     // A solo pass over its own cold cache measures the true per-scan
     // fetch count.
-    let solo_tables = super::load_verified_manifest_tables_with_cache(
+    let solo_segments = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load solo tables");
+    .expect("load solo segments");
     store.reset();
-    let solo = solo_tables
-        .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
+    let solo = solo_segments
+        .scan_prefix(ApiMetadataRowFamily::Revisions, "revision-")
         .await
         .expect("solo scan");
     let solo_fetches = store.count(OperationClass::Read);
@@ -117,28 +119,28 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     assert!(solo_fetches >= 8, "solo scan should fetch every segment");
 
     // Concurrent requests race over a second cold cache, each with its own
-    // tables view; single-flight is what keeps the pair at the solo count.
-    let paired_cache = super::MetadataTableCache::new(MetadataTableCacheConfig::default());
-    let first_tables = super::load_verified_manifest_tables_with_cache(
+    // segments view; single-flight is what keeps the pair at the solo count.
+    let paired_cache = super::MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let first_segments = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&paired_cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load first tables");
-    let second_tables = super::load_verified_manifest_tables_with_cache(
+    .expect("load first segments");
+    let second_segments = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&paired_cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load second tables");
+    .expect("load second segments");
     store.reset();
     let (first, second) = tokio::join!(
-        first_tables.scan_prefix(ApiMetadataTableFamily::Revisions, "revision-"),
-        second_tables.scan_prefix(ApiMetadataTableFamily::Revisions, "revision-"),
+        first_segments.scan_prefix(ApiMetadataRowFamily::Revisions, "revision-"),
+        second_segments.scan_prefix(ApiMetadataRowFamily::Revisions, "revision-"),
     );
     let paired_fetches = store.count(OperationClass::Read);
     assert_eq!(first.expect("first scan"), second.expect("second scan"));
@@ -181,23 +183,23 @@ async fn cached_manifest_carries_its_scan_order_runs() {
         .expect("create second checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
 
-    let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
-    let first = super::load_verified_manifest_tables_with_cache(
+    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let first = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load first tables");
-    let second = super::load_verified_manifest_tables_with_cache(
+    .expect("load first segments");
+    let second = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load second tables");
+    .expect("load second segments");
 
     assert!(
         first.scan_runs.len() >= 2,
@@ -215,7 +217,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
 }
 
 #[tokio::test]
-async fn table_range_page_merges_base_and_l0_in_row_key_order() {
+async fn segment_range_page_merges_base_and_l0_in_row_key_order() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -240,21 +242,21 @@ async fn table_range_page_merges_base_and_l0_in_row_key_order() {
         .expect("write b");
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let tables = super::load_verified_manifest_tables_with_cache(
+    let segments = super::load_verified_manifest_segments_with_cache(
         &store,
         None,
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load tables");
+    .expect("load segments");
 
     let docs_inode_id = InodeId(2);
     let lower_bound = format!("direntry-{:020}-", docs_inode_id.0);
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
-    let page = tables
+    let page = segments
         .scan_range_page(
-            ApiMetadataTableFamily::DirentryBinds,
+            ApiMetadataRowFamily::DirentryBinds,
             &lower_bound,
             upper_bound.as_deref(),
             2,
@@ -277,7 +279,8 @@ async fn table_range_page_merges_base_and_l0_in_row_key_order() {
 #[tokio::test]
 async fn byte_budgeted_cache_admits_large_range_scans() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -295,24 +298,24 @@ async fn byte_budgeted_cache_admits_large_range_scans() {
     };
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let cache = super::MetadataTableCache::new(Default::default());
-    let tables = super::load_verified_manifest_tables_with_cache(
+    let cache = super::MetadataSegmentCache::new(Default::default());
+    let segments = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load tables");
+    .expect("load segments");
 
     // The list preload path: one page-shaped range scan over a directory
     // whose bind rows span more segments than the small-scan limit.
     let docs_inode_id = InodeId(2);
     let lower_bound = format!("direntry-{:020}-", docs_inode_id.0);
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
-    let page = tables
+    let page = segments
         .scan_range_page(
-            ApiMetadataTableFamily::DirentryBinds,
+            ApiMetadataRowFamily::DirentryBinds,
             &lower_bound,
             upper_bound.as_deref(),
             8,
@@ -326,18 +329,18 @@ async fn byte_budgeted_cache_admits_large_range_scans() {
         "a wide range scan should admit its segments to the cache"
     );
 
-    let fresh_tables = super::load_verified_manifest_tables_with_cache(
+    let fresh_segments = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load fresh tables");
+    .expect("load fresh segments");
     store.reset();
-    let repeated = fresh_tables
+    let repeated = fresh_segments
         .scan_range_page(
-            ApiMetadataTableFamily::DirentryBinds,
+            ApiMetadataRowFamily::DirentryBinds,
             &lower_bound,
             upper_bound.as_deref(),
             8,
@@ -354,7 +357,7 @@ async fn byte_budgeted_cache_admits_large_range_scans() {
 }
 
 #[tokio::test]
-async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
+async fn maintenance_materialization_does_not_populate_metadata_segment_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -373,7 +376,7 @@ async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
         ..MetadataLsmPolicy::default()
     };
     let manifest_no = checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
-    let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
     let before = cache.stats();
 
     let materialized =
@@ -382,7 +385,7 @@ async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
             .expect("load materialized manifest");
     let after = cache.stats();
 
-    assert!(flatten_manifest_tables(base_run(&materialized.manifest).tables).len() > 1);
+    assert!(flatten_manifest_segments(base_run(&materialized.manifest).segments).len() > 1);
     assert_eq!(after, before);
 }
 
@@ -438,21 +441,21 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .expect("second checkpoint");
 
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
-    let tables = super::load_verified_manifest_tables_with_cache(
+    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let segments = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load tables");
+    .expect("load segments");
 
     // Resolve /docs, then look up beta's bind under it through the filtered
     // scan the visibility adapter uses.
-    let docs_binds = tables
+    let docs_binds = segments
         .scan_prefix(
-            ApiMetadataTableFamily::DirentryBinds,
+            ApiMetadataRowFamily::DirentryBinds,
             "direntry-00000000000000000001-",
         )
         .await
@@ -467,9 +470,9 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     let encoded_name = loonfs_api::wire::manifest::hex_encode_row_key_component("beta.txt");
     let filter_probe = format!("direntry-{:020}-{encoded_name}", docs_inode.0);
     let prefix = format!("{filter_probe}-");
-    let rows = tables
+    let rows = segments
         .scan_prefix_for_lookup(
-            ApiMetadataTableFamily::DirentryBinds,
+            ApiMetadataRowFamily::DirentryBinds,
             &prefix,
             &filter_probe,
             super::scan::Readahead::Disabled,
@@ -508,21 +511,21 @@ async fn metadata_cache_budget_counts_decoded_blocks() {
         .await
         .expect("checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let cache = MetadataTableCache::new(MetadataTableCacheConfig {
+    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
         max_decoded_bytes: 1,
     });
-    let tables = super::load_verified_manifest_tables_with_cache(
+    let segments = super::load_verified_manifest_segments_with_cache(
         &store,
         Some(&cache),
         &namespace_id,
         &manifest_object_id,
     )
     .await
-    .expect("load tables");
+    .expect("load segments");
 
     let key = "inode-00000000000000000001";
-    assert!(tables
-        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key)
+    assert!(segments
+        .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
         .await
         .expect("get inode")
         .is_some());
@@ -535,7 +538,8 @@ async fn metadata_cache_budget_counts_decoded_blocks() {
 #[tokio::test]
 async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -566,27 +570,28 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     // a lookup must not re-fetch — the per-view memo is the only reuse this
     // configuration has, and without it a cold list degrades from one fetch
     // per block to one fetch per lookup.
-    let tables = super::load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
-        .await
-        .expect("load tables");
+    let segments =
+        super::load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
+            .await
+            .expect("load segments");
     store.reset();
     let key = "inode-00000000000000000001";
-    assert!(tables
-        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key)
+    assert!(segments
+        .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
         .await
         .expect("first lookup")
         .is_some());
     let first_lookup_gets = store.count(OperationClass::Read);
     assert!(first_lookup_gets > 0, "a cold lookup fetches blocks");
 
-    assert!(tables
-        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key)
+    assert!(segments
+        .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
         .await
         .expect("repeated lookup")
         .is_some());
     let other = "inode-00000000000000000002";
-    assert!(tables
-        .get_for_lookup(ApiMetadataTableFamily::Inodes, other, other)
+    assert!(segments
+        .get_for_lookup(ApiMetadataRowFamily::Inodes, other, other)
         .await
         .expect("second-key lookup")
         .is_some());
@@ -600,7 +605,8 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
 #[tokio::test]
 async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -629,15 +635,15 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
             .expect("create checkpoint");
     }
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
         .await
-        .expect("load tables");
-    let direntry_descriptors: Vec<_> = tables
+        .expect("load segments");
+    let direntry_descriptors: Vec<_> = segments
         .manifest()
         .payload
-        .metadata_files
+        .segments
         .iter()
-        .filter(|descriptor| descriptor.family == ApiMetadataTableFamily::DirentryBinds)
+        .filter(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
         .collect();
     assert!(direntry_descriptors.len() >= 3);
     assert!(
@@ -650,7 +656,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        tables.manifest().payload.manifest_no,
+        segments.manifest().payload.manifest_no,
     )
     .await
     .expect("materialize manifest");
@@ -667,9 +673,9 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         lookup_keys::direntry_bind_probe(binding.parent_inode_id, binding.name_key.as_str());
 
     store.reset();
-    let rows = tables
+    let rows = segments
         .scan_prefix_for_lookup(
-            ApiMetadataTableFamily::DirentryBinds,
+            ApiMetadataRowFamily::DirentryBinds,
             &prefix,
             &probe,
             super::scan::Readahead::Enabled,
@@ -687,10 +693,10 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     // The same lookup against the same manifest with the inline copies
     // stripped must return the same rows through fetched filter blocks —
     // the inline copy is an accelerator, never an answer of its own.
-    let mut stripped_payload = tables.manifest().payload.clone();
+    let mut stripped_payload = segments.manifest().payload.clone();
     stripped_payload.manifest_no = ManifestNo(stripped_payload.manifest_no.0 + 1);
     stripped_payload.manifest_object_id = ManifestObjectId::generate(stripped_payload.manifest_no);
-    for descriptor in &mut stripped_payload.metadata_files {
+    for descriptor in &mut stripped_payload.segments {
         descriptor.filter_inline = None;
     }
     let stripped_object_id = stripped_payload.manifest_object_id.clone();
@@ -699,13 +705,14 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     write_namespace_manifest(&store, &stripped)
         .await
         .expect("write stripped manifest");
-    let stripped_tables = load_verified_manifest_tables(&store, &namespace_id, &stripped_object_id)
-        .await
-        .expect("load stripped tables");
+    let stripped_segments =
+        load_verified_manifest_segments(&store, &namespace_id, &stripped_object_id)
+            .await
+            .expect("load stripped segments");
     store.reset();
-    let stripped_rows = stripped_tables
+    let stripped_rows = stripped_segments
         .scan_prefix_for_lookup(
-            ApiMetadataTableFamily::DirentryBinds,
+            ApiMetadataRowFamily::DirentryBinds,
             &prefix,
             &probe,
             super::scan::Readahead::Enabled,
@@ -742,16 +749,16 @@ async fn corrupt_inline_filter_fails_the_lookup() {
         .await
         .expect("create checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
         .await
-        .expect("load tables");
-    let descriptor = tables
+        .expect("load segments");
+    let descriptor = segments
         .manifest()
         .payload
-        .metadata_files
+        .segments
         .iter()
         .find(|descriptor| {
-            descriptor.family == ApiMetadataTableFamily::DirentryBinds
+            descriptor.family == ApiMetadataRowFamily::DirentryBinds
                 && descriptor.filter_inline.is_some()
         })
         .expect("inline-filtered direntry segment")
@@ -791,10 +798,11 @@ async fn corrupt_inline_filter_fails_the_lookup() {
 async fn checkpointed_direntry_segment() -> (
     tempfile::TempDir,
     CountingStore<LocalFsStore>,
-    MetadataFileRef,
+    MetadataSegmentRef,
 ) {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -810,15 +818,15 @@ async fn checkpointed_direntry_segment() -> (
         .await
         .expect("create checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
         .await
-        .expect("load tables");
-    let mut descriptor = tables
+        .expect("load segments");
+    let mut descriptor = segments
         .manifest()
         .payload
-        .metadata_files
+        .segments
         .iter()
-        .find(|descriptor| descriptor.family == ApiMetadataTableFamily::DirentryBinds)
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
         .expect("a direntry segment")
         .clone();
     descriptor.filter_inline = None;
@@ -828,16 +836,16 @@ async fn checkpointed_direntry_segment() -> (
 /// A decoded block cache with `blocks` beneath it, which is what a runtime
 /// built with a local cache hands the read paths. A fresh one stands for a
 /// fresh process: only the local tier carries anything over.
-fn table_cache_over(blocks: &Arc<RecordingStoredMetadataBlockCache>) -> MetadataTableCache {
-    MetadataTableCache::with_stored_block_cache_and_observer(
-        MetadataTableCacheConfig::default(),
+fn segment_cache_over(blocks: &Arc<RecordingStoredMetadataBlockCache>) -> MetadataSegmentCache {
+    MetadataSegmentCache::with_stored_block_cache_and_observer(
+        MetadataSegmentCacheConfig::default(),
         Some(Arc::clone(blocks) as Arc<dyn StoredMetadataBlockCache>),
         None,
     )
 }
 
 fn stored_key(
-    descriptor: &MetadataFileRef,
+    descriptor: &MetadataSegmentRef,
     kind: StoredMetadataBlockKind,
     offset: u64,
 ) -> StoredMetadataBlockKey {
@@ -852,10 +860,10 @@ fn stored_key(
 /// read decoded.
 async fn warm_local_block_cache(
     store: &CountingStore<LocalFsStore>,
-    descriptor: &MetadataFileRef,
+    descriptor: &MetadataSegmentRef,
     blocks: &Arc<RecordingStoredMetadataBlockCache>,
 ) -> Arc<Vec<SegmentIndexEntry>> {
-    let cache = table_cache_over(blocks);
+    let cache = segment_cache_over(blocks);
     let memo = load::SessionBlockMemo::default();
     load::load_segment_filter(store, Some(&cache), &memo, descriptor)
         .await
@@ -872,7 +880,7 @@ async fn warm_local_block_cache(
 async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
     let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
     let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let cache = table_cache_over(&blocks);
+    let cache = segment_cache_over(&blocks);
     let memo = load::SessionBlockMemo::default();
 
     store.reset();
@@ -951,7 +959,7 @@ async fn a_warm_local_block_cache_answers_index_and_filter_without_the_store() {
     let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
     let cold_index = warm_local_block_cache(&store, &descriptor, &blocks).await;
 
-    let cache = table_cache_over(&blocks);
+    let cache = segment_cache_over(&blocks);
     let memo = load::SessionBlockMemo::default();
     store.reset();
     let warm_index = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
@@ -1004,7 +1012,7 @@ async fn a_local_block_cache_entry_that_does_not_decode_is_dropped_and_refetched
     );
     blocks.corrupt(&index_key);
 
-    let cache = table_cache_over(&blocks);
+    let cache = segment_cache_over(&blocks);
     let memo = load::SessionBlockMemo::default();
     store.reset();
     let repaired = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
@@ -1040,7 +1048,7 @@ async fn a_closed_local_block_cache_reads_as_a_miss() {
     blocks.close().await.expect("close the local cache");
     let calls_before = blocks.call_count();
 
-    let cache = table_cache_over(&blocks);
+    let cache = segment_cache_over(&blocks);
     let memo = load::SessionBlockMemo::default();
     store.reset();
     let index = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
@@ -1065,11 +1073,12 @@ async fn a_closed_local_block_cache_reads_as_a_miss() {
 async fn multi_block_direntry_segment() -> (
     tempfile::TempDir,
     CountingStore<LocalFsStore>,
-    MetadataFileRef,
+    MetadataSegmentRef,
     Arc<Vec<SegmentIndexEntry>>,
 ) {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -1085,15 +1094,15 @@ async fn multi_block_direntry_segment() -> (
         .await
         .expect("create checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
         .await
-        .expect("load tables");
-    let mut descriptor = tables
+        .expect("load segments");
+    let mut descriptor = segments
         .manifest()
         .payload
-        .metadata_files
+        .segments
         .iter()
-        .find(|descriptor| descriptor.family == ApiMetadataTableFamily::DirentryBinds)
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
         .expect("a direntry segment")
         .clone();
     descriptor.filter_inline = None;
@@ -1152,7 +1161,7 @@ async fn multi_block_direntry_segment() -> (
 /// no caches of either kind.
 async fn segment_rows(
     store: &CountingStore<LocalFsStore>,
-    descriptor: &MetadataFileRef,
+    descriptor: &MetadataSegmentRef,
 ) -> Vec<MetadataRow> {
     let memo = load::SessionBlockMemo::default();
     let index = block_fetch::load_segment_index(store, None, &memo, descriptor)
@@ -1169,7 +1178,7 @@ async fn segment_rows(
 /// One segment object's whole body, which the seeding helpers slice.
 async fn segment_object_bytes(
     store: &CountingStore<LocalFsStore>,
-    descriptor: &MetadataFileRef,
+    descriptor: &MetadataSegmentRef,
 ) -> Bytes {
     store
         .get(&descriptor.object_key, None)
@@ -1186,9 +1195,9 @@ fn stored_block_bytes(object: &Bytes, handle: &BlockHandle) -> Bytes {
 /// Puts the named blocks into the decoded cache, as an earlier read through
 /// this process would have left them.
 fn seed_decoded_blocks(
-    cache: &MetadataTableCache,
+    cache: &MetadataSegmentCache,
     object: &Bytes,
-    descriptor: &MetadataFileRef,
+    descriptor: &MetadataSegmentRef,
     index: &[SegmentIndexEntry],
     positions: &[usize],
 ) {
@@ -1199,7 +1208,7 @@ fn seed_decoded_blocks(
         cache.insert(
             block_fetch::segment_block_cache_key(
                 descriptor,
-                MetadataTableBlockKind::Data,
+                MetadataSegmentBlockKind::Data,
                 handle.offset,
             ),
             data_block_load::decoded_data_cache_block(descriptor.family, decoded),
@@ -1212,7 +1221,7 @@ fn seed_decoded_blocks(
 fn seed_local_blocks(
     blocks: &RecordingStoredMetadataBlockCache,
     object: &Bytes,
-    descriptor: &MetadataFileRef,
+    descriptor: &MetadataSegmentRef,
     index: &[SegmentIndexEntry],
     positions: &[usize],
 ) {
@@ -1229,8 +1238,8 @@ fn seed_local_blocks(
 /// memo a fresh request would carry, and the segment fetches it paid.
 async fn wide_read(
     store: &CountingStore<LocalFsStore>,
-    cache: Option<&MetadataTableCache>,
-    descriptor: &MetadataFileRef,
+    cache: Option<&MetadataSegmentCache>,
+    descriptor: &MetadataSegmentRef,
     index: &[SegmentIndexEntry],
 ) -> (Vec<Arc<DecodedDataBlock>>, usize) {
     let memo = load::SessionBlockMemo::default();
@@ -1256,7 +1265,7 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
         entry.block.offset,
     );
 
-    let cold_cache = table_cache_over(&blocks);
+    let cold_cache = segment_cache_over(&blocks);
     store.reset();
     let cold = data_block_load::load_segment_data_block(
         &store,
@@ -1288,7 +1297,7 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
         "a cold load probes the local cache, misses, and offers what it fetched"
     );
 
-    let warm_cache = table_cache_over(&blocks);
+    let warm_cache = segment_cache_over(&blocks);
     store.reset();
     let warm = data_block_load::load_segment_data_block(
         &store,
@@ -1323,7 +1332,7 @@ async fn a_wide_read_coalesces_the_blocks_the_decoded_cache_did_not_answer() {
     let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
 
     let decoded = [0usize, 4];
-    let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
     let object = segment_object_bytes(&store, &descriptor).await;
     seed_decoded_blocks(&cache, &object, &descriptor, &index, &decoded);
 
@@ -1348,7 +1357,7 @@ async fn a_span_load_never_reads_or_writes_the_local_block_cache() {
     let every_block: Vec<usize> = (0..index.len()).collect();
     seed_local_blocks(&blocks, &object, &descriptor, &index, &every_block);
     let calls_before = blocks.call_count();
-    let cache = table_cache_over(&blocks);
+    let cache = segment_cache_over(&blocks);
 
     let (read, gets) = wide_read(&store, Some(&cache), &descriptor, &index).await;
 
@@ -1380,7 +1389,7 @@ async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
     );
     blocks.corrupt(&corrupt_key);
 
-    let cache = table_cache_over(&blocks);
+    let cache = segment_cache_over(&blocks);
     let calls_before = blocks.call_count();
     store.reset();
     let read = data_block_load::load_segment_data_block(
@@ -1421,9 +1430,10 @@ async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
 }
 
 #[tokio::test]
-async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
+async fn checkpoint_l0_update_does_not_read_existing_metadata_segments() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)

@@ -1,18 +1,18 @@
-//! Verified row scans over a loaded manifest's tables, with per-segment
+//! Verified row scans over a loaded manifest's segments, with per-segment
 //! caching and prefix-window pruning.
 
-use super::cache::MetadataTableCache;
+use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
 use super::load::{
     load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter, SegmentKeyRangeBlocks,
     SessionBlockMemo,
 };
-use super::runs::{MetadataRunManifest, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
+use super::runs::{MetadataFamilySegments, MetadataRunManifest, CHECKPOINT_ROW_FAMILIES};
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{
-    MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
+    MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_objectstore::ObjectStore;
@@ -36,9 +36,9 @@ pub(crate) struct ManifestMaterializationForInspection {
     pub(crate) metadata_state: MetadataState,
 }
 
-pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
+pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(super) store: &'a S,
-    pub(super) table_cache: Option<&'a MetadataTableCache>,
+    pub(super) segment_cache: Option<&'a MetadataSegmentCache>,
     pub(super) manifest_object_key: String,
     pub(super) manifest: Arc<NamespaceManifestEnvelope>,
     /// The manifest's runs in scan order, derived once at load validation
@@ -50,8 +50,8 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     pub(super) block_memo: SessionBlockMemo,
 }
 
-impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataTables<'a, S> {
-    /// Returns the store the tables were loaded from.
+impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
+    /// Returns the store the segments were loaded from.
     pub(crate) fn store(&self) -> &'a S {
         self.store
     }
@@ -62,13 +62,13 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataTables<'a, S> {
     /// object key is never read or written.
     pub(crate) fn synthesized(store: &'a S, manifest: NamespaceManifestEnvelope) -> Self {
         debug_assert!(
-            manifest.payload.metadata_files.is_empty(),
+            manifest.payload.segments.is_empty(),
             "a synthesized manifest must name no durable metadata files"
         );
         let scan_runs = Arc::new(Vec::new());
         Self {
             store,
-            table_cache: None,
+            segment_cache: None,
             manifest_object_key: String::new(),
             manifest: Arc::new(manifest),
             scan_runs,
@@ -77,14 +77,14 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataTables<'a, S> {
     }
 }
 
-impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
+impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
     pub(crate) fn manifest(&self) -> &NamespaceManifestEnvelope {
         self.manifest.as_ref()
     }
 
     pub(crate) async fn get_for_lookup(
         &self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         key: &str,
         filter_probe: &str,
     ) -> Result<Option<MetadataRow>, ManifestLoadError> {
@@ -105,7 +105,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     #[cfg(test)]
     pub(crate) async fn scan_prefix(
         &self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         prefix: &str,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         Ok(strip_row_keys(
@@ -121,7 +121,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     /// coarser than the filter key must use [`Self::scan_prefix`] instead.
     pub(crate) async fn scan_prefix_for_lookup(
         &self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         prefix: &str,
         filter_probe: &str,
         readahead: Readahead,
@@ -134,7 +134,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
 
     pub(crate) async fn scan_range_page(
         &self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         lower_bound: &str,
         upper_bound: Option<&str>,
         limit: usize,
@@ -150,7 +150,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     /// every key from its row.
     pub(crate) async fn scan_range_page_with_keys(
         &self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         lower_bound: &str,
         upper_bound: Option<&str>,
         limit: usize,
@@ -173,7 +173,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     /// range; see [`Self::scan_prefix_for_lookup`] for the probe contract.
     pub(crate) async fn scan_range_page_for_lookup(
         &self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         lower_bound: &str,
         upper_bound: Option<&str>,
         limit: usize,
@@ -199,7 +199,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     /// with no row limit; rows come back in row-key order.
     async fn scan_prefix_rows(
         &self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         prefix: &str,
         filter_probe: Option<&str>,
         readahead: Readahead,
@@ -222,15 +222,16 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     /// fetches.
     async fn segment_filter_admits(
         &self,
-        descriptor: &MetadataFileRef,
+        descriptor: &MetadataSegmentRef,
         filter_probe: &str,
     ) -> Result<bool, ManifestLoadError> {
         let filter =
-            load_segment_filter(self.store, self.table_cache, &self.block_memo, descriptor).await?;
+            load_segment_filter(self.store, self.segment_cache, &self.block_memo, descriptor)
+                .await?;
         if filter.may_contain(filter_probe) {
             return Ok(true);
         }
-        if let Some(cache) = self.table_cache {
+        if let Some(cache) = self.segment_cache {
             cache.record_filter_skip();
         }
         Ok(false)
@@ -240,7 +241,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     /// no match — the filter's false-positive rate as observed by lookups.
     fn record_filter_false_positive_if_empty(&self, matched_rows: usize) {
         if matched_rows == 0 {
-            if let Some(cache) = self.table_cache {
+            if let Some(cache) = self.segment_cache {
                 cache.record_filter_false_positive();
             }
         }
@@ -248,7 +249,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
 
     async fn scan_range_page_rows(
         &self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         lower_bound: &str,
         upper_bound: Option<&str>,
         limit: usize,
@@ -257,8 +258,9 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let mut candidates = Vec::new();
         for run in self.scan_runs.iter() {
-            let table = manifest_table_for_family(&self.manifest_object_key, &run.tables, family)?;
-            candidates.extend(table.segments.iter().filter(|descriptor| {
+            let family_segments =
+                manifest_segment_for_family(&self.manifest_object_key, &run.segments, family)?;
+            candidates.extend(family_segments.segments.iter().filter(|descriptor| {
                 descriptor_may_intersect_range(descriptor, lower_bound, upper_bound)
             }));
         }
@@ -324,9 +326,9 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     /// probe every descriptor is admitted untouched.
     async fn filter_admitted_descriptors<'d>(
         &self,
-        descriptors: Vec<&'d MetadataFileRef>,
+        descriptors: Vec<&'d MetadataSegmentRef>,
         filter_probe: Option<&str>,
-    ) -> Result<Vec<&'d MetadataFileRef>, ManifestLoadError> {
+    ) -> Result<Vec<&'d MetadataSegmentRef>, ManifestLoadError> {
         let Some(filter_probe) = filter_probe else {
             return Ok(descriptors);
         };
@@ -351,14 +353,14 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
 
     async fn segment_rows(
         &self,
-        descriptor: &MetadataFileRef,
+        descriptor: &MetadataSegmentRef,
         lower_bound: &str,
         upper_bound: Option<&str>,
         readahead: Readahead,
     ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
         load_manifest_segment_rows_in_key_range_with_cache(
             self.store,
-            self.table_cache,
+            self.segment_cache,
             &self.block_memo,
             descriptor,
             lower_bound,
@@ -373,47 +375,50 @@ fn strip_row_keys(rows: Vec<(String, MetadataRow)>) -> Vec<MetadataRow> {
     rows.into_iter().map(|(_, row)| row).collect()
 }
 
-pub(super) fn ordered_manifest_tables<'a>(
+pub(super) fn ordered_manifest_segments<'a>(
     manifest_object_key: &str,
-    tables: &'a [MetadataTableManifest],
-) -> Result<Vec<&'a MetadataTableManifest>, ManifestLoadError> {
-    let mut ordered = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
-    for family in CHECKPOINT_TABLE_FAMILIES {
-        let mut matching = tables.iter().filter(|table| table.family == family);
-        let Some(table) = matching.next() else {
-            return Err(ManifestLoadError::MissingTableFamily {
+    segments_by_family: &'a [MetadataFamilySegments],
+) -> Result<Vec<&'a MetadataFamilySegments>, ManifestLoadError> {
+    let mut ordered = Vec::with_capacity(CHECKPOINT_ROW_FAMILIES.len());
+    for family in CHECKPOINT_ROW_FAMILIES {
+        let mut matching = segments_by_family
+            .iter()
+            .filter(|family_segments| family_segments.family == family);
+        let Some(family_segments) = matching.next() else {
+            return Err(ManifestLoadError::MissingRowFamily {
                 object_key: manifest_object_key.to_owned(),
                 family,
             });
         };
         if matching.next().is_some() {
-            return Err(ManifestLoadError::DuplicateTableFamily {
+            return Err(ManifestLoadError::DuplicateRowFamily {
                 object_key: manifest_object_key.to_owned(),
                 family,
             });
         }
-        ordered.push(table);
+        ordered.push(family_segments);
     }
     Ok(ordered)
 }
 
-pub(super) fn manifest_table_for_family<'a>(
+pub(super) fn manifest_segment_for_family<'a>(
     manifest_object_key: &str,
-    tables: &'a [MetadataTableManifest],
-    family: MetadataTableFamily,
-) -> Result<&'a MetadataTableManifest, ManifestLoadError> {
-    // Family-set integrity is validated once when the tables are loaded;
+    segments_by_family: &'a [MetadataFamilySegments],
+    family: MetadataRowFamily,
+) -> Result<&'a MetadataFamilySegments, ManifestLoadError> {
+    // Family-set integrity is validated once when the segments are loaded;
     // scans only need the lookup.
-    tables.iter().find(|table| table.family == family).ok_or(
-        ManifestLoadError::MissingTableFamily {
+    segments_by_family
+        .iter()
+        .find(|family_segments| family_segments.family == family)
+        .ok_or(ManifestLoadError::MissingRowFamily {
             object_key: manifest_object_key.to_owned(),
             family,
-        },
-    )
+        })
 }
 
 pub(super) fn descriptor_may_intersect_range(
-    descriptor: &MetadataFileRef,
+    descriptor: &MetadataSegmentRef,
     lower_bound: &str,
     upper_bound: Option<&str>,
 ) -> bool {

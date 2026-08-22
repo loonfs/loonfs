@@ -213,7 +213,7 @@ impl FsAdmin {
         let status_before = match self.get_namespace_diagnostics(namespace_id).await {
             Ok(status) => status,
             // A tombstoned namespace keeps reclaimable derived state — WAL
-            // segments, tables, manifests, checkpoint records — until GC
+            // segments, metadata segments, manifests, checkpoint records — until GC
             // ages it out, and a collection-only step is the reclamation
             // path. It proceeds against the tombstone; the summary comes
             // from the two control objects that outlive reclamation,

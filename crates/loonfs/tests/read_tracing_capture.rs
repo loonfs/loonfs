@@ -95,10 +95,8 @@ fn reads_name_their_anchor_and_the_lookup_that_came_back_empty() {
 
     let log = String::from_utf8(captured.lock().expect("capture lock").clone())
         .expect("captured log is utf8");
-    // The walk span says which anchor the read was pinned to: the head it
-    // answered at, and the manifest its tables came from. Fields are matched
-    // with their `=` so a line that merely carries the word cannot satisfy
-    // the assertion.
+    // The walk span records the head and manifest used by the read. Match the
+    // complete field names so unrelated log text cannot satisfy the assertion.
     let walk = find_line(&log, "phase=\"walk_path\"");
     for field in ["head_seq=", "manifest_no=", "manifest_head_seq="] {
         assert!(walk.contains(field), "missing `{field}` in: {walk}");

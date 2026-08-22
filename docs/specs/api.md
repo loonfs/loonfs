@@ -781,7 +781,7 @@ named in a fixed order:
 
 | Field | Action |
 | --- | --- |
-| `metadata` | Folds the visible WAL tail into metadata tables and advances the metadata root once the tail reaches `max_wal_tail_segments`, then merges one bounded metadata reorganization unit. The two are one action: folding a tail is what creates the delta runs a merge consumes. |
+| `metadata` | Folds the visible WAL tail into metadata segments and advances the metadata root once the tail reaches `max_wal_tail_segments`, then merges one bounded metadata reorganization unit. The two are one action: folding a tail is what creates the delta runs a merge consumes. |
 | `advance_retention` | Advances the retention floor to the flushed manifest head. |
 | `gc` | Runs one bounded garbage-collection pass. |
 
@@ -978,7 +978,7 @@ that reason, and the fields sum to the total:
 | `grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it is treated as young. |
 | `no_reference_manifest` | Unreachable and aged, but the namespace has published no manifest old enough to say what it referenced when the grace window opened. A reader that pinned its anchor inside the window may still be reading the object, so the pass keeps it until a manifest ages past the window. |
-| `degraded_roots` | Root resolution failed somewhere in the pass, so manifest and table deletion was suppressed wholesale. `degraded_retention` is set too. |
+| `degraded_roots` | Root resolution failed somewhere in the pass, so manifest and segment deletion was suppressed wholesale. `degraded_retention` is set too. |
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
 | `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, an unreadable record, a fork target not provably gone, a released record still inside its grace, or an active pin doing its job. |
 | `upload_session_window` | An upload session waiting out a window a clock resolves — the same waits `next_reclamation_at_ms` reports. |
@@ -991,7 +991,7 @@ namespace, so one object two passes both examine is counted by each.
 An object that something once referenced is not collectable the moment it
 stops being referenced. Reads pin a head and the manifest under it and go on
 reading through that pair, so `grace_window_ms` runs from the unreferencing
-as well as from the write: a table a reorganization folds away today is
+as well as from the write: a segment a reorganization folds away today is
 collected a grace window from now, not on the next pass. A namespace too
 young to have any manifest older than the window has nothing that dates its
 unreferencing yet, and a pass over one collects nothing and reports every
@@ -1413,7 +1413,7 @@ remain available because permanent user pins must stay discoverable and
 releasable after deletion. Releasing a fork-owned checkpoint remains rejected.
 
 Deletion itself reclaims nothing, but a deleted namespace's derived state —
-WAL segments, metadata tables and manifests, and checkpoint records that
+WAL segments, metadata segments and manifests, and checkpoint records that
 protect nothing live — becomes garbage once the tombstone is in place. A
 maintenance step that selects `gc` alone runs against the tombstone and ages
 that state out under the normal grace rules; the head survives as the
@@ -2350,7 +2350,7 @@ Representative response:
 The server forks from the source namespace's current head. The new namespace
 shares the source namespace's content store and starts with independent future
 namespace metadata. The fork creates a fork-owned source checkpoint so the
-source-owned immutable metadata files stay available for as long as the
+source-owned immutable metadata segments stay available for as long as the
 target may still read them, then installs the target namespace's head in one
 conditional write, then checks that the source checkpoint still holds. That
 head carries the fork provenance for the target's whole life.

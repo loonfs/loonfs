@@ -9,8 +9,8 @@
 //! the job's next heartbeat fails and it can no longer publish the staged
 //! output, so those objects can be treated as unreferenced.
 //!
-//! A job's lease sorts before its `tables/` directory. The collector reads the
-//! lease first and deletes it only after processing the staged tables. If the
+//! A job's lease sorts before its `segments/` directory. The collector reads the
+//! lease first and deletes it only after processing the staged segments. If the
 //! pass stops midway through the prefix, the `Reaping` lease remains so a
 //! later pass can safely continue.
 //!
@@ -47,7 +47,7 @@ pub(super) enum StagedObject {
     /// The collector claimed this lease. Delete it after processing the
     /// remaining objects in the job prefix.
     ClaimedLease,
-    /// The key is neither a recognized lease nor a staged table, so the
+    /// The key is neither a recognized lease nor a staged segment, so the
     /// collector retains it.
     UnrecognizedKey,
 }

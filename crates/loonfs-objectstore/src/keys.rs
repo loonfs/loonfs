@@ -3,7 +3,7 @@
 use crate::layout::ObjectLayout;
 use loonfs_api::{
     CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-    MetadataTableId, NamespaceId, UploadId, WalSegmentId,
+    MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
 };
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
@@ -63,11 +63,11 @@ pub fn metadata_manifest_prefix(namespace_id: &NamespaceId) -> String {
     ObjectLayout::new().metadata_manifest_prefix(namespace_id)
 }
 
-/// Builds the listing prefix containing metadata SST objects owned by one namespace.
+/// Builds the listing prefix containing metadata segment objects owned by one namespace.
 ///
 /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-pub fn metadata_table_prefix(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().metadata_table_prefix(namespace_id)
+pub fn metadata_segment_prefix(namespace_id: &NamespaceId) -> String {
+    ObjectLayout::new().metadata_segment_prefix(namespace_id)
 }
 
 /// Builds the immutable manifest key for one speculative manifest identity.
@@ -80,26 +80,29 @@ pub fn metadata_manifest_object(
     ObjectLayout::new().metadata_manifest_object(namespace_id, manifest_object_id)
 }
 
-/// Builds the immutable metadata SST key for one table identity.
+/// Builds the immutable metadata segment key for one segment identity.
 ///
 /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-pub fn metadata_table(namespace_id: &NamespaceId, metadata_table_id: &MetadataTableId) -> String {
-    ObjectLayout::new().metadata_table(namespace_id, metadata_table_id)
+pub fn metadata_segment(
+    namespace_id: &NamespaceId,
+    metadata_segment_id: &MetadataSegmentId,
+) -> String {
+    ObjectLayout::new().metadata_segment(namespace_id, metadata_segment_id)
 }
 
 /// Builds the immutable staging key one streaming compaction job writes a
 /// metadata segment to before any manifest references it.
 ///
 /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-pub fn metadata_compaction_table(
+pub fn metadata_compaction_segment(
     namespace_id: &NamespaceId,
     metadata_compaction_id: &MetadataCompactionId,
-    metadata_table_id: &MetadataTableId,
+    metadata_segment_id: &MetadataSegmentId,
 ) -> String {
-    ObjectLayout::new().metadata_compaction_table(
+    ObjectLayout::new().metadata_compaction_segment(
         namespace_id,
         metadata_compaction_id,
-        metadata_table_id,
+        metadata_segment_id,
     )
 }
 
@@ -170,14 +173,14 @@ pub fn content_blob(content_store_id: &ContentStoreId, content_id: &ContentId) -
 mod tests {
     use super::{
         checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_prefix,
-        metadata_compaction_table, metadata_manifest_object, metadata_root, metadata_table,
+        metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
         namespace_prefix, upload_session, wal_floor, wal_head, wal_segment,
         wal_segment_id_from_key, wal_segment_prefix,
     };
     use crate::layout::ObjectLayout;
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-        MetadataTableId, NamespaceId, UploadId, WalSegmentId,
+        MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -204,9 +207,9 @@ mod tests {
             .expect("valid metadata compaction id")
     }
 
-    fn metadata_table_id() -> MetadataTableId {
-        MetadataTableId::parse("tbl_00000000000000000000000000000001")
-            .expect("valid metadata table id")
+    fn metadata_segment_id() -> MetadataSegmentId {
+        MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+            .expect("valid metadata segment id")
     }
 
     fn upload_id() -> UploadId {
@@ -280,7 +283,7 @@ mod tests {
                 )
                 .replace("{checkpoint_id}", "chk_00000000000000000000000000000001")
                 .replace("{job_id}", "cmp_00000000000000000000000000000001")
-                .replace("{table_id}", "tbl_00000000000000000000000000000001")
+                .replace("{segment_id}", "seg_00000000000000000000000000000001")
                 .replace("{upload_id}", "upl_00000000000000000000000000000001")
                 .replace("{content_id[4..6]}", &CONTENT_ID[4..6])
                 .replace("{content_id[6..8]}", &CONTENT_ID[6..8])
@@ -310,15 +313,15 @@ mod tests {
                 checkpoint_record(&namespace_id(), &checkpoint_id()),
             ),
             (
-                "Metadata tables",
-                metadata_table(&namespace_id(), &metadata_table_id()),
+                "Metadata segments",
+                metadata_segment(&namespace_id(), &metadata_segment_id()),
             ),
             (
                 "Compaction staging",
-                metadata_compaction_table(
+                metadata_compaction_segment(
                     &namespace_id(),
                     &metadata_compaction_id(),
-                    &metadata_table_id(),
+                    &metadata_segment_id(),
                 ),
             ),
             (
@@ -396,20 +399,20 @@ mod tests {
             "namespaces/ns-1/metadata/manifests/00000000000000000400-0123456789abcdef.manifest.json"
         );
         assert_eq!(
-            metadata_table(&namespace_id(), &metadata_table_id()),
-            "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst"
+            metadata_segment(&namespace_id(), &metadata_segment_id()),
+            "namespaces/ns-1/metadata/segments/seg_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
             metadata_compaction_prefix(&namespace_id()),
             "namespaces/ns-1/metadata/compactions/"
         );
         assert_eq!(
-            metadata_compaction_table(
+            metadata_compaction_segment(
                 &namespace_id(),
                 &metadata_compaction_id(),
-                &metadata_table_id(),
+                &metadata_segment_id(),
             ),
-            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/tables/tbl_00000000000000000000000000000001.sst.zst"
+            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/segments/seg_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
             metadata_compaction_lease(&namespace_id(), &metadata_compaction_id()),

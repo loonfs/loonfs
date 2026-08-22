@@ -1,10 +1,10 @@
-//! Pure validation of loaded manifests and SST segments against their
+//! Pure validation of loaded manifests and their segments against their
 //! descriptors: identity, checksums, ranges, ordering, and row shape.
 
 use super::error::ManifestLoadError;
 use super::row::manifest_row_commit_seq;
 #[cfg(test)]
-use loonfs_api::wire::manifest::MetadataTableFamily;
+use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_api::wire::manifest::{
     MetadataRow, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
@@ -70,43 +70,40 @@ pub(super) fn validate_manifest_materialization_ranges(
         });
     }
 
-    if payload.metadata_files.is_empty() {
+    if payload.segments.is_empty() {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: "namespace manifest must reference at least one metadata file".to_owned(),
         });
     }
 
-    let mut saw_base_seq_file = false;
-    let mut saw_head_seq_file = false;
-    let mut seen_table_ids = Vec::new();
-    for metadata_file in &payload.metadata_files {
-        // The id shape is validated on decode: `table_id` is a typed
-        // `MetadataTableId`, so only well-formed ids can reach this point.
-        if seen_table_ids.contains(&metadata_file.table_id.as_str()) {
+    let mut saw_base_seq_segment = false;
+    let mut saw_head_seq_segment = false;
+    let mut seen_segment_ids = Vec::new();
+    for descriptor in &payload.segments {
+        // The id shape is validated on decode: `segment_id` is a typed
+        // `MetadataSegmentId`, so only well-formed ids can reach this point.
+        if seen_segment_ids.contains(&descriptor.segment_id.as_str()) {
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
-                message: format!("duplicate metadata table id `{}`", metadata_file.table_id),
+                message: format!("duplicate metadata segment id `{}`", descriptor.segment_id),
             });
         }
-        seen_table_ids.push(metadata_file.table_id.as_str());
-        if metadata_file.run_seq < payload.base_seq || metadata_file.run_seq > payload.head_seq {
+        seen_segment_ids.push(descriptor.segment_id.as_str());
+        if descriptor.run_seq < payload.base_seq || descriptor.run_seq > payload.head_seq {
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
                 message: format!(
                     "metadata file `{}` run seq `{}` is outside [`{}`, `{}`]",
-                    metadata_file.table_id,
-                    metadata_file.run_seq,
-                    payload.base_seq,
-                    payload.head_seq
+                    descriptor.segment_id, descriptor.run_seq, payload.base_seq, payload.head_seq
                 ),
             });
         }
-        saw_base_seq_file |= metadata_file.run_seq == payload.base_seq;
-        saw_head_seq_file |= metadata_file.run_seq == payload.head_seq;
+        saw_base_seq_segment |= descriptor.run_seq == payload.base_seq;
+        saw_head_seq_segment |= descriptor.run_seq == payload.head_seq;
     }
 
-    if !saw_base_seq_file {
+    if !saw_base_seq_segment {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
@@ -115,7 +112,7 @@ pub(super) fn validate_manifest_materialization_ranges(
             ),
         });
     }
-    if !saw_head_seq_file {
+    if !saw_head_seq_segment {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
@@ -163,9 +160,9 @@ pub(super) fn validate_direntry_child_bind_index(
     let mut direntry_bind_rows = direntry_bind_rows.iter().collect::<Vec<_>>();
     let mut direntry_child_bind_rows = direntry_child_bind_rows.iter().collect::<Vec<_>>();
     direntry_bind_rows
-        .sort_by_cached_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
+        .sort_by_cached_key(|row| row.row_key_for_family(MetadataRowFamily::DirentryChildBinds));
     direntry_child_bind_rows
-        .sort_by_cached_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
+        .sort_by_cached_key(|row| row.row_key_for_family(MetadataRowFamily::DirentryChildBinds));
 
     if direntry_bind_rows != direntry_child_bind_rows {
         return Err(ManifestLoadError::SegmentDescriptorMismatch {
@@ -188,12 +185,12 @@ pub(super) fn validate_revision_by_inode_desc_index(
 ) -> Result<(), ManifestLoadError> {
     validate_revision_rows_have_unique_keys(
         object_key,
-        MetadataTableFamily::Revisions,
+        MetadataRowFamily::Revisions,
         revision_rows,
     )?;
     validate_revision_rows_have_unique_keys(
         object_key,
-        MetadataTableFamily::RevisionsByInodeDesc,
+        MetadataRowFamily::RevisionsByInodeDesc,
         revision_by_inode_desc_rows,
     )?;
 
@@ -214,7 +211,7 @@ pub(super) fn validate_revision_by_inode_desc_index(
 #[cfg(test)]
 fn validate_revision_rows_have_unique_keys(
     object_key: &str,
-    family: MetadataTableFamily,
+    family: MetadataRowFamily,
     rows: &[MetadataRow],
 ) -> Result<(), ManifestLoadError> {
     let mut seen = BTreeSet::new();
@@ -233,5 +230,5 @@ fn validate_revision_rows_have_unique_keys(
 
 #[cfg(test)]
 fn revision_logical_key(row: &MetadataRow) -> String {
-    row.row_key_for_family(MetadataTableFamily::Revisions)
+    row.row_key_for_family(MetadataRowFamily::Revisions)
 }

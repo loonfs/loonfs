@@ -3,7 +3,7 @@
 //! "Which binding is visible/active" is the most safety-critical rule in the
 //! system, and it must be decided identically no matter which storage shape
 //! answers the underlying lookups (in-memory rows, at-head indexes, paged
-//! manifest tables merged with a WAL tail, or commit-preview overlays). This
+//! manifest segments merged with a WAL tail, or commit-preview overlays). This
 //! module expresses each composite rule exactly once:
 //!
 //! - [`BindingIdentity`] is the identity key of a binding event; every

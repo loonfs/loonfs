@@ -549,7 +549,7 @@ async fn sorted_listing(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult 
     Ok(())
 }
 
-/// Bounded reads are how metadata tables are read at all: a wrong range
+/// Bounded reads are how metadata segments are read at all: a wrong range
 /// answer is a wrong block, which decodes as corruption rather than as an
 /// error.
 async fn range_reads(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {

@@ -3,7 +3,7 @@
 
 use loonfs_api::{
     CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-    MetadataTableId, NamespaceId, UploadId, WalSegmentId,
+    MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -34,11 +34,11 @@ pub enum DurableObjectFamily {
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     MetadataManifest,
-    /// Classifies an immutable metadata SST segment.
+    /// Classifies an immutable metadata segment.
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-    MetadataTable,
-    /// Classifies an immutable metadata SST segment a streaming compaction
+    MetadataSegment,
+    /// Classifies an immutable metadata segment a streaming compaction
     /// wrote before any manifest referenced it.
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
@@ -147,40 +147,34 @@ impl ObjectLayout {
         format!("namespaces/{namespace_id}/metadata/manifests/")
     }
 
-    pub(crate) fn metadata_table(
+    pub(crate) fn metadata_segment(
         &self,
         namespace_id: &NamespaceId,
-        metadata_table_id: &MetadataTableId,
+        metadata_segment_id: &MetadataSegmentId,
     ) -> String {
-        format!("namespaces/{namespace_id}/metadata/tables/{metadata_table_id}.sst.zst")
+        format!("namespaces/{namespace_id}/metadata/segments/{metadata_segment_id}.sst.zst")
     }
 
-    pub(crate) fn metadata_table_prefix(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/metadata/tables/")
+    pub(crate) fn metadata_segment_prefix(&self, namespace_id: &NamespaceId) -> String {
+        format!("namespaces/{namespace_id}/metadata/segments/")
     }
 
-    /// A metadata segment a streaming compaction has written but no manifest
-    /// references yet. The object is an ordinary metadata segment; only the
-    /// directory differs, which is what keeps a running job's output out of
-    /// the sweep that reaps unreferenced table keys.
-    ///
-    /// The job id in the middle is what groups one job's output together, so
-    /// a collector can decide a whole job's objects from that job's lease
-    /// rather than one object at a time.
-    pub(crate) fn metadata_compaction_table(
+    /// Returns the staging key for a compaction output segment. Each job has a
+    /// separate prefix so garbage collection can protect its output with one
+    /// lease.
+    pub(crate) fn metadata_compaction_segment(
         &self,
         namespace_id: &NamespaceId,
         metadata_compaction_id: &MetadataCompactionId,
-        metadata_table_id: &MetadataTableId,
+        metadata_segment_id: &MetadataSegmentId,
     ) -> String {
         format!(
-            "namespaces/{namespace_id}/metadata/compactions/{metadata_compaction_id}/tables/{metadata_table_id}.sst.zst"
+            "namespaces/{namespace_id}/metadata/compactions/{metadata_compaction_id}/segments/{metadata_segment_id}.sst.zst"
         )
     }
 
-    /// The lease one job holds over its own prefix. It sorts before that
-    /// job's `tables/` directory, so an ascending listing of the compaction
-    /// prefix reads a job's lease before the objects it protects.
+    /// Returns the lease key for a compaction job. It sorts before the job's
+    /// staged segments.
     pub(crate) fn metadata_compaction_lease(
         &self,
         namespace_id: &NamespaceId,
@@ -195,17 +189,13 @@ impl ObjectLayout {
         format!("namespaces/{namespace_id}/metadata/compactions/")
     }
 
-    /// The job id of a key under one namespace's compaction prefix, for the
-    /// collector that has to find the lease owning a staged object.
-    ///
-    /// Returns `None` for a key under the prefix that is neither a job's
-    /// lease nor one of its staged segments; such a key belongs to no job and
-    /// the collector refuses to decide it.
+    /// Extracts a compaction job id from a recognized lease or segment key.
+    /// Returns `None` for other keys.
     pub(crate) fn metadata_compaction_job_id_from_key<'a>(&self, key: &'a str) -> Option<&'a str> {
         match key.split('/').collect::<Vec<_>>().as_slice() {
             ["namespaces", _, "metadata", "compactions", job_id, "lease.json"] => Some(job_id),
-            ["namespaces", _, "metadata", "compactions", job_id, "tables", table]
-                if table.ends_with(".sst.zst") =>
+            ["namespaces", _, "metadata", "compactions", job_id, "segments", segment]
+                if segment.ends_with(".sst.zst") =>
             {
                 Some(job_id)
             }
@@ -279,11 +269,13 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         {
             parsed(DurableObjectFamily::MetadataManifest, Some(namespace))
         }
-        ["namespaces", namespace, "metadata", "tables", table] if table.ends_with(".sst.zst") => {
-            parsed(DurableObjectFamily::MetadataTable, Some(namespace))
+        ["namespaces", namespace, "metadata", "segments", segment]
+            if segment.ends_with(".sst.zst") =>
+        {
+            parsed(DurableObjectFamily::MetadataSegment, Some(namespace))
         }
-        ["namespaces", namespace, "metadata", "compactions", _job_id, "tables", table]
-            if table.ends_with(".sst.zst") =>
+        ["namespaces", namespace, "metadata", "compactions", _job_id, "segments", segment]
+            if segment.ends_with(".sst.zst") =>
         {
             parsed(
                 DurableObjectFamily::MetadataCompactionStaging,
@@ -319,7 +311,7 @@ mod tests {
     use super::{parse_object_key, DurableObjectFamily, ObjectLayout};
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-        MetadataTableId, NamespaceId, UploadId, WalSegmentId,
+        MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
     };
 
     fn content_id() -> ContentId {
@@ -344,9 +336,9 @@ mod tests {
             .expect("valid metadata compaction id")
     }
 
-    fn metadata_table_id() -> MetadataTableId {
-        MetadataTableId::parse("tbl_00000000000000000000000000000001")
-            .expect("valid metadata table id")
+    fn metadata_segment_id() -> MetadataSegmentId {
+        MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+            .expect("valid metadata segment id")
     }
 
     fn upload_id() -> UploadId {
@@ -392,17 +384,17 @@ mod tests {
             "namespaces/ns-1/metadata/manifests/00000000000000000400-0123456789abcdef.manifest.json"
         );
         assert_eq!(
-            layout.metadata_table(&namespace_id(), &metadata_table_id()),
-            "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst"
+            layout.metadata_segment(&namespace_id(), &metadata_segment_id()),
+            "namespaces/ns-1/metadata/segments/seg_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
             layout
-                .metadata_compaction_table(
+                .metadata_compaction_segment(
                     &namespace_id(),
                     &metadata_compaction_id(1),
-                    &metadata_table_id()
+                    &metadata_segment_id()
                 ),
-            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/tables/tbl_00000000000000000000000000000001.sst.zst"
+            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/segments/seg_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
             layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1)),
@@ -445,60 +437,56 @@ mod tests {
             .starts_with(&prefix));
     }
 
-    /// A streaming compaction's staged segments must not appear in the
-    /// listing that enumerates referenced metadata tables. That listing is
-    /// what a collector sweeps, and a running job's output is unreferenced
-    /// for as long as the job runs.
+    /// Staged compaction segments use a separate prefix so metadata segment
+    /// garbage collection does not treat active job output as unreferenced.
     #[test]
-    fn staged_compaction_segments_live_outside_the_table_listing_prefix() {
+    fn staged_compaction_segments_live_outside_the_segment_listing_prefix() {
         let layout = ObjectLayout::new();
-        let tables = layout.metadata_table_prefix(&namespace_id());
+        let segments = layout.metadata_segment_prefix(&namespace_id());
         let staging = layout.metadata_compaction_prefix(&namespace_id());
 
-        assert!(!staging.starts_with(&tables));
+        assert!(!staging.starts_with(&segments));
         assert!(!layout
-            .metadata_compaction_table(
+            .metadata_compaction_segment(
                 &namespace_id(),
                 &metadata_compaction_id(1),
-                &metadata_table_id()
+                &metadata_segment_id()
             )
-            .starts_with(&tables));
+            .starts_with(&segments));
         assert!(layout
-            .metadata_compaction_table(
+            .metadata_compaction_segment(
                 &namespace_id(),
                 &metadata_compaction_id(1),
-                &metadata_table_id()
+                &metadata_segment_id()
             )
             .starts_with(&staging));
         assert!(layout
             .metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1))
             .starts_with(&staging));
         assert!(!layout
-            .metadata_table(&namespace_id(), &metadata_table_id())
+            .metadata_segment(&namespace_id(), &metadata_segment_id())
             .starts_with(&staging));
     }
 
-    /// A collector reads a job's lease before the objects the lease protects,
-    /// which is what lets one lease read decide a whole job's output.
+    /// Sorting places a job's lease before its staged segments.
     #[test]
     fn a_jobs_lease_sorts_before_its_staged_segments() {
         let layout = ObjectLayout::new();
         let lease = layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1));
-        let table = layout.metadata_compaction_table(
+        let segment_key = layout.metadata_compaction_segment(
             &namespace_id(),
             &metadata_compaction_id(1),
-            &metadata_table_id(),
+            &metadata_segment_id(),
         );
-        assert!(lease < table);
-        // And one job's objects are contiguous: the next job's lease sorts
-        // above every object of the job before it.
+        assert!(lease < segment_key);
+        // Each job occupies one contiguous key range.
         assert!(
-            table < layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(2))
+            segment_key
+                < layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(2))
         );
     }
 
-    /// Both key shapes under the compaction prefix name their job; anything
-    /// else under it names none, and the collector refuses to decide it.
+    /// Recognized lease and segment keys return their compaction job id.
     #[test]
     fn compaction_keys_report_the_job_that_owns_them() {
         let layout = ObjectLayout::new();
@@ -509,18 +497,18 @@ mod tests {
             Some("cmp_00000000000000000000000000000001")
         );
         assert_eq!(
-            layout.metadata_compaction_job_id_from_key(&layout.metadata_compaction_table(
+            layout.metadata_compaction_job_id_from_key(&layout.metadata_compaction_segment(
                 &namespace_id(),
                 &metadata_compaction_id(1),
-                &metadata_table_id()
+                &metadata_segment_id()
             )),
             Some("cmp_00000000000000000000000000000001")
         );
         for foreign in [
-            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/tables/tbl_00000000000000000000000000000001.tmp",
+            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/segments/seg_00000000000000000000000000000001.tmp",
             "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/notes.json",
             "namespaces/ns-1/metadata/compactions/stray.json",
-            "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst",
+            "namespaces/ns-1/metadata/segments/seg_00000000000000000000000000000001.sst.zst",
         ] {
             assert_eq!(layout.metadata_compaction_job_id_from_key(foreign), None);
         }
@@ -558,14 +546,14 @@ mod tests {
                 DurableObjectFamily::MetadataManifest,
             ),
             (
-                layout.metadata_table(&namespace_id(), &metadata_table_id()),
-                DurableObjectFamily::MetadataTable,
+                layout.metadata_segment(&namespace_id(), &metadata_segment_id()),
+                DurableObjectFamily::MetadataSegment,
             ),
             (
-                layout.metadata_compaction_table(
+                layout.metadata_compaction_segment(
                     &namespace_id(),
                     &metadata_compaction_id(1),
-                    &metadata_table_id(),
+                    &metadata_segment_id(),
                 ),
                 DurableObjectFamily::MetadataCompactionStaging,
             ),
@@ -598,11 +586,11 @@ mod tests {
             "namespaces/ns-1/control/lease.json",
             "namespaces/ns-1/wal/00000000000000000001-0123456789abcdef.wal.zst",
             "namespaces/ns-1/manifest/00000000000000000400.manifest.json",
-            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst.zst",
+            "namespaces/ns-1/segments/metadata/seg_00000000000000000000000000000001.sst.zst",
             "namespaces/ns-1/gc/manifest.boundary.json",
             "namespaces/ns-1/gc/pins/pin_00000000000000000000000000000001.json",
             "namespaces/ns-1/pins/pin_00000000000000000000000000000001.json",
-            "namespaces/ns-1/metadata/compaction-staging/tbl_00000000000000000000000000000001.sst.zst",
+            "namespaces/ns-1/metadata/compaction-staging/seg_00000000000000000000000000000001.sst.zst",
         ] {
             assert!(
                 parse_object_key(old).is_none(),

@@ -31,9 +31,9 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_compaction_lease, metadata_compaction_table,
-    metadata_manifest_object, metadata_manifest_prefix, metadata_root, metadata_table,
-    metadata_table_prefix, wal_head, wal_segment, wal_segment_prefix,
+    checkpoint_prefix, metadata_compaction_lease, metadata_compaction_segment,
+    metadata_manifest_object, metadata_manifest_prefix, metadata_root, metadata_segment,
+    metadata_segment_prefix, wal_head, wal_segment, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -549,7 +549,7 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
 
 #[tokio::test]
 async fn deleted_namespace_reclaims_down_to_its_tombstone() {
-    // After deletion, user checkpoints, WAL, manifests, and tables can age
+    // After deletion, user checkpoints, WAL, manifests, and segments can age
     // out. Only tombstone objects remain to prevent id reuse.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -577,7 +577,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         .await
         .expect("gc pass");
     assert!(report.deleted_wal_segments >= 1);
-    assert!(report.deleted_metadata_tables >= 1);
+    assert!(report.deleted_metadata_segments >= 1);
     assert!(report.deleted_manifests >= 1);
     // The pin on a tombstone has one route out, the same as every other
     // pin: released here, deleted a grace window after that release.
@@ -592,7 +592,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
 
     for prefix in [
         wal_segment_prefix(&namespace_id),
-        metadata_table_prefix(&namespace_id),
+        metadata_segment_prefix(&namespace_id),
         metadata_manifest_prefix(&namespace_id),
         checkpoint_prefix(&namespace_id),
     ] {
@@ -1287,26 +1287,26 @@ async fn content_reference_scan_surfaces_corrupt_metadata_rows() {
     namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
     let (upload_id, content_ref, content_store_id, _) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
-    let table_keys = store
-        .list_prefix(&metadata_table_prefix(&namespace_id))
+    let segment_keys = store
+        .list_prefix(&metadata_segment_prefix(&namespace_id))
         .await
-        .expect("list metadata tables");
+        .expect("list metadata segments");
     assert!(
-        !table_keys.is_empty(),
-        "the fixture must publish metadata tables"
+        !segment_keys.is_empty(),
+        "the fixture must publish metadata segments"
     );
-    for key in &table_keys {
+    for key in &segment_keys {
         let mut bytes = store
             .get(key, None)
             .await
-            .expect("read metadata table")
-            .expect("metadata table exists")
+            .expect("read metadata segment")
+            .expect("metadata segment exists")
             .to_vec();
         bytes[0] ^= 0xff;
         store
             .put_overwrite(key, Bytes::from(bytes))
             .await
-            .expect("corrupt metadata table");
+            .expect("corrupt metadata segment");
     }
     let content_key =
         loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
@@ -1316,7 +1316,7 @@ async fn content_reference_scan_surfaces_corrupt_metadata_rows() {
         .await
         .expect_err("corrupt content-reference rows must fail the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(table_keys.iter().any(|key| error.message().contains(key)));
+    assert!(segment_keys.iter().any(|key| error.message().contains(key)));
     assert!(store
         .head(&content_key)
         .await
@@ -1340,7 +1340,7 @@ async fn content_reference_scan_retains_content_when_metadata_rows_do_not_read()
         loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let store = FailStore::new(
         inner,
-        KeyPredicate::prefix(metadata_table_prefix(&namespace_id)),
+        KeyPredicate::prefix(metadata_segment_prefix(&namespace_id)),
         OperationClass::Read,
         InjectedError::Transport("metadata rows timed out".to_owned()),
     );
@@ -1586,7 +1586,7 @@ async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
     assert_eq!(
         (
             report.deleted_wal_segments,
-            report.deleted_metadata_tables,
+            report.deleted_metadata_segments,
             report.deleted_manifests,
             report.deleted_checkpoint_records,
             report.deleted_upload_sessions,
@@ -1741,7 +1741,7 @@ async fn a_pass_that_decides_nothing_echoes_its_cursor_verbatim() {
     assert_eq!(
         (
             parked.deleted_wal_segments,
-            parked.deleted_metadata_tables,
+            parked.deleted_metadata_segments,
             parked.deleted_manifests,
             parked.deleted_checkpoint_records,
             parked.deleted_upload_sessions,
@@ -1848,7 +1848,7 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
     assert_eq!(
         (
             report.deleted_wal_segments,
-            report.deleted_metadata_tables,
+            report.deleted_metadata_segments,
             report.deleted_manifests,
             report.deleted_checkpoint_records,
         ),
@@ -1990,7 +1990,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
         .expect("gc pass");
 
     assert_eq!(report.deleted_wal_segments, 0);
-    assert_eq!(report.deleted_metadata_tables, 0);
+    assert_eq!(report.deleted_metadata_segments, 0);
     assert_eq!(report.deleted_manifests, 0);
     assert!(report.retained_candidates > 0);
     // The breakdown is the same total, said in reasons: nothing is counted
@@ -2030,7 +2030,7 @@ fn aged_before_now(
 }
 
 /// Folds the L0 runs into fresh base segments, which is what leaves the
-/// previous run tables unreferenced.
+/// previous run segments unreferenced.
 async fn fold_metadata<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -2066,7 +2066,7 @@ async fn fold_metadata<S: ObjectStore + ?Sized>(
 /// before a fold is still reading through it afterwards, and the grace
 /// window is what that read is owed.
 ///
-/// The tables here are old by write time and unreferenced by the fold, which
+/// The segments here are old by write time and unreferenced by the fold, which
 /// is exactly the pair that used to make them collectable on the spot. They
 /// stay until a grace window has passed since the fold, and then they go —
 /// protecting a reader must not turn into never reclaiming.
@@ -2108,26 +2108,26 @@ async fn a_read_pinned_before_a_fold_still_reads_after_the_sweep() {
         .await
         .expect("gc pass right after the fold");
 
-    // The read is the assertion that matters: it reaches for its tables
-    // after the sweep has been over them.
+    // The read fails if garbage collection removed the manifest or any of its
+    // segments.
     pinned
         .resolve_path("/docs/file-0.txt", AttributeInclusion::Omit)
         .await
-        .expect("the pinned anchor still resolves through its own tables");
+        .expect("the pinned anchor still resolves through its own segments");
     assert_eq!(
-        report.deleted_metadata_tables, 0,
-        "the fold unreferenced these tables a moment ago, not a grace window ago"
+        report.deleted_metadata_segments, 0,
+        "the fold unreferenced these segments a moment ago, not a grace window ago"
     );
 
     // A grace window after the fold, the anchor moves on to the folded
-    // manifest and the superseded tables are collectable.
+    // manifest and the superseded segments are collectable.
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass a grace window after the fold");
     assert!(
-        report.deleted_metadata_tables > 0,
-        "folded-away tables must still be reclaimed, one window later"
+        report.deleted_metadata_segments > 0,
+        "folded-away segments must still be reclaimed, one window later"
     );
     stat_root(&store, &namespace_id).await;
 }
@@ -2163,11 +2163,11 @@ async fn namespace_with_staged_output(
     // staged segment below is written after it, the way a job's output is.
     let published = namespace_key_set(&inner, namespace_id).await;
     let store = aged_before_now(inner, published);
-    let staged_key = metadata_compaction_table(
+    let staged_key = metadata_compaction_segment(
         namespace_id,
         metadata_compaction_id,
-        &loonfs_api::MetadataTableId::parse("tbl_0123456789abcdef0123456789abcdef")
-            .expect("valid metadata table id"),
+        &loonfs_api::MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdef")
+            .expect("valid metadata segment id"),
     );
     store
         .put_if_absent(&staged_key, Bytes::from_static(b"staged segment"))
@@ -2260,7 +2260,7 @@ async fn a_live_jobs_staged_output_survives_however_old_it_is() {
         .await
         .expect("gc pass while the job holds its lease");
     assert_eq!(
-        report.deleted_metadata_tables, 0,
+        report.deleted_metadata_segments, 0,
         "a running job's output must not be reaped"
     );
     assert_eq!(
@@ -2301,7 +2301,7 @@ async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
         .await
         .expect("gc pass once the lease expired");
     assert_eq!(
-        report.deleted_metadata_tables, 0,
+        report.deleted_metadata_segments, 0,
         "an expired lease still leaves the objects their own window"
     );
     assert!(store
@@ -2311,8 +2311,8 @@ async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
         .is_some());
 
     // Past the staging window, the same objects are the orphans a dead job
-    // left. Only the segment counts as a metadata table; the lease is a
-    // control object.
+    // left. Only the staged object counts as a metadata segment; the lease
+    // is a control object.
     let reclaimable_ms = now_after_newest_object(
         store.inner(),
         &namespace_id,
@@ -2323,7 +2323,7 @@ async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
         .await
         .expect("gc pass once no job could still be running");
     assert_eq!(
-        report.deleted_metadata_tables, 1,
+        report.deleted_metadata_segments, 1,
         "a dead job's orphan must be reaped"
     );
     for key in [&staged_key, &lease_key] {
@@ -2354,7 +2354,7 @@ async fn staged_output_with_no_lease_at_all_is_reclaimed() {
     let report = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
         .await
         .expect("gc pass over an unclaimed prefix");
-    assert_eq!(report.deleted_metadata_tables, 1);
+    assert_eq!(report.deleted_metadata_segments, 1);
     assert!(store
         .head(&staged_key)
         .await
@@ -2425,13 +2425,13 @@ async fn a_candidate_error_still_finishes_the_claimed_compaction_lease() {
     )
     .await;
 
-    // The lease sorts before the staged table. GC claims it first, then this
-    // injected metadata failure makes the table decision return early.
+    // The lease sorts before the staged segment. GC claims it first, then this
+    // injected metadata failure makes the segment decision return early.
     let store = FailStore::new(
         inner,
         KeyPredicate::exact(staged_key.clone()),
         OperationClass::Head,
-        InjectedError::Transport("staged table metadata timed out".to_owned()),
+        InjectedError::Transport("staged segment metadata timed out".to_owned()),
     );
     store.fail_all();
     let error = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
@@ -2453,7 +2453,7 @@ async fn a_candidate_error_still_finishes_the_claimed_compaction_lease() {
             .inner()
             .head(&staged_key)
             .await
-            .expect("head the undecided table")
+            .expect("head the undecided segment")
             .is_some(),
         "the failing candidate itself stays for a later pass"
     );
@@ -2489,14 +2489,14 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
     let marking = marking_units(&store, &namespace_id, &reclaimable).await;
 
     // Resume immediately before compaction staging and buy exactly its lease
-    // candidate. The staged table is the lookahead that stops the pass.
+    // candidate. The staged segment is the lookahead that stops the pass.
     let mut bounded = config();
     bounded.max_objects = Some(marking + 1);
     bounded.cursor = Some(
         GcCursor::after(
             &namespace_id,
-            CandidateFamily::MetadataTables,
-            format!("{}~", metadata_table_prefix(&namespace_id)),
+            CandidateFamily::MetadataSegments,
+            format!("{}~", metadata_segment_prefix(&namespace_id)),
         )
         .encode()
         .expect("encode cursor"),
@@ -2519,15 +2519,14 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
         store
             .head(&staged_key)
             .await
-            .expect("head the unvisited table")
+            .expect("head the unvisited segment")
             .is_some(),
-        "the cursor leaves the unvisited table for the resumed pass"
+        "the cursor leaves the unvisited segment for the resumed pass"
     );
 }
 
-/// A published job's output is an ordinary referenced table. The manifest
-/// names it where it sits, so the sweep protects it for the same reason it
-/// protects every other table, and no window ever applies to it.
+/// A published job produces normal referenced segments. Their manifest keeps
+/// them from being collected.
 #[tokio::test]
 async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2547,7 +2546,7 @@ async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
         )
         .await;
         // Flushes rather than checkpoints: a checkpoint pins the manifest it
-        // published, and a pinned manifest protects its tables forever, which
+        // published, and a pinned manifest protects its segments forever, which
         // would leave this pass nothing to reap and nothing to prove.
         crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
             .await
@@ -2568,7 +2567,7 @@ async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
         .await
         .expect("gc pass long after the job published");
     assert!(
-        report.deleted_metadata_tables > 0,
+        report.deleted_metadata_segments > 0,
         "the pass must have reaped the runs the job replaced, or it proves nothing"
     );
     for key in &staged {
@@ -2774,21 +2773,21 @@ async fn an_object_the_anchor_predates_is_kept_by_its_own_age_alone() {
     // it, so no manifest can ever have named it.
     let published = namespace_key_set(&inner, &namespace_id).await;
     let store = aged_before_now(inner, published);
-    let orphan_key = metadata_table(
+    let orphan_key = metadata_segment(
         &namespace_id,
-        &loonfs_api::MetadataTableId::parse("tbl_0123456789abcdef0123456789abcdef")
-            .expect("valid metadata table id"),
+        &loonfs_api::MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdef")
+            .expect("valid metadata segment id"),
     );
     store
-        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan table"))
+        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan segment"))
         .await
-        .expect("write an unreferenced table");
+        .expect("write an unreferenced segment");
 
     let young = context(now_after_newest_object(store.inner(), &namespace_id, 0).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &young)
         .await
         .expect("gc pass while the orphan is young");
-    assert_eq!(report.deleted_metadata_tables, 0);
+    assert_eq!(report.deleted_metadata_segments, 0);
     assert_eq!(
         report.retained.grace_window, 1,
         "the orphan is kept by its own write time, and the pass says so"
@@ -2799,7 +2798,7 @@ async fn an_object_the_anchor_predates_is_kept_by_its_own_age_alone() {
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass once the orphan has aged");
-    assert_eq!(report.deleted_metadata_tables, 1);
+    assert_eq!(report.deleted_metadata_segments, 1);
     assert!(store
         .head(&orphan_key)
         .await
@@ -2824,15 +2823,15 @@ async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
     crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
         .await
         .expect("flush wal");
-    let orphan_key = metadata_table(
+    let orphan_key = metadata_segment(
         &namespace_id,
-        &loonfs_api::MetadataTableId::parse("tbl_0123456789abcdef0123456789abcdef")
-            .expect("valid metadata table id"),
+        &loonfs_api::MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdef")
+            .expect("valid metadata segment id"),
     );
     inner
-        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan table"))
+        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan segment"))
         .await
-        .expect("write an unreferenced table");
+        .expect("write an unreferenced segment");
 
     // Only the orphan is old: the manifests are all inside the window, so
     // the pass has no anchor to reason from.
@@ -2842,7 +2841,7 @@ async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
         .await
         .expect("gc pass with no aged manifest");
 
-    assert_eq!(report.deleted_metadata_tables, 0);
+    assert_eq!(report.deleted_metadata_segments, 0);
     assert_eq!(report.deleted_wal_segments, 0);
     assert_eq!(report.deleted_manifests, 0);
     assert_eq!(
@@ -2861,7 +2860,7 @@ async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass once a manifest anchors it");
-    assert_eq!(report.deleted_metadata_tables, 1);
+    assert_eq!(report.deleted_metadata_segments, 1);
     assert_eq!(report.retained.no_reference_manifest, 0);
 }
 
@@ -2902,7 +2901,7 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
     assert_eq!(
         (
             report.deleted_wal_segments,
-            report.deleted_metadata_tables,
+            report.deleted_metadata_segments,
             report.deleted_manifests,
         ),
         (0, 0, 0)
@@ -3024,7 +3023,7 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
         .expect("first gc pass");
 
     // Pass one deletes the dead record but the record still rooted its
-    // basis, so the referenced manifest and tables survive the pass.
+    // basis, so the referenced manifest and segments survive the pass.
     assert_eq!(first_pass.deleted_checkpoint_records, 1);
     assert!(!first_pass.degraded_retention);
     assert!(
@@ -3040,14 +3039,14 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     )
     .await
     .expect("dead basis manifest survives its record");
-    for file in &basis.payload.metadata_files {
+    for file in &basis.payload.segments {
         assert!(
             store
                 .head(&file.object_key)
                 .await
-                .expect("head table")
+                .expect("head segment")
                 .is_some(),
-            "dead basis table survives its record"
+            "dead basis segment survives its record"
         );
     }
 
@@ -3158,7 +3157,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
 
     // The first flush materialized the namespace's first manifest and the
     // next two superseded it; only the root's manifest is reachable. Its
-    // tables are all still referenced (a flush only appends L0 runs).
+    // segments are all still referenced (a flush only appends L0 runs).
     assert_eq!(report.deleted_manifests, 2);
     assert!(!report.degraded_retention);
     let manifests_left = store
@@ -3168,7 +3167,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     assert_eq!(manifests_left.len(), 1, "only the live root manifest stays");
 
     // Reorganization folds the L0 runs into fresh base segments; the
-    // superseded run tables then age out on the next pass.
+    // superseded run segments then age out on the next pass.
     let fold_policy = crate::checkpoint::MetadataLsmPolicy {
         max_l0_runs: NonZeroUsize::MIN,
         ..Default::default()
@@ -3195,8 +3194,8 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .await
         .expect("gc pass after reorganization");
     assert!(
-        after_fold.deleted_metadata_tables > 0,
-        "folded-away run tables become collectable"
+        after_fold.deleted_metadata_segments > 0,
+        "folded-away run segments become collectable"
     );
     assert!(!after_fold.degraded_retention);
 
@@ -4304,7 +4303,7 @@ async fn gc_fails_the_pass_on_a_corrupt_root_manifest() {
 
 /// The other half of the manifest arm: a rooted manifest the store will
 /// not hand over says nothing about the bytes, so the pass keeps its old
-/// behavior. It degrades, reclaims no manifests or tables, and counts what
+/// behavior. It degrades, reclaims no manifests or segments, and counts what
 /// it kept under `degraded_roots`.
 #[tokio::test]
 async fn gc_degrades_when_a_root_manifest_does_not_read() {
@@ -4338,7 +4337,7 @@ async fn gc_degrades_when_a_root_manifest_does_not_read() {
         "the pass counts what the degraded roots made it keep: {report:?}"
     );
     assert_eq!(report.deleted_manifests, 0);
-    assert_eq!(report.deleted_metadata_tables, 0);
+    assert_eq!(report.deleted_metadata_segments, 0);
     assert_eq!(
         namespace_keys(store.inner(), &namespace_id).await,
         before,
@@ -4377,7 +4376,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
         .expect("gc pass");
 
     assert_eq!(report.deleted_wal_segments, 0);
-    assert_eq!(report.deleted_metadata_tables, 0);
+    assert_eq!(report.deleted_metadata_segments, 0);
     assert_eq!(report.deleted_manifests, 0);
     assert_eq!(report.deleted_checkpoint_records, 0);
     assert_eq!(report.released_fork_checkpoints, 0);
@@ -4530,10 +4529,10 @@ async fn add_bounded_gc_fixture(
                 &loonfs_api::WalSegmentId::parse(format!("{index:020}-0000000000000000"))
                     .expect("valid WAL segment id"),
             ),
-            metadata_table(
+            metadata_segment(
                 namespace_id,
-                &loonfs_api::MetadataTableId::parse(format!("tbl_{index:032x}"))
-                    .expect("valid metadata table id"),
+                &loonfs_api::MetadataSegmentId::parse(format!("seg_{index:032x}"))
+                    .expect("valid metadata segment id"),
             ),
             format!(
                 "{}000-orphan-{index:02}.manifest.json",
@@ -4574,7 +4573,7 @@ async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTr
 
 fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
     total.deleted_wal_segments += pass.deleted_wal_segments;
-    total.deleted_metadata_tables += pass.deleted_metadata_tables;
+    total.deleted_metadata_segments += pass.deleted_metadata_segments;
     total.deleted_manifests += pass.deleted_manifests;
     total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
     total.released_fork_checkpoints += pass.released_fork_checkpoints;
@@ -4658,7 +4657,7 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     assert_eq!(
         (
             bounded_report.deleted_wal_segments,
-            bounded_report.deleted_metadata_tables,
+            bounded_report.deleted_metadata_segments,
             bounded_report.deleted_manifests,
             bounded_report.deleted_checkpoint_records,
             bounded_report.deleted_upload_sessions,
@@ -4666,7 +4665,7 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
         ),
         (
             unbounded_report.deleted_wal_segments,
-            unbounded_report.deleted_metadata_tables,
+            unbounded_report.deleted_metadata_segments,
             unbounded_report.deleted_manifests,
             unbounded_report.deleted_checkpoint_records,
             unbounded_report.deleted_upload_sessions,
@@ -4822,7 +4821,7 @@ async fn stale_cursor_rebuilds_roots_before_resuming() {
     for key in live
         .wal_segments
         .iter()
-        .chain(live.tables.iter())
+        .chain(live.segments.iter())
         .chain(live.checkpoint_keys.iter())
     {
         assert!(
