@@ -54,7 +54,7 @@ pub(super) async fn rewrite_manifest_segment(
             )
         });
     descriptor.filter_block = built.filter;
-    descriptor.payload_checksum = loonfs_api::sha256_digest(&built.bytes);
+    descriptor.object_checksum = loonfs_api::sha256_digest(&built.bytes);
 }
 
 fn assert_child_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
@@ -1017,7 +1017,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
             )
         });
     descriptor.filter_block = built.filter;
-    descriptor.payload_checksum = loonfs_api::sha256_digest(&built.bytes);
+    descriptor.object_checksum = loonfs_api::sha256_digest(&built.bytes);
     let segment_key = descriptor.object_key.clone();
     let manifest_id = materialized.manifest.payload.manifest_id;
     overwrite_manifest(&store, &namespace_id, materialized.manifest).await;

@@ -84,7 +84,7 @@ fn geometry(root: &Path) -> DiskGeometry {
 
 fn key(offset: u64) -> StoredMetadataBlockKey {
     StoredMetadataBlockKey {
-        payload_checksum: "sha256:00112233445566778899aabbccddeeff".to_owned(),
+        object_checksum: "sha256:00112233445566778899aabbccddeeff".to_owned(),
         kind: StoredMetadataBlockKind::Data,
         offset,
     }

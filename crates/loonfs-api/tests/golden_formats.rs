@@ -62,6 +62,9 @@ fn actor() -> ActorRef {
     ActorRef::service(ActorId::parse("loonfs-golden").expect("valid actor id"))
 }
 
+// Regenerate with `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1`:
+// without the single thread, tests that read a fixture race the tests rewriting
+// it and fail on a half-written file.
 fn assert_matches_golden(name: &str, actual: &[u8]) {
     let path = golden_path(name);
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
@@ -70,7 +73,7 @@ fn assert_matches_golden(name: &str, actual: &[u8]) {
         std::fs::write(&path, actual).expect("write golden fixture");
     }
     let expected = std::fs::read(&path).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1` to generate it")
     });
     if expected != actual {
         let offset = expected
@@ -91,7 +94,7 @@ fn assert_matches_golden(name: &str, actual: &[u8]) {
 
 fn read_golden(name: &str) -> Vec<u8> {
     std::fs::read(golden_path(name)).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1` to generate it")
     })
 }
 
@@ -364,7 +367,7 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
             // Only small filters are inlined; this descriptor's filter
             // is read through its handle, so the field is omitted.
             filter_inline: None,
-            payload_checksum: sha256_digest(b"sst payload"),
+            object_checksum: sha256_digest(b"sst payload"),
         }],
     })
     .expect("manifest envelope")

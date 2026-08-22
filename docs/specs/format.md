@@ -1821,6 +1821,9 @@ payload as an opaque sub-document:
 | `payload_checksum` | `sha256:<64 lowercase hex>` digest of the exact payload bytes as stored. |
 | `payload` | The payload: a raw JSON sub-document in JSON families, a CBOR byte string in CBOR families. |
 
+`payload_checksum` covers the payload inside an envelope. `object_checksum`
+covers a complete object that has no envelope.
+
 Two rules make these envelopes evolvable:
 
 1. **Checksums cover stored bytes, never a re-encoding.** Readers verify
@@ -1863,28 +1866,28 @@ independently readable sections — prefix-compressed data blocks holding rows
 in ascending row-key order, one bloom filter block over per-family lookup
 prefixes, then one index block naming each data block's last key and byte
 range. There is no footer and no self-describing header; the referencing
-manifest's segment descriptor carries the index and
-filter block handles, and is the only entry point into the object. Each
-section's CRC32C is computed over its stored (compressed) bytes and lives in
-the handle that names it — index entries for data blocks, the manifest
-descriptor for the index and filter — so a reader verifies every ranged read
-before decoding it, and the manifest transitively binds the object's exact
-bytes. The descriptor also records a whole-object `sha256` digest for
-publication conflict checks and offline verification; the read path never
-consults it. When the filter block is small (delta-run segments), the
-descriptor additionally inlines the filter's stored bytes as lowercase hex
+manifest's segment descriptor carries the index and filter block handles, and
+is the only entry point into the object. Each section's CRC32C is computed
+over its stored (compressed) bytes and lives in the handle that names it —
+index entries for data blocks, the manifest descriptor for the index and
+filter — so a reader verifies every ranged read before decoding it, and the
+manifest transitively binds the object's exact bytes. The descriptor also
+stores `object_checksum`, the SHA-256 digest of the full segment, for
+publication conflict checks and offline verification. Normal reads use the
+per-block checksums instead. When the filter block is small (delta-run segments),
+the descriptor additionally inlines the filter's stored bytes as lowercase hex
 (`filter_inline`), so a point lookup can rule the segment out without any
 object fetch. The inline copy is bound by the same filter handle — it must
 decode against the handle's stored length and CRC32C exactly like a fetched
-block, and a mismatch is corruption. When the field is absent (large
-filters are not inlined), readers fetch the filter block by its handle. The
-filter block sits directly before the index block at the end of the object;
-manifest loading rejects a descriptor whose handles disagree with that
-layout, or whose inline copy's length disagrees with its handle, so the
-read path assumes both. Readers reject out-of-order rows,
-out-of-order index entries, and checksum failures as malformed. The segment
-format is versioned by the manifest that references it (`namespace_manifest`
-`format_version`), since a segment is unreachable except through a manifest.
+block, and a mismatch is corruption. When the field is absent (large filters
+are not inlined), readers fetch the filter block by its handle. The filter
+block sits directly before the index block at the end of the object; manifest
+loading rejects a descriptor whose handles disagree with that layout, or whose
+inline copy's length disagrees with its handle, so the read path assumes both.
+Readers reject out-of-order rows, out-of-order index entries, and checksum
+failures as malformed. The segment format is versioned by the manifest that
+references it (`namespace_manifest` `format_version`), since a segment is
+unreachable except through a manifest.
 
 A run is identified by its `run_seq` and `level` together, and holds one
 family's segments from one producer: a WAL flush's delta run or a rebuild's
@@ -1958,10 +1961,11 @@ checkpoint.
 A gram-index segment uses the section 4.2.1 block grammar unchanged —
 prefix-compressed data blocks, one bloom filter block, one index block,
 handles and checksums in the grep-manifest descriptor — with a grep-owned row
-payload instead of metadata rows. The tokenizer, row shapes, and posting
-encoding below are frozen by grep manifest format version 1; their evolution
-follows the rules in section 4.3 and always permits rebuilding this derived
-work (section 6.6).
+payload instead of metadata rows. Its `object_checksum` is the SHA-256 digest
+of the complete stored segment, with the same meaning as the metadata segment
+field. The tokenizer, row shapes, and posting encoding below are
+frozen by grep manifest format version 1; their evolution follows the rules in
+section 4.3 and always permits rebuilding this derived work (section 6.6).
 
 - The **tokenizer** is every overlapping three-byte window (gram) of an
   eligible revision's content, after folding ASCII letters to lower case.
@@ -2088,11 +2092,11 @@ For file revisions, a valid manifest includes the canonical `revisions` table
 and the `revisions_by_inode_desc` index table. The index table must contain
 exactly the same revision rows as the canonical table, keyed for newest-first
 inode revision scans. Readers treat a missing, extra, duplicate, or changed
-revision index row as namespace corruption. Segment reads enforce per-segment
-checksums and key ranges; manifest-table loads enforce per-run row-count
-equality between canonical and index families; full row-level index equality
-is enforced by every reorganization rewrite over the complete input runs that
-the rewrite selected.
+revision index row as namespace corruption. Segment reads verify the per-block
+checksums in the block handles and enforce key ranges. Manifest-table loads
+enforce per-run row-count equality between canonical and index families; full
+row-level index equality is enforced by every reorganization rewrite over the
+complete input runs that the rewrite selected.
 
 ### 6.2 Compaction
 
