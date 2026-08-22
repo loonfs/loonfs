@@ -728,21 +728,17 @@ pub struct GcResponse {
     pub released_fork_checkpoints: u64,
     /// Checkpoint records released because their expiry passed, or because
     /// they sit on a terminally deleted namespace.
-    #[serde(default)]
     pub released_expired_checkpoints: u64,
     /// Upload-session control objects deleted after the reap window.
-    #[serde(default)]
     pub deleted_upload_sessions: u64,
     /// Content objects reclaimed because their upload session completed,
     /// aged past the derived reclamation grace, and nothing the namespace
     /// can reach references them. The upload half's cleanup of abandoned
     /// sessions is not counted here: it deletes unconditionally, whether or
     /// not the session ever wrote anything.
-    #[serde(default)]
     pub deleted_content_objects: u64,
     /// Active checkpoint records released because their basis manifest is
     /// verifiably gone.
-    #[serde(default)]
     pub released_missing_basis_checkpoints: u64,
     /// Candidates retained at delete time (grace window, missing
     /// timestamps, or reachable from the fresh root set).
@@ -750,7 +746,6 @@ pub struct GcResponse {
     /// The same total, split by the decision that spared each candidate.
     /// The total above stays because it is what every existing consumer
     /// reads; this says why.
-    #[serde(default)]
     pub retained: RetainedCandidates,
     /// True when ambiguous roots suppressed manifest/table deletion.
     pub degraded_retention: bool,
@@ -761,7 +756,6 @@ pub struct GcResponse {
     /// the whole scan reclaims what this one left behind. A pass that had
     /// room for the roots swept every other candidate normally around the
     /// skip, and one that did not also reports `budget_exhausted`.
-    #[serde(default)]
     pub content_reclamation_deferred: bool,
     /// True when the pass stopped because `max_objects` ran out before it
     /// finished. Whatever it did before that is reported here and stands;
@@ -769,7 +763,6 @@ pub struct GcResponse {
     /// continue. A budget too small for the namespace's own roots stops a
     /// pass before it decides anything at all, which is what this says and
     /// an empty report on its own does not.
-    #[serde(default)]
     pub budget_exhausted: bool,
     /// Opaque resume token when more candidates remain. Resuming rebuilds
     /// every safety proof; the token carries enumeration position only and

@@ -138,6 +138,68 @@ fn every_one_of_is_a_discriminated_non_null_union() {
     }
 }
 
+/// Checks success and error response schemas, including components used only
+/// by `ApiError` and `ErrorDetails`.
+#[test]
+fn no_schema_a_response_reaches_admits_null() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let mut visited = BTreeSet::new();
+    let mut properties = 0usize;
+
+    for (location, response) in documented_responses(&spec) {
+        assert_no_null_property(&spec, response, &location, &mut visited, &mut properties);
+    }
+
+    for schema_name in ["ApiError", "ErrorDetails", "GcResponse", "GrepMatch"] {
+        assert!(
+            visited.contains(&format!("#/components/schemas/{schema_name}")),
+            "the walk never reached `{schema_name}`"
+        );
+    }
+    assert!(
+        properties > 0,
+        "the walk reached no response schema properties"
+    );
+}
+
+/// Fields that the server always includes in these response types.
+const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
+    ("GcResponse", "budget_exhausted"),
+    ("GcResponse", "content_reclamation_deferred"),
+    ("GcResponse", "deleted_content_objects"),
+    ("GcResponse", "deleted_upload_sessions"),
+    ("GcResponse", "released_expired_checkpoints"),
+    ("GcResponse", "released_missing_basis_checkpoints"),
+    ("GcResponse", "retained"),
+    ("GrepMatch", "line_truncated"),
+];
+
+#[test]
+fn always_serialized_response_fields_are_required() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let schemas = spec
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+
+    for (schema_name, field) in ALWAYS_SERIALIZED_RESPONSE_FIELDS {
+        let schema = schemas
+            .get(*schema_name)
+            .unwrap_or_else(|| panic!("openapi document has no `{schema_name}` schema"));
+        assert!(
+            required_fields(schema).contains(field),
+            "`{schema_name}.{field}` is written on every response but the document marks it optional"
+        );
+    }
+}
+
 #[test]
 fn openapi_documents_current_server_paths() {
     let spec: Value = serde_json::from_str(
@@ -1555,6 +1617,85 @@ fn collect_one_of_objects<'a>(
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
+}
+
+/// Returns every response with its operation ID and status.
+fn documented_responses(spec: &Value) -> Vec<(String, &Value)> {
+    let mut responses = Vec::new();
+
+    for (operation_id, operation) in operations_by_id(spec) {
+        let Some(statuses) = operation.get("responses").and_then(Value::as_object) else {
+            continue;
+        };
+        for (status, response) in statuses {
+            responses.push((format!("{operation_id} {status}"), response));
+        }
+    }
+
+    responses
+}
+
+/// Checks a response and its referenced components for nullable properties.
+/// Optional response fields are omitted rather than encoded as `null`.
+fn assert_no_null_property<'a>(
+    spec: &'a Value,
+    value: &'a Value,
+    location: &str,
+    visited: &mut BTreeSet<String>,
+    properties: &mut usize,
+) {
+    match value {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                if visited.insert(reference.to_owned()) {
+                    let component = component_for_ref(spec, reference).unwrap_or_else(|| {
+                        panic!("{location} references a missing component: {reference}")
+                    });
+                    assert_no_null_property(spec, component, reference, visited, properties);
+                }
+            }
+
+            if let Some(schema_properties) = object.get("properties").and_then(Value::as_object) {
+                for (name, schema) in schema_properties {
+                    *properties += 1;
+                    assert!(
+                        !admits_null(schema),
+                        "response property `{name}` in {location} is typed null; \
+                         optional response fields are omitted when absent"
+                    );
+                    assert!(
+                        schema.get("nullable") != Some(&Value::Bool(true)),
+                        "response property `{name}` in {location} is marked nullable; \
+                         optional response fields are omitted when absent"
+                    );
+                }
+            }
+
+            for child in object.values() {
+                assert_no_null_property(spec, child, location, visited, properties);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                assert_no_null_property(spec, child, location, visited, properties);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn admits_null(schema: &Value) -> bool {
+    schema
+        .get("type")
+        .and_then(Value::as_array)
+        .is_some_and(|types| types.iter().any(|entry| entry.as_str() == Some("null")))
+}
+
+fn component_for_ref<'a>(spec: &'a Value, reference: &str) -> Option<&'a Value> {
+    let (component_type, component_name) = component_reference_parts(reference)?;
+    spec.get("components")?
+        .get(component_type.as_str())?
+        .get(component_name.as_str())
 }
 
 fn required_fields(schema: &Value) -> BTreeSet<&str> {

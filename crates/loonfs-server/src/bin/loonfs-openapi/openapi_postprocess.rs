@@ -194,6 +194,7 @@ pub(crate) fn openapi_json_pretty(
     let derived = serde_json::to_string(document)?;
     let mut document = serde_json::from_str(&derived)?;
     normalize_optional_schemas(&mut document);
+    drop_null_from_response_schemas(&mut document);
     add_union_discriminators(&mut document, &mut Vec::new());
     extract_union_variants(&mut document)?;
     add_operation_retry_classes(&mut document)?;
@@ -943,6 +944,162 @@ fn is_null_schema(value: &Value) -> bool {
     object.len() == 1 && object.get("type").and_then(Value::as_str) == Some("null")
 }
 
+/// Removes `null` from optional fields used in responses.
+///
+/// The server omits absent response fields. Request-only schemas keep `null`
+/// because serde accepts it. Shared request and response schemas use the
+/// response rule while keeping the field optional.
+fn drop_null_from_response_schemas(document: &mut Value) {
+    let mut pending = Vec::new();
+    collect_response_references(document, &mut pending);
+    let mut reachable = BTreeSet::new();
+
+    while let Some(reference) = pending.pop() {
+        let Some((component_type, component_name)) = component_reference_parts(&reference) else {
+            continue;
+        };
+        if !reachable.insert((component_type.clone(), component_name.clone())) {
+            continue;
+        }
+        let Some(component) = document
+            .get("components")
+            .and_then(|components| components.get(&component_type))
+            .and_then(Value::as_object)
+            .and_then(|entries| entries.get(&component_name))
+        else {
+            continue;
+        };
+        collect_component_references(component, &mut pending);
+    }
+
+    for responses in operation_responses_mut(document) {
+        drop_null_from_optional_properties(responses);
+    }
+
+    let Some(components) = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("components"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for (component_type, entries) in components {
+        let Some(entries) = entries.as_object_mut() else {
+            continue;
+        };
+        for (component_name, component) in entries {
+            if reachable.contains(&(component_type.clone(), component_name.clone())) {
+                drop_null_from_optional_properties(component);
+            }
+        }
+    }
+}
+
+/// Collects component references from every operation response.
+fn collect_response_references(document: &Value, references: &mut Vec<String>) {
+    let Some(paths) = document.get("paths").and_then(Value::as_object) else {
+        return;
+    };
+
+    for path_item in paths.values() {
+        let Some(path_item) = path_item.as_object() else {
+            continue;
+        };
+        for method in HTTP_METHODS {
+            let Some(responses) = path_item
+                .get(*method)
+                .and_then(|operation| operation.get("responses"))
+            else {
+                continue;
+            };
+            collect_component_references(responses, references);
+        }
+    }
+}
+
+/// Returns every operation's `responses` object for in-place updates.
+fn operation_responses_mut(document: &mut Value) -> Vec<&mut Value> {
+    let Some(paths) = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("paths"))
+        .and_then(Value::as_object_mut)
+    else {
+        return Vec::new();
+    };
+
+    paths
+        .values_mut()
+        .filter_map(Value::as_object_mut)
+        .flat_map(|path_item| {
+            path_item
+                .iter_mut()
+                .filter(|(method, _)| HTTP_METHODS.contains(&method.as_str()))
+                .filter_map(|(_, operation)| {
+                    operation
+                        .as_object_mut()
+                        .and_then(|operation| operation.get_mut("responses"))
+                })
+        })
+        .collect()
+}
+
+fn drop_null_from_optional_properties(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            let required = object
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>();
+            if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+                for (name, schema) in properties {
+                    if required.contains(name.as_str()) {
+                        continue;
+                    }
+                    let Some(replacement) = non_null_type(schema).cloned() else {
+                        continue;
+                    };
+                    let schema = schema
+                        .as_object_mut()
+                        .expect("schema with a type array is an object");
+                    schema.insert("type".to_owned(), replacement);
+                    schema.shift_remove("nullable");
+                }
+            }
+
+            for child in object.values_mut() {
+                drop_null_from_optional_properties(child);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                drop_null_from_optional_properties(child);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// Returns `X` when the schema type is `["X", "null"]`.
+fn non_null_type(value: &Value) -> Option<&Value> {
+    let types = value.get("type")?.as_array()?;
+    if types.len() != 2 {
+        return None;
+    }
+
+    match (
+        types[0].as_str() == Some("null"),
+        types[1].as_str() == Some("null"),
+    ) {
+        (true, false) => Some(&types[1]),
+        (false, true) => Some(&types[0]),
+        (true, true) | (false, false) => None,
+    }
+}
+
 fn add_union_discriminators(value: &mut Value, path: &mut Vec<String>) {
     match value {
         Value::Object(object) => {
@@ -1325,6 +1482,132 @@ mod tests {
         }));
 
         normalize_optional_schemas(&mut document);
+    }
+
+    /// One request schema, one response schema, and one schema both reach.
+    fn request_and_response_document() -> Value {
+        ordered(serde_json::json!({
+            "paths": {
+                "/things": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ThingRequest"}
+                                }
+                            }
+                        },
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"$ref": "#/components/schemas/ThingResponse"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "Shared": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": ["string", "null"]}
+                        }
+                    },
+                    "ThingRequest": {
+                        "type": "object",
+                        "properties": {
+                            "cursor": {"type": ["string", "null"]},
+                            "shared": {"$ref": "#/components/schemas/Shared"}
+                        }
+                    },
+                    "ThingResponse": {
+                        "type": "object",
+                        "required": ["count"],
+                        "properties": {
+                            "count": {"type": "integer"},
+                            "next_cursor": {"type": ["string", "null"], "nullable": true},
+                            "shared": {"$ref": "#/components/schemas/Shared"}
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
+    #[test]
+    fn drops_the_null_type_from_an_optional_response_property() {
+        let mut document = request_and_response_document();
+
+        drop_null_from_response_schemas(&mut document);
+        let actual = unordered(&document);
+        assert_eq!(
+            actual.pointer("/components/schemas/ThingResponse/properties/next_cursor"),
+            Some(&serde_json::json!({"type": "string"}))
+        );
+    }
+
+    #[test]
+    fn drops_the_null_type_from_a_schema_a_request_and_a_response_share() {
+        let mut document = request_and_response_document();
+
+        drop_null_from_response_schemas(&mut document);
+        let actual = unordered(&document);
+        assert_eq!(
+            actual.pointer("/components/schemas/Shared/properties/label"),
+            Some(&serde_json::json!({"type": "string"}))
+        );
+    }
+
+    #[test]
+    fn keeps_the_null_type_on_a_request_only_property() {
+        let mut document = request_and_response_document();
+
+        drop_null_from_response_schemas(&mut document);
+        let actual = unordered(&document);
+        assert_eq!(
+            actual.pointer("/components/schemas/ThingRequest/properties/cursor"),
+            Some(&serde_json::json!({"type": ["string", "null"]}))
+        );
+    }
+
+    #[test]
+    fn rewrites_only_optional_response_properties() {
+        let mut document = ordered(serde_json::json!({
+            "paths": {
+                "/things": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "required": ["marker"],
+                                            "properties": {
+                                                "marker": {"type": ["string", "null"]}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+
+        drop_null_from_response_schemas(&mut document);
+        let actual = unordered(&document);
+        assert_eq!(
+            actual.pointer(
+                "/paths/~1things/get/responses/200/content/application~1json/schema/properties/marker"
+            ),
+            Some(&serde_json::json!({"type": ["string", "null"]}))
+        );
     }
 
     #[test]

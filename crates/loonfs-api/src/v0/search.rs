@@ -79,7 +79,6 @@ pub struct GrepMatch {
     /// The matching line, truncated to the server's line cap.
     pub line: String,
     /// True when `line` was truncated.
-    #[serde(default)]
     pub line_truncated: bool,
 }
 
