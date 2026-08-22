@@ -91,7 +91,7 @@ mod tests {
     use bytes::Bytes;
     use loonfs_api::IndexSegmentId;
     use loonfs_grep::keyspace::{manifest_key, root_key, segment_key};
-    use loonfs_grep::root::GrepManifestId;
+    use loonfs_grep::root::GrepManifestObjectId;
     use loonfs_objectstore::keys::{wal_head, wal_segment};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
 
@@ -120,11 +120,12 @@ mod tests {
             .put_overwrite(&root_key(&namespace_id), Bytes::from_static(b"grep root"))
             .await
             .expect("grep root");
-        let grep_manifest_id = GrepManifestId::parse("gmf_0123456789abcdef0123456789abcdef")
-            .expect("valid grep manifest id");
+        let grep_manifest_object_id =
+            GrepManifestObjectId::parse("gmf_0123456789abcdef0123456789abcdef")
+                .expect("valid grep manifest object id");
         store
             .put_overwrite(
-                &manifest_key(&namespace_id, &grep_manifest_id),
+                &manifest_key(&namespace_id, &grep_manifest_object_id),
                 Bytes::from_static(b"grep manifest"),
             )
             .await

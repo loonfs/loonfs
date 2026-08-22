@@ -642,8 +642,8 @@ string_id! {
 }
 
 string_id! {
-    /// Identifies one stored grep manifest.
-    GrepManifestId,
+    /// Durable object id for one stored grep manifest.
+    GrepManifestObjectId,
     prefix = "gmf"
 }
 
@@ -652,30 +652,29 @@ string_id! {
     ManifestObjectId,
     error = GeneratedIdValidationError,
     validate = |value| {
-        validate_position_suffix_id(value, ("manifest_id", "manifest id"))
+        validate_position_suffix_id(value, ("manifest_no", "manifest number"))
     }
 }
 
 impl ManifestObjectId {
-    /// Manifest object ids order by logical manifest position and stay unique
-    /// under races.
-    pub fn generate(manifest_id: ManifestId) -> Self {
+    /// Returns a unique object id that sorts by manifest number.
+    pub fn generate(manifest_no: ManifestNo) -> Self {
         Self(format!(
             "{:020}-{}",
-            manifest_id.0,
+            manifest_no.0,
             generated_position_suffix()
         ))
     }
 }
 
-/// Logical manifest id encoded in a manifest object id's 20-digit prefix.
-pub fn manifest_object_id_manifest_id(object_id: &str) -> Option<ManifestId> {
-    validate_position_suffix_id(object_id, ("manifest_id", "manifest id")).ok()?;
+/// Returns the manifest number in an object id's 20-digit prefix.
+pub fn manifest_object_id_manifest_no(object_id: &str) -> Option<ManifestNo> {
+    validate_position_suffix_id(object_id, ("manifest_no", "manifest number")).ok()?;
     let (position, _) = object_id.split_once('-')?;
     position
         .parse()
         .ok()
-        .and_then(|value| ManifestId::parse(value).ok())
+        .and_then(|value| ManifestNo::parse(value).ok())
 }
 
 string_id! {
@@ -797,13 +796,13 @@ numeric_id! {
 }
 
 numeric_id! {
-    /// Version number for a namespace manifest.
+    /// Monotonic manifest counter for one namespace.
     ///
-    /// The manifest version can increase when metadata changes, even if no
+    /// The manifest number can increase when metadata changes, even if no
     /// namespace commit is written.
-    ManifestId,
+    ManifestNo,
     public_ordinal,
-    schema_description = "Version number for a namespace manifest. It can increase when metadata changes, even if no namespace commit is written."
+    schema_description = "Monotonic manifest counter for one namespace. It can increase when metadata changes, even if no namespace commit is written."
 }
 
 numeric_id! {
@@ -845,7 +844,7 @@ impl fmt::Display for InodeKind {
 mod tests {
     use super::{
         next_public_ordinal, ChangeSeq, CheckpointId, CommitId, ContentId, ContentStoreId, InodeId,
-        ManifestId, ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo, UploadId,
+        ManifestNo, ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo, UploadId,
         WalSegmentId, WriterEpoch, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributeRevisionNo;
@@ -893,7 +892,7 @@ mod tests {
         assert_range!(RevisionNo);
         assert_range!(ChangeSeq);
         assert_range!(AttributeRevisionNo);
-        assert_range!(ManifestId);
+        assert_range!(ManifestNo);
         assert_range!(WriterEpoch);
 
         assert_eq!(
@@ -1092,7 +1091,7 @@ mod tests {
     fn generated_runtime_ids_use_lower_hex_bodies() {
         let upload_id = UploadId::generate();
         let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
-        let manifest_object_id = ManifestObjectId::generate(ManifestId(413));
+        let manifest_object_id = ManifestObjectId::generate(ManifestNo(413));
         let metadata_table_id = MetadataTableId::generate();
         let checkpoint_id = CheckpointId::generate();
 
@@ -1128,7 +1127,7 @@ mod tests {
     fn generated_manifest_object_ids_are_not_reused_across_samples() {
         let mut ids = BTreeSet::new();
         for _ in 0..128 {
-            let id = ManifestObjectId::generate(ManifestId(412));
+            let id = ManifestObjectId::generate(ManifestNo(412));
             assert!(
                 ids.insert(id.clone()),
                 "generated duplicate manifest object id {id}"
@@ -1150,17 +1149,17 @@ mod tests {
     }
 
     #[test]
-    fn manifest_object_id_manifest_id_reads_position_prefix() {
+    fn manifest_object_id_manifest_no_reads_position_prefix() {
         assert_eq!(
-            super::manifest_object_id_manifest_id("00000000000000000412-9f2a6c0e4b7d4a90"),
-            Some(ManifestId(412))
+            super::manifest_object_id_manifest_no("00000000000000000412-9f2a6c0e4b7d4a90"),
+            Some(ManifestNo(412))
         );
         assert_eq!(
-            super::manifest_object_id_manifest_id("not-a-manifest-object-id"),
+            super::manifest_object_id_manifest_no("not-a-manifest-object-id"),
             None
         );
         assert_eq!(
-            super::manifest_object_id_manifest_id("00009007199254740992-9f2a6c0e4b7d4a90"),
+            super::manifest_object_id_manifest_no("00009007199254740992-9f2a6c0e4b7d4a90"),
             None
         );
     }

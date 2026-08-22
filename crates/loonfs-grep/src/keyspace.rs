@@ -1,6 +1,6 @@
 //! Grep-owned durable object keys and their strict parser.
 
-use crate::root::GrepManifestId;
+use crate::root::GrepManifestObjectId;
 use loonfs_api::{IndexSegmentId, NamespaceId};
 
 const NAMESPACE_KEYSPACE_PREFIX: &str = "namespaces/";
@@ -10,8 +10,12 @@ const GREP_EXTENSION_SUFFIX: &str = "/extensions/grep/";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrepKeyKind {
     Root,
-    Manifest { manifest_id: GrepManifestId },
-    Segment { segment_id: IndexSegmentId },
+    Manifest {
+        manifest_object_id: GrepManifestObjectId,
+    },
+    Segment {
+        segment_id: IndexSegmentId,
+    },
 }
 
 /// A recognized grep key split into its namespace and object kind.
@@ -37,9 +41,12 @@ pub fn manifests_prefix(namespace_id: &NamespaceId) -> String {
 }
 
 /// Key of one immutable grep manifest, under the id its publisher minted.
-pub fn manifest_key(namespace_id: &NamespaceId, manifest_id: &GrepManifestId) -> String {
+pub fn manifest_key(
+    namespace_id: &NamespaceId,
+    manifest_object_id: &GrepManifestObjectId,
+) -> String {
     format!(
-        "{}{manifest_id}.manifest.json",
+        "{}{manifest_object_id}.manifest.json",
         manifests_prefix(namespace_id)
     )
 }
@@ -71,7 +78,7 @@ pub fn parse_key(key: &str) -> Option<ParsedGrepKey> {
             return None;
         }
         GrepKeyKind::Manifest {
-            manifest_id: GrepManifestId::parse(manifest).ok()?,
+            manifest_object_id: GrepManifestObjectId::parse(manifest).ok()?,
         }
     } else {
         let segment = object.strip_prefix("segments/")?.strip_suffix(".sst.zst")?;
@@ -102,8 +109,9 @@ mod tests {
         let namespace_id = namespace_id();
         let segment_id = segment_id();
 
-        let manifest_id = GrepManifestId::parse("gmf_0123456789abcdef0123456789abcdef")
-            .expect("valid manifest id");
+        let manifest_object_id =
+            GrepManifestObjectId::parse("gmf_0123456789abcdef0123456789abcdef")
+                .expect("valid manifest object id");
 
         assert_eq!(
             grep_prefix(&namespace_id),
@@ -118,7 +126,7 @@ mod tests {
             "namespaces/docs/extensions/grep/manifests/"
         );
         assert_eq!(
-            manifest_key(&namespace_id, &manifest_id),
+            manifest_key(&namespace_id, &manifest_object_id),
             "namespaces/docs/extensions/grep/manifests/gmf_0123456789abcdef0123456789abcdef.manifest.json"
         );
         assert_eq!(
@@ -135,8 +143,9 @@ mod tests {
     fn built_keys_round_trip_through_the_parser() {
         let namespace_id = namespace_id();
         let segment_id = segment_id();
-        let manifest_id = GrepManifestId::parse("gmf_0123456789abcdef0123456789abcdef")
-            .expect("valid manifest id");
+        let manifest_object_id =
+            GrepManifestObjectId::parse("gmf_0123456789abcdef0123456789abcdef")
+                .expect("valid manifest object id");
 
         assert_eq!(
             parse_key(&root_key(&namespace_id)),
@@ -146,10 +155,10 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_key(&manifest_key(&namespace_id, &manifest_id)),
+            parse_key(&manifest_key(&namespace_id, &manifest_object_id)),
             Some(ParsedGrepKey {
                 namespace_id: namespace_id.clone(),
-                kind: GrepKeyKind::Manifest { manifest_id },
+                kind: GrepKeyKind::Manifest { manifest_object_id },
             })
         );
         assert_eq!(
@@ -190,12 +199,13 @@ mod tests {
     fn core_key_parser_ignores_grep_extension_objects() {
         let namespace_id = namespace_id();
         let segment_id = segment_id();
-        let manifest_id = GrepManifestId::parse("gmf_0123456789abcdef0123456789abcdef")
-            .expect("valid manifest id");
+        let manifest_object_id =
+            GrepManifestObjectId::parse("gmf_0123456789abcdef0123456789abcdef")
+                .expect("valid manifest object id");
 
         for key in [
             root_key(&namespace_id),
-            manifest_key(&namespace_id, &manifest_id),
+            manifest_key(&namespace_id, &manifest_object_id),
             segment_key(&namespace_id, &segment_id),
         ] {
             assert!(

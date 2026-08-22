@@ -7,7 +7,7 @@
 use super::ContentToken;
 use crate::{
     AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CheckpointId,
-    CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo, WriterEpoch,
+    CommitId, ContentRef, InodeId, ManifestNo, NamespaceId, RevisionNo, WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -193,7 +193,7 @@ pub struct NamespaceDiagnostics {
     /// Current manifest pointer recorded by the head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub current_manifest_id: Option<ManifestId>,
+    pub current_manifest_no: Option<ManifestNo>,
     /// Number of visible WAL segments after the current manifest.
     pub wal_tail_segments: u64,
 }
@@ -576,7 +576,7 @@ pub struct Checkpoint {
     /// Sequence covered by the checkpoint's pinned basis.
     pub checkpoint_seq: ChangeSeq,
     /// Manifest pinned by the checkpoint.
-    pub manifest_id: ManifestId,
+    pub manifest_no: ManifestNo,
 }
 
 /// One page of active checkpoint records.
@@ -616,7 +616,7 @@ pub struct FlushWalResponse {
     /// Head sequence the flush attempted to cover.
     pub target_head_seq: ChangeSeq,
     /// Manifest `metadata/root.json` references after the operation.
-    pub manifest_id: ManifestId,
+    pub manifest_no: ManifestNo,
     /// Sequence covered by that manifest.
     pub manifest_head_seq: ChangeSeq,
     /// How the root came to cover the head.
@@ -985,7 +985,7 @@ pub enum WalFlushStepOutcome {
         /// Sequence this step attempted to flush through.
         attempted_seq: ChangeSeq,
         /// Manifest the root currently references.
-        current_manifest_id: ManifestId,
+        current_manifest_no: ManifestNo,
     },
     /// A concurrent head update won the race.
     RaceLost {
@@ -1183,7 +1183,7 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             head_seq: ChangeSeq(11),
             retention_floor_seq: ChangeSeq(4),
-            current_manifest_id: Some(ManifestId(8)),
+            current_manifest_no: Some(ManifestNo(8)),
             wal_tail_segments: 3,
         };
         assert_eq!(
@@ -1192,7 +1192,7 @@ mod tests {
                 "namespace_id": "demo",
                 "head_seq": 11,
                 "retention_floor_seq": 4,
-                "current_manifest_id": 8,
+                "current_manifest_no": 8,
                 "wal_tail_segments": 3
             })
         );
@@ -1738,7 +1738,7 @@ mod tests {
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: Some(1_752_626_600_000),
             checkpoint_seq: ChangeSeq(12),
-            manifest_id: ManifestId(9),
+            manifest_no: ManifestNo(9),
         };
         let checkpoint_json = serde_json::json!({
             "checkpoint_id": "chk_00000000000000000000000000000001",
@@ -1746,7 +1746,7 @@ mod tests {
             "created_at_ms": 1_752_623_000_000_u64,
             "expires_at_ms": 1_752_626_600_000_u64,
             "checkpoint_seq": 12,
-            "manifest_id": 9,
+            "manifest_no": 9,
         });
         let mut create_json = checkpoint_json.clone();
         create_json["namespace_id"] = serde_json::json!("demo");
@@ -1794,7 +1794,7 @@ mod tests {
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: None,
             checkpoint_seq: ChangeSeq(3),
-            manifest_id: ManifestId(3),
+            manifest_no: ManifestNo(3),
         })
         .expect("serialize checkpoint");
         assert!(checkpoint_json.get("expires_at_ms").is_none());

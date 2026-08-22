@@ -73,7 +73,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 response.namespace_id,
                 response.checkpoint.checkpoint_seq.0,
                 response.checkpoint.checkpoint_id,
-                response.checkpoint.manifest_id
+                response.checkpoint.manifest_no
             )
         }
         CommandData::CheckpointsListed(response) => {

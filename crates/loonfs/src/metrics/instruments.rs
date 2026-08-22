@@ -1371,7 +1371,7 @@ mod tests {
 
         instruments.compaction_finished(
             &Ok(MetadataCompactionJobOutcome::Published {
-                manifest_id: loonfs_api::ManifestId(1),
+                manifest_no: loonfs_api::ManifestNo(1),
                 rows_read: 20,
                 rows_written: 10,
                 input_bytes: 2_000,

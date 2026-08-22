@@ -683,7 +683,7 @@ mod tests {
             namespace_id: namespace_id.clone(),
             head_seq: ChangeSeq(3),
             retention_floor_seq: ChangeSeq(1),
-            current_manifest_id: None,
+            current_manifest_no: None,
             wal_tail_segments: 2,
         };
         let transport = crate::transport::test_transport::failure_then_success(

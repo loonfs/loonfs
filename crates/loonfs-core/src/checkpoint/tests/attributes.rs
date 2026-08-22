@@ -248,7 +248,7 @@ async fn a_published_table_answers_at_the_sequence_the_read_asks_for() {
     let manifest = publish_manifest_with_tables(
         &store,
         &namespace_id,
-        ManifestId(1),
+        ManifestNo(1),
         ChangeSeq(9),
         flatten_manifest_tables(tables),
     )
@@ -297,14 +297,14 @@ async fn a_published_table_answers_at_the_sequence_the_read_asks_for() {
 async fn publish_manifest_with_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_id: ManifestId,
+    manifest_no: ManifestNo,
     head_seq: ChangeSeq,
     metadata_files: Vec<MetadataFileRef>,
 ) -> ManifestObjectId {
-    let manifest_object_id = ManifestObjectId::generate(manifest_id);
+    let manifest_object_id = ManifestObjectId::generate(manifest_no);
     let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
-        manifest_id,
+        manifest_no,
         manifest_object_id: manifest_object_id.clone(),
         head_seq,
         head_commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("commit id"),

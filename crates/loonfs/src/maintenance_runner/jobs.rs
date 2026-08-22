@@ -357,7 +357,7 @@ fn reclaimed_anything(gc: &GcResponse) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ManifestId;
+    use crate::ManifestNo;
     use loonfs_api::ChangeSeq;
     use loonfs_test_support::ids::namespace_id;
 
@@ -417,7 +417,7 @@ mod tests {
         let superseded = step_response(
             WalFlushStepOutcome::Superseded {
                 attempted_seq: ChangeSeq(3),
-                current_manifest_id: ManifestId(9),
+                current_manifest_no: ManifestNo(9),
             },
             ReorganizeStepOutcome::NotNeeded,
         );

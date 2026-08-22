@@ -872,7 +872,7 @@ mod tests {
     use crate::namespace::BootstrapNamespaceError;
     use crate::storage::content_admission::ContentTokenError;
     use loonfs_api::{
-        ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId, RevisionNo, WriterEpoch,
+        ChangeSeq, CommitId, InodeId, ManifestNo, NamespaceId, RevisionNo, WriterEpoch,
     };
     use loonfs_objectstore::ObjectStoreError;
 
@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn metadata_view_errors_map_to_actionable_public_codes() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let _manifest_id = ManifestId(1);
+        let _manifest_no = ManifestNo(1);
         let head_seq = ChangeSeq(3);
 
         let cases = [

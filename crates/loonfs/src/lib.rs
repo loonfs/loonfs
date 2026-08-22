@@ -95,7 +95,7 @@ pub use loonfs_api::{
     DeleteNamespaceResponse, DestinationBehavior, DirectoryPageCursor, EffectiveLimit,
     FileRevision, FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest,
     GcResponse, InodeId, InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceStepRequest, MaintenanceStepResponse, ManifestId,
+    ListPathEntriesResponse, MaintenanceStepRequest, MaintenanceStepResponse, ManifestNo,
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, NameKey, Namespace,
     NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy,
     ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,

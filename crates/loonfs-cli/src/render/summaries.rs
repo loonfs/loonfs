@@ -98,9 +98,9 @@ pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u6
         }
         WalFlushStepOutcome::Superseded {
             attempted_seq,
-            current_manifest_id,
+            current_manifest_no,
         } => format!(
-            "wal flush @ seq {} superseded (current manifest {current_manifest_id})",
+            "wal flush @ seq {} superseded (current manifest {current_manifest_no})",
             attempted_seq.0
         ),
         WalFlushStepOutcome::RaceLost { observed_head_seq } => format!(

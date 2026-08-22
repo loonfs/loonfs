@@ -118,7 +118,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         loonfs_api::CommitId,
         RevisionNo,
         ChangeSeq,
-        loonfs_api::ManifestId,
+        loonfs_api::ManifestNo,
         loonfs_api::NameKey,
         loonfs_api::AttributeKey,
         loonfs_api::AttributeValue,

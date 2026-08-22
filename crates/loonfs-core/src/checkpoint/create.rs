@@ -68,7 +68,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         let record = CheckpointRecordState {
             checkpoint_id: checkpoint_id.clone(),
             namespace_id: namespace_id.clone(),
-            manifest_id: basis.manifest_id,
+            manifest_no: basis.manifest_no,
             manifest_object_id: basis.manifest_object_id.clone(),
             manifest_head_seq: basis.manifest_head_seq,
             manifest_payload_checksum: basis.manifest_payload_checksum.clone(),

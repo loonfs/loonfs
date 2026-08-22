@@ -26,7 +26,7 @@
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::error::ManifestLoadError;
-use super::flush::{ensure_metadata_publication_budget, next_manifest_id_after};
+use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after};
 use super::load::load_verified_manifest_tables;
 use super::publish::{
     manifest_write_failure, publish_metadata_root, write_namespace_manifest,
@@ -46,7 +46,7 @@ use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
     MetadataFileRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -156,7 +156,7 @@ pub enum MetadataReorganizeOutcome {
         input_runs: usize,
         decoded_input_rows: u64,
         decoded_input_bytes: u64,
-        manifest_id: ManifestId,
+        manifest_no: ManifestNo,
         /// True when the window starting at the group's oldest run could not
         /// reach an L0 run, so this merge ran above a frozen base and the
         /// group's retention is still stopped. A runtime that amortizes counts
@@ -379,7 +379,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
                 input_runs: input.runs.len(),
                 decoded_input_rows: input.decoded_rows,
                 decoded_input_bytes: input.decoded_bytes,
-                manifest_id: manifest.payload.manifest_id,
+                manifest_no: manifest.payload.manifest_no,
                 bottom_anchored_merge_blocked,
             },
         )),
@@ -837,12 +837,12 @@ pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
     // One generated object id, one write. The generated id ends in 16 random
     // hex characters, so the key is this unit's alone and a conflict under it
     // is corruption rather than contention.
-    let manifest_id = next_manifest_id_after(previous.payload.manifest_id)?;
-    let manifest_object_id = ManifestObjectId::generate(manifest_id);
+    let manifest_no = next_manifest_no_after(previous.payload.manifest_no)?;
+    let manifest_object_id = ManifestObjectId::generate(manifest_no);
     let object_key = metadata_manifest_object(namespace_id, &manifest_object_id);
     let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
-        manifest_id,
+        manifest_no,
         manifest_object_id,
         head_seq: previous.payload.head_seq,
         head_commit_id: previous.payload.head_commit_id.clone(),

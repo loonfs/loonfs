@@ -53,7 +53,7 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
         .await
         .expect("materialization after");
 
-    assert_eq!(after.root.manifest_id, checkpoint.manifest_id);
+    assert_eq!(after.root.manifest_no, checkpoint.manifest_no);
     assert_eq!(before.head.seq, after.head.seq);
     assert!(metadata_states_equivalent(
         &before.metadata_state,
@@ -127,11 +127,11 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .expect("create checkpoint");
     // The published manifest already covers the head: pinning writes a
     // record against it instead of materializing a new manifest.
-    assert_eq!(checkpoint.manifest_id, ManifestId(1));
+    assert_eq!(checkpoint.manifest_no, ManifestNo(1));
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.root.manifest_id, ManifestId(1));
+    assert_eq!(materialization.root.manifest_no, ManifestNo(1));
     let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read checkpoint record")
@@ -139,7 +139,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .state;
     assert!(CheckpointId::parse(record.checkpoint_id.as_str()).is_ok());
     assert_eq!(record.manifest_head_seq, ChangeSeq(0));
-    assert_eq!(record.manifest_id, ManifestId(1));
+    assert_eq!(record.manifest_no, ManifestNo(1));
 }
 
 #[tokio::test]
@@ -213,7 +213,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.root.manifest_id, ManifestId(1));
+    assert_eq!(materialization.root.manifest_no, ManifestNo(1));
 }
 
 #[tokio::test]
@@ -348,7 +348,7 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
         .await
         .expect("repeat checkpoint");
     assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
-    assert_eq!(repeated.manifest_id, first.manifest_id);
+    assert_eq!(repeated.manifest_no, first.manifest_no);
     assert_eq!(repeated.checkpoint_seq, first.checkpoint_seq);
 
     let record = load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
@@ -356,7 +356,7 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest_id, first.manifest_id);
+    assert_eq!(record.manifest_no, first.manifest_no);
     assert_eq!(record.manifest_head_seq, first.checkpoint_seq);
     assert_eq!(
         record.status,
@@ -408,7 +408,7 @@ async fn manifest_materialization_uses_written_segments() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let reorganized_manifest_id = drain_reorganization(
+    let reorganized_manifest_no = drain_reorganization(
         &store,
         &namespace_id,
         &context,
@@ -419,7 +419,7 @@ async fn manifest_materialization_uses_written_segments() {
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        reorganized_manifest_id,
+        reorganized_manifest_no,
     )
     .await
     .expect("load materialized manifest");
@@ -470,7 +470,7 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
         .await
         .expect("first checkpoint");
     let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, first.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first.manifest_no)
             .await
             .expect("load first manifest");
 
@@ -491,7 +491,7 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
         .await
         .expect("materialization");
     let second_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_no)
             .await
             .expect("load second manifest");
 
@@ -518,7 +518,7 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
             .expect("read checkpoint record")
             .expect("record exists")
             .state;
-        assert_eq!(record.manifest_id, response.manifest_id);
+        assert_eq!(record.manifest_no, response.manifest_no);
     }
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
@@ -562,7 +562,7 @@ async fn manifest_l0_run_missing_table_fails_load() {
         .await
         .expect("second checkpoint");
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_no)
             .await
             .expect("load materialized manifest");
     let deleted_key = l0_runs(&materialized.manifest)[0]
@@ -575,7 +575,7 @@ async fn manifest_l0_run_missing_table_fails_load() {
         .clone();
     store.delete(&deleted_key).await.expect("delete l0 segment");
 
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_id)
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_no)
         .await
     {
         Err(ManifestLoadError::MissingSegment { object_key }) => {
@@ -596,7 +596,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
         .expect("bootstrap");
     let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
     let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id(first))
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no(first))
             .await
             .expect("load first manifest");
     let mut bad_base_manifest = first_materialized.manifest.clone();
@@ -636,7 +636,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
 
     let second = write_file_and_checkpoint(&store, &namespace_id, &context, 2).await;
     let second_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id(second))
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no(second))
             .await
             .expect("load second manifest");
     let mut bad_l0_manifest = second_materialized.manifest.clone();
@@ -725,8 +725,8 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     metadata_files.extend(flatten_manifest_tables(metadata_ssts));
     let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
-        manifest_id: manifest_id(materialization.head.seq),
-        manifest_object_id: manifest_object_id(manifest_id(materialization.head.seq)),
+        manifest_no: manifest_no(materialization.head.seq),
+        manifest_object_id: manifest_object_id(manifest_no(materialization.head.seq)),
         head_seq: materialization.head.seq,
         head_commit_id: materialization.head.head_commit_id.clone(),
         base_seq: first,
@@ -767,7 +767,7 @@ async fn manifest_l0_runs_chain_across_successive_manifests() {
     }
 
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(5))
+        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestNo(5))
             .await
             .expect("load chained manifest");
     // Always-append checkpoints keep the first published base (seq 0) and
@@ -806,9 +806,9 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         .await
         .expect("materialization before checkpoint");
 
-    let manifest_id = checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
+    let manifest_no = checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
             .expect("load manifest");
 
@@ -864,12 +864,12 @@ async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_id: Some(materialization.root.manifest_id),
+            basis_manifest_no: Some(materialization.root.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestId(1),
+        ManifestNo(1),
     )
     .await
     .expect("build manifest");
@@ -900,12 +900,12 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_id: Some(materialization.root.manifest_id),
+            basis_manifest_no: Some(materialization.root.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestId(1),
+        ManifestNo(1),
     )
     .await
     .expect("build manifest");
@@ -927,10 +927,10 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
     );
     match error {
         MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestObjectConflict {
-            manifest_id,
+            manifest_no,
             ..
         }) => {
-            assert_eq!(manifest_id, ManifestId(1));
+            assert_eq!(manifest_no, ManifestNo(1));
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -964,12 +964,12 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_id: Some(materialization.root.manifest_id),
+            basis_manifest_no: Some(materialization.root.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestId(1),
+        ManifestNo(1),
     )
     .await
     .expect("build manifest");
@@ -993,13 +993,13 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     // With standalone records, pinning a basis that already covers the head
     // writes a checkpoint file against it instead of building a new
     // manifest.
-    assert_eq!(checkpoint.manifest_id, ManifestId(1));
+    assert_eq!(checkpoint.manifest_no, ManifestNo(1));
     let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest_id, ManifestId(1));
+    assert_eq!(record.manifest_no, ManifestNo(1));
     assert_eq!(
         record.manifest_payload_checksum,
         manifest_without_checkpoint.payload_checksum
@@ -1034,12 +1034,12 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_id: Some(materialization.root.manifest_id),
+            basis_manifest_no: Some(materialization.root.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestId(1),
+        ManifestNo(1),
     )
     .await
     .expect("build manifest without checkpoint");

@@ -101,15 +101,15 @@ impl ObjectStore for ManifestChecksumMismatchOnceStore {
     }
 }
 
-async fn current_manifest_id<S: ObjectStore + ?Sized>(
+async fn current_manifest_no<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> ManifestId {
+) -> ManifestNo {
     load_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
-        .manifest_id
+        .manifest_no
 }
 
 fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> {
@@ -239,7 +239,7 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
-) -> (ManifestId, usize) {
+) -> (ManifestNo, usize) {
     let mut published = 0usize;
     for _ in 0..128 {
         let report = super::reorganize_metadata_step(
@@ -260,7 +260,7 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
                 panic!("test budget must admit a progress-making subset")
             }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => {
-                return (current_manifest_id(store, namespace_id).await, published);
+                return (current_manifest_no(store, namespace_id).await, published);
             }
         }
     }
@@ -745,8 +745,8 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
     let stale = loonfs_api::wire::control::CheckpointRecordState {
         checkpoint_id: checkpoint.checkpoint_id.clone(),
         namespace_id: namespace_id.clone(),
-        manifest_id: ManifestId(0),
-        manifest_object_id: manifest_object_id(ManifestId(0)),
+        manifest_no: ManifestNo(0),
+        manifest_object_id: manifest_object_id(ManifestNo(0)),
         manifest_head_seq: ChangeSeq(0),
         manifest_payload_checksum: "sha256:stale".to_owned(),
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
@@ -1048,7 +1048,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     let appended = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load appended manifest");
@@ -1058,7 +1058,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     // Reorganization folds one family group per unit, each publishing its
     // own manifest — the manifest chain is the progress record.
     let mut units = 0usize;
-    let mut last_manifest_id = None;
+    let mut last_manifest_no = None;
     loop {
         let report = super::reorganize_metadata_step(
             &store,
@@ -1070,12 +1070,12 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         .await
         .expect("reorganization step");
         match report.outcome {
-            super::MetadataReorganizeOutcome::UnitPublished { manifest_id, .. } => {
+            super::MetadataReorganizeOutcome::UnitPublished { manifest_no, .. } => {
                 units += 1;
-                if let Some(previous) = last_manifest_id {
-                    assert!(manifest_id > previous, "units must advance the manifest");
+                if let Some(previous) = last_manifest_no {
+                    assert!(manifest_no > previous, "units must advance the manifest");
                 }
-                last_manifest_id = Some(manifest_id);
+                last_manifest_no = Some(manifest_no);
             }
             super::MetadataReorganizeOutcome::Superseded => {
                 panic!("no concurrent publisher exists in this test")
@@ -1091,7 +1091,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     let drained = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load drained manifest");
@@ -1131,7 +1131,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
             .expect("create checkpoint");
     }
 
-    let root_before = current_manifest_id(&store, &namespace_id).await;
+    let root_before = current_manifest_no(&store, &namespace_id).await;
     let tiny_byte_policy = MetadataLsmPolicy {
         max_l0_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
@@ -1152,7 +1152,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         panic!("one byte must not admit an SST run");
     };
     assert_eq!(
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
         root_before,
         "a step that plans a compaction must not publish"
     );
@@ -1262,7 +1262,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         &visible_between.metadata_state
     ));
 
-    let (bounded_manifest_id, bounded_steps_after_first) =
+    let (bounded_manifest_no, bounded_steps_after_first) =
         drain_reorganization_with_count(&bounded_store, &namespace_id, &context, bounded_policy)
             .await;
     let unbounded_policy = MetadataLsmPolicy {
@@ -1272,7 +1272,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         max_decoded_input_bytes_per_step: unlimited,
         ..MetadataLsmPolicy::default()
     };
-    let (unbounded_manifest_id, unbounded_steps) = drain_reorganization_with_count(
+    let (unbounded_manifest_no, unbounded_steps) = drain_reorganization_with_count(
         &unbounded_store,
         &namespace_id,
         &context,
@@ -1284,14 +1284,14 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     let bounded = load_manifest_materialization_for_inspection(
         &bounded_store,
         &namespace_id,
-        bounded_manifest_id,
+        bounded_manifest_no,
     )
     .await
     .expect("load bounded result");
     let unbounded = load_manifest_materialization_for_inspection(
         &unbounded_store,
         &namespace_id,
-        unbounded_manifest_id,
+        unbounded_manifest_no,
     )
     .await
     .expect("load unbounded result");
@@ -1370,10 +1370,10 @@ async fn whole_run_compaction_rewrites_base_segments() {
     .await
     .expect("write cold");
 
-    let first_manifest_id =
+    let first_manifest_no =
         checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_no)
             .await
             .expect("load first manifest");
     let first_run_keys = run_segment_object_keys(&first_materialized.manifest);
@@ -1402,9 +1402,9 @@ async fn whole_run_compaction_rewrites_base_segments() {
     let compacted = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("compacted checkpoint");
-    let compacted_manifest_id = drain_reorganization(&store, &namespace_id, &context, policy).await;
+    let compacted_manifest_no = drain_reorganization(&store, &namespace_id, &context, policy).await;
     let compacted_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
             .await
             .expect("load compacted manifest");
     let materialization_after = load_current_projection(&store, &namespace_id)
@@ -1458,10 +1458,10 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
             .expect("write initial file");
     }
 
-    let first_manifest_id =
+    let first_manifest_no =
         checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_no)
             .await
             .expect("load first manifest");
     let revision_keys_before = base_segment_object_keys_for_family(
@@ -1494,9 +1494,9 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
     let _compacted = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("compacted checkpoint");
-    let compacted_manifest_id = drain_reorganization(&store, &namespace_id, &context, policy).await;
+    let compacted_manifest_no = drain_reorganization(&store, &namespace_id, &context, policy).await;
     let compacted_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
             .await
             .expect("load compacted manifest");
     let revision_keys_after = base_segment_object_keys_for_family(
@@ -1594,7 +1594,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     let drained = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load drained manifest");
@@ -1626,7 +1626,7 @@ async fn checkpoints_chain_l0_runs_past_the_default_cap() {
     let appended = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load appended manifest");
@@ -1721,7 +1721,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
         .await
         .expect("in-budget retry succeeds");
     assert_eq!(advanced.outcome, loonfs_api::FlushWalOutcome::Published);
-    assert!(advanced.manifest_id > root_before.manifest_id);
+    assert!(advanced.manifest_no > root_before.manifest_no);
 }
 
 /// An over-budget reorganization unit aborts the same way: no root motion,
@@ -1917,7 +1917,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     let before = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load the parked manifest");
@@ -1983,7 +1983,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
         let current = load_manifest_materialization_for_inspection(
             &store,
             &namespace_id,
-            current_manifest_id(&store, &namespace_id).await,
+            current_manifest_no(&store, &namespace_id).await,
         )
         .await
         .expect("load the folded manifest");
@@ -2039,7 +2039,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     let after = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load the drained manifest");
@@ -2147,7 +2147,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let before = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load the manifest before the fold");
@@ -2199,7 +2199,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let after = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load the manifest after the fold");
@@ -2285,7 +2285,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     let before = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load the manifest");
@@ -2330,7 +2330,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
          rather than assemble one across the wide run"
     );
 
-    let root_before = current_manifest_id(&store, &namespace_id).await;
+    let root_before = current_manifest_no(&store, &namespace_id).await;
     let report = super::reorganize_metadata_step(
         &store,
         &namespace_id,
@@ -2349,7 +2349,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         report.outcome
     );
     assert_eq!(
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
         root_before,
         "a step that plans a compaction must not publish"
     );
@@ -2442,7 +2442,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
             let current = load_manifest_materialization_for_inspection(
                 &store,
                 &namespace_id,
-                current_manifest_id(&store, &namespace_id).await,
+                current_manifest_no(&store, &namespace_id).await,
             )
             .await
             .expect("load the current manifest");
@@ -2492,7 +2492,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
     let final_manifest = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        current_manifest_id(&store, &namespace_id).await,
+        current_manifest_no(&store, &namespace_id).await,
     )
     .await
     .expect("load the final manifest");

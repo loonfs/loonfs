@@ -6,19 +6,19 @@ async fn build_manifest_from_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     projection: &CurrentProjection,
-    manifest_id: ManifestId,
+    manifest_no: ManifestNo,
 ) -> NamespaceManifestEnvelope {
     build_namespace_manifest_from_metadata_state(
         store,
         namespace_id,
         ManifestMetadataSource {
             head: &projection.head,
-            basis_manifest_id: Some(projection.root.manifest_id),
+            basis_manifest_no: Some(projection.root.manifest_no),
             retention_floor_seq: read_floor_seq(store, namespace_id).await,
             metadata_state: &projection.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        manifest_id,
+        manifest_no,
     )
     .await
     .expect("build manifest")
@@ -32,14 +32,14 @@ struct ManifestSwapOnCasConflictStore {
 }
 
 impl ManifestSwapOnCasConflictStore {
-    async fn install_competing_manifest_id(&self) {
+    async fn install_competing_manifest_no(&self) {
         let loaded = load_metadata_root_object(&self.inner, &self.namespace_id)
             .await
             .expect("read root for swap");
         let mut root = loaded.state;
         // Same-seq replacement referencing a different manifest: the shape a
         // pure compaction publishes.
-        root.manifest_id = ManifestId(root.manifest_id.0 + 1);
+        root.manifest_no = ManifestNo(root.manifest_no.0 + 1);
         let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
             loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
             root,
@@ -94,7 +94,7 @@ impl ObjectStore for ManifestSwapOnCasConflictStore {
         use std::sync::atomic::Ordering;
         if self.remaining_conflicts.load(Ordering::SeqCst) > 0 {
             self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
-            self.install_competing_manifest_id().await;
+            self.install_competing_manifest_no().await;
             return Err(ObjectStoreError::PreconditionFailed {
                 object_key: key.to_owned(),
             });
@@ -538,7 +538,7 @@ async fn create_checkpoint_fails_when_its_manifest_key_holds_a_different_payload
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization_after.root.manifest_id, ManifestId(1));
+    assert_eq!(materialization_after.root.manifest_no, ManifestNo(1));
 }
 
 #[tokio::test]
@@ -565,14 +565,14 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
         .await
         .expect("materialization");
     let first_manifest =
-        build_manifest_from_projection(&store, &namespace_id, &materialization, ManifestId(1))
+        build_manifest_from_projection(&store, &namespace_id, &materialization, ManifestNo(1))
             .await;
     let second_manifest =
-        build_manifest_from_projection(&store, &namespace_id, &materialization, ManifestId(1))
+        build_manifest_from_projection(&store, &namespace_id, &materialization, ManifestNo(1))
             .await;
     assert_eq!(
-        first_manifest.payload.manifest_id,
-        second_manifest.payload.manifest_id
+        first_manifest.payload.manifest_no,
+        second_manifest.payload.manifest_no
     );
     assert_ne!(
         first_manifest.payload.manifest_object_id,
@@ -670,8 +670,8 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
     .expect("build metadata tables");
     let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
-        manifest_id: ManifestId(materialization_before.head.seq.0),
-        manifest_object_id: manifest_object_id(ManifestId(materialization_before.head.seq.0)),
+        manifest_no: ManifestNo(materialization_before.head.seq.0),
+        manifest_object_id: manifest_object_id(ManifestNo(materialization_before.head.seq.0)),
         head_seq: materialization_before.head.seq,
         head_commit_id: materialization_before.head.head_commit_id.clone(),
         base_seq: materialization_before.head.seq,
@@ -712,7 +712,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
 
     match outcome {
         ManifestPublicationOutcome::Superseded(current) => {
-            assert_eq!(current.manifest_id, later_checkpoint.manifest_id);
+            assert_eq!(current.manifest_no, later_checkpoint.manifest_no);
         }
         other => panic!("expected superseded outcome, got {other:?}"),
     }
@@ -750,12 +750,12 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_id: Some(materialization.root.manifest_id),
+            basis_manifest_no: Some(materialization.root.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestId(1),
+        ManifestNo(1),
     )
     .await
     .expect("build manifest");
@@ -807,12 +807,12 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_id: Some(materialization.root.manifest_id),
+            basis_manifest_no: Some(materialization.root.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestId(1),
+        ManifestNo(1),
     )
     .await
     .expect("build manifest");
@@ -833,7 +833,7 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
 
     match outcome {
         ManifestPublicationOutcome::Published(root) => {
-            assert_eq!(root.manifest_id, manifest.payload.manifest_id);
+            assert_eq!(root.manifest_no, manifest.payload.manifest_no);
             assert_eq!(root.manifest_object_id, manifest.payload.manifest_object_id);
         }
         other => panic!("expected recovered published root, got {other:?}"),
@@ -864,10 +864,10 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
         .await
         .expect("materialization");
     let candidate_manifest =
-        build_manifest_from_projection(&raw_store, &namespace_id, &materialization, ManifestId(1))
+        build_manifest_from_projection(&raw_store, &namespace_id, &materialization, ManifestNo(1))
             .await;
     let competing_manifest =
-        build_manifest_from_projection(&raw_store, &namespace_id, &materialization, ManifestId(2))
+        build_manifest_from_projection(&raw_store, &namespace_id, &materialization, ManifestNo(2))
             .await;
     write_namespace_manifest(&raw_store, &candidate_manifest)
         .await
@@ -878,7 +878,7 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
 
     let competing_root = MetadataRootState {
         namespace_id: namespace_id.clone(),
-        manifest_id: competing_manifest.payload.manifest_id,
+        manifest_no: competing_manifest.payload.manifest_no,
         manifest_object_id: competing_manifest.payload.manifest_object_id.clone(),
         manifest_head_seq: competing_manifest.payload.head_seq,
         manifest_payload_checksum: competing_manifest.payload_checksum.clone(),
@@ -902,7 +902,7 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
 
     match outcome {
         ManifestPublicationOutcome::Superseded(root) => {
-            assert_eq!(root.manifest_id, competing_manifest.payload.manifest_id);
+            assert_eq!(root.manifest_no, competing_manifest.payload.manifest_no);
             assert_eq!(
                 root.manifest_object_id,
                 competing_manifest.payload.manifest_object_id
@@ -982,18 +982,18 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.root.manifest_id, checkpoint.manifest_id);
+    assert_eq!(materialization.root.manifest_no, checkpoint.manifest_no);
     let compacted = build_namespace_manifest_from_metadata_state(
         &store,
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_id: Some(materialization.root.manifest_id),
+            basis_manifest_no: Some(materialization.root.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestId(checkpoint.manifest_id.0 + 1),
+        ManifestNo(checkpoint.manifest_no.0 + 1),
     )
     .await
     .expect("build compacted manifest");
@@ -1016,7 +1016,7 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
     .expect("same-seq replacement publishes");
     match outcome {
         ManifestPublicationOutcome::Published(root) => {
-            assert_eq!(root.manifest_id, compacted.payload.manifest_id);
+            assert_eq!(root.manifest_no, compacted.payload.manifest_no);
             assert_eq!(
                 root.manifest_head_seq,
                 materialization.root.manifest_head_seq
@@ -1028,7 +1028,7 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
     let after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization after compaction");
-    assert_eq!(after.root.manifest_id, compacted.payload.manifest_id);
+    assert_eq!(after.root.manifest_no, compacted.payload.manifest_no);
     assert!(metadata_states_equivalent(
         &materialization.metadata_state,
         &after.metadata_state
@@ -1115,14 +1115,14 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         &store,
         &namespace_id,
         &sibling_basis,
-        ManifestId(sibling_basis.root.manifest_id.0 + 1),
+        ManifestNo(sibling_basis.root.manifest_no.0 + 1),
     )
     .await;
     let stale_higher_head = build_manifest_from_projection(
         &store,
         &namespace_id,
         &stale_basis,
-        ManifestId(stale_basis.root.manifest_id.0 + 1),
+        ManifestNo(stale_basis.root.manifest_no.0 + 1),
     )
     .await;
     assert!(stale_higher_head.payload.head_seq > sibling.payload.head_seq);

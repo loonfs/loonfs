@@ -97,7 +97,7 @@ impl GrepService {
         let pointer = load_grep_root_pointer(store, namespace_id)
             .await?
             .ok_or(GrepError::NotEnabled)?;
-        let manifest_id = pointer.pointer().manifest_id();
+        let manifest_object_id = pointer.pointer().manifest_object_id();
         let cache_key = GrepBlockCacheKey {
             identity: pointer.pointer().manifest_payload_checksum().to_owned(),
             block_kind: GrepBlockKind::Manifest,
@@ -112,7 +112,7 @@ impl GrepService {
                         message: format!(
                             "grep root `{}` names missing manifest `{}`",
                             pointer.object_key(),
-                            manifest_key(namespace_id, manifest_id)
+                            manifest_key(namespace_id, manifest_object_id)
                         ),
                     })?;
                 let state = Arc::new(manifest.manifest_state().clone());
@@ -123,7 +123,7 @@ impl GrepService {
                     .map_err(|error| {
                         CoreError::Internal(format!(
                             "failed to size decoded grep manifest `{}`: {error}",
-                            manifest_key(namespace_id, manifest_id)
+                            manifest_key(namespace_id, manifest_object_id)
                         ))
                     })?
                     .len()
@@ -144,7 +144,7 @@ impl GrepService {
                 return Err(GrepError::CorruptIndex {
                     message: format!(
                         "grep manifest `{}` resolved to a non-manifest cache entry",
-                        manifest_key(namespace_id, manifest_id)
+                        manifest_key(namespace_id, manifest_object_id)
                     ),
                 });
             }
@@ -154,7 +154,7 @@ impl GrepService {
             return Err(GrepError::CorruptIndex {
                 message: format!(
                     "grep manifest `{}` names namespace `{}` instead of requested namespace `{namespace_id}`",
-                    manifest_key(namespace_id, manifest_id),
+                    manifest_key(namespace_id, manifest_object_id),
                     state.namespace_id()
                 ),
             });

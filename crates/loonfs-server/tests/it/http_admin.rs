@@ -7,7 +7,7 @@ use crate::common::{collect_checkpoints, start_server};
 use bytes::Bytes;
 use loonfs_api::{
     ApiError, ChangeSeq, CheckpointId, CheckpointOwnerSummary, CreateCheckpointResponse,
-    ManifestId, ReleaseCheckpointResponse,
+    ManifestNo, ReleaseCheckpointResponse,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -198,7 +198,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         }
     );
     assert_eq!(first.checkpoint.checkpoint_seq, ChangeSeq(1));
-    assert_eq!(first.checkpoint.manifest_id, ManifestId(1));
+    assert_eq!(first.checkpoint.manifest_no, ManifestNo(1));
     let listed = collect_checkpoints(&client, &namespace)
         .await
         .expect("list first checkpoint");
@@ -218,8 +218,8 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         first.checkpoint.checkpoint_seq
     );
     assert_eq!(
-        repeated.checkpoint.manifest_id,
-        first.checkpoint.manifest_id
+        repeated.checkpoint.manifest_no,
+        first.checkpoint.manifest_no
     );
     assert_eq!(
         repeated.checkpoint.expires_at_ms,

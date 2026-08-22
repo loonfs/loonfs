@@ -6,7 +6,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::basis::{load_head_and_metadata_basis, resolve_retention_floor_seq};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
-use loonfs_api::{ChangeSeq, ManifestId, Namespace, NamespaceDiagnostics, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, Namespace, NamespaceDiagnostics, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 /// Whether a namespace carries visible commits its basis manifest does not
@@ -20,7 +20,7 @@ pub struct NamespaceFlushBasis {
 /// Namespace diagnostics before the WAL tail is counted.
 struct LoadedHeadBasis {
     head: HeadState,
-    current_manifest_id: Option<ManifestId>,
+    current_manifest_no: Option<ManifestNo>,
     /// Sequence the basis manifest covers; the visible tail sits above it.
     basis_head_seq: ChangeSeq,
     retention_floor_seq: ChangeSeq,
@@ -55,18 +55,18 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
                 )
                 .await
                 .map(|manifest| {
-                    let own_manifest_id = loaded
+                    let own_manifest_no = loaded
                         .basis
                         .is_owned_by(expected_namespace_id)
-                        .then_some(basis.manifest_id);
-                    (own_manifest_id, manifest.payload.head_seq)
+                        .then_some(basis.manifest_no);
+                    (own_manifest_no, manifest.payload.head_seq)
                 }),
                 None => Ok((None, ChangeSeq(0))),
             }
         },
         resolve_retention_floor_seq(store, &head)
     );
-    let (current_manifest_id, basis_head_seq) = basis.map_err(|error| {
+    let (current_manifest_no, basis_head_seq) = basis.map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
     })?;
     let retention_floor_seq = retention_floor_seq.map_err(|error| {
@@ -74,7 +74,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     })?;
     Ok(LoadedHeadBasis {
         head,
-        current_manifest_id,
+        current_manifest_no,
         basis_head_seq,
         retention_floor_seq,
     })
@@ -129,7 +129,7 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
         namespace_id: loaded.head.namespace_id,
         head_seq: loaded.head.seq,
         retention_floor_seq: loaded.retention_floor_seq,
-        current_manifest_id: loaded.current_manifest_id,
+        current_manifest_no: loaded.current_manifest_no,
         wal_tail_segments,
     })
 }
@@ -178,7 +178,7 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         retention_floor_seq,
-        current_manifest_id: None,
+        current_manifest_no: None,
         wal_tail_segments: 0,
     })
 }

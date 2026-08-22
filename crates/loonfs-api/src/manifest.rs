@@ -7,7 +7,7 @@ use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
+    InodeKind, ManifestNo, ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -886,8 +886,8 @@ pub struct NamespaceManifestPayload {
     /// Namespace whose materialized state this manifest describes.
     pub namespace_id: NamespaceId,
     /// Monotonic logical manifest position selected by the namespace root.
-    pub manifest_id: ManifestId,
-    /// Immutable object identity that distinguishes speculative candidates at `manifest_id`.
+    pub manifest_no: ManifestNo,
+    /// Unique id for this candidate at `manifest_no`.
     pub manifest_object_id: ManifestObjectId,
     /// Greatest namespace sequence materialized by the referenced file set.
     pub head_seq: ChangeSeq,
@@ -989,7 +989,7 @@ mod tests {
         MetadataFileRef, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
     };
     use crate::{
-        ChangeSeq, CommitId, InodeId, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
+        ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataTableId, NameKey,
         NamespaceId, WriterEpoch,
     };
 
@@ -1040,7 +1040,7 @@ mod tests {
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
         let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            manifest_id: ManifestId(10),
+            manifest_no: ManifestNo(10),
             manifest_object_id: ManifestObjectId::parse("00000000000000000010-0123456789abcdef")
                 .expect("valid manifest object id"),
             head_seq: ChangeSeq(10),
@@ -1077,7 +1077,7 @@ mod tests {
         let envelope = NamespaceManifestEnvelope::from_payload(
             NamespaceManifestPayload {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-                manifest_id: ManifestId(12),
+                manifest_no: ManifestNo(12),
                 manifest_object_id: ManifestObjectId::parse(
                     "00000000000000000012-0123456789abcdef",
                 )

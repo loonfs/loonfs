@@ -27,7 +27,7 @@ use loonfs_api::wire::manifest::{
     NAMESPACE_MANIFEST_FORMAT_VERSION,
 };
 use loonfs_api::{
-    ChangeSeq, ManifestId, ManifestObjectId, MetadataCompactionId, NamespaceId, WriterEpoch,
+    ChangeSeq, ManifestNo, ManifestObjectId, MetadataCompactionId, NamespaceId, WriterEpoch,
 };
 use loonfs_objectstore::keys::{
     metadata_compaction_job_id_from_key, metadata_compaction_table, metadata_manifest_object,
@@ -57,7 +57,7 @@ pub(super) fn ensure_root_matches_manifest(
     if manifest.payload_checksum != root.manifest_payload_checksum {
         return Err(CoreError::NamespaceCorrupt(format!(
             "metadata root for namespace `{namespace_id}` references manifest `{}` with checksum `{}`, but the manifest carries `{}`",
-            root.manifest_id,
+            root.manifest_no,
             root.manifest_payload_checksum,
             manifest.payload_checksum,
         )));
@@ -80,7 +80,7 @@ pub(super) fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceMan
         payload_checksum: String::new(),
         payload: NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
-            manifest_id: ManifestId(0),
+            manifest_no: ManifestNo(0),
             manifest_object_id: ManifestObjectId::parse(GENESIS_MANIFEST_OBJECT_ID)
                 .expect("genesis manifest object id is valid"),
             head_seq: ChangeSeq(0),
@@ -224,7 +224,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
         })?;
         validate_namespace_manifest(
             namespace_id,
-            manifest.payload.manifest_id,
+            manifest.payload.manifest_no,
             manifest_object_id,
             &manifest_key,
             &manifest,
@@ -328,7 +328,7 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
     })?;
     validate_namespace_manifest(
         namespace_id,
-        manifest.payload.manifest_id,
+        manifest.payload.manifest_no,
         manifest_object_id,
         manifest_key,
         &manifest,

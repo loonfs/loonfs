@@ -7,7 +7,7 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CheckpointOwnerSummary, CommitId, CreateCheckpointOptions, CreateNamespaceOptions,
-    DeleteNamespaceOptions, ErrorCode, FsAdmin, FsWriter, MaintenancePlan, ManifestId,
+    DeleteNamespaceOptions, ErrorCode, FsAdmin, FsWriter, MaintenancePlan, ManifestNo,
     MetadataCompactionOutcome, NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeError,
     SharedObjectStore, WalFlushStepOutcome,
 };
@@ -44,7 +44,7 @@ fn namespace_diagnostics_reports_wal_tail_segments() {
     assert_eq!(status.head_seq, ChangeSeq(0));
     // A namespace that has never flushed has published no manifest of its
     // own; it reads from the built-in genesis state.
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_no, None);
     assert_eq!(status.wal_tail_segments, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
@@ -61,7 +61,7 @@ fn namespace_diagnostics_reports_wal_tail_segments() {
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_no, None);
     assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
     assert_eq!(store.count(OperationClass::List), 0);
@@ -280,7 +280,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after wal flush");
-    assert_eq!(status.current_manifest_id, Some(ManifestId(1)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
     assert_eq!(status.wal_tail_segments, 0);
 
     // Maintenance is record-less: flushing the WAL must leave nothing
@@ -531,7 +531,7 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after l0 wal flush");
-    assert_eq!(status.current_manifest_id, Some(ManifestId(2)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
     assert_eq!(status.wal_tail_segments, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -597,7 +597,7 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
     let manifest_before = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status before the call")
-        .current_manifest_id;
+        .current_manifest_no;
 
     // Nothing here has outgrown a bounded step, so the plan is a merge and
     // this call reports exactly that: it published the unit the planner
@@ -609,7 +609,7 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
     assert_ne!(
         fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status after the call")
-            .current_manifest_id,
+            .current_manifest_no,
         manifest_before,
         "the call must run the same planner a maintenance step runs, and publish what it chose"
     );
@@ -703,7 +703,7 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after lost race");
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_no, None);
     assert_eq!(status.wal_tail_segments, 1);
 }
 

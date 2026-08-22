@@ -722,9 +722,9 @@ async fn publish_streaming_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     snapshot_keys: &BTreeSet<String>,
     result: &MetadataMergeResult,
-) -> ManifestId {
+) -> ManifestNo {
     match finalize_streaming_compaction(store, namespace_id, spec, snapshot_keys, result).await {
-        Finalization::Published(manifest_id) => manifest_id,
+        Finalization::Published(manifest_no) => manifest_no,
         other => panic!("no concurrent publisher exists in this test, got {other:?}"),
     }
 }
@@ -767,7 +767,7 @@ async fn current_metadata_state<S: ObjectStore + ?Sized>(
             .await
             .expect("read root")
             .state
-            .manifest_id,
+            .manifest_no,
     )
     .await
     .expect("materialize the manifest")
@@ -3309,7 +3309,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
         namespace_id: namespace_id.clone(),
         flushed: AtomicUsize::new(0),
     };
-    let manifest_id = match finalize_streaming_compaction(
+    let manifest_no = match finalize_streaming_compaction(
         &racing_store,
         &namespace_id,
         &spec,
@@ -3318,7 +3318,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     )
     .await
     {
-        Finalization::Published(manifest_id) => manifest_id,
+        Finalization::Published(manifest_no) => manifest_no,
         other => panic!("the retry must publish, got {other:?}"),
     };
     assert!(
@@ -3327,7 +3327,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     );
 
     let tables = load_current_manifest_tables(&store, &namespace_id).await;
-    assert_eq!(tables.manifest().payload.manifest_id, manifest_id);
+    assert_eq!(tables.manifest().payload.manifest_no, manifest_no);
     let runs = snapshot_runs_for_group(tables.manifest(), group);
     drop(tables);
     // Two runs: the base run the job built, and the delta run the flush

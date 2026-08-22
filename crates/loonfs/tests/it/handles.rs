@@ -9,7 +9,7 @@
 use crate::common::collect_path_entries;
 use loonfs::{
     CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsAdmin,
-    FsBackgroundWork, FsReader, FsWriter, MaintenanceJobId, MaintenancePlan, ManifestId,
+    FsBackgroundWork, FsReader, FsWriter, MaintenanceJobId, MaintenancePlan, ManifestNo,
     MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError,
     SharedObjectStore, StoreConfig,
 };
@@ -364,7 +364,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             .await
             .expect("queued namespace status after shutdown");
         assert_eq!(
-            status.current_manifest_id, None,
+            status.current_manifest_no, None,
             "shutdown must clear queued work before the active step releases its permit"
         );
 
@@ -394,7 +394,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             .await
             .expect("queued namespace status after the post-shutdown nudge");
         assert_eq!(
-            status.current_manifest_id, None,
+            status.current_manifest_no, None,
             "post-shutdown nudges must not spawn maintenance"
         );
     });
@@ -558,7 +558,7 @@ fn admin_over_writer_core_invalidates_shared_caches() {
             .await
             .expect("status after the scheduled step");
         assert!(
-            status.current_manifest_id.is_some(),
+            status.current_manifest_no.is_some(),
             "the scheduled step should have published a manifest: {status:?}"
         );
         assert!(
@@ -699,7 +699,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             .await
             .expect("status after writes");
         assert_eq!(
-            status.current_manifest_id, None,
+            status.current_manifest_no, None,
             "manual-only writer must not publish checkpoints: {status:?}"
         );
         assert!(
@@ -724,7 +724,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             .await
             .expect("status after explicit step");
         assert!(
-            status.current_manifest_id.is_some(),
+            status.current_manifest_no.is_some(),
             "explicit step should publish a manifest: {status:?}"
         );
         assert!(
@@ -760,7 +760,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
             .await
             .expect("status after auto step");
         assert!(
-            status.current_manifest_id.is_some(),
+            status.current_manifest_no.is_some(),
             "auto step should have published a manifest: {status:?}"
         );
         assert!(
@@ -886,7 +886,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .await
             .expect("status after the shutdown");
         assert_eq!(
-            status.current_manifest_id, None,
+            status.current_manifest_no, None,
             "a shut-down writer must not schedule checkpoints: {status:?}"
         );
         assert_eq!(
@@ -979,7 +979,7 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
             )
             .await
             .expect("create checkpoint");
-        assert!(checkpoint.checkpoint.manifest_id > ManifestId(0));
+        assert!(checkpoint.checkpoint.manifest_no > ManifestNo(0));
         let retention = admin
             .maintenance_step_namespace(
                 &namespace_id,

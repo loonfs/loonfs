@@ -1204,7 +1204,7 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
         "RevisionNo",
         "ChangeSeq",
         "AttributeRevisionNo",
-        "ManifestId",
+        "ManifestNo",
         "WriterEpoch",
     ] {
         let schema = schemas.get(name).unwrap_or_else(|| panic!("{name} schema"));

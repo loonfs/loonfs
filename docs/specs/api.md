@@ -313,11 +313,17 @@ conditional-request failures.
 One SDK serves both backends; deployment mode never forks the client
 codebase.
 
-Revision numbers, change sequences, attribute revisions, manifest ids, writer
-epochs, and grep run ordinals are JSON integers from 0 through 9007199254740991
-(`2^53 - 1`). Implementations MUST reject larger input values and MUST NOT
-store a larger value. `inode_id` is not an ordinal and may use the full `u64`
-range.
+Revision numbers, change sequences, attribute revisions, manifest numbers,
+writer epochs, and grep run ordinals are JSON integers from 0 through
+9007199254740991 (`2^53 - 1`). Implementations MUST reject larger input values
+and MUST NOT store a larger value. `inode_id` is not an ordinal and may use the
+full `u64` range.
+
+Field-name suffixes each mean one thing. `_seq` is a position in the namespace
+commit history. `_no` is a monotonic counter scoped to one object: a file's
+revisions, an inode's attribute revisions, or a namespace's manifests.
+`_index` is a 0-based position inside a container. `_number` is a 1-based
+position defined by a provider or a tool. `_id` is an opaque identity.
 
 ### 4.1 Public inode identity
 
@@ -854,7 +860,7 @@ floor has advanced.
 A checkpoint name is a label, not a key: every create mints a new record
 under a new id, and two creates under one name leave two records. Create and
 list use one checkpoint object: `checkpoint_id`, `owner`, `created_at_ms`,
-optional `expires_at_ms`, `checkpoint_seq`, and `manifest_id`. The create
+optional `expires_at_ms`, `checkpoint_seq`, and `manifest_no`. The create
 response adds `namespace_id` as an envelope and flattens that object into the
 same JSON level. For an API create, `owner` is `user` with the request's
 `name`; `created_at_ms` is the durable record timestamp that listing later
@@ -863,7 +869,7 @@ reports.
 For example, a create response is:
 
 ```json
-{"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_id":9}
+{"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}
 ```
 
 `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns active
@@ -873,7 +879,7 @@ id. Fork checkpoints retain their `fork` owner and remain until their target
 namespace is deleted.
 
 ```json
-{"namespace_id":"demo","checkpoints":[{"checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_id":9}]}
+{"namespace_id":"demo","checkpoints":[{"checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}]}
 ```
 
 Release is idempotent and returns only the addressed namespace and
@@ -1378,7 +1384,7 @@ namespace state plus storage details used by maintenance:
 | `namespace_id` | Durable namespace id. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
-| `current_manifest_id` | Current manifest ID; omitted until the namespace has a manifest. |
+| `current_manifest_no` | Current manifest number; omitted until the namespace has a manifest. |
 | `wal_tail_segments` | Number of visible WAL segments after the current manifest. |
 
 ```json
@@ -1386,7 +1392,7 @@ namespace state plus storage details used by maintenance:
   "namespace_id": "demo",
   "head_seq": 418,
   "retention_floor_seq": 120,
-  "current_manifest_id": 410,
+  "current_manifest_no": 410,
   "wal_tail_segments": 3
 }
 ```

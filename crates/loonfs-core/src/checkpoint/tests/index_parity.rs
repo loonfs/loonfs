@@ -71,14 +71,14 @@ async fn revision_index_test_materialization(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> (ManifestId, NamespaceManifestEnvelope, Vec<MetadataRow>) {
+) -> (ManifestNo, NamespaceManifestEnvelope, Vec<MetadataRow>) {
     // The corruptions below target base-run segments, which only exist
     // once reorganization has folded the checkpoint's L0 runs.
-    let manifest_id =
+    let manifest_no =
         checkpoint_then_reorganize(store, namespace_id, context, MetadataLsmPolicy::default())
             .await;
     let materialized =
-        load_manifest_materialization_for_inspection(store, namespace_id, manifest_id)
+        load_manifest_materialization_for_inspection(store, namespace_id, manifest_no)
             .await
             .expect("load manifest before corruption");
     let revision_index_rows = manifest_rows_for_family(
@@ -87,7 +87,7 @@ async fn revision_index_test_materialization(
     );
     assert!(!revision_index_rows.is_empty());
     (
-        materialized.manifest.payload.manifest_id,
+        materialized.manifest.payload.manifest_no,
         materialized.manifest,
         revision_index_rows,
     )
@@ -131,7 +131,7 @@ pub(super) async fn overwrite_manifest(
     manifest: NamespaceManifestEnvelope,
 ) {
     let manifest_key = metadata_manifest_object(namespace_id, &manifest.payload.manifest_object_id);
-    let manifest_id = manifest.payload.manifest_id;
+    let manifest_no = manifest.payload.manifest_no;
     let manifest_object_id = manifest.payload.manifest_object_id.clone();
     let updated_manifest =
         NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
@@ -147,7 +147,7 @@ pub(super) async fn overwrite_manifest(
     let loaded_root = load_metadata_root_object(store, namespace_id)
         .await
         .expect("read root");
-    if loaded_root.state.manifest_id == manifest_id {
+    if loaded_root.state.manifest_no == manifest_no {
         let mut root = loaded_root.state;
         root.manifest_object_id = manifest_object_id;
         root.manifest_payload_checksum = updated_manifest.payload_checksum.clone();
@@ -168,7 +168,7 @@ pub(super) async fn overwrite_manifest(
     }
 }
 
-/// Republishes a payload under a fresh manifest id and loads it back, so a
+/// Republishes a payload under a fresh manifest number and loads it back, so a
 /// caller can assert on what validation makes of an edited manifest.
 async fn load_perturbed_manifest(
     store: &LocalFsStore,
@@ -176,8 +176,8 @@ async fn load_perturbed_manifest(
     mut payload: NamespaceManifestPayload,
     id_offset: u64,
 ) -> Result<(), ManifestLoadError> {
-    payload.manifest_id = ManifestId(payload.manifest_id.0 + id_offset);
-    payload.manifest_object_id = ManifestObjectId::generate(payload.manifest_id);
+    payload.manifest_no = ManifestNo(payload.manifest_no.0 + id_offset);
+    payload.manifest_object_id = ManifestObjectId::generate(payload.manifest_no);
     let manifest_object_id = payload.manifest_object_id.clone();
     let envelope =
         NamespaceManifestEnvelope::from_payload(payload).expect("perturbed manifest envelope");
@@ -320,7 +320,7 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
         .expect("advance floor");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(2));
 
-    let mut last_manifest_id = None;
+    let mut last_manifest_no = None;
     for round in 0..9u32 {
         write_file_bytes(
             &store,
@@ -335,12 +335,12 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
         let checkpoint = create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("create checkpoint");
-        last_manifest_id = Some(checkpoint.manifest_id);
+        last_manifest_no = Some(checkpoint.manifest_no);
     }
     // Checkpoints only append; dropping happens when reorganization folds
     // the runs against the advanced floor.
-    let _ = last_manifest_id.expect("manifest id");
-    let reorganized_manifest_id = drain_reorganization(
+    let _ = last_manifest_no.expect("manifest number");
+    let reorganized_manifest_no = drain_reorganization(
         &store,
         &namespace_id,
         &context,
@@ -351,7 +351,7 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        reorganized_manifest_id,
+        reorganized_manifest_no,
     )
     .await
     .expect("load manifest");
@@ -603,7 +603,7 @@ async fn base_rebuild_retains_revisions_superseded_below_floor() {
         .await
         .expect("advance floor");
 
-    let mut last_manifest_id = None;
+    let mut last_manifest_no = None;
     for round in 0..9u32 {
         write_file_bytes(
             &store,
@@ -618,13 +618,13 @@ async fn base_rebuild_retains_revisions_superseded_below_floor() {
         let checkpoint = create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("create checkpoint");
-        last_manifest_id = Some(checkpoint.manifest_id);
+        last_manifest_no = Some(checkpoint.manifest_no);
     }
     // Checkpoints only append, and the base rebuild folds the runs against
     // the advanced floor — but revision rows are never dropped: file
     // history is durable data, not replay state.
-    let _ = last_manifest_id.expect("manifest id");
-    let reorganized_manifest_id = drain_reorganization(
+    let _ = last_manifest_no.expect("manifest number");
+    let reorganized_manifest_no = drain_reorganization(
         &store,
         &namespace_id,
         &context,
@@ -635,7 +635,7 @@ async fn base_rebuild_retains_revisions_superseded_below_floor() {
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        reorganized_manifest_id,
+        reorganized_manifest_no,
     )
     .await
     .expect("load manifest");
@@ -689,7 +689,7 @@ async fn base_rebuild_drops_bindings_unbound_below_floor() {
         .await
         .expect("advance floor");
 
-    let mut last_manifest_id = None;
+    let mut last_manifest_no = None;
     for round in 0..9u32 {
         write_file_bytes(
             &store,
@@ -704,12 +704,12 @@ async fn base_rebuild_drops_bindings_unbound_below_floor() {
         let checkpoint = create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("create checkpoint");
-        last_manifest_id = Some(checkpoint.manifest_id);
+        last_manifest_no = Some(checkpoint.manifest_no);
     }
     // Checkpoints only append; dropping happens when reorganization folds
     // the runs against the advanced floor.
-    let _ = last_manifest_id.expect("manifest id");
-    let reorganized_manifest_id = drain_reorganization(
+    let _ = last_manifest_no.expect("manifest number");
+    let reorganized_manifest_no = drain_reorganization(
         &store,
         &namespace_id,
         &context,
@@ -720,7 +720,7 @@ async fn base_rebuild_drops_bindings_unbound_below_floor() {
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        reorganized_manifest_id,
+        reorganized_manifest_no,
     )
     .await
     .expect("load manifest");
@@ -858,7 +858,7 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
     // Tamper only the descriptor's row_count for the revision index family;
     // the per-run count-equality check must reject the manifest at load.
     let mut manifest =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("load manifest")
             .manifest;
@@ -899,7 +899,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     .await
     .expect("write hello");
 
-    let reorganized_manifest_id = checkpoint_then_reorganize(
+    let reorganized_manifest_no = checkpoint_then_reorganize(
         &store,
         &namespace_id,
         &context,
@@ -909,7 +909,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        reorganized_manifest_id,
+        reorganized_manifest_no,
     )
     .await
     .expect("load manifest");
@@ -929,7 +929,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
 
     let manifest_key =
         metadata_manifest_object(&namespace_id, &manifest.payload.manifest_object_id);
-    let manifest_id = manifest.payload.manifest_id;
+    let manifest_no = manifest.payload.manifest_no;
     let updated_manifest =
         NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
     let manifest_bytes =
@@ -939,7 +939,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
         .await
         .expect("overwrite manifest");
 
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await {
         Err(ManifestLoadError::SegmentCodec { message, .. }) => {
             assert!(
                 message.contains("checksum"),
@@ -973,7 +973,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
         .await
         .expect("checkpoint");
     let mut materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("load manifest before replacing a row");
 
@@ -1019,10 +1019,10 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     descriptor.filter_block = built.filter;
     descriptor.object_checksum = loonfs_api::sha256_digest(&built.bytes);
     let segment_key = descriptor.object_key.clone();
-    let manifest_id = materialized.manifest.payload.manifest_id;
+    let manifest_no = materialized.manifest.payload.manifest_no;
     overwrite_manifest(&store, &namespace_id, materialized.manifest).await;
 
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await {
         Err(ManifestLoadError::SegmentCodec {
             object_key,
             message,
@@ -1057,7 +1057,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     .await
     .expect("write hello");
 
-    let manifest_id = checkpoint_then_reorganize(
+    let manifest_no = checkpoint_then_reorganize(
         &store,
         &namespace_id,
         &context,
@@ -1065,7 +1065,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     )
     .await;
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
             .expect("load manifest");
     let base = base_run(&materialized.manifest);
@@ -1086,7 +1086,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         .delete(&deleted_key)
         .await
         .expect("delete child index");
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await {
         Err(ManifestLoadError::MissingSegment { object_key }) => {
             assert_eq!(object_key, deleted_key);
         }
@@ -1124,7 +1124,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     .await
     .expect("write other");
 
-    let manifest_id = checkpoint_then_reorganize(
+    let manifest_no = checkpoint_then_reorganize(
         &store,
         &namespace_id,
         &context,
@@ -1132,7 +1132,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     )
     .await;
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
             .expect("load manifest before corruption");
     let mut manifest = materialized.manifest;
@@ -1167,7 +1167,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
 
     let manifest_key =
         metadata_manifest_object(&namespace_id, &manifest.payload.manifest_object_id);
-    let manifest_id = manifest.payload.manifest_id;
+    let manifest_no = manifest.payload.manifest_no;
     let updated_manifest =
         NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
     let manifest_bytes =
@@ -1178,7 +1178,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         .expect("overwrite manifest");
 
     assert_child_index_mismatch(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
     );
 }
 
@@ -1206,18 +1206,18 @@ async fn manifest_rejects_missing_revision_desc_index() {
         .await
         .expect("checkpoint");
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_no)
             .await
             .expect("load manifest before corruption");
     let mut manifest = materialized.manifest;
-    let manifest_id = manifest.payload.manifest_id;
+    let manifest_no = manifest.payload.manifest_no;
     manifest.payload.metadata_files.retain(|metadata_file| {
         metadata_file.family != ApiMetadataTableFamily::RevisionsByInodeDesc
     });
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
     );
 }
 
@@ -1251,14 +1251,14 @@ async fn manifest_rejects_revision_desc_index_missing_row() {
     .await
     .expect("write other");
 
-    let (manifest_id, mut manifest, mut revision_index_rows) =
+    let (manifest_no, mut manifest, mut revision_index_rows) =
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     revision_index_rows.pop().expect("revision index row");
     rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
     );
 }
 
@@ -1282,7 +1282,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
     .await
     .expect("write hello");
 
-    let (manifest_id, mut manifest, mut revision_index_rows) =
+    let (manifest_no, mut manifest, mut revision_index_rows) =
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     let extra_row = revision_index_rows
         .first()
@@ -1314,7 +1314,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
     );
 }
 
@@ -1338,7 +1338,7 @@ async fn manifest_rejects_revision_desc_index_changed_content_ref() {
     .await
     .expect("write hello");
 
-    let (manifest_id, mut manifest, mut revision_index_rows) =
+    let (manifest_no, mut manifest, mut revision_index_rows) =
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     let first = revision_index_rows.first_mut().expect("revision index row");
     if let MetadataRow::Revision { content_ref, .. } = first {
@@ -1348,7 +1348,7 @@ async fn manifest_rejects_revision_desc_index_changed_content_ref() {
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
     );
 }
 
@@ -1372,7 +1372,7 @@ async fn manifest_rejects_revision_desc_index_duplicate_rows() {
     .await
     .expect("write hello");
 
-    let (manifest_id, mut manifest, mut revision_index_rows) =
+    let (manifest_no, mut manifest, mut revision_index_rows) =
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     revision_index_rows.push(
         revision_index_rows
@@ -1383,7 +1383,7 @@ async fn manifest_rejects_revision_desc_index_duplicate_rows() {
     rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await {
         Err(ManifestLoadError::DuplicateRevisionRow { family, .. }) => {
             assert_eq!(family, ApiMetadataTableFamily::RevisionsByInodeDesc);
         }
@@ -1432,12 +1432,12 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization_before.head,
-            basis_manifest_id: Some(materialization_before.root.manifest_id),
+            basis_manifest_no: Some(materialization_before.root.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization_before.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestId(2),
+        ManifestNo(2),
     )
     .await
     .expect("build orphan manifest");
@@ -1448,7 +1448,7 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization_after.root.manifest_id, first.manifest_id);
+    assert_eq!(materialization_after.root.manifest_no, first.manifest_no);
     assert_eq!(
         materialization_after.head.seq,
         orphan_manifest.payload.head_seq
@@ -1488,7 +1488,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         .expect("write file");
     }
     // Fold the L0 runs so every inode row lands in one base segment.
-    let manifest_id = checkpoint_then_reorganize(
+    let manifest_no = checkpoint_then_reorganize(
         &store,
         &namespace_id,
         &context,
@@ -1496,7 +1496,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
     )
     .await;
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
             .expect("load manifest before the rewrite");
     let mut manifest = materialized.manifest;
