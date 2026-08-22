@@ -346,7 +346,7 @@ impl Client {
         options: &ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
         let mut url = format!(
-            "{}/v0/namespaces/{}/filesystem/list?path={}",
+            "{}/v0/namespaces/{}/filesystem/entries?path={}",
             self.base_url,
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str())
@@ -369,7 +369,7 @@ impl Client {
         options: &StatPathOptions,
     ) -> Result<AuthoritativePathEntry> {
         let mut url = format!(
-            "{}/v0/namespaces/{}/filesystem/stat?path={}",
+            "{}/v0/namespaces/{}/filesystem/entry?path={}",
             self.base_url,
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str())

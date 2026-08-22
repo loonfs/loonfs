@@ -277,7 +277,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 
     let raw_first_page: ListPathEntriesResponse = get_json(
         &format!(
-            "{}/v0/namespaces/demo/filesystem/list?path=/docs&limit=1",
+            "{}/v0/namespaces/demo/filesystem/entries?path=/docs&limit=1",
             harness.server_url
         ),
         "test-token",
@@ -288,7 +288,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 
     let nonnumeric_limit: Result<ListPathEntriesResponse, Box<ApiError>> = get_json(
         &format!(
-            "{}/v0/namespaces/demo/filesystem/list?path=/docs&limit=not-a-number",
+            "{}/v0/namespaces/demo/filesystem/entries?path=/docs&limit=not-a-number",
             harness.server_url
         ),
         "test-token",

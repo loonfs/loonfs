@@ -37,7 +37,7 @@ async fn http_stat_omits_the_root_name_and_carries_named_child_names() {
     let stat_json = |encoded_path: &str| {
         let response = raw_agent()
             .get(&format!(
-                "{}/v0/namespaces/demo/filesystem/stat?path={encoded_path}",
+                "{}/v0/namespaces/demo/filesystem/entry?path={encoded_path}",
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")

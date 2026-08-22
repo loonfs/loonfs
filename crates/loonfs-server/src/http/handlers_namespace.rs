@@ -51,9 +51,9 @@ pub(super) struct CheckpointPageQuery {
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "capabilities",
+        operation_id = "get_capabilities",
         path = "/v0/capabilities",
-        tag = "capabilities",
+        tag = "system",
         summary = "Get capabilities",
         description = "Returns a summary of supported features and limits.",
         responses(
@@ -63,7 +63,7 @@ pub(super) struct CheckpointPageQuery {
         )
     )
 )]
-pub(super) async fn capabilities(
+pub(super) async fn get_capabilities(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
@@ -512,8 +512,8 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
     feature = "openapi",
     utoipa::path(
         post,
-        operation_id = "maintenance_step",
-        path = "/v0/admin/namespaces/{namespace_id}/maintenance/step",
+        operation_id = "run_maintenance",
+        path = "/v0/admin/namespaces/{namespace_id}/maintenance/run",
         tag = "admin",
         summary = "Run maintenance step",
         description = "Runs one bounded maintenance step. The body selects the actions by naming them: `metadata` folds the WAL tail once it reaches the threshold and merges one bounded reorganization unit, `advance_retention: true` advances the retention floor, and `gc` runs one bounded garbage-collection pass. Selected actions run in that order, each reports separately, and an absent report means the body did not select that action. A body that selects nothing is rejected. Nothing surrenders replay history or sweeps objects unless the body asked for it. A deleted namespace accepts a step that selects `gc` alone, which is how its reclaimable state is collected; any other selection is refused. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
@@ -529,7 +529,7 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
         )
     )
 )]
-pub(super) async fn maintenance_step(
+pub(super) async fn run_maintenance(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     OptionalAppJson(request): OptionalAppJson<MaintenanceStepRequest>,

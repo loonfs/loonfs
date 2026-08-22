@@ -44,7 +44,7 @@ async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
     assert_invalid_namespace_response(
         raw_agent()
             .get(&format!(
-                "{}/v0/namespaces/bad%25/filesystem/list?path=/",
+                "{}/v0/namespaces/bad%25/filesystem/entries?path=/",
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")

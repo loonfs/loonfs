@@ -221,8 +221,8 @@ fn openapi_documents_current_server_paths() {
         ("/v0/namespaces/{namespace_id}", "delete"),
         ("/v0/namespaces/{namespace_id}/forks", "post"),
         ("/v0/admin/namespaces/{namespace_id}/diagnostics", "get"),
-        ("/v0/namespaces/{namespace_id}/filesystem/list", "get"),
-        ("/v0/namespaces/{namespace_id}/filesystem/stat", "get"),
+        ("/v0/namespaces/{namespace_id}/filesystem/entries", "get"),
+        ("/v0/namespaces/{namespace_id}/filesystem/entry", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/content", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/downloads", "post"),
         ("/v0/namespaces/{namespace_id}/filesystem/revisions", "get"),
@@ -257,7 +257,7 @@ fn openapi_documents_current_server_paths() {
             "post",
         ),
         (
-            "/v0/admin/namespaces/{namespace_id}/maintenance/step",
+            "/v0/admin/namespaces/{namespace_id}/maintenance/run",
             "post",
         ),
         (
@@ -277,7 +277,7 @@ fn openapi_documents_current_server_paths() {
     assert!(!paths.contains_key("/openapi.json"));
     assert_query_params(
         paths,
-        "/v0/namespaces/{namespace_id}/filesystem/list",
+        "/v0/namespaces/{namespace_id}/filesystem/entries",
         "get",
         &["path", "limit", "cursor"],
     );
@@ -377,7 +377,7 @@ fn openapi_documents_current_server_paths() {
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
             "get",
-            "stat_inode",
+            "get_inode",
         ),
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
@@ -392,7 +392,7 @@ fn openapi_documents_current_server_paths() {
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
             "post",
-            "begin_download_by_inode",
+            "create_download_by_inode",
         ),
     ] {
         let actual = paths
@@ -540,7 +540,8 @@ fn proxy_paths_use_namespace_aliases_and_declare_no_security() {
         .iter()
         .filter_map(|tag| tag["name"].as_str())
         .collect::<BTreeSet<_>>();
-    assert!(!tag_names.contains("system"));
+    // `get_capabilities` keeps the `system` tag in the proxy document. The
+    // path checks below verify that other system routes are excluded.
     assert!(!tag_names.contains("admin"));
     let referenced_tags = spec["paths"]
         .as_object()
@@ -576,7 +577,7 @@ fn proxy_paths_use_namespace_aliases_and_declare_no_security() {
             let operation_id = operation["operationId"]
                 .as_str()
                 .expect("proxy operation ID");
-            if operation_id == "capabilities" {
+            if operation_id == "get_capabilities" {
                 assert_eq!(path, "/v0/capabilities");
                 continue;
             }
@@ -805,7 +806,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         .expect("openapi paths object");
 
     for (path, method) in [
-        ("/v0/namespaces/{namespace_id}/filesystem/list", "get"),
+        ("/v0/namespaces/{namespace_id}/filesystem/entries", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/revisions", "get"),
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
@@ -814,7 +815,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         ("/v0/namespaces/{namespace_id}/filesystem/trash", "get"),
         ("/v0/admin/namespaces/{namespace_id}/checkpoints", "get"),
         ("/v0/namespaces/{namespace_id}/changes", "get"),
-        ("/v0/namespaces/{namespace_id}/query/grep", "get"),
+        ("/v0/namespaces/{namespace_id}/grep", "get"),
     ] {
         let parameter = query_parameter(paths, path, method, "limit");
         assert_eq!(parameter.get("required"), Some(&Value::Bool(false)));
@@ -827,8 +828,8 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
     }
 
     for (path, default) in [
-        ("/v0/namespaces/{namespace_id}/filesystem/stat", true),
-        ("/v0/namespaces/{namespace_id}/filesystem/list", false),
+        ("/v0/namespaces/{namespace_id}/filesystem/entry", true),
+        ("/v0/namespaces/{namespace_id}/filesystem/entries", false),
         ("/v0/namespaces/{namespace_id}/inodes/{inode_id}", true),
     ] {
         let parameter = query_parameter(paths, path, "get", "include_attributes");
@@ -841,7 +842,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         );
     }
 
-    let grep_path = "/v0/namespaces/{namespace_id}/query/grep";
+    let grep_path = "/v0/namespaces/{namespace_id}/grep";
     for name in ["case_insensitive", "allow_scan", "allow_stale"] {
         let parameter = query_parameter(paths, grep_path, "get", name);
         assert_eq!(parameter.get("required"), Some(&Value::Bool(false)));
@@ -890,12 +891,12 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
 
     for (path, method, parameter_name) in [
         (
-            "/v0/namespaces/{namespace_id}/filesystem/list",
+            "/v0/namespaces/{namespace_id}/filesystem/entries",
             "get",
             "path",
         ),
         (
-            "/v0/namespaces/{namespace_id}/filesystem/stat",
+            "/v0/namespaces/{namespace_id}/filesystem/entry",
             "get",
             "path",
         ),
@@ -910,7 +911,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             "path",
         ),
         (
-            "/v0/namespaces/{namespace_id}/filesystem/list",
+            "/v0/namespaces/{namespace_id}/filesystem/entries",
             "get",
             "cursor",
         ),

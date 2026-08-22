@@ -86,15 +86,15 @@ func PutFile(ctx context.Context, c *client.Client, in PutFileInput) (*PutFileRe
 		return nil, fmt.Errorf("transfers: actor is required")
 	}
 
-	capabilities, err := c.Capabilities(ctx)
+	capabilities, err := c.System.GetCapabilities(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("transfers: read capabilities: %w", err)
 	}
-	beginRequest, err := beginUploadRequest(capabilities, in.NamespaceID, int64(len(in.Bytes)))
+	createRequest, err := createUploadRequest(capabilities, in.NamespaceID, int64(len(in.Bytes)))
 	if err != nil {
 		return nil, err
 	}
-	begin, err := c.Uploads.BeginUpload(ctx, beginRequest)
+	begin, err := c.Uploads.CreateUpload(ctx, createRequest)
 	if err != nil {
 		return nil, fmt.Errorf("transfers: begin upload: %w", err)
 	}
@@ -119,7 +119,7 @@ func PutFile(ctx context.Context, c *client.Client, in PutFileInput) (*PutFileRe
 	if status.ContentToken != nil {
 		contentTokens = []*loonfs.ContentToken{status.ContentToken}
 	}
-	committed, err := c.Filesystem.ApplyCommit(ctx, &loonfs.CommitRequest{
+	committed, err := c.Filesystem.CreateCommit(ctx, &loonfs.CommitRequest{
 		NamespaceID:   string(in.NamespaceID),
 		Actor:         in.Actor,
 		CommitID:      in.CommitID,
@@ -152,14 +152,14 @@ func GetFile(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileRe
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
-	capabilities, err := c.Capabilities(ctx)
+	capabilities, err := c.System.GetCapabilities(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("transfers: read capabilities: %w", err)
 	}
 	if capabilities == nil || !capabilities.Features[featureDirectGet] {
 		return getFileProxied(ctx, c, in)
 	}
-	grant, err := c.Filesystem.BeginDownload(ctx, &loonfs.BeginDownloadRequest{
+	grant, err := c.Filesystem.CreateDownload(ctx, &loonfs.BeginDownloadRequest{
 		NamespaceID: string(in.NamespaceID),
 		Path:        in.Path,
 		RevisionNo:  in.RevisionNo,
@@ -202,7 +202,7 @@ func getFileProxied(ctx context.Context, c *client.Client, in GetFileInput) (*Ge
 	revisionNo := in.RevisionNo
 	var claim *loonfs.ContentRef
 	if revisionNo == nil {
-		entry, err := c.Filesystem.StatPath(ctx, &loonfs.StatPathRequest{
+		entry, err := c.Filesystem.GetPathEntry(ctx, &loonfs.GetPathEntryRequest{
 			NamespaceID: string(in.NamespaceID),
 			Path:        string(in.Path),
 		})
@@ -283,11 +283,11 @@ func fileProjection(entry *loonfs.AuthoritativePathEntry) (*loonfs.Authoritative
 	return entry.File, nil
 }
 
-func beginUploadRequest(
+func createUploadRequest(
 	capabilities *loonfs.CapabilityDocument,
 	namespaceID loonfs.NamespaceID,
 	sizeBytes int64,
-) (*loonfs.BeginUploadBody, error) {
+) (*loonfs.CreateUploadRequest, error) {
 	if capabilities == nil {
 		return nil, fmt.Errorf("transfers: capability response is nil")
 	}
@@ -316,7 +316,7 @@ func beginUploadRequest(
 			)
 		}
 	}
-	return &loonfs.BeginUploadBody{
+	return &loonfs.CreateUploadRequest{
 		NamespaceID: string(namespaceID),
 		Body:        request,
 	}, nil
@@ -484,7 +484,7 @@ func transferServiceProxied(
 	payload []byte,
 	begin *loonfs.BeginUploadResponseServiceProxied,
 ) (*loonfs.UploadSessionResponse, error) {
-	if _, err := c.Uploads.UploadContent(
+	if _, err := c.Uploads.PutUploadContent(
 		ctx,
 		string(namespaceID),
 		string(begin.UploadID),

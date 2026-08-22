@@ -13,11 +13,11 @@
     "/v0/capabilities": {
       "get": {
         "tags": [
-          "capabilities"
+          "system"
         ],
         "summary": "Get capabilities",
         "description": "Returns a summary of supported features and limits.",
-        "operationId": "capabilities",
+        "operationId": "get_capabilities",
         "responses": {
           "200": {
             "description": "Capability document",
@@ -152,7 +152,7 @@
         ],
         "summary": "Apply a commit",
         "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
-        "operationId": "apply_commit",
+        "operationId": "create_commit",
         "parameters": [
           {
             "name": "namespace_alias",
@@ -359,7 +359,7 @@
         ],
         "summary": "Begin download",
         "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.max_content_bytes`.",
-        "operationId": "begin_download",
+        "operationId": "create_download",
         "parameters": [
           {
             "name": "namespace_alias",
@@ -449,7 +449,7 @@
         "x-loonfs-retry": "safe"
       }
     },
-    "/v0/namespace-aliases/{namespace_alias}/filesystem/list": {
+    "/v0/namespace-aliases/{namespace_alias}/filesystem/entries": {
       "get": {
         "tags": [
           "filesystem"
@@ -572,6 +572,102 @@
         }
       }
     },
+    "/v0/namespace-aliases/{namespace_alias}/filesystem/entry": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "Stat path",
+        "description": "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
+        "operationId": "get_path_entry",
+        "parameters": [
+          {
+            "name": "namespace_alias",
+            "in": "path",
+            "description": "Application namespace alias",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute filesystem path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_attributes",
+            "in": "query",
+            "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative path entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthoritativePathEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path or include_attributes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/revisions": {
       "get": {
         "tags": [
@@ -685,102 +781,6 @@
         }
       }
     },
-    "/v0/namespace-aliases/{namespace_alias}/filesystem/stat": {
-      "get": {
-        "tags": [
-          "filesystem"
-        ],
-        "summary": "Stat path",
-        "description": "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
-        "operationId": "stat_path",
-        "parameters": [
-          {
-            "name": "namespace_alias",
-            "in": "path",
-            "description": "Application namespace alias",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "path",
-            "in": "query",
-            "description": "Absolute filesystem path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "include_attributes",
-            "in": "query",
-            "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Authoritative path entry",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AuthoritativePathEntry"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid path or include_attributes",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace or path not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "x-loonfs-retry": "safe"
-      }
-    },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/trash": {
       "get": {
         "tags": [
@@ -875,7 +875,7 @@
         }
       }
     },
-    "/v0/namespace-aliases/{namespace_alias}/query/grep": {
+    "/v0/namespace-aliases/{namespace_alias}/grep": {
       "get": {
         "tags": [
           "query"
@@ -1054,7 +1054,7 @@
         ],
         "summary": "Begin upload",
         "description": "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store presigned credentials.",
-        "operationId": "begin_upload",
+        "operationId": "create_upload",
         "parameters": [
           {
             "name": "namespace_alias",
@@ -1161,7 +1161,7 @@
         ],
         "summary": "Get upload session",
         "description": "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
-        "operationId": "get_upload_status",
+        "operationId": "get_upload",
         "parameters": [
           {
             "name": "namespace_alias",
@@ -1460,7 +1460,7 @@
         ],
         "summary": "Upload content",
         "description": "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
-        "operationId": "upload_content",
+        "operationId": "put_upload_content",
         "parameters": [
           {
             "name": "namespace_alias",
@@ -4116,8 +4116,8 @@
   },
   "tags": [
     {
-      "name": "capabilities",
-      "description": "Capability discovery"
+      "name": "system",
+      "description": "Server health, readiness, metrics, and capability discovery"
     },
     {
       "name": "filesystem",

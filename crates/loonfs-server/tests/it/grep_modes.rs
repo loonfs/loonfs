@@ -726,7 +726,7 @@ async fn assert_not_supported(
 }
 
 fn query_path(namespace_id: &NamespaceId) -> String {
-    format!("/v0/namespaces/{namespace_id}/query/grep")
+    format!("/v0/namespaces/{namespace_id}/grep")
 }
 
 fn query_path_with_pattern(namespace_id: &NamespaceId, pattern: &str) -> String {

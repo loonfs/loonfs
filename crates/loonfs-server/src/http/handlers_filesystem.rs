@@ -170,7 +170,7 @@ impl utoipa::ToSchema for OpenApiDefaultFalseBoolean {}
     utoipa::path(
         get,
         operation_id = "list_path_entries",
-        path = "/v0/namespaces/{namespace_id}/filesystem/list",
+        path = "/v0/namespaces/{namespace_id}/filesystem/entries",
         tag = "filesystem",
         summary = "List directory",
         description = "Lists a directory at the current namespace head.",
@@ -230,8 +230,8 @@ pub(super) async fn list_path_entries(
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "stat_path",
-        path = "/v0/namespaces/{namespace_id}/filesystem/stat",
+        operation_id = "get_path_entry",
+        path = "/v0/namespaces/{namespace_id}/filesystem/entry",
         tag = "filesystem",
         summary = "Stat path",
         description = "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
@@ -250,7 +250,7 @@ pub(super) async fn list_path_entries(
         )
     )
 )]
-pub(super) async fn stat_path(
+pub(super) async fn get_path_entry(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
@@ -444,7 +444,7 @@ pub(super) async fn list_file_revisions(
     feature = "openapi",
     utoipa::path(
         post,
-        operation_id = "apply_commit",
+        operation_id = "create_commit",
         path = "/v0/namespaces/{namespace_id}/commits",
         tag = "filesystem",
         summary = "Apply a commit",
@@ -463,7 +463,7 @@ pub(super) async fn list_file_revisions(
     )
 )]
 /// The server stores the actor from the request; the shared token does not verify it.
-pub(super) async fn apply_commit(
+pub(super) async fn create_commit(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<ApiCommitRequest>,

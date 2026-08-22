@@ -26,7 +26,7 @@ within a plane is expressed as **named features** (section 2).
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path and inode reads (stat, list, content, revisions), path mutations, staged uploads, the change feed, namespace state by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Read namespace storage diagnostics; create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
-| `query/v0` | Query plane | Content search over derived indexes (`GET /v0/namespaces/{namespace_id}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized active grep root for the namespace. | Optional |
+| `query/v0` | Query plane | Content search over derived indexes (`GET /v0/namespaces/{namespace_id}/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized active grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
 Notes:
@@ -156,11 +156,11 @@ hoc.
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
-| `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/stat` and `GET /filesystem/list`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
+| `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
-| `query.grep` | Content search (`GET /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
+| `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `admin/v0`'s only feature key is `admin.grep.index`; the rest of that plane
 is required ops. `acl.*` keys are unregistered until that plane
@@ -658,6 +658,10 @@ API that implements them.
 HTTP is one transport binding for these abstract operations. It is not the
 underlying semantics.
 
+GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `run`, `release`, `enable`, `disable`, `gc`, `abort`, `complete`, and `probe`. `/v0/admin/` is the only plane prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
+
+Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `release_checkpoint`. Generated SDK method names come from these IDs, so changing an ID also changes the generated method name.
+
 ### Authentication and transport
 
 A deployment that sets a token authenticates every request with an HTTP
@@ -707,27 +711,27 @@ The table below lists the retry class for every v0 operation.
 
 | Purpose | Operation ID | Retry class | Representative HTTP shape |
 | --- | --- | --- | --- |
-| Check server health | `health` | `safe` | `GET /health` |
-| Check server readiness | `readiness` | `safe` | `GET /readiness` |
-| Read deployment capabilities | `capabilities` | `safe` | `GET /v0/capabilities` |
+| Check server health | `get_health` | `safe` | `GET /health` |
+| Check server readiness | `get_readiness` | `safe` | `GET /readiness` |
+| Read deployment capabilities | `get_capabilities` | `safe` | `GET /v0/capabilities` |
 | Create a namespace | `create_namespace` | `new_attempt` | `POST /v0/namespaces` |
 | Read a namespace | `get_namespace` | `safe` | `GET /v0/namespaces/{ns}` |
-| Stat a path | `stat_path` | `safe` | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
-| Stat an inode | `stat_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
-| List a path | `list_path_entries` | `safe` | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
+| Read a path entry | `get_path_entry` | `safe` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
+| Read an inode | `get_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
+| List path entries | `list_path_entries` | `safe` | `GET /v0/namespaces/{ns}/filesystem/entries?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
 | List file revisions by path | `list_file_revisions` | `safe` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | List file revisions by inode | `list_file_revisions_by_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
 | Read current or prior file content by path | `get_file_bytes` | `safe` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` (`revision_no` is optional) |
 | Read prior file content by inode | `get_file_revision_bytes_by_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
-| Start a download by path | `begin_download` | `safe` | `POST /v0/namespaces/{ns}/filesystem/downloads` |
-| Start a download by inode | `begin_download_by_inode` | `safe` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with body `{}` |
+| Start a download by path | `create_download` | `safe` | `POST /v0/namespaces/{ns}/filesystem/downloads` |
+| Start a download by inode | `create_download_by_inode` | `safe` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with body `{}` |
 | List recoverable deletions | `list_trash` | `safe` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
-| Apply a commit | `apply_commit` | `replay` | `POST /v0/namespaces/{ns}/commits` |
-| Start an upload | `begin_upload` | `new_attempt` | `POST /v0/namespaces/{ns}/uploads` |
-| Upload content through the server | `upload_content` | `safe` | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
+| Create a commit | `create_commit` | `replay` | `POST /v0/namespaces/{ns}/commits` |
+| Create an upload session | `create_upload` | `new_attempt` | `POST /v0/namespaces/{ns}/uploads` |
+| Upload content through the server | `put_upload_content` | `safe` | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
 | Create multipart upload URLs | `sign_upload_parts` | `safe` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
 | Complete an upload | `complete_upload` | `replay` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
-| Read upload status | `get_upload_status` | `safe` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
+| Read an upload session | `get_upload` | `safe` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
 | Abort an upload session | `abort_upload` | `safe` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
 | Read committed changes | `list_changes` | `safe` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `fork_namespace` | `new_attempt` | `POST /v0/namespaces/{source_ns}/forks` |
@@ -736,9 +740,9 @@ The table below lists the retry class for every v0 operation.
 | Create a checkpoint | `create_checkpoint` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
 | List checkpoints | `list_checkpoints` | `safe` | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
 | Release a checkpoint | `release_checkpoint` | `safe` | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
-| Run maintenance | `maintenance_step` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/maintenance/step` |
-| Search file contents | `grep` | `safe` | `GET /v0/namespaces/{ns}/query/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
-| Read grep index status | `get_grep_index_status` | `safe` | `GET /v0/admin/namespaces/{ns}/grep/index` |
+| Run maintenance | `run_maintenance` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/maintenance/run` |
+| Search file contents | `grep` | `safe` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
+| Read grep index status | `get_grep_index` | `safe` | `GET /v0/admin/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `safe` | `POST /v0/admin/namespaces/{ns}/grep/index/enable`; idempotent |
 | Disable the grep index | `disable_grep_index` | `safe` | `POST /v0/admin/namespaces/{ns}/grep/index/disable`; idempotent |
 | Collect grep index garbage | `gc_grep_index` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/grep/index/gc`; supports `max_objects` and `next_cursor` |
@@ -940,9 +944,7 @@ uploads. That trust comes from the endpoint allowlist behind the
 `uploads.direct_put` capability, because a probe exercises the server's own
 request path and never a presigned capability handed to a client.
 
-Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
-`/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
-`core/v0`.
+Routes under `/v0/admin/` belong to the `admin/v0` profile. `GET /v0/namespaces/{ns}/grep` belongs to `query/v0`. Everything else shown belongs to `core/v0`.
 
 When a GC pass sees a future reclamation deadline, its response includes
 `next_reclamation_at_ms`, the soonest time still ahead of the pass at which
@@ -1003,7 +1005,7 @@ independent.
 The first is the **metadata retention floor**. It limits how far back clients
 can replay the WAL. Advancing the floor makes older WAL segments eligible for
 garbage collection. It advances only through an explicit request:
-`POST .../maintenance/step` with `advance_retention: true`, or
+`POST .../maintenance/run` with `advance_retention: true`, or
 `loonfs admin retention advance`. It does not remove file revisions.
 
 The second is the **content reclamation grace**, which is slightly longer than
@@ -1439,7 +1441,7 @@ its queue in admission order — requests admitted before the delete publish fir
 after it fail with `namespace_deleted`, and nothing is rejected for a delete
 that ends up failing its precondition.
 
-### 6.4 `GET /filesystem/stat` and `GET /inodes/{inode_id}`
+### 6.4 `GET /filesystem/entry` and `GET /inodes/{inode_id}`
 
 The response is one authoritative path entry. Enum values are snake_case per
 the durable naming rules (`format.md`, "Durable naming conventions").
@@ -1478,10 +1480,7 @@ current revision row. These stamps are observational — sequences are the
 order, and no validity rule reads them. Directories have creation time but no
 modified time in v0; rename and move change neither attribution nor time.
 
-`include_attributes` selects whether the entry carries the inode's attribute
-projection. It accepts `true` or `false`; anything else is `invalid_request`. Stat
-defaults to `true`, because a stat answers for one path and a map is capped
-at 64 KiB.
+`include_attributes` selects whether the response includes the inode's attributes. It accepts `true` or `false`; anything else is `invalid_request`. The entry route defaults to `true` because it returns one bounded attribute map of at most 64 KiB.
 
 The projection serializes as prefixed siblings. `attributes_revision_no` and
 the complete `attributes` map are present together or absent together;
@@ -1502,14 +1501,11 @@ empty string is not a spelling for the root or for any named path component.
 The inode route returns the same entry shape, including the current `path`.
 Renaming an entry changes its path and name but not its inode id or metadata.
 An unknown or hidden inode returns `inode_not_found`. The root inode returns
-`/`. `include_attributes` behaves the same as it does for path stat.
+`/`. `include_attributes` behaves the same as it does for the path entry route.
 
-### 6.5 `GET /filesystem/list`
+### 6.5 `GET /filesystem/entries`
 
-The envelope names the listed path and the head the listing was read from, so
-an empty directory still reports which state it observed and the response can
-grow without reshaping `entries`. Entries are full path entries with the same
-shape as `stat` (directory entries leave the file-only fields out).
+The envelope names the listed path and the head the listing was read from, so an empty directory still reports which state it observed and the response can grow without reshaping `entries`. Entries are full path entries with the same shape returned by `GET /filesystem/entry` (directory entries omit file-only fields).
 
 Directory listing advances in canonical `name_key` order. Concatenating pages
 in cursor order yields the complete listing in that same order; clients must
@@ -1518,12 +1514,7 @@ required on every page; the cursor carries the resume position, but the
 request path remains the authority for what is being listed. Responses
 include `next_cursor` only when another page is available.
 
-`include_attributes` works exactly as it does on stat, and obeys the same
-required-siblings-together projection rule, but it defaults to `false`. That
-default is what bounds a listing: a page holds up to `pagination.max_limit`
-entries and each attribute map may be 64 KiB, and no request declares a byte
-budget, so a listing carries attributes only when the caller asks and sizes
-its pages for what comes back.
+`include_attributes` works exactly as it does on the entry route and obeys the same required-siblings-together projection rule, but it defaults to `false`. This keeps the default response bounded because a page may contain up to `pagination.max_limit` entries and each attribute map may be 64 KiB. Clients that request attributes should choose a suitable page size.
 
 A cursor is an opaque ordering resume, not a snapshot pin. Every cursor in the API
 — directory listing, revision listing, grep, and the change feed alike —
@@ -2373,12 +2364,12 @@ same `namespace_exists` or `namespace_deleted` error as namespace creation.
 If the source checkpoint disappears before the operation completes, the
 server deletes the new target and returns `checkpoint_unavailable`.
 
-### 6.13 `GET /query/grep`
+### 6.13 `GET /grep`
 
 Representative request:
 
 ```http
-GET /query/grep?pattern=fn%20%28grep%7Csearch%29&case_insensitive=false&path_prefix=%2Fsrc&limit=100
+GET /grep?pattern=fn%20%28grep%7Csearch%29&case_insensitive=false&path_prefix=%2Fsrc&limit=100
 ```
 
 Representative response:
@@ -2664,7 +2655,7 @@ a raw path string.
 | Operation | Raw path is used for | Stable in-flight identity after start |
 | --- | --- | --- |
 | `get <file>` | the request itself | none required |
-| `put <file>` (resumable) | `begin_upload` only | server-issued upload session, if used |
+| `put <file>` (resumable) | `create_upload` only | server-issued upload session, if used |
 
 ### 9.6 Control-plane durability guidance
 
