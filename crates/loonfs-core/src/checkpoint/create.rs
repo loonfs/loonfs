@@ -9,7 +9,7 @@ use super::record::{
 #[cfg(test)]
 use super::row::manifest_rows_for_family;
 #[cfg(test)]
-use super::runs::CHECKPOINT_TABLE_FAMILIES;
+use super::runs::CHECKPOINT_ROW_FAMILIES;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
 use crate::error::CoreError;
@@ -151,9 +151,9 @@ pub(super) async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?
 
     let projection = super::flush::load_root_projection(store, namespace_id).await?;
     let mut metadata_state = MetadataStateBuilder::default();
-    for family in CHECKPOINT_TABLE_FAMILIES {
+    for family in CHECKPOINT_ROW_FAMILIES {
         let mut rows = projection
-            .manifest_tables
+            .manifest_segments
             .scan_prefix(family, "")
             .await
             .map_err(|error| {

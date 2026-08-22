@@ -30,7 +30,7 @@ use std::sync::Arc;
 /// Objects reachable from the most recently collected roots.
 pub(super) struct LiveSet {
     pub(super) manifests: BTreeSet<ManifestObjectId>,
-    pub(super) tables: BTreeSet<String>,
+    pub(super) segments: BTreeSet<String>,
     pub(super) wal_segments: BTreeSet<String>,
     /// Content referenced by retained WAL commits but not yet materialized in
     /// a manifest. These references are collected while validating the WAL
@@ -41,7 +41,7 @@ pub(super) struct LiveSet {
     /// result from a crash between writing and verifying the record.
     pub(super) missing_basis_records: BTreeSet<String>,
     /// Whether a root manifest was missing or could not be read. The pass must
-    /// not delete manifests or tables when this is true. Corruption fails the
+    /// not delete manifests or segments when this is true. Corruption fails the
     /// pass instead.
     pub(super) degraded: bool,
     /// Whether the namespace has been deleted.
@@ -54,7 +54,7 @@ impl LiveSet {
     fn collecting(namespace_deleted: bool) -> Self {
         Self {
             manifests: BTreeSet::new(),
-            tables: BTreeSet::new(),
+            segments: BTreeSet::new(),
             wal_segments: BTreeSet::new(),
             wal_content_ids: BTreeSet::new(),
             checkpoint_keys: BTreeSet::new(),
@@ -74,7 +74,7 @@ impl LiveSet {
 
 /// References recorded at the start of the grace window.
 ///
-/// Object age alone is not enough to protect active readers. An old table may
+/// Object age alone is not enough to protect active readers. An old segment may
 /// have stopped being referenced only moments ago. The collector therefore
 /// uses the newest manifest that is at least one grace window old as an
 /// anchor. An object can be deleted only when it is absent from the current
@@ -104,8 +104,8 @@ pub(super) struct AnchoredManifest {
     /// Highest sequence materialized by the anchor. Readers pinned to it may
     /// still replay later WAL segments.
     head_seq: ChangeSeq,
-    /// Object keys of the metadata tables the anchor named.
-    tables: BTreeSet<String>,
+    /// Object keys of the metadata segments the anchor named.
+    segments: BTreeSet<String>,
 }
 
 impl ReferenceAnchor {
@@ -304,7 +304,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             context,
         )
         .await?;
-        collect_manifest_tables(
+        collect_manifest_segments(
             store,
             namespace_id,
             root_manifest_object_id.as_ref(),
@@ -407,7 +407,7 @@ async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
     }
 }
 
-async fn collect_manifest_tables<S: ObjectStore + ?Sized>(
+async fn collect_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     root_manifest_object_id: Option<&ManifestObjectId>,
@@ -416,7 +416,7 @@ async fn collect_manifest_tables<S: ObjectStore + ?Sized>(
     live: &mut LiveSet,
     budget: &mut PassBudget,
 ) -> CollectResult<()> {
-    // Only a validated manifest can protect its table objects.
+    // Only a validated manifest can protect its segment objects.
     for manifest_object_id in &manifest_object_ids {
         charge(budget)?;
         let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
@@ -428,12 +428,12 @@ async fn collect_manifest_tables<S: ObjectStore + ?Sized>(
         )
         .await
         {
-            Ok(Some(manifest)) => live.tables.extend(
+            Ok(Some(manifest)) => live.segments.extend(
                 manifest
                     .payload
-                    .metadata_files
+                    .segments
                     .iter()
-                    .map(|file| file.object_key.clone()),
+                    .map(|descriptor| descriptor.object_key.clone()),
             ),
             Ok(None) if Some(manifest_object_id) == root_manifest_object_id => {
                 live.degraded = true;
@@ -451,7 +451,7 @@ async fn collect_manifest_tables<S: ObjectStore + ?Sized>(
                         namespace_id = %namespace_id,
                         object_key = manifest_key,
                         error = %error,
-                        "a root manifest did not read; this pass reclaims no manifests or tables"
+                        "a root manifest did not read; this pass reclaims no manifests or segments"
                     );
                 }
                 ManifestLoadFailureClass::Corrupt => {
@@ -485,11 +485,11 @@ async fn collect_reference_anchor<S: ObjectStore + ?Sized>(
             select_reference_anchor(store, namespace_id, grace_window_ms, budget, context).await?
         }
     };
-    // Protect the anchor's tables and manifest so later passes can use the
+    // Protect the anchor's segments and manifest so later passes can use the
     // same evidence.
     if let ReferenceAnchor::Manifest(anchor) = &live.anchor {
         live.manifests.insert(anchor.manifest_object_id.clone());
-        live.tables.extend(anchor.tables.iter().cloned());
+        live.segments.extend(anchor.segments.iter().cloned());
     }
     Ok(())
 }
@@ -645,11 +645,11 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
     Ok(ReferenceAnchor::Manifest(Box::new(AnchoredManifest {
         manifest_object_id,
         head_seq: manifest.payload.head_seq,
-        tables: manifest
+        segments: manifest
             .payload
-            .metadata_files
+            .segments
             .iter()
-            .map(|file| file.object_key.clone())
+            .map(|descriptor| descriptor.object_key.clone())
             .collect(),
     })))
 }

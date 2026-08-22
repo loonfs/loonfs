@@ -215,7 +215,7 @@ impl PassProgress {
 /// this pass kept becomes reclaimable.
 fn gc_pass_line(pass: &loonfs_api::GcResponse) -> String {
     let deleted = pass.deleted_wal_segments
-        + pass.deleted_metadata_tables
+        + pass.deleted_metadata_segments
         + pass.deleted_manifests
         + pass.deleted_checkpoint_records
         + pass.deleted_upload_sessions
@@ -232,7 +232,7 @@ fn gc_pass_line(pass: &loonfs_api::GcResponse) -> String {
 
 fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::GcResponse) {
     total.deleted_wal_segments += pass.deleted_wal_segments;
-    total.deleted_metadata_tables += pass.deleted_metadata_tables;
+    total.deleted_metadata_segments += pass.deleted_metadata_segments;
     total.deleted_manifests += pass.deleted_manifests;
     total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
     total.released_fork_checkpoints += pass.released_fork_checkpoints;

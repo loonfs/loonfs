@@ -136,15 +136,12 @@ impl FsAdminBuilder {
         self
     }
 
-    /// Shares `writer`'s decoded-block cache with this handle instead of
-    /// opening a separate one, so explicit maintenance reuses blocks that
-    /// writer-side reads already decoded — and warms them back. Sound
-    /// because entries are keyed by immutable identities; only for a
-    /// writer in the same runtime ownership domain. The cache keeps the
-    /// writer's byte budget: [`Self::runtime_cache`] still sizes this
-    /// handle's other caches, but its decoded-block budget goes unused.
-    pub fn shared_metadata_table_cache(mut self, writer: &super::FsWriter) -> Self {
-        self.core.shared_metadata_table_cache = Some(writer.metadata_table_cache());
+    /// Shares the writer's decoded-block cache with this admin handle. Use a
+    /// writer from the same runtime. The shared cache keeps the writer's byte
+    /// budget; [`Self::runtime_cache`] still configures this handle's other
+    /// caches.
+    pub fn shared_metadata_segment_cache(mut self, writer: &super::FsWriter) -> Self {
+        self.core.shared_metadata_segment_cache = Some(writer.metadata_segment_cache());
         self
     }
 
@@ -161,7 +158,7 @@ impl FsAdminBuilder {
     /// `writer`'s shutdown cancels and drains it.
     ///
     /// Only for a writer in the same runtime ownership domain, like
-    /// [`Self::shared_metadata_table_cache`].
+    /// [`Self::shared_metadata_segment_cache`].
     pub fn background_maintenance(mut self, writer: &super::FsWriter) -> Self {
         self.compactions = Some(writer.background_compactions());
         self

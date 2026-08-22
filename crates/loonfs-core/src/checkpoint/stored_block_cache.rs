@@ -1,10 +1,10 @@
-//! Interface for a node-local cache of encoded metadata SST blocks.
+//! Interface for a node-local cache of encoded metadata segment blocks.
 //!
-//! This cache sits between the decoded [`MetadataTableCache`] and object
+//! This cache sits between the decoded [`MetadataSegmentCache`] and object
 //! storage. It stores the original encoded section bytes, which are decoded
 //! and verified before any rows are returned.
 //!
-//! [`MetadataTableCache`]: super::MetadataTableCache
+//! [`MetadataSegmentCache`]: super::MetadataSegmentCache
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use thiserror::Error;
 
-/// Identifies one encoded section of an immutable metadata SST segment.
+/// Identifies one encoded section of an immutable metadata segment.
 ///
 /// `object_checksum` identifies the complete segment. `kind` and `offset`
 /// identify one section within it. The decoder validates lengths and CRCs, so
@@ -49,7 +49,7 @@ impl StoredMetadataBlockCacheCloseError {
     }
 }
 
-/// Node-local cache of encoded metadata SST sections.
+/// Node-local cache of encoded metadata segment sections.
 ///
 /// Object storage remains authoritative. Every cache hit is decoded and
 /// verified before rows are returned. Cache operations are best effort:

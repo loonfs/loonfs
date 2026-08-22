@@ -22,7 +22,7 @@
 //!
 //! [`merge_group_in_step`] runs it synchronously inside one maintenance step.
 //! The step's budgets chose the window and the step publishes the result, so
-//! the segments go to `metadata/tables/` and there is no lease, no job, no
+//! the segments go to `metadata/segments/` and there is no lease, no job, no
 //! registry, and no admission.
 //!
 //! [`run_metadata_compaction_job`] runs it as a background task the
@@ -42,8 +42,8 @@
 
 use super::block_fetch::{load_segment_filter, segment_object_len};
 use super::block_load::SessionBlockMemo;
-use super::build::MetadataTableDestination;
-use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
+use super::build::MetadataSegmentDestination;
+use super::cache::{MetadataSegmentCache, MetadataSegmentCacheConfig};
 use super::compaction_lease::{CompactionLease, LeaseHold};
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping, SegmentRowIterator,
@@ -57,18 +57,18 @@ use super::frozen_floor::{
     BindingGeneration,
 };
 use super::load::{
-    load_manifest_segment_rows_in_key_range_with_cache, load_verified_manifest_tables,
+    load_manifest_segment_rows_in_key_range_with_cache, load_verified_manifest_segments,
 };
 use super::publish::{publish_metadata_root, ManifestPublicationOutcome};
 use super::reorganize::{group_run_descriptors, write_reorganized_manifest, MergePlacement};
 use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
-use super::scan::{descriptor_may_intersect_range, Readahead, VerifiedMetadataTables};
+use super::scan::{descriptor_may_intersect_range, Readahead, VerifiedMetadataSegments};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::load_metadata_root_object_if_present;
 use crate::time::current_time_ms;
 use crate::time::StdMonotonicTimer;
-use loonfs_api::wire::manifest::{lookup_keys, MetadataFileRef, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -157,13 +157,13 @@ impl MetadataCompactionSpec {
         self.group
     }
 
-    /// The job's identity, which names the prefix its output sits under.
+    /// Job id used in the staging prefix.
     pub fn job_id(&self) -> &MetadataCompactionId {
         &self.job_id
     }
 
     /// The families this job rebuilds, for a caller reporting what it started.
-    pub fn families(&self) -> &'static [MetadataTableFamily] {
+    pub fn families(&self) -> &'static [MetadataRowFamily] {
         self.group.families()
     }
 
@@ -281,12 +281,12 @@ pub(super) enum MetadataMergeOutcome {
 pub(super) struct MetadataMergeResult {
     /// The output run's segment descriptors, naming the object keys the merge
     /// wrote them to.
-    pub(super) output_segments: Vec<MetadataFileRef>,
+    pub(super) output_segments: Vec<MetadataSegmentRef>,
     pub(super) rows_read: u64,
     pub(super) rows_written: u64,
     pub(super) input_bytes: u64,
     pub(super) output_bytes: u64,
-    pub(super) rows_written_by_family: BTreeMap<MetadataTableFamily, u64>,
+    pub(super) rows_written_by_family: BTreeMap<MetadataRowFamily, u64>,
     /// Point reads into the snapshot's unbind family, one per reverse bind
     /// row at or below the frozen floor. Zero for a merge that resolves the
     /// reverse index from what it streamed
@@ -310,7 +310,7 @@ pub(super) struct MetadataMergeResult {
 /// The engine is the job's engine. What this leaves out is everything the job
 /// needs because it outlives its step: there is no lease, no staging prefix,
 /// no registry entry, and no admission, and the segments are written at
-/// ordinary table keys because the step publishes them itself a moment later.
+/// ordinary segment keys because the step publishes them itself a moment later.
 ///
 /// `runs` is the window the step's budgets chose, and `placement` is where its
 /// output stands in the group — which is also what decides whether rows may be
@@ -330,7 +330,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
         group,
         placement,
         frozen_floor_seq,
-        MetadataTableDestination::Published { namespace_id },
+        MetadataSegmentDestination::Published { namespace_id },
         policy,
         runs.to_vec(),
         // The window is capped by the step's budgets, so the set of below-floor
@@ -344,13 +344,10 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     merge.run().await
 }
 
-/// Rebuilds `spec`'s group from `spec`'s runs.
-///
-/// `tables` must name the manifest the spec was planned against: the job
-/// resolves its snapshot out of that manifest, so the runs it reads are the
-/// runs the plan chose and nothing else.
+/// Rebuilds the family group and runs selected by `spec`. `segments` must come
+/// from the manifest used to create the specification.
 pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     policy: MetadataLsmPolicy,
@@ -358,17 +355,17 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     lease: &mut CompactionLease<'_>,
 ) -> Result<MetadataMergeOutcome> {
     let merge = GroupMerge::new(
-        tables.store,
+        segments.store,
         namespace_id,
         spec.group,
         spec.placement,
         spec.frozen_floor_seq,
-        MetadataTableDestination::CompactionStaging {
+        MetadataSegmentDestination::CompactionStaging {
             namespace_id,
             job_id: spec.job_id(),
         },
         policy,
-        resolve_snapshot_runs(tables, spec)?,
+        resolve_snapshot_runs(segments, spec)?,
         // A job has no bound on the group it rebuilds, so it reads the
         // snapshot per reverse row rather than holding a set that would follow
         // the group's size.
@@ -454,13 +451,13 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<MetadataCompactionJobOutcome> {
     let timer = StdMonotonicTimer::default();
-    let Some(tables) = load_current_manifest_tables(store, namespace_id).await? else {
+    let Some(segments) = load_current_manifest_segments(store, namespace_id).await? else {
         return Ok(MetadataCompactionJobOutcome::Abandoned);
     };
     // What the job is about to read, recorded before it reads anything.
     // Finalization compares the manifest against this, so the run it publishes
     // stands in for exactly the segments it merged.
-    let Some(snapshot_keys) = snapshot_segment_keys(&tables, spec) else {
+    let Some(snapshot_keys) = snapshot_segment_keys(&segments, spec) else {
         return Ok(MetadataCompactionJobOutcome::Abandoned);
     };
     // The lease is written before the first output object, so no object under
@@ -484,7 +481,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     );
 
     let result = match run_metadata_compaction(
-        &tables,
+        &segments,
         namespace_id,
         spec,
         policy,
@@ -522,7 +519,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
             return Ok(MetadataCompactionJobOutcome::Cancelled);
         }
     };
-    drop(tables);
+    drop(segments);
 
     let rows_read = result.rows_read;
     let rows_written = result.rows_written;
@@ -651,10 +648,11 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         else {
             return Ok(Finalization::Abandoned);
         };
-        let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
-            .await
-            .map_err(manifest_load_failure)?;
-        if snapshot_segment_keys(&tables, spec).as_ref() != Some(snapshot_keys) {
+        let segments =
+            load_verified_manifest_segments(store, namespace_id, &root.manifest_object_id)
+                .await
+                .map_err(manifest_load_failure)?;
+        if snapshot_segment_keys(&segments, spec).as_ref() != Some(snapshot_keys) {
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
                 families = ?spec.families(),
@@ -663,16 +661,16 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             return Ok(Finalization::Abandoned);
         }
 
-        let previous = tables.manifest();
-        let mut metadata_files: Vec<MetadataFileRef> = previous
+        let previous = segments.manifest();
+        let mut next_segments: Vec<MetadataSegmentRef> = previous
             .payload
-            .metadata_files
+            .segments
             .iter()
             .filter(|descriptor| !snapshot_keys.contains(&descriptor.object_key))
             .cloned()
             .collect();
-        metadata_files.extend(result.output_segments.iter().cloned());
-        let base_seq = metadata_files
+        next_segments.extend(result.output_segments.iter().cloned());
+        let base_seq = next_segments
             .iter()
             .map(|descriptor| descriptor.run_seq)
             .min()
@@ -681,7 +679,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             store,
             namespace_id,
             previous,
-            metadata_files,
+            next_segments,
             base_seq,
             previous
                 .payload
@@ -704,7 +702,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             current_time_ms()?,
         )
         .await?;
-        drop(tables);
+        drop(segments);
         match published {
             ManifestPublicationOutcome::Published(_) => {
                 return Ok(Finalization::Published(manifest.payload.manifest_no))
@@ -732,12 +730,11 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     Ok(Finalization::Superseded)
 }
 
-/// The tables of whatever manifest the namespace's root names, or `None` when
-/// it names none.
-async fn load_current_manifest_tables<'a, S: ObjectStore + ?Sized>(
+/// Loads the segments in the current root manifest, or `None` if no root exists.
+async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
-) -> Result<Option<VerifiedMetadataTables<'a, S>>> {
+) -> Result<Option<VerifiedMetadataSegments<'a, S>>> {
     let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
@@ -745,7 +742,7 @@ async fn load_current_manifest_tables<'a, S: ObjectStore + ?Sized>(
     else {
         return Ok(None);
     };
-    load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+    load_verified_manifest_segments(store, namespace_id, &root.manifest_object_id)
         .await
         .map(Some)
         .map_err(manifest_load_failure)
@@ -759,12 +756,12 @@ async fn load_current_manifest_tables<'a, S: ObjectStore + ?Sized>(
 /// gained meanwhile are not in it — the job never read them, and they survive
 /// the publication untouched.
 pub(super) fn snapshot_segment_keys<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     spec: &MetadataCompactionSpec,
 ) -> Option<BTreeSet<String>> {
     let mut keys = BTreeSet::new();
     for (run_seq, level) in spec.inputs() {
-        let run = tables
+        let run = segments
             .scan_runs
             .iter()
             .find(|run| run.run_seq == *run_seq && run.level == *level)?;
@@ -822,7 +819,7 @@ enum ReverseBindResolution {
 /// One set of families the engine merges and judges together, and how it
 /// groups their rows while doing it.
 pub(super) struct RetentionCluster {
-    pub(super) families: &'static [MetadataTableFamily],
+    pub(super) families: &'static [MetadataRowFamily],
     pub(super) locality: LocalityGrouping,
     pub(super) rule: RetentionRule,
 }
@@ -838,21 +835,21 @@ pub(super) struct RetentionCluster {
 const BINDINGS_CLUSTERS: [RetentionCluster; 2] = [
     RetentionCluster {
         families: &[
-            MetadataTableFamily::DirentryBinds,
-            MetadataTableFamily::DirentryUnbinds,
+            MetadataRowFamily::DirentryBinds,
+            MetadataRowFamily::DirentryUnbinds,
         ],
         locality: LocalityGrouping::LeadingKeyComponents(4),
         rule: RetentionRule::ForwardBindings,
     },
     RetentionCluster {
-        families: &[MetadataTableFamily::DirentryChildBinds],
+        families: &[MetadataRowFamily::DirentryChildBinds],
         locality: LocalityGrouping::Row,
         rule: RetentionRule::ReverseBindProbe,
     },
 ];
 
 /// A family no rule ever drops a row from, rewritten in key order.
-const fn row_cluster(families: &'static [MetadataTableFamily]) -> RetentionCluster {
+const fn row_cluster(families: &'static [MetadataRowFamily]) -> RetentionCluster {
     RetentionCluster {
         families,
         locality: LocalityGrouping::Row,
@@ -863,24 +860,24 @@ const fn row_cluster(families: &'static [MetadataTableFamily]) -> RetentionClust
 /// Revision rows are never dropped and their index travels with them, so both
 /// families are a straight rewrite in key order.
 const REVISION_CLUSTERS: [RetentionCluster; 2] = [
-    row_cluster(&[MetadataTableFamily::Revisions]),
-    row_cluster(&[MetadataTableFamily::RevisionsByInodeDesc]),
+    row_cluster(&[MetadataRowFamily::Revisions]),
+    row_cluster(&[MetadataRowFamily::RevisionsByInodeDesc]),
 ];
-const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataTableFamily::Inodes])];
-const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataTableFamily::Tombstones])];
+const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Inodes])];
+const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Tombstones])];
 /// A receipt is kept or dropped by its own sequence against the floor.
 const RECEIPT_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
-    families: &[MetadataTableFamily::CommitReceipts],
+    families: &[MetadataRowFamily::CommitReceipts],
     locality: LocalityGrouping::Row,
     rule: RetentionRule::Receipts,
 }];
 const ACTIVE_DELETION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
-    families: &[MetadataTableFamily::ActiveDeletions],
+    families: &[MetadataRowFamily::ActiveDeletions],
     locality: LocalityGrouping::LeadingKeyComponents(2),
     rule: RetentionRule::ActiveDeletions,
 }];
 const ATTRIBUTE_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
-    families: &[MetadataTableFamily::Attributes],
+    families: &[MetadataRowFamily::Attributes],
     locality: LocalityGrouping::LeadingKeyComponents(1),
     rule: RetentionRule::Attributes,
 }];
@@ -906,17 +903,17 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     /// sequence every segment carries and whether rows may be dropped at all.
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
-    destination: MetadataTableDestination<'a>,
+    destination: MetadataSegmentDestination<'a>,
     policy: MetadataLsmPolicy,
     snapshot: Vec<MetadataRunManifest>,
     reverse_binds: ReverseBindResolution,
-    probe_cache: MetadataTableCache,
+    probe_cache: MetadataSegmentCache,
     result: MetadataMergeResult,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
     /// The last input row key seen in each family, which is what lets the merge
     /// refuse a family that holds one row key twice. One string per family.
-    last_input_key_by_family: BTreeMap<MetadataTableFamily, String>,
+    last_input_key_by_family: BTreeMap<MetadataRowFamily, String>,
     /// Progress state for an unbounded background merge. `None` for a merge
     /// short enough to have nothing to report.
     progress: Option<ProgressReporter>,
@@ -1012,7 +1009,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         group: MetadataFamilyGroup,
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
-        destination: MetadataTableDestination<'a>,
+        destination: MetadataSegmentDestination<'a>,
         policy: MetadataLsmPolicy,
         snapshot: Vec<MetadataRunManifest>,
         reverse_binds: ReverseBindResolution,
@@ -1033,7 +1030,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             policy,
             snapshot,
             reverse_binds,
-            probe_cache: MetadataTableCache::new(MetadataTableCacheConfig {
+            probe_cache: MetadataSegmentCache::new(MetadataSegmentCacheConfig {
                 max_decoded_bytes: PROBE_CACHE_DECODED_BYTES,
             }),
             result: MetadataMergeResult {
@@ -1091,7 +1088,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     /// error against the merge itself.
     fn refuse_a_repeated_input_key(
         &mut self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         row_key: &str,
     ) -> Result<()> {
         if let Some(previous) = self.last_input_key_by_family.get(&family) {
@@ -1142,7 +1139,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let mut iterators = Vec::new();
         for run in &self.snapshot {
             for family in cluster.families {
-                let segments: Vec<MetadataFileRef> = group_run_descriptors(run, self.group)
+                let segments: Vec<MetadataSegmentRef> = group_run_descriptors(run, self.group)
                     .filter(|descriptor| descriptor.family == *family)
                     .cloned()
                     .collect();
@@ -1151,7 +1148,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 }
             }
         }
-        let mut writers: BTreeMap<MetadataTableFamily, MergeSegmentWriter> = cluster
+        let mut writers: BTreeMap<MetadataRowFamily, MergeSegmentWriter> = cluster
             .families
             .iter()
             .map(|family| {
@@ -1276,7 +1273,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     async fn write_row(
         &mut self,
         (family, row): KeptRow,
-        writers: &mut BTreeMap<MetadataTableFamily, MergeSegmentWriter<'_>>,
+        writers: &mut BTreeMap<MetadataRowFamily, MergeSegmentWriter<'_>>,
     ) -> Result<()> {
         self.fold_into_index_digests(family, &row)?;
         *self
@@ -1386,7 +1383,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let mut rows = Vec::new();
         for run in &self.snapshot {
             for descriptor in group_run_descriptors(run, self.group)
-                .filter(|descriptor| descriptor.family == MetadataTableFamily::DirentryUnbinds)
+                .filter(|descriptor| descriptor.family == MetadataRowFamily::DirentryUnbinds)
             {
                 if !descriptor_may_intersect_range(descriptor, prefix, upper_bound.as_deref()) {
                     continue;
@@ -1424,7 +1421,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     /// pair, when the group has one.
     fn fold_into_index_digests(
         &mut self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         row: &MetadataRow,
     ) -> Result<()> {
         let Some((canonical, index)) = index_pair(self.group) else {
@@ -1510,15 +1507,15 @@ impl RowDigest {
 }
 
 /// The canonical family and secondary index of a group that carries one.
-fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataTableFamily, MetadataTableFamily)> {
+fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, MetadataRowFamily)> {
     match group {
         MetadataFamilyGroup::Bindings => Some((
-            MetadataTableFamily::DirentryBinds,
-            MetadataTableFamily::DirentryChildBinds,
+            MetadataRowFamily::DirentryBinds,
+            MetadataRowFamily::DirentryChildBinds,
         )),
         MetadataFamilyGroup::Revisions => Some((
-            MetadataTableFamily::Revisions,
-            MetadataTableFamily::RevisionsByInodeDesc,
+            MetadataRowFamily::Revisions,
+            MetadataRowFamily::RevisionsByInodeDesc,
         )),
         _ => None,
     }
@@ -1526,13 +1523,13 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataTableFamily, Metada
 
 /// Turns the run ids a spec names back into the manifest's runs.
 fn resolve_snapshot_runs<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     spec: &MetadataCompactionSpec,
 ) -> Result<Vec<MetadataRunManifest>> {
     spec.inputs
         .iter()
         .map(|(run_seq, level)| {
-            tables
+            segments
                 .scan_runs
                 .iter()
                 .find(|run| run.run_seq == *run_seq && run.level == *level)

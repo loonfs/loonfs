@@ -3,7 +3,7 @@
 //! Everything that crosses a process or storage boundary is defined here:
 //! validated identifier and path types at the crate root, the versioned HTTP
 //! protocol shapes in [`v0`], and the durable storage formats in [`wire`]
-//! (WAL segments, metadata SSTs, namespace manifests, and control objects).
+//! (WAL segments, metadata segments, namespace manifests, and control objects).
 //! Other LoonFS crates depend on this one for vocabulary; it depends on none
 //! of them.
 //!
@@ -81,7 +81,7 @@ pub mod wire {
     }
 
     pub mod sst_blocks {
-        //! Metadata SST block handles, builders, and codecs.
+        //! Block handles, builders, and codecs for metadata and index segments.
 
         pub use crate::sst_blocks::*;
     }
@@ -128,7 +128,7 @@ pub use ids::{
     generated_id, manifest_object_id_manifest_no, next_public_ordinal, wal_segment_id_start_seq,
     ChangeSeq, CheckpointId, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
     GeneratedIdValidationError, GrepManifestObjectId, IndexSegmentId, InodeId, InodeKind,
-    ManifestNo, ManifestObjectId, MetadataCompactionId, MetadataTableId, NameKey,
+    ManifestNo, ManifestObjectId, MetadataCompactionId, MetadataSegmentId, NameKey,
     NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PublicOrdinalRangeError,
     RevisionNo, UploadId, WalSegmentId, WriterEpoch, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES,
     MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER, ROOT_INODE_ID,

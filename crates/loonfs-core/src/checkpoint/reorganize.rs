@@ -27,7 +27,7 @@
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::error::ManifestLoadError;
 use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after};
-use super::load::load_verified_manifest_tables;
+use super::load::load_verified_manifest_segments;
 use super::publish::{
     manifest_write_failure, publish_metadata_root, write_namespace_manifest,
     ManifestPublicationOutcome,
@@ -36,7 +36,7 @@ use super::runs::{
     l0_run_count, MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest,
     CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
 };
-use super::scan::VerifiedMetadataTables;
+use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
@@ -44,7 +44,7 @@ use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::{load_head_object, load_metadata_root_object_if_present};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
-    MetadataFileRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
 use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -231,7 +231,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     timer: &dyn MonotonicTimer,
 ) -> Result<MetadataReorganizeReport> {
     // The publication budget covers the whole unit: measurement starts
-    // before any table object is written and gates the root
+    // before any segment object is written and gates the root
     // compare-and-swap below.
     let publication_started_ms = timer.monotonic_now_ms();
     // A namespace that has published no manifest of its own has no runs to
@@ -246,16 +246,16 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             MetadataReorganizeOutcome::NotNeeded { l0_runs: 0 },
         ));
     };
-    let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+    let segments = load_verified_manifest_segments(store, namespace_id, &root.manifest_object_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
-    let previous = tables.manifest();
+    let previous = segments.manifest();
 
     let l0_runs = l0_run_count(&previous.payload);
     if l0_runs < policy.max_l0_runs.get()
-        && !manifest_has_partial_reorganization(tables.scan_runs.as_ref())
+        && !manifest_has_partial_reorganization(segments.scan_runs.as_ref())
     {
         return Ok(report(
             namespace_id,
@@ -284,12 +284,17 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;
-    let selection =
-        select_reorganization_input(&tables, group, policy, floor_seq, &compactions.frozen_base)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+    let selection = select_reorganization_input(
+        &segments,
+        group,
+        policy,
+        floor_seq,
+        &compactions.frozen_base,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
     if let Some(bottom) = selection.group_bottom_over_budget {
         report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
     }
@@ -314,10 +319,10 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
 
     // Merge only the selected complete runs, through the one engine both
     // reorganization paths run ([`super::streaming_compaction`]). It reads
-    // exactly the manifest's tables — never the WAL tail — and the unselected
+    // exactly the manifest's segments — never the WAL tail — and the unselected
     // descriptors remain in the replacement manifest unchanged. Whether it
     // drops rows follows from the placement, and its segments go to ordinary
-    // table keys because this step publishes them below.
+    // segment keys because this step publishes them below.
     let merged = merge_group_in_step(
         store,
         namespace_id,
@@ -329,9 +334,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     )
     .await?;
 
-    let mut metadata_files: Vec<_> = previous
+    let mut next_segments: Vec<_> = previous
         .payload
-        .metadata_files
+        .segments
         .iter()
         .filter(|descriptor| {
             !group.contains(descriptor.family)
@@ -341,11 +346,11 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         })
         .cloned()
         .collect();
-    metadata_files.extend(merged.output_segments);
+    next_segments.extend(merged.output_segments);
     // `base_seq` is the manifest's oldest-run marker: every referenced run
     // must sit at or above it, including L0 runs other groups have not
     // folded yet.
-    let base_seq = metadata_files
+    let base_seq = next_segments
         .iter()
         .map(|descriptor| descriptor.run_seq)
         .min()
@@ -355,7 +360,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         store,
         namespace_id,
         previous,
-        metadata_files,
+        next_segments,
         base_seq,
         previous.payload.retention_floor_seq.max(floor_seq),
     )
@@ -534,13 +539,13 @@ fn over_budget_run(
 /// the current retention floor before applying retention. A full-compaction
 /// plan records `frozen_floor_seq` so the background job uses one fixed floor.
 pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     group: MetadataFamilyGroup,
     policy: MetadataLsmPolicy,
     frozen_floor_seq: ChangeSeq,
     frozen_base: &FrozenBasePolicy,
 ) -> std::result::Result<ReorganizationSelection, ManifestLoadError> {
-    let mut candidates = tables
+    let mut candidates = segments
         .scan_runs
         .iter()
         .filter(|run| run_has_group_rows(run, group))
@@ -554,7 +559,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
             .then(right.level.cmp(&left.level))
     });
     let candidate_count = candidates.len();
-    let head_seq = tables.manifest().payload.head_seq;
+    let head_seq = segments.manifest().payload.head_seq;
     let row_budget =
         u64::try_from(policy.max_decoded_input_rows_per_step.get()).unwrap_or(u64::MAX);
     let byte_budget =
@@ -608,7 +613,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
             let run_bytes = match decoded_bytes_by_candidate[index] {
                 Some(bytes) => bytes,
                 None => {
-                    let bytes = decoded_group_run_bytes(tables, run, group).await?;
+                    let bytes = decoded_group_run_bytes(segments, run, group).await?;
                     decoded_bytes_by_candidate[index] = Some(bytes);
                     bytes
                 }
@@ -754,24 +759,24 @@ fn run_has_group_rows(run: &MetadataRunManifest, group: MetadataFamilyGroup) -> 
 pub(super) fn group_run_descriptors(
     run: &MetadataRunManifest,
     group: MetadataFamilyGroup,
-) -> impl Iterator<Item = &MetadataFileRef> {
-    run.tables
+) -> impl Iterator<Item = &MetadataSegmentRef> {
+    run.segments
         .iter()
-        .filter(move |table| group.contains(table.family))
-        .flat_map(|table| &table.segments)
+        .filter(move |family_segments| group.contains(family_segments.family))
+        .flat_map(|family_segments| &family_segments.segments)
 }
 
 async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     run: &MetadataRunManifest,
     group: MetadataFamilyGroup,
 ) -> std::result::Result<u64, ManifestLoadError> {
     let mut decoded_bytes = 0u64;
     for descriptor in group_run_descriptors(run, group) {
         let index = load_segment_index_for_reorganization(
-            tables.store,
-            tables.table_cache,
-            &tables.block_memo,
+            segments.store,
+            segments.segment_cache,
+            &segments.block_memo,
             descriptor,
         )
         .await?;
@@ -817,7 +822,7 @@ pub(super) fn select_family_group(
 
 fn group_l0_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGroup) -> u64 {
     payload
-        .metadata_files
+        .segments
         .iter()
         .filter(|descriptor| {
             descriptor.level == CHECKPOINT_L0_RUN_LEVEL && group.contains(descriptor.family)
@@ -830,7 +835,7 @@ pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     previous: &NamespaceManifestEnvelope,
-    metadata_files: Vec<MetadataFileRef>,
+    segments: Vec<MetadataSegmentRef>,
     base_seq: ChangeSeq,
     retention_floor_seq: ChangeSeq,
 ) -> Result<NamespaceManifestEnvelope> {
@@ -850,7 +855,7 @@ pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
         writer_epoch: previous.payload.writer_epoch,
         next_inode_id: previous.payload.next_inode_id,
         retention_floor_seq,
-        metadata_files,
+        segments,
     })
     .map_err(|error| CoreError::Codec {
         object_key,

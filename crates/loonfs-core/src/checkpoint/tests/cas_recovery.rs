@@ -658,7 +658,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
     let materialization_before = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    let tables = build_manifest_tables(
+    let segments = build_manifest_segments(
         &store,
         &namespace_id,
         materialization_before.head.seq,
@@ -667,7 +667,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         MetadataLsmPolicy::default().max_rows_per_segment,
     )
     .await
-    .expect("build metadata tables");
+    .expect("build metadata segments");
     let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no: ManifestNo(materialization_before.head.seq.0),
@@ -678,7 +678,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         writer_epoch: materialization_before.head.writer_epoch,
         next_inode_id: materialization_before.head.next_inode_id,
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-        metadata_files: flatten_manifest_tables(tables),
+        segments: flatten_manifest_segments(segments),
     })
     .expect("build manifest");
     write_namespace_manifest(&store, &manifest)

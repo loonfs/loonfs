@@ -165,8 +165,8 @@ pub enum KeyClass {
     WalSegment,
     /// Groups namespace manifests and their mutable root pointer.
     NamespaceManifest,
-    /// Groups immutable metadata SST segments.
-    MetadataSst,
+    /// Groups immutable metadata segments.
+    MetadataSegment,
     /// Groups checkpoint records and retained-history floors consulted by garbage collection.
     GcControl,
     /// Groups unrecognized keys and coarse listing prefixes.
@@ -728,8 +728,8 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::MetadataManifest | DurableObjectFamily::MetadataRoot => {
             KeyClass::NamespaceManifest
         }
-        DurableObjectFamily::MetadataTable | DurableObjectFamily::MetadataCompactionStaging => {
-            KeyClass::MetadataSst
+        DurableObjectFamily::MetadataSegment | DurableObjectFamily::MetadataCompactionStaging => {
+            KeyClass::MetadataSegment
         }
         DurableObjectFamily::CheckpointRecord
         | DurableObjectFamily::WalFloor

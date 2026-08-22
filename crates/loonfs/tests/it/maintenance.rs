@@ -550,14 +550,14 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
     assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
     let l0_files = manifest
         .payload
-        .metadata_files
+        .segments
         .iter()
-        .filter(|metadata_file| metadata_file.level == 0)
+        .filter(|descriptor| descriptor.level == 0)
         .collect::<Vec<_>>();
     assert!(!l0_files.is_empty());
     assert!(l0_files
         .iter()
-        .any(|metadata_file| metadata_file.run_seq == ChangeSeq(2)));
+        .any(|descriptor| descriptor.run_seq == ChangeSeq(2)));
 }
 
 /// A handle with no background work behind it can still run the one piece of

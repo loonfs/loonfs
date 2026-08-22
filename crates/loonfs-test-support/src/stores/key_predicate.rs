@@ -49,9 +49,9 @@ impl KeyPredicate {
         Self::family(DurableObjectFamily::ContentBlob)
     }
 
-    /// Selects metadata-table keys.
-    pub fn metadata_table() -> Self {
-        Self::family(DurableObjectFamily::MetadataTable)
+    /// Selects metadata-segment keys.
+    pub fn metadata_segment() -> Self {
+        Self::family(DurableObjectFamily::MetadataSegment)
     }
 
     /// Selects the WAL head key for the given namespace.

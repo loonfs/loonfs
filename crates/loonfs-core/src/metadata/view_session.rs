@@ -17,7 +17,7 @@ use super::{
     RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::CoreError;
-use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily};
 use loonfs_api::{
     AbsolutePath, AttributeRevisionNo, Attributes, ChangeSeq, InodeId, InodeKind, NameKey,
     ROOT_INODE_ID,
@@ -186,7 +186,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         let mut stream = DirentryBindNameGroupStream::new(
             self.base
                 .tail_direntry_bind_page_candidates(parent_inode_id, start_after_name_key),
-            self.base.manifest_tables().is_none(),
+            self.base.manifest_segments().is_none(),
         );
         let mut children = Vec::with_capacity(limit);
         'pages: while children.len() < limit {
@@ -242,9 +242,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             if stream.manifest_candidates.is_empty() && !stream.manifest_exhausted {
                 self.counters.scan_range_page_calls =
                     self.counters.scan_range_page_calls.saturating_add(1);
-                let page = if let Some(tables) = self.base.manifest_tables() {
+                let page = if let Some(segments) = self.base.manifest_segments() {
                     manifest_index::direntry_binds_for_parent_name_key_page(
-                        tables,
+                        segments,
                         parent_inode_id,
                         start_after_name_key,
                         stream.manifest_after_row_key.as_deref(),
@@ -1005,5 +1005,5 @@ fn direntry_bind_row_key(record: &DirentryBindRecord) -> String {
         bind_seq: record.bind_seq,
         bind_delta_index: record.bind_delta_index,
     }
-    .row_key_for_family(MetadataTableFamily::DirentryBinds)
+    .row_key_for_family(MetadataRowFamily::DirentryBinds)
 }

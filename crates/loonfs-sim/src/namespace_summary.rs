@@ -54,7 +54,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
                 DurableObjectFamily::MetadataManifest => {
                     summary.manifest_objects += 1;
                 }
-                DurableObjectFamily::MetadataTable
+                DurableObjectFamily::MetadataSegment
                 | DurableObjectFamily::MetadataCompactionStaging => {
                     summary.compacted_metadata_objects += 1;
                 }

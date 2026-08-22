@@ -435,7 +435,7 @@ async fn manifest_materialization_uses_written_segments() {
 
     let segment_key = base_segment_object_keys_for_family(
         &materialized.manifest,
-        ApiMetadataTableFamily::Revisions,
+        ApiMetadataRowFamily::Revisions,
     )
     .into_iter()
     .next()
@@ -502,8 +502,8 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
         first_materialized.manifest.payload.base_seq
     );
     assert_eq!(
-        base_run(&second_materialized.manifest).tables,
-        base_run(&first_materialized.manifest).tables
+        base_run(&second_materialized.manifest).segments,
+        base_run(&first_materialized.manifest).segments
     );
     let l0_runs = l0_runs(&second_materialized.manifest);
     assert_eq!(l0_runs.len(), 2);
@@ -527,7 +527,7 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
 }
 
 #[tokio::test]
-async fn manifest_l0_run_missing_table_fails_load() {
+async fn manifest_l0_run_missing_segment_fails_load() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -566,9 +566,9 @@ async fn manifest_l0_run_missing_table_fails_load() {
             .await
             .expect("load materialized manifest");
     let deleted_key = l0_runs(&materialized.manifest)[0]
-        .tables
+        .segments
         .iter()
-        .flat_map(|table| table.segments.iter())
+        .flat_map(|family_segments| family_segments.segments.iter())
         .next()
         .expect("l0 run segment")
         .object_key
@@ -586,7 +586,7 @@ async fn manifest_l0_run_missing_table_fails_load() {
 }
 
 #[tokio::test]
-async fn manifest_materialization_rejects_off_pattern_table_keys() {
+async fn manifest_materialization_rejects_off_pattern_segment_keys() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -605,16 +605,16 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
     let expected_base_key = {
         let base_descriptor = bad_base_manifest
             .payload
-            .metadata_files
+            .segments
             .iter_mut()
-            .find(|metadata_file| {
-                metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL
-                    && metadata_file.family == ApiMetadataTableFamily::Inodes
+            .find(|descriptor| {
+                descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
+                    && descriptor.family == ApiMetadataRowFamily::Inodes
             })
             .expect("base metadata file");
-        let expected = metadata_table(
+        let expected = metadata_segment(
             &base_descriptor.owner_namespace_id,
-            &base_descriptor.table_id,
+            &base_descriptor.segment_id,
         );
         base_descriptor.object_key = format!("{}-wrong", base_descriptor.object_key);
         expected
@@ -631,7 +631,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
         Err(ManifestLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
             assert_eq!(expected, expected_base_key);
         }
-        other => panic!("expected base table key mismatch, got {other:?}"),
+        other => panic!("expected base segment key mismatch, got {other:?}"),
     }
 
     let second = write_file_and_checkpoint(&store, &namespace_id, &context, 2).await;
@@ -645,14 +645,15 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
     let expected_l0_key = {
         let l0_descriptor = bad_l0_manifest
             .payload
-            .metadata_files
+            .segments
             .iter_mut()
-            .find(|metadata_file| {
-                metadata_file.level == CHECKPOINT_L0_RUN_LEVEL
-                    && metadata_file.family == ApiMetadataTableFamily::Inodes
+            .find(|descriptor| {
+                descriptor.level == CHECKPOINT_L0_RUN_LEVEL
+                    && descriptor.family == ApiMetadataRowFamily::Inodes
             })
             .expect("l0 metadata file");
-        let expected = metadata_table(&l0_descriptor.owner_namespace_id, &l0_descriptor.table_id);
+        let expected =
+            metadata_segment(&l0_descriptor.owner_namespace_id, &l0_descriptor.segment_id);
         l0_descriptor.object_key = format!("{}-wrong", l0_descriptor.object_key);
         expected
     };
@@ -668,7 +669,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
         Err(ManifestLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
             assert_eq!(expected, expected_l0_key);
         }
-        other => panic!("expected l0 table key mismatch, got {other:?}"),
+        other => panic!("expected l0 segment key mismatch, got {other:?}"),
     }
 }
 
@@ -695,17 +696,17 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    let malformed_run_tables = build_manifest_tables_from_rows(
+    let malformed_run_segments = build_manifest_segments_from_rows(
         &store,
         &namespace_id,
         first,
         CHECKPOINT_BASE_RUN_LEVEL,
         |family| manifest_rows_for_family(&materialization.metadata_state, family),
-        MetadataTableSegmentation::Full,
+        MetadataSegmentation::Full,
     )
     .await
-    .expect("write malformed run tables");
-    let metadata_ssts = build_manifest_tables_from_rows(
+    .expect("write malformed run segments");
+    let metadata_segments = build_manifest_segments_from_rows(
         &store,
         &namespace_id,
         materialization.head.seq,
@@ -717,12 +718,12 @@ async fn manifest_run_rejects_rows_after_run_seq() {
                 first,
             )
         },
-        MetadataTableSegmentation::Full,
+        MetadataSegmentation::Full,
     )
     .await
-    .expect("write empty metadata run tables");
-    let mut metadata_files = flatten_manifest_tables(malformed_run_tables);
-    metadata_files.extend(flatten_manifest_tables(metadata_ssts));
+    .expect("write empty metadata run segments");
+    let mut segments = flatten_manifest_segments(malformed_run_segments);
+    segments.extend(flatten_manifest_segments(metadata_segments));
     let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no: manifest_no(materialization.head.seq),
@@ -733,7 +734,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         writer_epoch: materialization.head.writer_epoch,
         next_inode_id: materialization.head.next_inode_id,
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-        metadata_files,
+        segments,
     })
     .expect("build malformed manifest");
 
@@ -783,7 +784,7 @@ async fn manifest_l0_runs_chain_across_successive_manifests() {
 }
 
 #[tokio::test]
-async fn manifest_base_run_tables_have_sorted_segment_coverage() {
+async fn manifest_base_run_segments_have_sorted_segment_coverage() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -814,25 +815,25 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
 
     let base = base_run(&materialized.manifest);
     let revisions = base
-        .tables
+        .segments
         .iter()
-        .find(|table| table.family == ApiMetadataTableFamily::Revisions)
-        .expect("revision table");
+        .find(|family_segments| family_segments.family == ApiMetadataRowFamily::Revisions)
+        .expect("revision segments");
     assert!(revisions.segments.len() >= 3);
 
     let direntries = base
-        .tables
+        .segments
         .iter()
-        .find(|table| table.family == ApiMetadataTableFamily::DirentryBinds)
-        .expect("direntry table");
+        .find(|family_segments| family_segments.family == ApiMetadataRowFamily::DirentryBinds)
+        .expect("direntry segments");
     assert!(
         direntries.segments.len() >= 3,
         "hot directory direntry rows should be range-split"
     );
 
-    for table in &base.tables {
+    for family_segments in &base.segments {
         let mut previous_max_key: Option<&str> = None;
-        for descriptor in &table.segments {
+        for descriptor in &family_segments.segments {
             assert!(descriptor.min_key.as_str() <= descriptor.max_key.as_str());
             if let Some(previous) = previous_max_key {
                 assert!(previous < descriptor.min_key.as_str());

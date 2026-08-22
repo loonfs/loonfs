@@ -1302,7 +1302,7 @@ mod tests {
     #[tokio::test]
     async fn ranged_reads_match_the_reference_contract_in_one_round_trip() {
         let store = memory_store();
-        let key = "namespaces/demo/metadata/tables/tbl_abc.sst.zst";
+        let key = "namespaces/demo/metadata/segments/seg_abc.sst.zst";
         store
             .put_if_absent(key, Bytes::from_static(b"0123456789"))
             .await
@@ -1348,7 +1348,7 @@ mod tests {
 
         // A missing object is `Ok(None)` however the request is shaped —
         // the same answer the unranged read and the local provider give.
-        let missing = "namespaces/demo/metadata/tables/tbl_missing.sst.zst";
+        let missing = "namespaces/demo/metadata/segments/seg_missing.sst.zst";
         assert_eq!(
             store.get(missing, range(0, 4)).await.expect("missing"),
             None

@@ -199,9 +199,9 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
 
 pub(super) fn gc_summary(report: &GcResponse) -> String {
     let mut summary = format!(
-        "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records, {} content objects ({} retained)",
+        "gc deleted {} wal segments, {} metadata segments, {} manifests, {} checkpoint records, {} content objects ({} retained)",
         report.deleted_wal_segments,
-        report.deleted_metadata_tables,
+        report.deleted_metadata_segments,
         report.deleted_manifests,
         report.deleted_checkpoint_records,
         report.deleted_content_objects,

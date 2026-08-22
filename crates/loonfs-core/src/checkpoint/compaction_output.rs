@@ -1,40 +1,36 @@
 //! Writing a merge's output: one segment builder per family, rolled to the
 //! store every time the segment row budget fills.
 //!
-//! Both reorganization paths write through this. What a builder holds is one
-//! segment's worth of rows, so output residency is the segment row budget and
-//! not the size of the group being merged.
+//! Both reorganization paths write through this module. Each builder holds at
+//! most one segment, so memory use is bounded by the segment row limit rather
+//! than the size of the family group.
 //!
-//! The paths differ in one thing: the destination that derives the key a
-//! segment lands under. A background job's segments are written long before
-//! the manifest that names them, so they go under the job's own prefix where a
-//! lease speaks for them (format spec, "Compaction"). A merge that runs inside
-//! a maintenance step publishes in that same step, so its segments go to
-//! `metadata/tables/` like any other freshly written run and are covered by
-//! the ordinary write-time grace.
+//! Background jobs write segments under a leased staging prefix before
+//! publishing them. A merge completed within one maintenance step writes to
+//! `metadata/segments/` because it publishes those segments in the same step.
 
-use super::build::{write_manifest_segment, MetadataTableDestination};
+use super::build::{write_manifest_segment, MetadataSegmentDestination};
 use super::reorganize::MergePlacement;
 use super::runs::MetadataLsmPolicy;
 use crate::error::Result;
-use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_objectstore::ObjectStore;
 
 /// Accumulates one family's surviving rows and uploads a segment every time
 /// the segment row budget fills.
 pub(super) struct MergeSegmentWriter<'a> {
-    family: MetadataTableFamily,
-    destination: MetadataTableDestination<'a>,
+    family: MetadataRowFamily,
+    destination: MetadataSegmentDestination<'a>,
     placement: MergePlacement,
     rows: Vec<MetadataRow>,
     next_segment_index: u32,
-    segments: Vec<MetadataFileRef>,
+    segments: Vec<MetadataSegmentRef>,
 }
 
 impl<'a> MergeSegmentWriter<'a> {
     pub(super) fn new(
-        family: MetadataTableFamily,
-        destination: MetadataTableDestination<'a>,
+        family: MetadataRowFamily,
+        destination: MetadataSegmentDestination<'a>,
         placement: MergePlacement,
     ) -> Self {
         Self {
@@ -68,7 +64,7 @@ impl<'a> MergeSegmentWriter<'a> {
     pub(super) async fn finish<S: ObjectStore + ?Sized>(
         mut self,
         store: &S,
-    ) -> Result<Vec<MetadataFileRef>> {
+    ) -> Result<Vec<MetadataSegmentRef>> {
         let rest = std::mem::take(&mut self.rows);
         if !rest.is_empty() {
             self.write_segment(store, rest).await?;

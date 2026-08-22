@@ -22,7 +22,7 @@ use crate::metrics::LATENCY_SECONDS_BOUNDARIES;
 use crate::{
     GcResponse, MaintenanceJobId, MaintenanceStepConclusion, MetadataCompactionJobOutcome,
 };
-use loonfs_core::cache::{MetadataTableCacheObserver, WalTailProjectionCacheObserver};
+use loonfs_core::cache::{MetadataSegmentCacheObserver, WalTailProjectionCacheObserver};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -71,7 +71,9 @@ type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 /// [`GcResponse`] names them.
 const GC_CATEGORIES: [GcCategory; 9] = [
     ("deleted_wal_segments", |gc| gc.deleted_wal_segments),
-    ("deleted_metadata_tables", |gc| gc.deleted_metadata_tables),
+    ("deleted_metadata_segments", |gc| {
+        gc.deleted_metadata_segments
+    }),
     ("deleted_manifests", |gc| gc.deleted_manifests),
     ("deleted_checkpoint_records", |gc| {
         gc.deleted_checkpoint_records
@@ -128,11 +130,11 @@ impl RuntimeInstruments {
         }
     }
 
-    /// Returns the metadata-table cache metrics observer, if metrics are enabled.
-    pub(crate) fn metadata_table_cache_observer(
+    /// Returns the metadata-segment cache metrics observer, if metrics are enabled.
+    pub(crate) fn metadata_segment_cache_observer(
         &self,
-    ) -> Option<Arc<dyn MetadataTableCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.cache.metadata_table);
+    ) -> Option<Arc<dyn MetadataSegmentCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.cache.metadata_segment);
         Some(observer)
     }
 
@@ -569,11 +571,11 @@ impl MaintenanceJobInstruments {
 /// Metrics for caches owned by the runtime. All instruments are registered together.
 struct RuntimeCacheInstruments {
     latest_metadata_view_reads: Arc<dyn CounterHandle>,
-    metadata_table: Arc<MetadataTableCacheInstruments>,
+    metadata_segment: Arc<MetadataSegmentCacheInstruments>,
     wal_tail_projection: Arc<WalTailProjectionCacheInstruments>,
 }
 
-struct MetadataTableCacheInstruments {
+struct MetadataSegmentCacheInstruments {
     hits: Arc<dyn CounterHandle>,
     misses: Arc<dyn CounterHandle>,
     inserts: Arc<dyn CounterHandle>,
@@ -604,18 +606,18 @@ impl RuntimeCacheInstruments {
                 "Latest metadata reads served through the metadata-view path",
                 &[],
             ),
-            metadata_table: Arc::new(MetadataTableCacheInstruments::register(recorder)),
+            metadata_segment: Arc::new(MetadataSegmentCacheInstruments::register(recorder)),
             wal_tail_projection: Arc::new(WalTailProjectionCacheInstruments::register(recorder)),
         }
     }
 }
 
-impl MetadataTableCacheInstruments {
+impl MetadataSegmentCacheInstruments {
     fn register(recorder: &dyn MetricsRecorder) -> Self {
         let get = |result| {
             recorder.register_counter(
-                "loonfs.metadata_table_cache.gets",
-                "Decoded metadata-table cache lookups, by outcome",
+                "loonfs.metadata_segment_cache.gets",
+                "Decoded metadata-segment cache lookups, by outcome",
                 &[("result", result)],
             )
         };
@@ -623,22 +625,22 @@ impl MetadataTableCacheInstruments {
             hits: get("hit"),
             misses: get("miss"),
             inserts: recorder.register_counter(
-                "loonfs.metadata_table_cache.inserts",
-                "Blocks inserted into the decoded metadata-table cache",
+                "loonfs.metadata_segment_cache.inserts",
+                "Blocks inserted into the decoded metadata-segment cache",
                 &[],
             ),
             evictions: recorder.register_counter(
-                "loonfs.metadata_table_cache.evictions",
-                "Blocks evicted from the decoded metadata-table cache",
+                "loonfs.metadata_segment_cache.evictions",
+                "Blocks evicted from the decoded metadata-segment cache",
                 &[],
             ),
             filter_skips: recorder.register_counter(
-                "loonfs.metadata_table_cache.filter_skips",
+                "loonfs.metadata_segment_cache.filter_skips",
                 "Segments skipped after their filter ruled out a lookup",
                 &[],
             ),
             filter_false_positives: recorder.register_counter(
-                "loonfs.metadata_table_cache.filter_false_positives",
+                "loonfs.metadata_segment_cache.filter_false_positives",
                 "Filter admissions that matched no metadata rows",
                 &[],
             ),
@@ -646,7 +648,7 @@ impl MetadataTableCacheInstruments {
     }
 }
 
-impl MetadataTableCacheObserver for MetadataTableCacheInstruments {
+impl MetadataSegmentCacheObserver for MetadataSegmentCacheInstruments {
     fn hit(&self) {
         self.hits.increment(1);
     }
@@ -1026,7 +1028,7 @@ mod tests {
         instruments.latest_metadata_view_read();
 
         let metadata = instruments
-            .metadata_table_cache_observer()
+            .metadata_segment_cache_observer()
             .expect("metadata observer");
         metadata.hit();
         metadata.miss();
@@ -1053,20 +1055,20 @@ mod tests {
                 1,
             ),
             (
-                "loonfs.metadata_table_cache.gets",
+                "loonfs.metadata_segment_cache.gets",
                 &[("result", "hit")][..],
                 1,
             ),
             (
-                "loonfs.metadata_table_cache.gets",
+                "loonfs.metadata_segment_cache.gets",
                 &[("result", "miss")][..],
                 1,
             ),
-            ("loonfs.metadata_table_cache.inserts", &[][..], 1),
-            ("loonfs.metadata_table_cache.evictions", &[][..], 1),
-            ("loonfs.metadata_table_cache.filter_skips", &[][..], 1),
+            ("loonfs.metadata_segment_cache.inserts", &[][..], 1),
+            ("loonfs.metadata_segment_cache.evictions", &[][..], 1),
+            ("loonfs.metadata_segment_cache.filter_skips", &[][..], 1),
             (
-                "loonfs.metadata_table_cache.filter_false_positives",
+                "loonfs.metadata_segment_cache.filter_false_positives",
                 &[][..],
                 1,
             ),
@@ -1437,7 +1439,7 @@ mod tests {
         let mut gc = GcResponse {
             namespace_id: loonfs_test_support::ids::namespace_id("demo"),
             deleted_wal_segments: 3,
-            deleted_metadata_tables: 0,
+            deleted_metadata_segments: 0,
             deleted_manifests: 0,
             deleted_checkpoint_records: 0,
             released_fork_checkpoints: 0,

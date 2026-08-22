@@ -1,4 +1,4 @@
-//! Seq-scoped metadata lookups answered from manifest tables via verified
+//! Seq-scoped metadata lookups answered from manifest segments via verified
 //! scans.
 
 use super::row_decode::{
@@ -7,7 +7,7 @@ use super::row_decode::{
     direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
     tombstone_from_manifest_row,
 };
-use crate::checkpoint::{ManifestLoadError, Readahead, VerifiedMetadataTables};
+use crate::checkpoint::{ManifestLoadError, Readahead, VerifiedMetadataSegments};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{
@@ -15,7 +15,7 @@ use crate::metadata::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::lookup_keys;
-use loonfs_api::wire::manifest::MetadataTableFamily;
+use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
@@ -25,12 +25,12 @@ pub(super) fn manifest_error_to_core(error: ManifestLoadError) -> CoreError {
 }
 
 pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
 ) -> Result<Option<InodeRecord>> {
     let key = lookup_keys::inode_key(inode_id);
-    tables
-        .get_for_lookup(MetadataTableFamily::Inodes, &key, &key)
+    segments
+        .get_for_lookup(MetadataRowFamily::Inodes, &key, &key)
         .await
         .map_err(manifest_error_to_core)?
         .map(inode_from_manifest_row)
@@ -43,7 +43,7 @@ pub(super) struct ManifestDirentryBindCandidate {
 }
 
 pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
     start_after_name_key: Option<&str>,
     start_after_row_key: Option<&str>,
@@ -59,9 +59,9 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
         parent_prefix.clone()
     };
     let upper_bound = string_prefix_upper_bound(&parent_prefix);
-    tables
+    segments
         .scan_range_page_with_keys(
-            MetadataTableFamily::DirentryBinds,
+            MetadataRowFamily::DirentryBinds,
             &lower_bound,
             upper_bound.as_deref(),
             limit,
@@ -79,15 +79,15 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
 }
 
 pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
     name_key: &NameKey,
 ) -> Result<Vec<DirentryBindRecord>> {
     let filter_probe = lookup_keys::direntry_bind_probe(parent_inode_id, name_key.as_str());
     let prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key.as_str());
-    tables
+    segments
         .scan_prefix_for_lookup(
-            MetadataTableFamily::DirentryBinds,
+            MetadataRowFamily::DirentryBinds,
             &prefix,
             &filter_probe,
             Readahead::Disabled,
@@ -100,14 +100,14 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
 }
 
 pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     child_inode_id: InodeId,
 ) -> Result<Vec<DirentryBindRecord>> {
     let filter_probe = lookup_keys::direntry_child_probe(child_inode_id);
     let prefix = lookup_keys::direntry_child_prefix(child_inode_id);
-    tables
+    segments
         .scan_prefix_for_lookup(
-            MetadataTableFamily::DirentryChildBinds,
+            MetadataRowFamily::DirentryChildBinds,
             &prefix,
             &filter_probe,
             Readahead::Enabled,
@@ -120,7 +120,7 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
 }
 
 pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     direntry: &DirentryBindRecord,
 ) -> Result<Vec<DirentryUnbindRecord>> {
     let filter_probe =
@@ -131,9 +131,9 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
         direntry.bind_seq,
         direntry.bind_delta_index,
     );
-    let unbinds: Vec<DirentryUnbindRecord> = tables
+    let unbinds: Vec<DirentryUnbindRecord> = segments
         .scan_prefix_for_lookup(
-            MetadataTableFamily::DirentryUnbinds,
+            MetadataRowFamily::DirentryUnbinds,
             &prefix,
             &filter_probe,
             Readahead::Disabled,
@@ -154,7 +154,7 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
 /// caller treats absence from the result as "no unbind exists" for names in
 /// the range, so a partial scan would be a correctness bug, not a slow path.
 pub(super) async fn direntry_unbinds_for_parent_name_range<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
     first_name_key: &NameKey,
     last_name_key: &NameKey,
@@ -168,9 +168,9 @@ pub(super) async fn direntry_unbinds_for_parent_name_range<S: ObjectStore + ?Siz
 
     let mut unbinds = Vec::new();
     loop {
-        let page = tables
+        let page = segments
             .scan_range_page(
-                MetadataTableFamily::DirentryUnbinds,
+                MetadataRowFamily::DirentryUnbinds,
                 &lower_bound,
                 upper_bound.as_deref(),
                 UNBIND_RANGE_SCAN_LIMIT,
@@ -180,7 +180,7 @@ pub(super) async fn direntry_unbinds_for_parent_name_range<S: ObjectStore + ?Siz
         let page_len = page.len();
         let last_row_key = page
             .last()
-            .map(|row| row.row_key_for_family(MetadataTableFamily::DirentryUnbinds));
+            .map(|row| row.row_key_for_family(MetadataRowFamily::DirentryUnbinds));
         for row in page {
             unbinds.push(direntry_unbind_from_manifest_row(row)?);
         }
@@ -217,25 +217,25 @@ impl RevisionPagePosition {
 }
 
 pub(super) async fn latest_revision_for_inode<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
 ) -> Result<Option<RevisionRecord>> {
-    Ok(revisions_for_inode_page_desc(tables, inode_id, None, 1)
+    Ok(revisions_for_inode_page_desc(segments, inode_id, None, 1)
         .await?
         .into_iter()
         .next())
 }
 
 pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Option<RevisionRecord>> {
     let exact_prefix = revision_by_inode_desc_exact_revision_prefix(inode_id, revision_no);
     let filter_probe = revision_by_inode_desc_filter_probe(inode_id);
-    tables
+    segments
         .scan_range_page_for_lookup(
-            MetadataTableFamily::RevisionsByInodeDesc,
+            MetadataRowFamily::RevisionsByInodeDesc,
             &exact_prefix,
             string_prefix_upper_bound(&exact_prefix).as_deref(),
             1,
@@ -250,7 +250,7 @@ pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
 }
 
 pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     start_after: Option<RevisionPagePosition>,
     limit: usize,
@@ -263,9 +263,9 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
     let lower_bound = start_after
         .map(|position| resume_after_row_key(&revision_by_inode_desc_row_key(inode_id, position)))
         .unwrap_or_else(|| inode_prefix.clone());
-    tables
+    segments
         .scan_range_page_for_lookup(
-            MetadataTableFamily::RevisionsByInodeDesc,
+            MetadataRowFamily::RevisionsByInodeDesc,
             &lower_bound,
             string_prefix_upper_bound(&inode_prefix).as_deref(),
             limit,
@@ -283,14 +283,14 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
 /// keyed by deletion generation, so a page is a range scan whose cost follows
 /// the page, not the namespace's deletion history.
 pub(super) async fn active_deletions_page<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     lower_bound: &str,
     upper_bound: Option<&str>,
     limit: usize,
 ) -> Result<Vec<(String, ActiveDeletionRecord)>> {
-    tables
+    segments
         .scan_range_page_with_keys(
-            MetadataTableFamily::ActiveDeletions,
+            MetadataRowFamily::ActiveDeletions,
             lower_bound,
             upper_bound,
             limit,
@@ -303,14 +303,14 @@ pub(super) async fn active_deletions_page<S: ObjectStore + ?Sized>(
 }
 
 pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     root_inode_id: InodeId,
 ) -> Result<Vec<SubtreeTombstoneRecord>> {
     let filter_probe = lookup_keys::tombstone_probe(root_inode_id);
     let prefix = lookup_keys::tombstone_prefix(root_inode_id);
-    tables
+    segments
         .scan_prefix_for_lookup(
-            MetadataTableFamily::Tombstones,
+            MetadataRowFamily::Tombstones,
             &prefix,
             &filter_probe,
             Readahead::Enabled,
@@ -323,14 +323,14 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
 }
 
 pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     commit_id: &CommitId,
 ) -> Result<Option<CommitReceiptRecord>> {
     let filter_probe = lookup_keys::commit_receipt_probe(commit_id.as_str());
     let prefix = lookup_keys::commit_receipt_prefix(commit_id.as_str());
-    let receipts: Vec<CommitReceiptRecord> = tables
+    let receipts: Vec<CommitReceiptRecord> = segments
         .scan_prefix_for_lookup(
-            MetadataTableFamily::CommitReceipts,
+            MetadataRowFamily::CommitReceipts,
             &prefix,
             &filter_probe,
             Readahead::Disabled,
@@ -358,7 +358,7 @@ const ATTRIBUTES_RAW_SCAN_LIMIT: usize = 16;
 /// with the sequences that publish them, so scanning past rows above the
 /// sequence never skips one below it.
 pub(super) async fn attributes_for_inode<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
+    segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     visible_seq: ChangeSeq,
 ) -> Result<Option<AttributesRevisionRecord>> {
@@ -367,9 +367,9 @@ pub(super) async fn attributes_for_inode<S: ObjectStore + ?Sized>(
     let upper_bound = string_prefix_upper_bound(&prefix);
     let mut lower_bound = prefix;
     loop {
-        let page = tables
+        let page = segments
             .scan_range_page_for_lookup(
-                MetadataTableFamily::Attributes,
+                MetadataRowFamily::Attributes,
                 &lower_bound,
                 upper_bound.as_deref(),
                 ATTRIBUTES_RAW_SCAN_LIMIT,
@@ -380,7 +380,7 @@ pub(super) async fn attributes_for_inode<S: ObjectStore + ?Sized>(
         let page_len = page.len();
         let last_row_key = page
             .last()
-            .map(|row| row.row_key_for_family(MetadataTableFamily::Attributes));
+            .map(|row| row.row_key_for_family(MetadataRowFamily::Attributes));
         for row in page {
             let record = attributes_revision_from_manifest_row(row)?;
             if record.committed_seq <= visible_seq {

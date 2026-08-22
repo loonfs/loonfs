@@ -1,7 +1,7 @@
 //! [`NamespaceEngine`]: the namespace-scoped entry point for reads, writes,
 //! uploads, checkpoints, and maintenance.
 
-use crate::cache::{MetadataTableCache, WalTailProjectionCache};
+use crate::cache::{MetadataSegmentCache, WalTailProjectionCache};
 use crate::checkpoint::{CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
@@ -54,7 +54,7 @@ pub struct RuntimeReadContext {
     /// Metadata basis referenced by the pinned head. This is the namespace's own
     /// root after one is published, or its genesis or fork basis before then.
     pub basis: MetadataBasis,
-    pub table_cache: Arc<MetadataTableCache>,
+    pub segment_cache: Arc<MetadataSegmentCache>,
     pub tail_cache: Arc<WalTailProjectionCache>,
 }
 
@@ -63,7 +63,7 @@ fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_
         &context.head,
         context.head_etag.as_str(),
         &context.basis,
-        Some(&context.table_cache),
+        Some(&context.segment_cache),
         Some(&context.tail_cache),
     )
 }
@@ -391,7 +391,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self.live_catalog(context)?;
         crate::checkpoint::list_checkpoint_files_page(
             &self.store,
-            Some(context.table_cache.as_ref()),
+            Some(context.segment_cache.as_ref()),
             &self.namespace_id,
             checkpoint_id,
             request,

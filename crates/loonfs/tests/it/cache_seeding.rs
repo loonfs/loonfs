@@ -422,7 +422,7 @@ fn stat_and_list_use_initial_manifest_without_checkpoint() {
 }
 
 #[test]
-fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads() {
+fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(CountingStore::new(
@@ -494,10 +494,10 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
 }
 
 #[test]
-fn repeated_materialized_stat_uses_metadata_table_cache() {
+fn repeated_materialized_stat_uses_metadata_segment_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let fs = runtime(temp_dir.path(), "metadata-table-cache-test");
+    let fs = runtime(temp_dir.path(), "metadata-segment-cache-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -528,8 +528,8 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
         .expect("second materialized stat");
     let after_second = fs.runtime_cache_stats();
 
-    assert!(after_first.metadata_table_cache_inserts > 0);
-    assert!(after_second.metadata_table_cache_hits > after_first.metadata_table_cache_hits);
+    assert!(after_first.metadata_segment_cache_inserts > 0);
+    assert!(after_second.metadata_segment_cache_hits > after_first.metadata_segment_cache_hits);
     assert_eq!(after_second.latest_metadata_view_reads, 2);
 }
 
@@ -700,11 +700,9 @@ fn separate_runtime_instances_share_object_store_state() {
     assert_eq!(file.bytes, b"shared");
 }
 
-/// A runtime built with a stored-block cache fills it from the reads that go
-/// through it, and a second runtime on the same store — whose decoded caches
-/// are empty, as a restarted process's are — reads a segment section back
-/// out of it. The decoded-cache assertion keeps this honest: it fails if the
-/// cycle stops exercising the metadata table path this tier sits under.
+/// A runtime fills the stored-block cache while reading. A second runtime with
+/// an empty decoded cache then reads a segment section from the stored cache.
+/// The decoded-cache assertion confirms that both reads use this cache path.
 #[test]
 fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     let temp_dir = tempdir().expect("tempdir");
@@ -746,7 +744,7 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     assert_eq!(entries.len(), 2);
 
     assert!(
-        fs.runtime_cache_stats().metadata_table_cache_inserts > 0,
+        fs.runtime_cache_stats().metadata_segment_cache_inserts > 0,
         "the cycle must reach the decoded block cache for this to prove anything"
     );
     let offered: Vec<StoredMetadataBlockKind> = stored_blocks
@@ -789,7 +787,7 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     );
 }
 
-/// Maintenance reads through no metadata table cache, so the local tier
+/// Maintenance reads through no metadata segment cache, so the local tier
 /// beneath it never sees a maintenance read. Reorganization is the widest
 /// read maintenance has — it decodes every row of the runs it folds — and
 /// this pins the structural argument end to end: not one block offered, and
@@ -825,7 +823,7 @@ fn metadata_maintenance_offers_nothing_to_the_local_block_cache() {
         assert_eq!(
             stored_blocks.call_count(),
             calls_before,
-            "a maintenance step carries no table cache, so it reaches neither cache tier"
+            "a maintenance step carries no segment cache, so it reaches neither cache tier"
         );
         if upkeep(&step).reorganize == ReorganizeStepOutcome::UnitPublished {
             reorganized = true;

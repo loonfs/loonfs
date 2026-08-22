@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Batch-scoped memo of durable-layer lookups: everything except the
-/// mutation overlay (manifest tables, WAL tail, in-memory base). Publish
+/// mutation overlay (manifest segments, WAL tail, in-memory base). Publish
 /// batches attach one so repeated path walks across candidates scan each
 /// durable key once; the overlay — the only layer that changes between
 /// candidates — is composed per lookup on top.

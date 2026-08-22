@@ -12,7 +12,7 @@ use super::data_block_load::load_segment_data_block_span;
 use super::streaming_compaction::manifest_load_failure;
 use super::validate::validate_manifest_row_seq_range;
 use crate::error::Result;
-use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_objectstore::ObjectStore;
 use std::collections::VecDeque;
@@ -69,7 +69,7 @@ pub(super) enum LocalityGrouping {
 /// and its unbind's `direntry-unbind-{parent}-{name}` both read as
 /// `{parent}-{name}`.
 pub(super) fn locality_of(
-    family: MetadataTableFamily,
+    family: MetadataRowFamily,
     row_key: &str,
     locality: LocalityGrouping,
 ) -> &str {
@@ -99,8 +99,8 @@ pub(super) fn locality_of(
 /// row-key order. Only the current segment's index is held, and only the
 /// blocks not yet consumed.
 pub(super) struct SegmentRowIterator {
-    pub(super) family: MetadataTableFamily,
-    segments: Vec<MetadataFileRef>,
+    pub(super) family: MetadataRowFamily,
+    segments: Vec<MetadataSegmentRef>,
     next_segment: usize,
     index: Option<Arc<Vec<SegmentIndexEntry>>>,
     next_block: usize,
@@ -109,7 +109,7 @@ pub(super) struct SegmentRowIterator {
 }
 
 impl SegmentRowIterator {
-    pub(super) fn new(family: MetadataTableFamily, mut segments: Vec<MetadataFileRef>) -> Self {
+    pub(super) fn new(family: MetadataRowFamily, mut segments: Vec<MetadataSegmentRef>) -> Self {
         segments.sort_by_key(|descriptor| descriptor.segment_index);
         Self {
             family,
@@ -192,9 +192,8 @@ impl SegmentRowIterator {
             };
             let descriptor = &self.segments[self.next_segment - 1];
             let end = (self.next_block + BLOCKS_PER_ITERATOR_FETCH).min(index.len());
-            // Blocks are decoded into this iterator alone: no table cache and
-            // a memo that dies with the call, so nothing the merge reads is
-            // retained anywhere but here.
+            // Compaction bypasses the shared segment cache. This temporary memo
+            // retains decoded blocks only for the current load.
             let blocks = load_segment_data_block_span(
                 store,
                 None,
@@ -279,7 +278,7 @@ pub(super) fn select_next_iterator(
 #[cfg(test)]
 mod tests {
     use super::{locality_of, LocalityGrouping};
-    use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
+    use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily};
     use loonfs_api::{ChangeSeq, DisplayName, InodeId, NameKey};
 
     fn bind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
@@ -317,38 +316,34 @@ mod tests {
     fn a_bind_and_its_unbind_name_one_locality_group() {
         let bound = bind(7, "report.txt", 11);
         let retired = unbind(7, "report.txt", 11);
-        let bind_key = bound.row_key_for_family(MetadataTableFamily::DirentryBinds);
-        let unbind_key = retired.row_key_for_family(MetadataTableFamily::DirentryUnbinds);
+        let bind_key = bound.row_key_for_family(MetadataRowFamily::DirentryBinds);
+        let unbind_key = retired.row_key_for_family(MetadataRowFamily::DirentryUnbinds);
 
         assert_eq!(
-            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, GENERATION),
-            locality_of(
-                MetadataTableFamily::DirentryUnbinds,
-                &unbind_key,
-                GENERATION
-            ),
+            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, GENERATION),
+            locality_of(MetadataRowFamily::DirentryUnbinds, &unbind_key, GENERATION),
         );
         // Another generation of the same name is a different group, which is
         // what keeps a slot with any number of generations bounded.
         let regenerated =
-            bind(7, "report.txt", 12).row_key_for_family(MetadataTableFamily::DirentryBinds);
+            bind(7, "report.txt", 12).row_key_for_family(MetadataRowFamily::DirentryBinds);
         assert_ne!(
-            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, GENERATION),
-            locality_of(MetadataTableFamily::DirentryBinds, &regenerated, GENERATION),
+            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, GENERATION),
+            locality_of(MetadataRowFamily::DirentryBinds, &regenerated, GENERATION),
         );
         // Another name under the same parent is a different group: the rules
         // read one binding, not one directory.
-        let other = bind(7, "other.txt", 11).row_key_for_family(MetadataTableFamily::DirentryBinds);
+        let other = bind(7, "other.txt", 11).row_key_for_family(MetadataRowFamily::DirentryBinds);
         assert_ne!(
-            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, GENERATION),
-            locality_of(MetadataTableFamily::DirentryBinds, &other, GENERATION),
+            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, GENERATION),
+            locality_of(MetadataRowFamily::DirentryBinds, &other, GENERATION),
         );
         // And so is the same name under another parent.
         let elsewhere =
-            bind(8, "report.txt", 11).row_key_for_family(MetadataTableFamily::DirentryBinds);
+            bind(8, "report.txt", 11).row_key_for_family(MetadataRowFamily::DirentryBinds);
         assert_ne!(
-            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, GENERATION),
-            locality_of(MetadataTableFamily::DirentryBinds, &elsewhere, GENERATION),
+            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, GENERATION),
+            locality_of(MetadataRowFamily::DirentryBinds, &elsewhere, GENERATION),
         );
     }
 
@@ -361,7 +356,7 @@ mod tests {
             .into_iter()
             .flat_map(|name| {
                 [11u64, 12].map(|seq| {
-                    bind(7, name, seq).row_key_for_family(MetadataTableFamily::DirentryBinds)
+                    bind(7, name, seq).row_key_for_family(MetadataRowFamily::DirentryBinds)
                 })
             })
             .collect();
@@ -369,7 +364,7 @@ mod tests {
 
         let localities: Vec<&str> = keys
             .iter()
-            .map(|key| locality_of(MetadataTableFamily::DirentryBinds, key, GENERATION))
+            .map(|key| locality_of(MetadataRowFamily::DirentryBinds, key, GENERATION))
             .collect();
         let mut runs = localities.clone();
         runs.dedup();

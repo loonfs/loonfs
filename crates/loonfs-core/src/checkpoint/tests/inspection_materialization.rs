@@ -3,15 +3,15 @@
 use super::super::block_load::{
     load_manifest_segment_rows_in_key_range_with_cache, SegmentKeyRangeBlocks, SessionBlockMemo,
 };
-use super::super::cache::MetadataTableCache;
+use super::super::cache::MetadataSegmentCache;
 use super::super::error::ManifestLoadError;
 use super::super::load::{ensure_segment_object_key, load_namespace_manifest_envelope_if_present};
 use super::super::row::manifest_row_kind;
 use super::super::runs::{
-    runs_in_materialization_order, MetadataTableManifest, MAX_MAINTENANCE_TABLE_IO,
+    runs_in_materialization_order, MetadataFamilySegments, MAX_MAINTENANCE_SEGMENT_IO,
 };
 use super::super::scan::{
-    ordered_manifest_tables, ManifestMaterializationForInspection, Readahead,
+    ordered_manifest_segments, ManifestMaterializationForInspection, Readahead,
 };
 use super::super::validate::{
     validate_direntry_child_bind_index, validate_manifest_materialization_ranges,
@@ -21,7 +21,7 @@ use crate::metadata::{MetadataState, MetadataStateBuilder};
 use futures::future::try_join_all;
 use loonfs_api::manifest_object_id_manifest_no;
 use loonfs_api::wire::manifest::{
-    MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
+    MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_api::{ManifestNo, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
@@ -117,7 +117,7 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "load_manifest_tables", key_class = "metadata_sst")
+    fields(phase = "load_manifest_segments", key_class = "metadata_segment")
 )]
 #[cfg(test)]
 pub(crate) async fn load_manifest_metadata_state_for_inspection_from_manifest<
@@ -131,11 +131,11 @@ pub(crate) async fn load_manifest_metadata_state_for_inspection_from_manifest<
     let mut metadata_state = MetadataStateBuilder::default();
     validate_manifest_materialization_ranges(manifest_object_key, &manifest.payload)?;
     for run in runs_in_materialization_order(&manifest.payload) {
-        append_manifest_tables_to_metadata(
+        append_manifest_segments_to_metadata(
             store,
             namespace_id,
             manifest_object_key,
-            &run.tables,
+            &run.segments,
             &mut metadata_state,
         )
         .await?;
@@ -145,30 +145,30 @@ pub(crate) async fn load_manifest_metadata_state_for_inspection_from_manifest<
 }
 
 #[cfg(test)]
-pub(super) async fn append_manifest_tables_to_metadata<S>(
+pub(super) async fn append_manifest_segments_to_metadata<S>(
     store: &S,
     _namespace_id: &NamespaceId,
     manifest_object_key: &str,
-    tables: &[MetadataTableManifest],
+    segments_by_family: &[MetadataFamilySegments],
     metadata_state: &mut MetadataStateBuilder,
 ) -> Result<(), ManifestLoadError>
 where
     S: ObjectStore + ?Sized,
 {
-    let ordered_tables = ordered_manifest_tables(manifest_object_key, tables)?;
+    let ordered = ordered_manifest_segments(manifest_object_key, segments_by_family)?;
     let mut direntry_bind_rows = Vec::new();
     let mut direntry_child_bind_rows = Vec::new();
     let mut revision_rows = Vec::new();
     let mut revision_by_inode_desc_rows = Vec::new();
-    for table in ordered_tables {
-        let mut descriptors = Vec::with_capacity(table.segments.len());
-        for descriptor in &table.segments {
+    for family_segments in ordered {
+        let mut descriptors = Vec::with_capacity(family_segments.segments.len());
+        for descriptor in &family_segments.segments {
             ensure_segment_object_key(descriptor)?;
             descriptors.push(descriptor);
         }
 
         let mut loaded_segments = Vec::with_capacity(descriptors.len());
-        for chunk in descriptors.chunks(MAX_MAINTENANCE_TABLE_IO) {
+        for chunk in descriptors.chunks(MAX_MAINTENANCE_SEGMENT_IO) {
             loaded_segments.extend(
                 try_join_all(
                     chunk
@@ -181,22 +181,27 @@ where
 
         for (descriptor, row_set) in descriptors.into_iter().zip(loaded_segments) {
             let rows: Vec<MetadataRow> = row_set.rows().cloned().collect();
-            match table.family {
-                MetadataTableFamily::DirentryBinds => {
+            match family_segments.family {
+                MetadataRowFamily::DirentryBinds => {
                     direntry_bind_rows.extend(rows.iter().cloned());
                 }
-                MetadataTableFamily::DirentryChildBinds => {
+                MetadataRowFamily::DirentryChildBinds => {
                     direntry_child_bind_rows.extend(rows.iter().cloned());
                 }
-                MetadataTableFamily::Revisions => {
+                MetadataRowFamily::Revisions => {
                     revision_rows.extend(rows.iter().cloned());
                 }
-                MetadataTableFamily::RevisionsByInodeDesc => {
+                MetadataRowFamily::RevisionsByInodeDesc => {
                     revision_by_inode_desc_rows.extend(rows.iter().cloned());
                 }
                 _ => {}
             }
-            append_rows_to_metadata(metadata_state, table.family, &descriptor.object_key, &rows)?;
+            append_rows_to_metadata(
+                metadata_state,
+                family_segments.family,
+                &descriptor.object_key,
+                &rows,
+            )?;
         }
     }
 
@@ -215,7 +220,7 @@ where
 #[cfg(test)]
 pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
-    descriptor: &MetadataFileRef,
+    descriptor: &MetadataSegmentRef,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     load_manifest_segment_rows_with_cache(store, None, descriptor).await
 }
@@ -226,12 +231,12 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
-    table_cache: Option<&MetadataTableCache>,
-    descriptor: &MetadataFileRef,
+    segment_cache: Option<&MetadataSegmentCache>,
+    descriptor: &MetadataSegmentRef,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     let row_set = load_manifest_segment_rows_in_key_range_with_cache(
         store,
-        table_cache,
+        segment_cache,
         &SessionBlockMemo::default(),
         descriptor,
         "",
@@ -267,48 +272,48 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
 #[cfg(test)]
 pub(crate) fn append_rows_to_metadata(
     metadata_state: &mut MetadataStateBuilder,
-    family: MetadataTableFamily,
+    family: MetadataRowFamily,
     object_key: &str,
     rows: &[MetadataRow],
 ) -> Result<(), ManifestLoadError> {
     use crate::metadata::row_decode;
     for row in rows {
-        let mismatch = |_: crate::error::CoreError| ManifestLoadError::TableRowKindMismatch {
+        let mismatch = |_: crate::error::CoreError| ManifestLoadError::SegmentRowKindMismatch {
             object_key: object_key.to_owned(),
             family,
             row_kind: manifest_row_kind(row).to_owned(),
         };
         match family {
-            MetadataTableFamily::Inodes => metadata_state
+            MetadataRowFamily::Inodes => metadata_state
                 .push_inode(row_decode::inode_from_manifest_row(row.clone()).map_err(mismatch)?),
-            MetadataTableFamily::DirentryBinds => metadata_state.push_direntry_bind(
+            MetadataRowFamily::DirentryBinds => metadata_state.push_direntry_bind(
                 row_decode::direntry_bind_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
-            MetadataTableFamily::DirentryChildBinds => {
+            MetadataRowFamily::DirentryChildBinds => {
                 row_decode::direntry_bind_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
-            MetadataTableFamily::DirentryUnbinds => metadata_state.push_direntry_unbind(
+            MetadataRowFamily::DirentryUnbinds => metadata_state.push_direntry_unbind(
                 row_decode::direntry_unbind_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
-            MetadataTableFamily::Revisions => metadata_state.push_revision(
+            MetadataRowFamily::Revisions => metadata_state.push_revision(
                 row_decode::revision_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
-            MetadataTableFamily::RevisionsByInodeDesc => {
+            MetadataRowFamily::RevisionsByInodeDesc => {
                 row_decode::revision_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
-            MetadataTableFamily::Tombstones => metadata_state.push_subtree_tombstone(
+            MetadataRowFamily::Tombstones => metadata_state.push_subtree_tombstone(
                 row_decode::tombstone_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
             // Derived from the tombstone rows above, like the secondary
             // indexes: decoding proves the row belongs to the family, and
             // materialization re-derives it.
-            MetadataTableFamily::ActiveDeletions => {
+            MetadataRowFamily::ActiveDeletions => {
                 row_decode::active_deletion_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
-            MetadataTableFamily::CommitReceipts => metadata_state.push_commit_receipt(
+            MetadataRowFamily::CommitReceipts => metadata_state.push_commit_receipt(
                 row_decode::commit_receipt_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
-            MetadataTableFamily::Attributes => metadata_state.push_attributes_revision(
+            MetadataRowFamily::Attributes => metadata_state.push_attributes_revision(
                 row_decode::attributes_revision_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
         }

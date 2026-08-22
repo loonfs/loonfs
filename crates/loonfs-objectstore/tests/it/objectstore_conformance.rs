@@ -11,7 +11,7 @@ use loonfs_api::{Checksum, ContentId, ManifestObjectId};
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
-    content_blob, metadata_manifest_object, metadata_table, wal_head, wal_segment,
+    content_blob, metadata_manifest_object, metadata_segment, wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
@@ -52,28 +52,28 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/metadata/manifests/00000000000000000420-0123456789abcdef.manifest.json"
     );
     assert_eq!(
-        metadata_table(
+        metadata_segment(
             &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &loonfs_api::MetadataTableId::parse("tbl_00000000000000000000000000000001")
-                .expect("valid metadata table id")
+            &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+                .expect("valid metadata segment id")
         ),
-        "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst"
+        "namespaces/ns-1/metadata/segments/seg_00000000000000000000000000000001.sst.zst"
     );
     assert_eq!(
-        metadata_table(
+        metadata_segment(
             &loonfs_api::NamespaceId::parse("source-ns").expect("valid namespace id"),
-            &loonfs_api::MetadataTableId::parse("tbl_00000000000000000000000000000002")
-                .expect("valid metadata table id")
+            &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000002")
+                .expect("valid metadata segment id")
         ),
-        "namespaces/source-ns/metadata/tables/tbl_00000000000000000000000000000002.sst.zst"
+        "namespaces/source-ns/metadata/segments/seg_00000000000000000000000000000002.sst.zst"
     );
     assert_eq!(
-        metadata_table(
+        metadata_segment(
             &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &loonfs_api::MetadataTableId::parse("tbl_ffffffffffffffffffffffffffffffff")
-                .expect("valid metadata table id")
+            &loonfs_api::MetadataSegmentId::parse("seg_ffffffffffffffffffffffffffffffff")
+                .expect("valid metadata segment id")
         ),
-        "namespaces/ns-1/metadata/tables/tbl_ffffffffffffffffffffffffffffffff.sst.zst"
+        "namespaces/ns-1/metadata/segments/seg_ffffffffffffffffffffffffffffffff.sst.zst"
     );
 }
 

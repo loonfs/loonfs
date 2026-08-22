@@ -470,7 +470,7 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
         .await
         .expect("checkpoint the unflushed fork target");
     assert!(
-        foreign_metadata_file_owners(&store, &target)
+        foreign_metadata_segment_owners(&store, &target)
             .await
             .contains(&source),
         "the fork target's basis manifest should still name source-owned metadata files"
@@ -493,7 +493,7 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
 
 /// Which namespaces own the metadata files a namespace's current manifest
 /// names.
-async fn foreign_metadata_file_owners(
+async fn foreign_metadata_segment_owners(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<NamespaceId> {
@@ -512,9 +512,9 @@ async fn foreign_metadata_file_owners(
     loonfs_api::wire::manifest::decode_namespace_manifest_json(&bytes)
         .expect("decode manifest")
         .payload
-        .metadata_files
+        .segments
         .into_iter()
-        .map(|file| file.owner_namespace_id)
+        .map(|descriptor| descriptor.owner_namespace_id)
         .collect()
 }
 

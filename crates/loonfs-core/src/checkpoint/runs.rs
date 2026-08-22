@@ -1,7 +1,7 @@
-//! The LSM run model: how a manifest's flat `metadata_files` list groups
-//! into ordered runs and tables, plus the layout policy constants.
+//! The LSM run model: how a manifest's flat `segments` list groups
+//! into ordered runs and row families, plus the layout policy constants.
 
-use loonfs_api::wire::manifest::{MetadataFileRef, MetadataTableFamily, NamespaceManifestPayload};
+use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef, NamespaceManifestPayload};
 use loonfs_api::ChangeSeq;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -13,21 +13,21 @@ pub(super) use loonfs_api::wire::sst_blocks::{
     DEFAULT_MAX_ROWS_PER_SEGMENT as DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT,
 };
 
-pub(super) const MAX_MAINTENANCE_TABLE_IO: usize = 8;
+pub(super) const MAX_MAINTENANCE_SEGMENT_IO: usize = 8;
 pub(super) const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
 pub(super) const CHECKPOINT_BASE_RUN_LEVEL: u32 = 1;
 
-pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 10] = [
-    MetadataTableFamily::Inodes,
-    MetadataTableFamily::DirentryBinds,
-    MetadataTableFamily::DirentryChildBinds,
-    MetadataTableFamily::DirentryUnbinds,
-    MetadataTableFamily::Revisions,
-    MetadataTableFamily::RevisionsByInodeDesc,
-    MetadataTableFamily::Tombstones,
-    MetadataTableFamily::ActiveDeletions,
-    MetadataTableFamily::CommitReceipts,
-    MetadataTableFamily::Attributes,
+pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 10] = [
+    MetadataRowFamily::Inodes,
+    MetadataRowFamily::DirentryBinds,
+    MetadataRowFamily::DirentryChildBinds,
+    MetadataRowFamily::DirentryUnbinds,
+    MetadataRowFamily::Revisions,
+    MetadataRowFamily::RevisionsByInodeDesc,
+    MetadataRowFamily::Tombstones,
+    MetadataRowFamily::ActiveDeletions,
+    MetadataRowFamily::CommitReceipts,
+    MetadataRowFamily::Attributes,
 ];
 
 /// Metadata families merged together as one consistency unit.
@@ -62,26 +62,26 @@ pub enum MetadataFamilyGroup {
 impl MetadataFamilyGroup {
     /// The families this group merges together, in the order a run writes
     /// them. What a caller reports; never what it keys a group by.
-    pub const fn families(self) -> &'static [MetadataTableFamily] {
+    pub const fn families(self) -> &'static [MetadataRowFamily] {
         match self {
             Self::Bindings => &[
-                MetadataTableFamily::DirentryBinds,
-                MetadataTableFamily::DirentryChildBinds,
-                MetadataTableFamily::DirentryUnbinds,
+                MetadataRowFamily::DirentryBinds,
+                MetadataRowFamily::DirentryChildBinds,
+                MetadataRowFamily::DirentryUnbinds,
             ],
             Self::Revisions => &[
-                MetadataTableFamily::Revisions,
-                MetadataTableFamily::RevisionsByInodeDesc,
+                MetadataRowFamily::Revisions,
+                MetadataRowFamily::RevisionsByInodeDesc,
             ],
-            Self::Inodes => &[MetadataTableFamily::Inodes],
-            Self::Tombstones => &[MetadataTableFamily::Tombstones],
-            Self::ActiveDeletions => &[MetadataTableFamily::ActiveDeletions],
-            Self::CommitReceipts => &[MetadataTableFamily::CommitReceipts],
-            Self::Attributes => &[MetadataTableFamily::Attributes],
+            Self::Inodes => &[MetadataRowFamily::Inodes],
+            Self::Tombstones => &[MetadataRowFamily::Tombstones],
+            Self::ActiveDeletions => &[MetadataRowFamily::ActiveDeletions],
+            Self::CommitReceipts => &[MetadataRowFamily::CommitReceipts],
+            Self::Attributes => &[MetadataRowFamily::Attributes],
         }
     }
 
-    pub(super) fn contains(self, family: MetadataTableFamily) -> bool {
+    pub(super) fn contains(self, family: MetadataRowFamily) -> bool {
         self.families().contains(&family)
     }
 }
@@ -97,16 +97,16 @@ pub(super) const REORGANIZE_FAMILY_GROUPS: [MetadataFamilyGroup; 7] = [
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MetadataTableManifest {
-    pub(super) family: MetadataTableFamily,
-    pub(super) segments: Vec<MetadataFileRef>,
+pub(super) struct MetadataFamilySegments {
+    pub(super) family: MetadataRowFamily,
+    pub(super) segments: Vec<MetadataSegmentRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataRunManifest {
     pub(super) run_seq: ChangeSeq,
     pub(super) level: u32,
-    pub(super) tables: Vec<MetadataTableManifest>,
+    pub(super) segments: Vec<MetadataFamilySegments>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,14 +142,14 @@ impl Default for MetadataLsmPolicy {
 }
 
 pub(super) fn l0_run_count(payload: &NamespaceManifestPayload) -> usize {
-    runs_from_metadata_files(payload)
+    runs_from_segments(payload)
         .into_iter()
         .filter(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
         .count()
 }
 
 pub(super) fn runs_in_scan_order(payload: &NamespaceManifestPayload) -> Vec<MetadataRunManifest> {
-    let mut runs = runs_from_metadata_files(payload);
+    let mut runs = runs_from_segments(payload);
     runs.sort_by(|left, right| {
         left.level
             .cmp(&right.level)
@@ -161,7 +161,7 @@ pub(super) fn runs_in_scan_order(payload: &NamespaceManifestPayload) -> Vec<Meta
 pub(super) fn runs_in_materialization_order(
     payload: &NamespaceManifestPayload,
 ) -> Vec<MetadataRunManifest> {
-    let mut runs = runs_from_metadata_files(payload);
+    let mut runs = runs_from_segments(payload);
     runs.sort_by(|left, right| {
         left.run_seq
             .cmp(&right.run_seq)
@@ -170,37 +170,40 @@ pub(super) fn runs_in_materialization_order(
     runs
 }
 
-pub(super) fn runs_from_metadata_files(
-    payload: &NamespaceManifestPayload,
-) -> Vec<MetadataRunManifest> {
-    let mut runs: BTreeMap<(ChangeSeq, u32), BTreeMap<MetadataTableFamily, Vec<MetadataFileRef>>> =
+pub(super) fn runs_from_segments(payload: &NamespaceManifestPayload) -> Vec<MetadataRunManifest> {
+    let mut runs: BTreeMap<(ChangeSeq, u32), BTreeMap<MetadataRowFamily, Vec<MetadataSegmentRef>>> =
         BTreeMap::new();
-    for metadata_file in &payload.metadata_files {
-        runs.entry((metadata_file.run_seq, metadata_file.level))
+    for descriptor in &payload.segments {
+        runs.entry((descriptor.run_seq, descriptor.level))
             .or_default()
-            .entry(metadata_file.family)
+            .entry(descriptor.family)
             .or_default()
-            .push(metadata_file.clone());
+            .push(descriptor.clone());
     }
     runs.into_iter()
-        .map(|((run_seq, level), tables_by_family)| MetadataRunManifest {
-            run_seq,
-            level,
-            tables: CHECKPOINT_TABLE_FAMILIES
-                .into_iter()
-                .map(|family| {
-                    let mut segments = tables_by_family.get(&family).cloned().unwrap_or_default();
-                    segments.sort_by_key(|segment| segment.segment_index);
-                    MetadataTableManifest { family, segments }
-                })
-                .collect(),
-        })
+        .map(
+            |((run_seq, level), segments_by_family)| MetadataRunManifest {
+                run_seq,
+                level,
+                segments: CHECKPOINT_ROW_FAMILIES
+                    .into_iter()
+                    .map(|family| {
+                        let mut segments =
+                            segments_by_family.get(&family).cloned().unwrap_or_default();
+                        segments.sort_by_key(|descriptor| descriptor.segment_index);
+                        MetadataFamilySegments { family, segments }
+                    })
+                    .collect(),
+            },
+        )
         .collect()
 }
 
-pub(super) fn flatten_manifest_tables(tables: Vec<MetadataTableManifest>) -> Vec<MetadataFileRef> {
-    tables
+pub(super) fn flatten_manifest_segments(
+    segments_by_family: Vec<MetadataFamilySegments>,
+) -> Vec<MetadataSegmentRef> {
+    segments_by_family
         .into_iter()
-        .flat_map(|table| table.segments)
+        .flat_map(|family_segments| family_segments.segments)
         .collect()
 }

@@ -1,12 +1,6 @@
 # Metadata Block Storage
 
-LoonFS keeps a namespace's filesystem metadata — bindings, revisions,
-inodes, and the other per-kind tables, called families — in immutable
-segment objects arranged as a log-structured merge tree and referenced
-by the namespace manifest. This document describes the segment layout,
-the read path, and the maintenance cycle, and why they are shaped that
-way. The binding rules live in `docs/specs/format.md` (section 4.2.1
-for the object layout, section 6 for maintenance).
+LoonFS stores each namespace's filesystem metadata in immutable segments arranged as a log-structured merge tree. The namespace manifest references these segments. This document explains the segment layout, read path, and maintenance cycle. The required behavior is defined in `docs/specs/format.md`: section 4.2.1 covers the object layout, and section 6 covers maintenance.
 
 ## Segment objects
 

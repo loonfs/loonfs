@@ -2,7 +2,7 @@
 //! candidates as one WAL segment and one head compare-and-swap, then returns
 //! one result per candidate.
 
-use crate::checkpoint::MetadataTableCache;
+use crate::checkpoint::MetadataSegmentCache;
 use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataViewError, Result, WriterFence};
@@ -258,7 +258,7 @@ pub struct NamespaceCommitEngine {
     /// Shared cache of decoded blocks used by publish-view reads. Blocks are
     /// keyed by segment digest, while the head ETag check verifies that the view
     /// is current.
-    table_cache: Option<Arc<MetadataTableCache>>,
+    segment_cache: Option<Arc<MetadataSegmentCache>>,
 }
 
 impl NamespaceCommitEngine {
@@ -268,7 +268,7 @@ impl NamespaceCommitEngine {
             publish_tail_projection: None,
             session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
-            table_cache: None,
+            segment_cache: None,
         }
     }
 
@@ -293,8 +293,8 @@ impl NamespaceCommitEngine {
         self
     }
 
-    pub fn table_cache(mut self, table_cache: Arc<MetadataTableCache>) -> Self {
-        self.table_cache = Some(table_cache);
+    pub fn segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
+        self.segment_cache = Some(segment_cache);
         self
     }
 
@@ -400,7 +400,7 @@ impl NamespaceCommitEngine {
 
         let (publish_view, projection) = match load_publish_metadata_view(
             store,
-            self.table_cache.as_deref(),
+            self.segment_cache.as_deref(),
             &self.namespace_id,
             acquired_writer,
             self.publish_tail_projection.as_ref(),
@@ -1055,11 +1055,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_views_reuse_cached_table_blocks_across_publishes() {
-        use crate::cache::MetadataTableCacheConfig;
+    async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
+        use crate::cache::MetadataSegmentCacheConfig;
         let temp_dir = tempdir().expect("tempdir");
         let store =
-            CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+            CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = context("writer-a");
         bootstrap_namespace(&store, &namespace_id, &writer, false)
@@ -1088,7 +1088,7 @@ mod tests {
         .await
         .expect("checkpoint");
 
-        // Without a cache, every publish view re-fetches the table blocks
+        // Without a cache, every publish view re-fetches the segment blocks
         // its validation walks need.
         let mut uncached = NamespaceCommitEngine::new(namespace_id.clone());
         store.reset();
@@ -1105,7 +1105,7 @@ mod tests {
             .expect("uncached publish a");
         assert!(
             store.count(OperationClass::Read) > 0,
-            "publish validation should read table blocks"
+            "publish validation should read segment blocks"
         );
         store.reset();
         uncached
@@ -1124,8 +1124,10 @@ mod tests {
             "without a cache the next publish re-fetches the same blocks"
         );
 
-        let cache = Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default()));
-        let mut cached = NamespaceCommitEngine::new(namespace_id.clone()).table_cache(cache);
+        let cache = Arc::new(MetadataSegmentCache::new(
+            MetadataSegmentCacheConfig::default(),
+        ));
+        let mut cached = NamespaceCommitEngine::new(namespace_id.clone()).segment_cache(cache);
         store.reset();
         cached
             .publish_batch(
@@ -1157,7 +1159,7 @@ mod tests {
         assert_eq!(
             store.count(OperationClass::Read),
             0,
-            "a warm cache serves every publish-view table read"
+            "a warm cache serves every publish-view segment read"
         );
     }
 }

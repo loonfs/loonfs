@@ -463,7 +463,7 @@ async fn build_handles(
         // reuses blocks reader traffic already decoded instead of
         // populating a second, default-sized cache.
         .runtime_cache(config.runtime_cache_config())
-        .shared_metadata_table_cache(&writer)
+        .shared_metadata_segment_cache(&writer)
         // A maintenance step this server runs on request may plan a
         // background streaming compaction. Sharing the writer's runner is
         // what lets it start one, makes the operator's step and the writer's

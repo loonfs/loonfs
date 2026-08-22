@@ -26,7 +26,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepCandidateFamily {
     WalSegments,
-    MetadataTables,
+    MetadataSegments,
     CompactionStaging,
     Manifests,
     Checkpoints,
@@ -220,7 +220,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                 return Ok(SweepStep::Continue);
             }
             CandidateFamily::WalSegments => SweepCandidateFamily::WalSegments,
-            CandidateFamily::MetadataTables => SweepCandidateFamily::MetadataTables,
+            CandidateFamily::MetadataSegments => SweepCandidateFamily::MetadataSegments,
             CandidateFamily::CompactionStaging => SweepCandidateFamily::CompactionStaging,
             CandidateFamily::Manifests => SweepCandidateFamily::Manifests,
             CandidateFamily::Checkpoints => SweepCandidateFamily::Checkpoints,
@@ -249,7 +249,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
 
         match family {
             SweepCandidateFamily::WalSegments => self.process_wal_segment(key).await?,
-            SweepCandidateFamily::MetadataTables => self.process_metadata_table(key).await?,
+            SweepCandidateFamily::MetadataSegments => self.process_metadata_segment(key).await?,
             SweepCandidateFamily::CompactionStaging => self.process_compaction_staging(key).await?,
             SweepCandidateFamily::Manifests => self.process_manifest(key).await?,
             SweepCandidateFamily::Checkpoints => self.process_checkpoint(key).await?,
@@ -261,10 +261,10 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         match family {
             SweepCandidateFamily::WalSegments => !self.initial_live.protects_wal_segment(key),
             // A staged segment a publication landed is named by the manifest
-            // like any other table, so the same root set answers for both
+            // like any other segment, so the same root set answers for both
             // families.
-            SweepCandidateFamily::MetadataTables | SweepCandidateFamily::CompactionStaging => {
-                !self.initial_live.tables.contains(key)
+            SweepCandidateFamily::MetadataSegments | SweepCandidateFamily::CompactionStaging => {
+                !self.initial_live.segments.contains(key)
             }
             SweepCandidateFamily::Manifests => match manifest_object_id_of(key) {
                 Some(Ok(id)) => !self.initial_live.manifests.contains(&id),
@@ -285,14 +285,14 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         Ok(())
     }
 
-    async fn process_metadata_table(&mut self, key: &str) -> Result<()> {
+    async fn process_metadata_segment(&mut self, key: &str) -> Result<()> {
         // Rule 5 is sticky across every re-collection in this pass.
         if self.sweep.degraded {
             self.report.retain(RetainedReason::DegradedRoots);
-        } else if self.sweep.live.tables.contains(key) {
+        } else if self.sweep.live.segments.contains(key) {
             self.report.retain(RetainedReason::Referenced);
         } else if self.sweep_aged(key, self.policy.grace_window_ms).await? {
-            self.report.deleted_metadata_tables += 1;
+            self.report.deleted_metadata_segments += 1;
         }
         Ok(())
     }
@@ -302,7 +302,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             self.report.retain(RetainedReason::DegradedRoots);
             return Ok(());
         }
-        if self.sweep.live.tables.contains(key) {
+        if self.sweep.live.segments.contains(key) {
             self.report.retain(RetainedReason::Referenced);
             return Ok(());
         }
@@ -326,7 +326,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                     .await?
                     && key.ends_with(".sst.zst")
                 {
-                    self.report.deleted_metadata_tables += 1;
+                    self.report.deleted_metadata_segments += 1;
                 }
             }
         }

@@ -4,8 +4,8 @@
 use super::current_files::resolve_visible_inode;
 use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
 use crate::checkpoint::{
-    head_from_manifest, load_basis_metadata_tables, MetadataTableCache, VerifiedMetadataTables,
-    WalTailProjectionCache, WalTailProjectionCacheKey,
+    head_from_manifest, load_basis_metadata_segments, MetadataSegmentCache,
+    VerifiedMetadataSegments, WalTailProjectionCache, WalTailProjectionCacheKey,
 };
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError, Result};
@@ -65,7 +65,7 @@ pub(crate) struct ReadLoadContext<'anchor, 'cache> {
     /// consistent (any manifest at or below the pinned seq serves it, with
     /// WAL replay covering the rest).
     basis: &'anchor MetadataBasis,
-    table_cache: Option<&'cache MetadataTableCache>,
+    segment_cache: Option<&'cache MetadataSegmentCache>,
     tail_cache: Option<&'cache WalTailProjectionCache>,
 }
 
@@ -74,31 +74,24 @@ impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
         head: &'anchor HeadState,
         head_etag: &'anchor str,
         basis: &'anchor MetadataBasis,
-        table_cache: Option<&'cache MetadataTableCache>,
+        segment_cache: Option<&'cache MetadataSegmentCache>,
         tail_cache: Option<&'cache WalTailProjectionCache>,
     ) -> Self {
         Self {
             head,
             head_etag,
             basis,
-            table_cache,
+            segment_cache,
             tail_cache,
         }
     }
 }
 
-/// The metadata anchor one read is pinned to.
+/// Identifies the metadata snapshot used by one read.
 ///
-/// Three numbers say where a read's answer came from: the head sequence it
-/// answers at, the manifest its verified tables were loaded from, and the
-/// head sequence that manifest was published at. A read that answers
-/// not-found for a path a writer had already committed is either anchored
-/// behind that write or reading tables that do not hold it, and the two
-/// cases are told apart by these three numbers alone.
-///
-/// They are the same three the WAL-tail projection cache keys a projection
-/// by, so a read span names its anchor with the words that cache already
-/// uses. All three are plain numbers, so recording them costs no allocation.
+/// The head sequence, manifest number, and manifest head sequence distinguish
+/// a stale snapshot from a manifest that is missing expected data. These are
+/// also the fields used to key the WAL-tail projection cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReadAnchor {
     head_seq: ChangeSeq,
@@ -179,7 +172,7 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: NamespaceId,
     pub(super) content_store_id: ContentStoreId,
     pub(super) head: HeadState,
-    pub(super) tables: VerifiedMetadataTables<'a, S>,
+    pub(super) segments: VerifiedMetadataSegments<'a, S>,
     wal_tail_rows: Arc<MetadataState>,
     anchor: ReadAnchor,
 }
@@ -215,16 +208,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         }
         let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
         let manifest_no = basis.manifest_no();
-        let loaded_basis = load_basis_metadata_tables(
+        let loaded_basis = load_basis_metadata_segments(
             store,
-            load_context.table_cache,
+            load_context.segment_cache,
             namespace_id,
             basis,
             head.created_at_ms,
         )
         .await?;
-        let tables = loaded_basis.tables;
-        let manifest_head = head_from_manifest(&head, tables.manifest());
+        let segments = loaded_basis.segments;
+        let manifest_head = head_from_manifest(&head, segments.manifest());
         let anchor = ReadAnchor {
             head_seq: head.seq,
             manifest_no,
@@ -243,7 +236,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     namespace_id: namespace_id.clone(),
                     content_store_id: catalog_entry.content_store_id().clone(),
                     head,
-                    tables,
+                    segments,
                     wal_tail_rows,
                     anchor,
                 });
@@ -285,7 +278,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             namespace_id: namespace_id.clone(),
             content_store_id: catalog_entry.content_store_id().clone(),
             head,
-            tables,
+            segments,
             wal_tail_rows,
             anchor,
         })
@@ -869,7 +862,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     pub(super) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.tables, self.wal_tail_rows.as_ref())
+        MetadataView::from_loaded_head(&self.head, &self.segments, self.wal_tail_rows.as_ref())
     }
 }
 

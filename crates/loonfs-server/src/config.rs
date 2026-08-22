@@ -227,7 +227,7 @@ pub struct RuntimeCacheConfigOverrides {
     pub max_cached_namespaces: Option<usize>,
     pub max_cached_wal_tail_projection_rows: Option<usize>,
     pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
-    pub metadata_table_cache_max_decoded_bytes: Option<usize>,
+    pub metadata_segment_cache_max_decoded_bytes: Option<usize>,
 }
 
 /// Controls whether this server schedules maintenance automatically.
@@ -377,8 +377,8 @@ impl ServerConfig {
         {
             config.max_cached_wal_tail_projection_decoded_bytes = value;
         }
-        if let Some(value) = self.runtime_cache.metadata_table_cache_max_decoded_bytes {
-            config.metadata_table_cache.max_decoded_bytes = value;
+        if let Some(value) = self.runtime_cache.metadata_segment_cache_max_decoded_bytes {
+            config.metadata_segment_cache.max_decoded_bytes = value;
         }
         config
     }
@@ -1607,7 +1607,7 @@ writer_id = "loonfs-server"
 max_cached_namespaces = 0
 max_cached_wal_tail_projection_rows = 0
 max_cached_wal_tail_projection_decoded_bytes = 0
-metadata_table_cache_max_decoded_bytes = 0
+metadata_segment_cache_max_decoded_bytes = 0
 
 [store]
 kind = "local-fs"

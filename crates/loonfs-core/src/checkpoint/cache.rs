@@ -18,27 +18,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
-/// Default decoded-byte budget for cached metadata table blocks. The byte
-/// budget is the only limit — one wide directory's segment working set must
-/// fit, or warm listings re-fetch segments superlinearly — and zero
+/// Default decoded-byte budget for metadata segment blocks. A value of zero
 /// disables the cache.
-pub(crate) const DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const DEFAULT_METADATA_SEGMENT_CACHE_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataTableCacheConfig {
+pub struct MetadataSegmentCacheConfig {
     pub max_decoded_bytes: usize,
 }
 
-impl Default for MetadataTableCacheConfig {
+impl Default for MetadataSegmentCacheConfig {
     fn default() -> Self {
         Self {
-            max_decoded_bytes: DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES,
+            max_decoded_bytes: DEFAULT_METADATA_SEGMENT_CACHE_DECODED_BYTES,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MetadataTableCacheStats {
+pub struct MetadataSegmentCacheStats {
     pub hits: usize,
     pub misses: usize,
     pub inserts: usize,
@@ -52,8 +50,8 @@ pub struct MetadataTableCacheStats {
     pub filter_false_positives: usize,
 }
 
-/// Receives decoded metadata-table cache events so they can be recorded as metrics.
-pub trait MetadataTableCacheObserver: Send + Sync + 'static {
+/// Receives metadata segment cache events for metrics.
+pub trait MetadataSegmentCacheObserver: Send + Sync + 'static {
     fn hit(&self);
     fn miss(&self);
     fn insert(&self);
@@ -63,7 +61,7 @@ pub trait MetadataTableCacheObserver: Send + Sync + 'static {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum MetadataTableBlockKind {
+pub(super) enum MetadataSegmentBlockKind {
     Index,
     Filter,
     Data,
@@ -71,12 +69,12 @@ pub(super) enum MetadataTableBlockKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct MetadataTableCacheKey {
+pub(super) struct MetadataSegmentCacheKey {
     /// The cached object's identity: a segment's object checksum for block
     /// entries, or the manifest object key for manifest entries — both
     /// immutable, so entries can never go stale.
     pub(super) identity: String,
-    pub(super) block_kind: MetadataTableBlockKind,
+    pub(super) block_kind: MetadataSegmentBlockKind,
     pub(super) block_offset: u64,
 }
 
@@ -86,7 +84,7 @@ pub(super) struct MetadataTableCacheKey {
 /// and `block_offset` make collisions between kinds impossible. Data blocks
 /// hold metadata rows.
 #[derive(Debug, Clone)]
-pub(super) enum DecodedMetadataTableBlock {
+pub(super) enum DecodedMetadataSegmentBlock {
     Index {
         entries: Arc<Vec<SegmentIndexEntry>>,
         decoded_bytes: usize,
@@ -101,15 +99,14 @@ pub(super) enum DecodedMetadataTableBlock {
     },
     Manifest {
         manifest: Arc<NamespaceManifestEnvelope>,
-        /// The manifest's `metadata_files` regrouped into scan-order runs,
-        /// derived once when the envelope is validated. Scans walk this
-        /// list on every page, so it is far too hot to regroup per scan.
+        /// The manifest's `segments` grouped in scan order during validation.
+        /// Reusing this list avoids rebuilding it for every page.
         scan_runs: Arc<Vec<MetadataRunManifest>>,
         decoded_bytes: usize,
     },
 }
 
-impl DecodedMetadataTableBlock {
+impl DecodedMetadataSegmentBlock {
     pub(super) fn decoded_bytes(&self) -> usize {
         match self {
             Self::Index { decoded_bytes, .. }
@@ -120,23 +117,23 @@ impl DecodedMetadataTableBlock {
     }
 }
 
-pub struct MetadataTableCache {
-    config: MetadataTableCacheConfig,
-    inner: Mutex<MetadataTableCacheInner>,
-    stats: MetadataTableCacheStatsInner,
-    observer: Option<Arc<dyn MetadataTableCacheObserver>>,
+pub struct MetadataSegmentCache {
+    config: MetadataSegmentCacheConfig,
+    inner: Mutex<MetadataSegmentCacheInner>,
+    stats: MetadataSegmentCacheStatsInner,
+    observer: Option<Arc<dyn MetadataSegmentCacheObserver>>,
     /// One cell per in-flight block fetch, keyed by the block's cache key,
     /// so concurrent readers share a single ranged GET per block.
-    in_flight: Mutex<HashMap<MetadataTableCacheKey, Arc<OnceCell<DecodedMetadataTableBlock>>>>,
+    in_flight: Mutex<HashMap<MetadataSegmentCacheKey, Arc<OnceCell<DecodedMetadataSegmentBlock>>>>,
     /// Optional node-local cache for encoded blocks. Keeping it with the
     /// decoded cache ensures callers use both cache tiers or neither tier.
     stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
 }
 
-impl std::fmt::Debug for MetadataTableCache {
+impl std::fmt::Debug for MetadataSegmentCache {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("MetadataTableCache")
+            .debug_struct("MetadataSegmentCache")
             .field("config", &self.config)
             .field("inner", &self.inner)
             .field("stats", &self.stats)
@@ -147,22 +144,22 @@ impl std::fmt::Debug for MetadataTableCache {
 }
 
 #[derive(Debug, Default)]
-struct MetadataTableCacheInner {
-    entries: HashMap<MetadataTableCacheKey, CacheSlot>,
-    order: Recency<MetadataTableCacheKey>,
+struct MetadataSegmentCacheInner {
+    entries: HashMap<MetadataSegmentCacheKey, CacheSlot>,
+    order: Recency<MetadataSegmentCacheKey>,
     decoded_bytes: usize,
 }
 
 #[derive(Debug)]
 struct CacheSlot {
-    block: DecodedMetadataTableBlock,
+    block: DecodedMetadataSegmentBlock,
     /// Recency stamp assigned on the most recent access. Recency records with
     /// an older stamp for this key are ignored.
     last_touch: u64,
 }
 
 #[derive(Debug, Default)]
-struct MetadataTableCacheStatsInner {
+struct MetadataSegmentCacheStatsInner {
     hits: AtomicUsize,
     misses: AtomicUsize,
     inserts: AtomicUsize,
@@ -171,21 +168,21 @@ struct MetadataTableCacheStatsInner {
     filter_false_positives: AtomicUsize,
 }
 
-impl MetadataTableCache {
-    pub fn new(config: MetadataTableCacheConfig) -> Self {
+impl MetadataSegmentCache {
+    pub fn new(config: MetadataSegmentCacheConfig) -> Self {
         Self::with_stored_block_cache_and_observer(config, None, None)
     }
 
     /// Creates a cache that reports activity to the optional `observer`.
     pub fn with_stored_block_cache_and_observer(
-        config: MetadataTableCacheConfig,
+        config: MetadataSegmentCacheConfig,
         stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
-        observer: Option<Arc<dyn MetadataTableCacheObserver>>,
+        observer: Option<Arc<dyn MetadataSegmentCacheObserver>>,
     ) -> Self {
         Self {
             config,
-            inner: Mutex::new(MetadataTableCacheInner::default()),
-            stats: MetadataTableCacheStatsInner::default(),
+            inner: Mutex::new(MetadataSegmentCacheInner::default()),
+            stats: MetadataSegmentCacheStatsInner::default(),
             observer,
             in_flight: Mutex::new(HashMap::new()),
             stored_block_cache,
@@ -200,18 +197,18 @@ impl MetadataTableCache {
     /// Resolves one block access through a single-flight cell.
     pub(super) async fn get_or_load<E, F, Fut>(
         &self,
-        cache_key: &MetadataTableCacheKey,
+        cache_key: &MetadataSegmentCacheKey,
         fetch: F,
-    ) -> Result<DecodedMetadataTableBlock, E>
+    ) -> Result<DecodedMetadataSegmentBlock, E>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<DecodedMetadataTableBlock, E>>,
+        Fut: std::future::Future<Output = Result<DecodedMetadataSegmentBlock, E>>,
     {
         let cell = {
             let mut in_flight = self
                 .in_flight
                 .lock()
-                .expect("metadata table cache in-flight lock should not be poisoned");
+                .expect("metadata segment cache in-flight lock should not be poisoned");
             Arc::clone(
                 in_flight
                     .entry(cache_key.clone())
@@ -232,7 +229,7 @@ impl MetadataTableCache {
         let mut in_flight = self
             .in_flight
             .lock()
-            .expect("metadata table cache in-flight lock should not be poisoned");
+            .expect("metadata segment cache in-flight lock should not be poisoned");
         if in_flight
             .get(cache_key)
             .is_some_and(|current| Arc::ptr_eq(current, &cell))
@@ -242,8 +239,8 @@ impl MetadataTableCache {
         result
     }
 
-    pub fn stats(&self) -> MetadataTableCacheStats {
-        MetadataTableCacheStats {
+    pub fn stats(&self) -> MetadataSegmentCacheStats {
+        MetadataSegmentCacheStats {
             hits: self.stats.hits.load(Ordering::SeqCst),
             misses: self.stats.misses.load(Ordering::SeqCst),
             inserts: self.stats.inserts.load(Ordering::SeqCst),
@@ -269,14 +266,14 @@ impl MetadataTableCache {
         }
     }
 
-    pub(super) fn get(&self, key: &MetadataTableCacheKey) -> Option<DecodedMetadataTableBlock> {
+    pub(super) fn get(&self, key: &MetadataSegmentCacheKey) -> Option<DecodedMetadataSegmentBlock> {
         if self.config.max_decoded_bytes == 0 {
             return None;
         }
         let mut inner = self
             .inner
             .lock()
-            .expect("metadata table cache lock should not be poisoned");
+            .expect("metadata segment cache lock should not be poisoned");
         let Some(block) = inner.entries.get(key).map(|slot| slot.block.clone()) else {
             self.stats.misses.fetch_add(1, Ordering::SeqCst);
             if let Some(observer) = &self.observer {
@@ -292,14 +289,14 @@ impl MetadataTableCache {
         Some(block)
     }
 
-    pub(super) fn insert(&self, key: MetadataTableCacheKey, block: DecodedMetadataTableBlock) {
+    pub(super) fn insert(&self, key: MetadataSegmentCacheKey, block: DecodedMetadataSegmentBlock) {
         if self.config.max_decoded_bytes == 0 {
             return;
         }
         let mut inner = self
             .inner
             .lock()
-            .expect("metadata table cache lock should not be poisoned");
+            .expect("metadata segment cache lock should not be poisoned");
         let decoded_bytes = block.decoded_bytes();
         if let Some(previous) = inner.entries.insert(
             key.clone(),
@@ -318,7 +315,7 @@ impl MetadataTableCache {
         if let Some(observer) = &self.observer {
             observer.insert();
         }
-        let MetadataTableCacheInner {
+        let MetadataSegmentCacheInner {
             entries,
             order,
             decoded_bytes,
@@ -339,8 +336,8 @@ impl MetadataTableCache {
     }
 }
 
-impl MetadataTableCacheInner {
-    fn touch(&mut self, key: &MetadataTableCacheKey) {
+impl MetadataSegmentCacheInner {
+    fn touch(&mut self, key: &MetadataSegmentCacheKey) {
         let stamp = self.order.touch(key);
         if let Some(slot) = self.entries.get_mut(key) {
             slot.last_touch = stamp;
@@ -355,8 +352,8 @@ impl MetadataTableCacheInner {
 /// Returns `true` when `stamp` matches the key's most recent access.
 /// Replacing, evicting, or accessing an entry can leave older recency records.
 fn slot_is_live(
-    entries: &HashMap<MetadataTableCacheKey, CacheSlot>,
-    key: &MetadataTableCacheKey,
+    entries: &HashMap<MetadataSegmentCacheKey, CacheSlot>,
+    key: &MetadataSegmentCacheKey,
     stamp: u64,
 ) -> bool {
     entries
@@ -655,8 +652,8 @@ fn wal_tail_projection_slot_is_live(
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache,
-        MetadataTableCacheConfig, MetadataTableCacheKey, WalTailProjectionCache,
+        DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, MetadataSegmentCache,
+        MetadataSegmentCacheConfig, MetadataSegmentCacheKey, WalTailProjectionCache,
         WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
     };
     use crate::metadata::{InodeRecord, MetadataState};
@@ -664,8 +661,8 @@ mod tests {
     use loonfs_api::{ActorId, ActorRef, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
     use std::sync::Arc;
 
-    fn block(decoded_bytes: usize) -> DecodedMetadataTableBlock {
-        DecodedMetadataTableBlock::Data {
+    fn block(decoded_bytes: usize) -> DecodedMetadataSegmentBlock {
+        DecodedMetadataSegmentBlock::Data {
             block: Arc::new(DecodedDataBlock {
                 row_keys: Vec::new(),
                 rows: Vec::new(),
@@ -674,10 +671,10 @@ mod tests {
         }
     }
 
-    fn key(digest: &str) -> MetadataTableCacheKey {
-        MetadataTableCacheKey {
+    fn key(digest: &str) -> MetadataSegmentCacheKey {
+        MetadataSegmentCacheKey {
             identity: digest.to_owned(),
-            block_kind: MetadataTableBlockKind::Data,
+            block_kind: MetadataSegmentBlockKind::Data,
             block_offset: 0,
         }
     }
@@ -734,7 +731,7 @@ mod tests {
 
     #[test]
     fn byte_budget_evicts_the_oldest_block() {
-        let cache = MetadataTableCache::new(MetadataTableCacheConfig {
+        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
             max_decoded_bytes: 1000,
         });
         cache.insert(key("a"), block(600));
@@ -749,7 +746,7 @@ mod tests {
 
     #[test]
     fn replacing_a_block_reaccounts_its_decoded_bytes() {
-        let cache = MetadataTableCache::new(MetadataTableCacheConfig {
+        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
             max_decoded_bytes: 1000,
         });
         cache.insert(key("a"), block(600));
@@ -763,7 +760,7 @@ mod tests {
 
     #[test]
     fn recency_queue_stays_bounded_under_repeated_hits() {
-        let cache = MetadataTableCache::new(MetadataTableCacheConfig {
+        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
             max_decoded_bytes: 10_000,
         });
         for index in 0..8 {
@@ -784,25 +781,25 @@ mod tests {
 
     #[test]
     fn cache_hits_share_the_decoded_row_allocation() {
-        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
         let inserted = block(64);
         let rows = match &inserted {
-            DecodedMetadataTableBlock::Data { block: rows, .. } => Arc::clone(rows),
-            DecodedMetadataTableBlock::Index { .. }
-            | DecodedMetadataTableBlock::Filter { .. }
-            | DecodedMetadataTableBlock::Manifest { .. } => {
+            DecodedMetadataSegmentBlock::Data { block: rows, .. } => Arc::clone(rows),
+            DecodedMetadataSegmentBlock::Index { .. }
+            | DecodedMetadataSegmentBlock::Filter { .. }
+            | DecodedMetadataSegmentBlock::Manifest { .. } => {
                 panic!("fixture builds a data block")
             }
         };
         cache.insert(key("a"), inserted);
         let hit = cache.get(&key("a")).expect("inserted block should hit");
         let shares_allocation = match &hit {
-            DecodedMetadataTableBlock::Data {
+            DecodedMetadataSegmentBlock::Data {
                 block: hit_rows, ..
             } => Arc::ptr_eq(hit_rows, &rows),
-            DecodedMetadataTableBlock::Index { .. }
-            | DecodedMetadataTableBlock::Filter { .. }
-            | DecodedMetadataTableBlock::Manifest { .. } => false,
+            DecodedMetadataSegmentBlock::Index { .. }
+            | DecodedMetadataSegmentBlock::Filter { .. }
+            | DecodedMetadataSegmentBlock::Manifest { .. } => false,
         };
         assert!(
             shares_allocation,
@@ -812,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_or_load_retries_after_a_failed_load() {
-        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
         let failed: Result<_, String> = cache
             .get_or_load(&key("a"), || async { Err("transport".to_owned()) })
             .await;
@@ -828,7 +825,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_or_load_counts_one_miss_and_populates_for_later_hits() {
-        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
         let fetched: Result<_, String> = cache
             .get_or_load(&key("a"), || async { Ok(block(1)) })
             .await;

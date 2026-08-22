@@ -112,11 +112,11 @@ pub mod cache {
     pub use crate::recency::Recency;
 
     pub use crate::checkpoint::{
-        ManifestLoadError, ManifestLoadFailureClass, MetadataTableCache, MetadataTableCacheConfig,
-        MetadataTableCacheObserver, MetadataTableCacheStats, StoredMetadataBlockCache,
-        StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
-        WalTailProjectionCache, WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
-        WalTailProjectionCacheObserver, WalTailProjectionCacheStats,
+        ManifestLoadError, ManifestLoadFailureClass, MetadataSegmentCache,
+        MetadataSegmentCacheConfig, MetadataSegmentCacheObserver, MetadataSegmentCacheStats,
+        StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
+        StoredMetadataBlockKind, WalTailProjectionCache, WalTailProjectionCacheConfig,
+        WalTailProjectionCacheKey, WalTailProjectionCacheObserver, WalTailProjectionCacheStats,
         DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{

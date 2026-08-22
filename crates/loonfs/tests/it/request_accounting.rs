@@ -1,7 +1,7 @@
 //! Diagnostic (ignored): per-section request accounting for the warm-ops
 //! benchmark shape. Builds a bench-like namespace, then runs each warm
 //! phase on a fresh handle while classifying every store GET — by object
-//! class, and for metadata tables by section (index / filter / data),
+//! class, and for metadata segments by section (index / filter / data),
 //! family, and run level, using the live manifest's own descriptors.
 //!
 //! Run with:
@@ -26,10 +26,10 @@ const FILES: usize = 10_000;
 const BATCH: usize = 100;
 const STEP_EVERY_BATCHES: usize = 33;
 
-/// (family, level, index_offset, filter_offset) per table object key.
-type TableMap = BTreeMap<String, (String, u32, u64, u64)>;
+/// (family, level, index_offset, filter_offset) per segment object key.
+type SegmentMap = BTreeMap<String, (String, u32, u64, u64)>;
 
-async fn table_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> TableMap {
+async fn segment_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> SegmentMap {
     let root = loonfs_core::control::load_namespace_metadata_root_control(store, namespace_id)
         .await
         .expect("load metadata root");
@@ -42,7 +42,7 @@ async fn table_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Tab
     let manifest = decode_namespace_manifest_json(&bytes).expect("decode manifest");
     manifest
         .payload
-        .metadata_files
+        .segments
         .iter()
         .map(|descriptor| {
             (
@@ -59,22 +59,22 @@ async fn table_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Tab
 }
 
 #[allow(clippy::print_stdout)]
-fn report(phase: &str, gets: &[RecordedGet], tables: &TableMap) {
+fn report(phase: &str, gets: &[RecordedGet], segments: &SegmentMap) {
     let mut by_class: BTreeMap<String, usize> = BTreeMap::new();
-    let mut by_table: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_segment: BTreeMap<String, usize> = BTreeMap::new();
     for (key, range) in gets {
-        let class = if let Some((family, level, index_offset, filter_offset)) = tables.get(key) {
+        let class = if let Some((family, level, index_offset, filter_offset)) = segments.get(key) {
             let section = match range {
                 Some((start, _)) if start == index_offset => "index",
                 Some((start, _)) if start == filter_offset => "filter",
                 Some(_) => "data",
                 None => "whole",
             };
-            by_table
+            by_segment
                 .entry(format!("L{level} {family} {section}"))
                 .and_modify(|count| *count += 1)
                 .or_insert(1);
-            format!("table:{section}")
+            format!("segment:{section}")
         } else if key.contains("/wal/segments/") {
             "wal".to_owned()
         } else if key.contains("/manifests/") {
@@ -93,7 +93,7 @@ fn report(phase: &str, gets: &[RecordedGet], tables: &TableMap) {
     for (class, count) in &by_class {
         println!("   {class:<16} {count}");
     }
-    for (bucket, count) in &by_table {
+    for (bucket, count) in &by_segment {
         println!("     {bucket:<44} {count}");
     }
 }
@@ -205,11 +205,11 @@ async fn warm_phase_request_accounting() {
                 .expect("step");
         }
     }
-    let tables = table_map(&store, &namespace_id).await;
+    let segments = segment_map(&store, &namespace_id).await;
     println!(
-        "layout: {} table objects across levels {:?}",
-        tables.len(),
-        tables
+        "layout: {} segment objects across levels {:?}",
+        segments.len(),
+        segments
             .values()
             .map(|(_, level, _, _)| *level)
             .collect::<std::collections::BTreeSet<_>>()
@@ -246,19 +246,19 @@ async fn warm_phase_request_accounting() {
         }
     }
     assert_eq!(listed, FILES);
-    report("warm full list", &log.take_gets(), &tables);
+    report("warm full list", &log.take_gets(), &segments);
 
     reader
         .stat_path(&namespace_id, "/hot/file-04999.txt", Default::default())
         .await
         .expect("stat");
-    report("warm stat", &log.take_gets(), &tables);
+    report("warm stat", &log.take_gets(), &segments);
 
     reader
         .get_file_bytes(&namespace_id, "/hot/file-05000.txt")
         .await
         .expect("read");
-    report("warm read", &log.take_gets(), &tables);
+    report("warm read", &log.take_gets(), &segments);
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("acct-writer-2")
@@ -283,7 +283,7 @@ async fn warm_phase_request_accounting() {
         )
         .await
         .expect("warm write");
-    report("warm write", &log.take_gets(), &tables);
+    report("warm write", &log.take_gets(), &segments);
 
     // A second write on the same handle separates per-handle warmup cost
     // from per-write cost.
@@ -307,6 +307,6 @@ async fn warm_phase_request_accounting() {
     report(
         "warm write (same handle, second)",
         &log.take_gets(),
-        &tables,
+        &segments,
     );
 }

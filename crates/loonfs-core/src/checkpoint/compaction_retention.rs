@@ -25,12 +25,12 @@
 
 use super::frozen_floor::{bind_survives_frozen_floor, BindingGeneration};
 use crate::error::{CoreError, Result};
-use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
 use loonfs_api::{AttributeRevisionNo, ChangeSeq};
 use std::collections::BTreeSet;
 
 /// One row a retention operator kept, and the family it belongs to.
-pub(super) type KeptRow = (MetadataTableFamily, MetadataRow);
+pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
 
 /// Which rule decides a cluster's rows, as the cluster table names it.
 ///
@@ -93,7 +93,7 @@ impl RetentionOperator {
     /// anything held comes back.
     pub(super) fn push(
         &mut self,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         row: MetadataRow,
         floor_seq: ChangeSeq,
     ) -> Result<Option<KeptRow>> {
@@ -122,7 +122,7 @@ impl RetentionOperator {
             }
             Self::ForwardBindings(state) => Ok(state
                 .close_group(floor_seq)?
-                .map(|row| (MetadataTableFamily::DirentryBinds, row))),
+                .map(|row| (MetadataRowFamily::DirentryBinds, row))),
         }
     }
 
@@ -422,7 +422,7 @@ mod tests {
         for (revision, committed_seq) in [(100_002u64, 102u64), (100_001, 101)] {
             if let Some((_, row)) = operator
                 .push(
-                    MetadataTableFamily::Attributes,
+                    MetadataRowFamily::Attributes,
                     attribute_row(7, revision, committed_seq),
                     floor(),
                 )
@@ -434,7 +434,7 @@ mod tests {
         for revision in (1..=100_000u64).rev() {
             let pushed = operator
                 .push(
-                    MetadataTableFamily::Attributes,
+                    MetadataRowFamily::Attributes,
                     attribute_row(7, revision, 50),
                     floor(),
                 )
@@ -455,14 +455,14 @@ mod tests {
         let mut operator = RetentionRule::Attributes.operator();
         operator
             .push(
-                MetadataTableFamily::Attributes,
+                MetadataRowFamily::Attributes,
                 attribute_row(7, 5, 50),
                 floor(),
             )
             .expect("the first row at the floor is kept");
         let error = operator
             .push(
-                MetadataTableFamily::Attributes,
+                MetadataRowFamily::Attributes,
                 attribute_row(7, 5, 49),
                 floor(),
             )
@@ -492,19 +492,11 @@ mod tests {
             },
         };
         assert!(operator
-            .push(
-                MetadataTableFamily::ActiveDeletions,
-                removed.clone(),
-                floor()
-            )
+            .push(MetadataRowFamily::ActiveDeletions, removed.clone(), floor())
             .expect("push")
             .is_none());
         assert!(operator
-            .push(
-                MetadataTableFamily::ActiveDeletions,
-                listed.clone(),
-                floor()
-            )
+            .push(MetadataRowFamily::ActiveDeletions, listed.clone(), floor())
             .expect("push")
             .is_none());
         assert_eq!(operator.held_rows(), 0);
@@ -512,7 +504,7 @@ mod tests {
         operator.close_group(floor()).expect("close");
         assert!(
             operator
-                .push(MetadataTableFamily::ActiveDeletions, listed, floor())
+                .push(MetadataRowFamily::ActiveDeletions, listed, floor())
                 .expect("push")
                 .is_some(),
             "the next deletion is decided on its own markers, not the previous one's"
@@ -531,7 +523,7 @@ mod tests {
             // which is the shape a repeatedly recreated name leaves.
             operator
                 .push(
-                    MetadataTableFamily::DirentryBinds,
+                    MetadataRowFamily::DirentryBinds,
                     bind_row(7, "hot.txt", generation),
                     ChangeSeq(200_000),
                 )
@@ -539,7 +531,7 @@ mod tests {
             peak = peak.max(operator.held_rows());
             operator
                 .push(
-                    MetadataTableFamily::DirentryUnbinds,
+                    MetadataRowFamily::DirentryUnbinds,
                     unbind_row(7, "hot.txt", generation, generation + 1),
                     ChangeSeq(200_000),
                 )
@@ -564,7 +556,7 @@ mod tests {
         let mut operator = RetentionRule::ForwardBindings.operator();
         operator
             .push(
-                MetadataTableFamily::DirentryBinds,
+                MetadataRowFamily::DirentryBinds,
                 bind_row(7, "a.txt", 10),
                 floor(),
             )
@@ -572,14 +564,14 @@ mod tests {
         assert!(operator
             .close_group(floor())
             .expect("close")
-            .is_some_and(|(family, _)| family == MetadataTableFamily::DirentryBinds));
+            .is_some_and(|(family, _)| family == MetadataRowFamily::DirentryBinds));
 
         // The next slot is unaffected by the one before it: the bind left
         // standing in `a.txt` is that slot's latest, which is what the
         // invariant allows.
         operator
             .push(
-                MetadataTableFamily::DirentryBinds,
+                MetadataRowFamily::DirentryBinds,
                 bind_row(7, "b.txt", 11),
                 floor(),
             )
@@ -590,7 +582,7 @@ mod tests {
         // first is the state the drop rule may not act on.
         operator
             .push(
-                MetadataTableFamily::DirentryBinds,
+                MetadataRowFamily::DirentryBinds,
                 bind_row(7, "b.txt", 12),
                 floor(),
             )

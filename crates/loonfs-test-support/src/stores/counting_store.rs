@@ -96,9 +96,9 @@ impl<S> CountingStore<S> {
         }
     }
 
-    /// Counts operations on metadata tables.
-    pub fn metadata_tables(inner: S) -> Self {
-        Self::new(inner, KeyPredicate::metadata_table())
+    /// Counts operations on metadata segments.
+    pub fn metadata_segments(inner: S) -> Self {
+        Self::new(inner, KeyPredicate::metadata_segment())
     }
 
     /// Returns the current counters.

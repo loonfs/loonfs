@@ -10,7 +10,7 @@ use crate::{
     MaintenanceJobId, NamespaceId, Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError,
     SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
-use loonfs_core::cache::{MetadataTableCache, StoredMetadataBlockCache};
+use loonfs_core::cache::{MetadataSegmentCache, StoredMetadataBlockCache};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -64,8 +64,8 @@ impl FsWriter {
 
     /// This writer's shared decoded-block cache handle, for builders that
     /// open another core sharing it.
-    pub(crate) fn metadata_table_cache(&self) -> Arc<MetadataTableCache> {
-        self.core.metadata_table_cache()
+    pub(crate) fn metadata_segment_cache(&self) -> Arc<MetadataSegmentCache> {
+        self.core.metadata_segment_cache()
     }
 
     /// The streaming metadata compactions this writer's runner is running,
@@ -334,13 +334,13 @@ impl FsWriterBuilder {
     /// The handle rides on the decoded cache, so every handle built from
     /// this writer's cache reaches the same local cache — the reader this
     /// writer derives, and an admin handle sharing the cache through
-    /// [`FsAdminBuilder::shared_metadata_table_cache`]. Nothing else
+    /// [`FsAdminBuilder::shared_metadata_segment_cache`]. Nothing else
     /// reaches it: paths that carry no decoded cache carry neither tier.
     ///
     /// Unset by default. The host owns the cache and closes it, and object
     /// storage stays the authority for every read either way.
     ///
-    /// [`FsAdminBuilder::shared_metadata_table_cache`]: crate::FsAdminBuilder::shared_metadata_table_cache
+    /// [`FsAdminBuilder::shared_metadata_segment_cache`]: crate::FsAdminBuilder::shared_metadata_segment_cache
     pub fn stored_metadata_block_cache(
         mut self,
         stored_metadata_block_cache: Arc<dyn StoredMetadataBlockCache>,
@@ -488,7 +488,10 @@ mod tests {
         .await
         .expect("build writer");
 
-        assert!(writer.metadata_table_cache().stored_block_cache().is_none());
+        assert!(writer
+            .metadata_segment_cache()
+            .stored_block_cache()
+            .is_none());
     }
 
     /// The handle rides on the decoded block cache, which is what puts the
@@ -508,10 +511,13 @@ mod tests {
         .await
         .expect("build writer");
 
-        assert!(writer.metadata_table_cache().stored_block_cache().is_some());
+        assert!(writer
+            .metadata_segment_cache()
+            .stored_block_cache()
+            .is_some());
         assert!(Arc::ptr_eq(
-            &writer.metadata_table_cache(),
-            &writer.reader().core.metadata_table_cache()
+            &writer.metadata_segment_cache(),
+            &writer.reader().core.metadata_segment_cache()
         ));
     }
 

@@ -620,9 +620,9 @@ const CONTENT_ID_SHARD_LEVELS: usize = 2;
 const CONTENT_ID_SHARD_WIDTH: usize = 2;
 
 string_id! {
-    /// Durable id for one metadata SST table file.
-    MetadataTableId,
-    prefix = "tbl"
+    /// Durable id for one metadata segment.
+    MetadataSegmentId,
+    prefix = "seg"
 }
 
 string_id! {
@@ -844,8 +844,8 @@ impl fmt::Display for InodeKind {
 mod tests {
     use super::{
         next_public_ordinal, ChangeSeq, CheckpointId, CommitId, ContentId, ContentStoreId, InodeId,
-        ManifestNo, ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo, UploadId,
-        WalSegmentId, WriterEpoch, MAX_PUBLIC_INTEGER,
+        ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo,
+        UploadId, WalSegmentId, WriterEpoch, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributeRevisionNo;
     use std::collections::BTreeSet;
@@ -1070,9 +1070,9 @@ mod tests {
     }
 
     #[test]
-    fn generated_upload_wal_segment_table_and_checkpoint_ids_reject_hyphenated_ids() {
+    fn generated_upload_wal_metadata_segment_and_checkpoint_ids_reject_hyphenated_ids() {
         assert!(UploadId::parse("upl_00000000000000000000000000000001").is_ok());
-        assert!(MetadataTableId::parse("tbl_00000000000000000000000000000001").is_ok());
+        assert!(MetadataSegmentId::parse("seg_00000000000000000000000000000001").is_ok());
         assert!(CheckpointId::parse("chk_00000000000000000000000000000001").is_ok());
         assert!(UploadId::parse(["upl", "123"].join("-")).is_err());
         assert!(WalSegmentId::parse("00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
@@ -1083,7 +1083,7 @@ mod tests {
         assert!(ManifestObjectId::parse("00000000000000000412-9F2A6C0E4B7D4A90").is_err());
         assert!(ManifestObjectId::parse("mf_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
         assert!(WalSegmentId::parse("seg_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
-        assert!(MetadataTableId::parse(["tbl", "123"].join("-")).is_err());
+        assert!(MetadataSegmentId::parse(["seg", "123"].join("-")).is_err());
         assert!(CheckpointId::parse(["chk", "123"].join("-")).is_err());
     }
 
@@ -1092,7 +1092,7 @@ mod tests {
         let upload_id = UploadId::generate();
         let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
         let manifest_object_id = ManifestObjectId::generate(ManifestNo(413));
-        let metadata_table_id = MetadataTableId::generate();
+        let metadata_segment_id = MetadataSegmentId::generate();
         let checkpoint_id = CheckpointId::generate();
 
         assert_generated_id_shape(upload_id.as_str(), "upl");
@@ -1100,12 +1100,12 @@ mod tests {
         assert!(manifest_object_id
             .as_str()
             .starts_with("00000000000000000413-"));
-        assert_generated_id_shape(metadata_table_id.as_str(), "tbl");
+        assert_generated_id_shape(metadata_segment_id.as_str(), "seg");
         assert_generated_id_shape(checkpoint_id.as_str(), "chk");
         assert!(UploadId::parse(upload_id.as_str()).is_ok());
         assert!(WalSegmentId::parse(wal_segment_id.as_str()).is_ok());
         assert!(ManifestObjectId::parse(manifest_object_id.as_str()).is_ok());
-        assert!(MetadataTableId::parse(metadata_table_id.as_str()).is_ok());
+        assert!(MetadataSegmentId::parse(metadata_segment_id.as_str()).is_ok());
         assert!(CheckpointId::parse(checkpoint_id.as_str()).is_ok());
     }
 

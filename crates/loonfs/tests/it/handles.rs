@@ -1044,7 +1044,7 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
         let manifest = decode_namespace_manifest_json(&bytes).expect("decode manifest");
         let l0_files = manifest
             .payload
-            .metadata_files
+            .segments
             .iter()
             .filter(|descriptor| descriptor.level == 0)
             .count();

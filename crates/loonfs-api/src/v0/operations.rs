@@ -690,7 +690,7 @@ pub struct RetainedCandidates {
     /// its anchor inside the window may still be reading it, and the pass
     /// keeps it until a manifest ages past the window.
     pub no_reference_manifest: u64,
-    /// Root resolution failed somewhere in this pass, so manifest and table
+    /// Root resolution failed somewhere in this pass, so manifest and segment
     /// deletion was suppressed wholesale (`degraded_retention` is set too).
     pub degraded_roots: u64,
     /// A key under a swept family that this collector does not recognize as
@@ -726,8 +726,8 @@ pub struct GcResponse {
     pub namespace_id: NamespaceId,
     /// Unreferenced WAL segments deleted.
     pub deleted_wal_segments: u64,
-    /// Unreferenced metadata tables deleted.
-    pub deleted_metadata_tables: u64,
+    /// Unreferenced metadata segments deleted.
+    pub deleted_metadata_segments: u64,
     /// Unreferenced manifests deleted.
     pub deleted_manifests: u64,
     /// Released checkpoint records deleted after their grace window.
@@ -756,7 +756,7 @@ pub struct GcResponse {
     /// The total above stays because it is what every existing consumer
     /// reads; this says why.
     pub retained: RetainedCandidates,
-    /// True when ambiguous roots suppressed manifest/table deletion.
+    /// True when ambiguous roots suppressed manifest/segment deletion.
     pub degraded_retention: bool,
     /// True when the pass skipped completed-content reclamation because
     /// what it needs — the namespace's live roots, then the reference
@@ -800,7 +800,7 @@ impl GcResponse {
         Self {
             namespace_id,
             deleted_wal_segments: 0,
-            deleted_metadata_tables: 0,
+            deleted_metadata_segments: 0,
             deleted_manifests: 0,
             deleted_checkpoint_records: 0,
             released_fork_checkpoints: 0,
@@ -939,7 +939,7 @@ pub struct AdvanceRetentionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceStepRequest {
-    /// Flush the visible WAL tail into metadata tables, then run one bounded
+    /// Flush the visible WAL tail into metadata segments, then run one bounded
     /// reorganization step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]

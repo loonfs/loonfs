@@ -1,6 +1,6 @@
 //! Manifest load errors, classified as corruption versus store trouble.
 
-use loonfs_api::wire::manifest::MetadataTableFamily;
+use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_api::{ManifestNo, ManifestObjectId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -63,37 +63,37 @@ pub enum ManifestLoadError {
         expected_payload_checksum: String,
         actual_payload_checksum: String,
     },
-    #[error("namespace manifest `{object_key}` is missing table family `{family:?}`")]
-    MissingTableFamily {
+    #[error("namespace manifest `{object_key}` is missing row family `{family:?}`")]
+    MissingRowFamily {
         object_key: String,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
     },
-    #[error("namespace manifest `{object_key}` repeats table family `{family:?}`")]
-    DuplicateTableFamily {
+    #[error("namespace manifest `{object_key}` repeats row family `{family:?}`")]
+    DuplicateRowFamily {
         object_key: String,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
     },
     #[error("namespace manifest `{object_key}` has invalid runs: {message}")]
     RunManifestMismatch { object_key: String, message: String },
-    #[error("missing metadata SST `{object_key}`")]
+    #[error("missing metadata segment `{object_key}`")]
     MissingSegment { object_key: String },
-    #[error("failed to read metadata SST `{object_key}`: {message}")]
+    #[error("failed to read metadata segment `{object_key}`: {message}")]
     ReadSegment { object_key: String, message: String },
-    #[error("metadata SST codec error for `{object_key}`: {message}")]
+    #[error("metadata segment codec error for `{object_key}`: {message}")]
     SegmentCodec { object_key: String, message: String },
-    #[error("metadata SST key mismatch for `{object_key}`: expected `{expected}`")]
+    #[error("metadata segment key mismatch for `{object_key}`: expected `{expected}`")]
     SegmentObjectKeyMismatch {
         object_key: String,
         expected: String,
     },
-    #[error("metadata SST descriptor mismatch for `{object_key}`: {message}")]
+    #[error("metadata segment descriptor mismatch for `{object_key}`: {message}")]
     SegmentDescriptorMismatch { object_key: String, message: String },
     #[error(
         "metadata row kind mismatch for `{object_key}` family `{family:?}`: found `{row_kind}`"
     )]
-    TableRowKindMismatch {
+    SegmentRowKindMismatch {
         object_key: String,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         row_kind: String,
     },
     #[error(
@@ -101,7 +101,7 @@ pub enum ManifestLoadError {
     )]
     DuplicateRevisionRow {
         object_key: String,
-        family: MetadataTableFamily,
+        family: MetadataRowFamily,
         row_key: String,
     },
     #[error("namespace manifest `{object_key}` revision index does not match canonical revisions")]

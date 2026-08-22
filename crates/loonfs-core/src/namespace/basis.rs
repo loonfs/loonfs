@@ -39,7 +39,7 @@ pub enum MetadataBasis {
 /// The manifest a basis resolves to, and who owns the objects it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasisManifest {
-    /// Namespace under whose prefix the manifest and its tables live.
+    /// Namespace under whose prefix the manifest and its segments live.
     pub owner_namespace_id: NamespaceId,
     /// Logical manifest position, which the object id encodes.
     pub manifest_no: ManifestNo,

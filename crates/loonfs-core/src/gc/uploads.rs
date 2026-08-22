@@ -11,7 +11,7 @@
 
 use super::budget::PassBudget;
 use super::live_set::LiveSet;
-use crate::checkpoint::{load_verified_manifest_tables, ManifestLoadFailureClass};
+use crate::checkpoint::{load_verified_manifest_segments, ManifestLoadFailureClass};
 use crate::context::MutationContext;
 use crate::control_update::{
     load_upload_session_state, try_update_upload_session, UploadSessionCas, UploadSessionUpdate,
@@ -21,14 +21,14 @@ use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
 use crate::protocol::AbandonedUpload;
 use crate::storage::content::delete_unpublished_content_object;
 use loonfs_api::wire::control::{UploadSessionRecordStatus, UploadSessionState};
-use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{ContentId, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-/// Rows read from one metadata table per request while collecting content
+/// Rows read from one metadata segment per request while collecting content
 /// references. Each wave is one page of rows and costs one budget unit, so
 /// this sets both how much of a revision family is held in memory at a time
 /// and how finely the scan can be interrupted.
@@ -330,9 +330,9 @@ pub(super) async fn collect_referenced_content<S: ObjectStore + ?Sized>(
         if !budget.try_charge() {
             return Ok(CollectedReferences::Deferred);
         }
-        let tables =
-            match load_verified_manifest_tables(store, namespace_id, manifest_object_id).await {
-                Ok(tables) => tables,
+        let segments =
+            match load_verified_manifest_segments(store, namespace_id, manifest_object_id).await {
+                Ok(segments) => segments,
                 Err(error) => match error.failure_class() {
                     ManifestLoadFailureClass::Store => {
                         tracing::warn!(
@@ -356,9 +356,9 @@ pub(super) async fn collect_referenced_content<S: ObjectStore + ?Sized>(
             if !budget.try_charge() {
                 return Ok(CollectedReferences::Deferred);
             }
-            let rows = match tables
+            let rows = match segments
                 .scan_range_page_with_keys(
-                    MetadataTableFamily::Revisions,
+                    MetadataRowFamily::Revisions,
                     &lower_bound,
                     upper_bound.as_deref(),
                     REVISION_SCAN_WAVE_ROWS,

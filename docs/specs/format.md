@@ -90,15 +90,17 @@ The required durable object families and standard key patterns are:
 | --- | --- | --- | --- |
 | **WAL head** | Mutable | Defines the namespace's durable identity and current state: content store, fork provenance, visible sequence, writer epoch, writer metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
-| **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
+| **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata segment references and a head summary. Segment references carry their own owner, so a fork target's manifest names source-owned segments without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
-| **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
-| **Compaction staging** | Immutable | Hold metadata segments one streaming compaction job has written before any manifest references them ("Compaction"). The object is an ordinary metadata segment; only the directory differs. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/tables/{table_id}.sst.zst` |
+| **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/segments/{segment_id}.sst.zst` |
+| **Compaction staging** | Immutable | Hold metadata segments one streaming compaction job has written before any manifest references them ("Compaction"). The object is an ordinary metadata segment; only the directory differs. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` |
 | **Compaction leases** | Mutable lifecycle | Record ownership of a compaction output prefix. A job creates and refreshes an `active` lease. Garbage collection may change an expired lease to terminal `reaping` before reclaiming the output. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/lease.json` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
+
+`.sst.zst` identifies the block encoding: sorted rows with each block compressed using zstd. Metadata and grep segments use this encoding. `.wal.zst` identifies the WAL encoding.
 
 The WAL subtree has one mutable head, one optional mutable floor, and the
 immutable segment collection:
@@ -126,7 +128,7 @@ Namespace object keys are built through the central object layout API in
 `loonfs-objectstore`. The namespace root remains `namespaces/{namespace_id}/`.
 Forks are copy-on-write: the target's head names a source-owned manifest as
 its starting basis, later target manifests may go on referencing source-owned
-metadata tables, and the source holds a fork-owned checkpoint record
+metadata segments, and the source holds a fork-owned checkpoint record
 protecting that basis for the target's lifetime.
 
 The content-store keyspace holds blobs and nothing else. A content store has
@@ -144,7 +146,7 @@ recovery authority. `wal/head.json` and `wal/floor.json` live outside the
 `wal/segments/` listing prefix, so a reclamation listing of segments yields
 only segment keys.
 
-WAL and metadata-table deletion is reachability-driven from the live
+WAL and metadata-segment deletion is reachability-driven from the live
 manifest, checkpoint records, and the retention floor. Extension-owned
 objects below `namespaces/{namespace_id}/extensions/` are foreign to the core
 key parser and are never core-GC candidates.
@@ -158,7 +160,7 @@ The namespace tree's lifecycle can be read off its grammar:
   and `metadata/root.json`) that are never swept. If a
   singleton cannot be explained in one sentence, it is too broad.
 - **Collections are never authoritative via enumeration** (`wal/segments/`,
-  `metadata/manifests/`, `metadata/tables/`, `uploads/`,
+  `metadata/manifests/`, `metadata/segments/`, `uploads/`,
   `content-stores/.../objects/`). A record in a collection matters only when a
   pointer, chain link, or checkpoint reaches it — except to GC, which
   lists collections to find garbage and roots. WAL segments and metadata
@@ -166,8 +168,8 @@ The namespace tree's lifecycle can be read off its grammar:
   while concurrent writers avoid fighting for one immutable object name.
 - **Paths express ownership, not authority.** Envelopes and payloads still
   validate namespace id, object id, family, checksum, and sequence fields;
-  the same fact is never encoded twice (table family lives in the manifest
-  and table envelope, not the path).
+  the same fact is never encoded twice (the row family lives in the manifest
+  and the segment envelope, not the path).
 - **`wal/head.json` is the namespace.** The head exists, or the namespace does
   not. It is the existence marker, and after deletion it is kept forever as
   the tombstone that retires the namespace id.
@@ -289,8 +291,8 @@ when the session begins. Direct multipart uses the algorithm stored in the
 session, currently CRC-64/NVME. For direct uploads, LoonFS accepts a client
 checksum only after completion verifies the provider's stored object.
 
-Metadata materialization tables include canonical metadata families and
-validated derived families. The canonical families are `inodes`,
+The metadata row families are canonical metadata families and validated
+derived families. The canonical families are `inodes`,
 `direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`,
 `commit-receipts`, and `attributes`. The `direntry-child-binds` family is a
 secondary index over the same direntry bind rows, keyed by child inode, and
@@ -801,7 +803,7 @@ Namespace deletion does not imply content-store deletion. In v0, deleting a
 content store is unsupported operator-only work, and the only content garbage
 collection is the narrow one described in section 6.4: an object a completed
 upload session owns and no metadata references. Metadata is reclaimed by garbage collection: on a
-terminally deleted namespace a GC pass reaps the WAL chain, metadata tables,
+terminally deleted namespace a GC pass reaps the WAL chain, metadata segments,
 manifests, and non-protecting checkpoint records under the usual windows,
 leaving the head as the id-retiring tombstone, together with the root and
 floor objects if the namespace ever wrote them (section 6, rule 4). Objects
@@ -816,7 +818,7 @@ source namespace's current head. Every attempt creates its own leased,
 verified fork-owned source checkpoint at that head, then installs the complete
 target head with one create-if-absent. The target writes no manifest, no root, and no floor: the
 head's `fork_basis` names the source manifest the target starts from, and the
-fork-owned checkpoint record is what keeps that manifest and its tables alive
+fork-owned checkpoint record is what keeps that manifest and its segments alive
 for as long as the target may still need them.
 
 Fork provenance lives in the target head and stays there for the namespace's
@@ -1079,7 +1081,7 @@ for another.
 
 Case 3 is the only cross-namespace read in the format, and the head is the
 only thing that may authorize one. Call this rule the **head-authorized
-foreign basis**: no manifest, root, checkpoint, or table may send a reader
+foreign basis**: no manifest, root, checkpoint, or segment may send a reader
 into another namespace's prefix on its own say-so, because only the head is
 carried forward verbatim by every publication and so only the head can be
 trusted to still mean what it said when the fork happened.
@@ -1094,7 +1096,7 @@ path, no search for a nearby manifest, and no dropping back to the genesis
 basis.
 
 `fork_basis.source_checkpoint_id` names the fork-owned checkpoint record on
-the source that keeps the basis manifest and its tables alive. That record,
+the source that keeps the basis manifest and its segments alive. That record,
 not the fork basis itself, is the reachability root; the fork basis only says
 which objects to read.
 
@@ -1288,12 +1290,12 @@ object:
 3. Use the visible WAL tip named by the head to identify the visible segment
    chain after the basis `head_seq`, then replay the logical commit records in ascending
    `seq` order through `head.seq`. Each logical commit appends normalized rows
-   to the same metadata tables.
+   to the same row families.
 
 The result is a metadata view pinned to one `seq`.
 
 For latest path `stat` and directory `list`, an implementation may avoid
-hydrating a complete metadata state. The reader may query verified metadata run tables and the visible WAL tail
+hydrating a complete metadata state. The reader may query verified metadata run segments and the visible WAL tail
 overlay directly, provided it applies the same visibility rules and treats
 missing or corrupt manifest/WAL objects as hard errors. An absent
 `metadata/root.json` is not one of those errors: it resolves through the head
@@ -1630,7 +1632,7 @@ becomes a garbage-collection candidate once nothing pins it.
 
 Every metadata publication — WAL flush and reorganization alike —
 self-enforces the metadata publication budget, measured from before its
-first table object is written until its root compare-and-swap is initiated.
+first segment object is written until its root compare-and-swap is initiated.
 A publication that exceeds the budget aborts without publishing: its
 immutable outputs stay unreachable and are reclaimed by garbage collection
 after the grace window. This bound (with the WAL publish budget for
@@ -1685,7 +1687,7 @@ context. The protocol is:
 2. Create a verified fork-owned source checkpoint at that head under a freshly
    generated id. Its owner carries the target namespace id and
    `expires_at_ms = now + FORK_CHECKPOINT_LEASE_MS`. This record is the
-   reachability root that keeps the source's basis manifest and tables alive
+   reachability root that keeps the source's basis manifest and segments alive
    for as long as the target lives; nothing under the target's prefix protects
    them. Every attempt takes its own record; no attempt reuses, refreshes, or
    revives an earlier one's.
@@ -1727,10 +1729,10 @@ being one publication plus provider bounds plus clock skew.
 `FORK_GUARD_MARGIN_MS` is one provider operation's total wall time — the
 staleness bound on the guard's own read.
 
-The fork does not copy content-store blobs or source metadata SSTs, and
+The fork does not copy content-store blobs or source metadata segments, and
 writes no target manifest, root, or floor. A successful fork has independent
 namespace history from the fork point, starting its own WAL at
-`fork_seq + 1`. Future target WAL, checkpoints, and metadata SSTs are written
+`fork_seq + 1`. Future target WAL, checkpoints, and metadata segments are written
 under the target namespace root. Until the target's first flush publishes a
 root, its head resolves the basis (section 2.9.1).
 
@@ -2122,12 +2124,12 @@ The namespace manifest may reference one or more immutable metadata runs. Runs
 are not a second source of truth; they are rebuildable metadata rows used to
 keep normal metadata view loading from replaying an unbounded WAL tail.
 
-For file revisions, a valid manifest includes the canonical `revisions` table
-and the `revisions_by_inode_desc` index table. The index table must contain
-exactly the same revision rows as the canonical table, keyed for newest-first
+For file revisions, a valid manifest includes the canonical `revisions` family
+and the `revisions_by_inode_desc` index family. The index family must contain
+exactly the same revision rows as the canonical family, keyed for newest-first
 inode revision scans. Readers treat a missing, extra, duplicate, or changed
 revision index row as namespace corruption. Segment reads verify the per-block
-checksums in the block handles and enforce key ranges. Manifest-table loads
+checksums in the block handles and enforce key ranges. Manifest loads
 enforce per-run row-count equality between canonical and index families; full
 row-level index equality is enforced by every reorganization rewrite over the
 complete input runs that the rewrite selected.
@@ -2202,11 +2204,11 @@ A rebuild whose bottom-anchored window cannot fit one step's budget is run as
 a streaming compaction instead: it merges every run of the group in one job
 and writes each finished output segment as it fills, so nothing about the job
 follows the size of the group. Those segments are written under
-`namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/tables/{table_id}.sst.zst`
-rather than under `metadata/tables/`. The object is an ordinary metadata
+`namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst`
+rather than under `metadata/segments/`. The object is an ordinary metadata
 segment — same encoding, same descriptor, same reads — and only its directory
 differs. The directory is what keeps a running job's output out of the
-listing that enumerates metadata tables: a job outlives the collector's grace
+listing that enumerates metadata segments: a job outlives the collector's grace
 window, so its segments would otherwise read as unreferenced objects aged
 past grace, which is the class the collector reaps. The job id groups one
 job's output together so a collector can decide all of it from that job's
@@ -2236,7 +2238,7 @@ Invariants:
 
 Checkpoint records are standalone files under `checkpoints/`. Maintenance
 never creates one: automatic root advancement leaves superseded manifests and
-folded-away tables unpinned, and garbage collection reaps them under the
+folded-away segments unpinned, and garbage collection reaps them under the
 grace-window and delete-time re-verification rules ("Garbage collection").
 A checkpoint record is a deliberate pin — fork sources and explicit admin
 checkpoints — and roots its basis for as long as the record exists.
@@ -2267,9 +2269,9 @@ does not exist, so there is nothing to collect and nothing to ignore.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
-`metadata/tables/`, `metadata/compactions/`, `checkpoints/`, and
+`metadata/segments/`, `metadata/compactions/`, `checkpoints/`, and
 `wal/segments/` collections. A live manifest roots every object key its
-`metadata_files` list names, wherever that key sits. The pass also
+`segments` list names, wherever that key sits. The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
 halves are split at the completed line and described in rule 11.
 Core GC never recognizes, lists specifically, or deletes any object below a
@@ -2320,7 +2322,7 @@ publishing CAS) — under these rules:
    the namespace's own prefix whose provider timestamp is at least `T` old:
    it is a durable snapshot of what the namespace referenced when the window
    opened. R roots what it names exactly as `metadata/root.json` does — its
-   own key, its `metadata_files`, its content references, and every WAL
+   own key, its `segments`, its content references, and every WAL
    segment above its `head_seq` — so an unreferenced object is deleted only
    when the current root set, R, and the object's own age all agree. A
    namespace that has published no manifest needs no R: nothing has ever
@@ -2344,7 +2346,7 @@ publishing CAS) — under these rules:
    stands — a user pin until its expiry passes, a fork pin until its target
    is provably gone (rule 10), whatever its lease says; and the visible chain from
    `wal/head.json.visible_wal_tip` down to the floor. A namespace with no
-   root of its own has no manifest or table to protect under its own prefix;
+   root of its own has no manifest or segment to protect under its own prefix;
    its basis, if it has a foreign one, is protected on the source side by
    the fork-owned checkpoint record. On a terminally
    deleted namespace the root set shrinks to fork-owned records protecting
@@ -2355,7 +2357,7 @@ publishing CAS) — under these rules:
    namespace ever wrote them.
 5. A root the pass cannot resolve causes retention, not deletion: a root
    manifest that is absent, or that the store will not hand over,
-   suppresses manifest and table deletion for the whole pass. A root that
+   suppresses manifest and segment deletion for the whole pass. A root that
    is corrupt is a different case, because retaining it would suppress
    deletion on every later pass as well and nothing would ever say why. An
    object under `checkpoints/` that does not decode as a checkpoint record,
@@ -2368,7 +2370,7 @@ publishing CAS) — under these rules:
    an active checkpoint's basis, the checkpoint's objects remain protected;
    reconciling the floor is an explicit recovery action.
 9. **Immutable sweep families need no two-step deletion.** WAL segments,
-   metadata tables and manifests, grep segments and manifests, and content
+   metadata segments and manifests, grep segments and manifests, and content
    blobs have keys that can only contain identical bytes under their
    create-if-absent, content-derived, or write-verification protocols. Once
    one is unreferenced and grace-aged, unconditional deletion is safe: a
@@ -2450,7 +2452,7 @@ publishing CAS) — under these rules:
 
    The lease says so instead. Every job owns the prefix
    `namespaces/{namespace_id}/metadata/compactions/{job_id}/`, writes its
-   output under `tables/` inside it, and holds a lease at `lease.json` beside
+   output under `segments/` inside it, and holds a lease at `lease.json` beside
    that directory. The lease carries ownership only — job, namespace, owner,
    the tagged `status`, `started_at_ms`, `heartbeat_at_ms` — and never a
    cursor, an output descriptor, an offset, or resumable progress. The job
@@ -2517,7 +2519,7 @@ publishing CAS) — under these rules:
    object, so believing a corrupt one would keep its prefix alive forever and
    nothing would ever say why. Every other rule — the reference anchor,
    delete-time re-verification, degraded roots — applies here exactly as it
-   applies to `metadata/tables/`.
+   applies to `metadata/segments/`.
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.

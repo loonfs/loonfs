@@ -9,7 +9,7 @@ use crate::metrics::RuntimeInstruments;
 use crate::{CommitResponse, CoreError, NamespaceId, Recency, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
-use loonfs_core::cache::{MetadataTableCacheStats, WalTailProjectionCacheStats};
+use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::{
     load_namespace_read_anchor, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
     MetadataBasis, VerifiedNamespaceCatalogEntry,
@@ -80,18 +80,18 @@ pub struct RuntimeCacheStats {
     pub wal_tail_projection_cache_cached_rows: usize,
     /// Decoded bytes currently retained across cached WAL-tail projections.
     pub wal_tail_projection_cache_cached_decoded_bytes: usize,
-    /// Decoded metadata-table cache hits.
-    pub metadata_table_cache_hits: usize,
-    /// Decoded metadata-table cache misses.
-    pub metadata_table_cache_misses: usize,
-    /// Blocks inserted into the decoded metadata-table cache.
-    pub metadata_table_cache_inserts: usize,
-    /// Blocks evicted from the decoded metadata-table cache.
-    pub metadata_table_cache_evictions: usize,
+    /// Decoded metadata-segment cache hits.
+    pub metadata_segment_cache_hits: usize,
+    /// Decoded metadata-segment cache misses.
+    pub metadata_segment_cache_misses: usize,
+    /// Blocks inserted into the decoded metadata-segment cache.
+    pub metadata_segment_cache_inserts: usize,
+    /// Blocks evicted from the decoded metadata-segment cache.
+    pub metadata_segment_cache_evictions: usize,
     /// Segments skipped by their bloom filter before any index or data read.
-    pub metadata_table_cache_filter_skips: usize,
+    pub metadata_segment_cache_filter_skips: usize,
     /// Segments whose filter admitted a lookup that matched no rows.
-    pub metadata_table_cache_filter_false_positives: usize,
+    pub metadata_segment_cache_filter_false_positives: usize,
 }
 
 pub(crate) struct RuntimeCacheStatsInner {
@@ -109,7 +109,7 @@ impl RuntimeCacheStatsInner {
 
     pub(crate) fn snapshot(
         &self,
-        metadata_table_cache: MetadataTableCacheStats,
+        metadata_segment_cache: MetadataSegmentCacheStats,
         wal_tail_projection_cache: WalTailProjectionCacheStats,
     ) -> RuntimeCacheStats {
         RuntimeCacheStats {
@@ -129,12 +129,12 @@ impl RuntimeCacheStatsInner {
             wal_tail_projection_cache_cached_rows: wal_tail_projection_cache.cached_rows,
             wal_tail_projection_cache_cached_decoded_bytes: wal_tail_projection_cache
                 .cached_decoded_bytes,
-            metadata_table_cache_hits: metadata_table_cache.hits,
-            metadata_table_cache_misses: metadata_table_cache.misses,
-            metadata_table_cache_inserts: metadata_table_cache.inserts,
-            metadata_table_cache_evictions: metadata_table_cache.evictions,
-            metadata_table_cache_filter_skips: metadata_table_cache.filter_skips,
-            metadata_table_cache_filter_false_positives: metadata_table_cache
+            metadata_segment_cache_hits: metadata_segment_cache.hits,
+            metadata_segment_cache_misses: metadata_segment_cache.misses,
+            metadata_segment_cache_inserts: metadata_segment_cache.inserts,
+            metadata_segment_cache_evictions: metadata_segment_cache.evictions,
+            metadata_segment_cache_filter_skips: metadata_segment_cache.filter_skips,
+            metadata_segment_cache_filter_false_positives: metadata_segment_cache
                 .filter_false_positives,
         }
     }
@@ -341,7 +341,7 @@ impl ReadCore {
             head: anchor.head.state.clone(),
             head_etag: anchor.head.identity.etag.clone(),
             basis: anchor.basis.clone(),
-            table_cache: Arc::clone(&self.inner.metadata_table_cache),
+            segment_cache: Arc::clone(&self.inner.metadata_segment_cache),
             tail_cache: Arc::clone(&self.inner.wal_tail_projection_cache),
         }
     }

@@ -12,7 +12,7 @@
 /// * the retention floor;
 /// * one checkpoint record read while marking, plus one more for the fork
 ///   target head that decides whether that record's target is gone;
-/// * one manifest opened, whether to mark its tables or by the content
+/// * one manifest opened, whether to mark its segments or by the content
 ///   reference scan;
 /// * one page of revision rows read out of an opened manifest;
 /// * the retained WAL chain, charged as one block of one unit per request

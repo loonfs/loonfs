@@ -385,10 +385,10 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         .expect("undelete before checkpoint");
         // The default threshold (32 segments) would answer NotNeeded for
         // this short history; force the flush so reopen reads Set and
-        // Revoke rows out of durable tables, not WAL replay.
+        // Revoke rows out of durable segments, not WAL replay.
         let step = fs
             .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
-            .expect("checkpoint the revoke into durable tables");
+            .expect("checkpoint the revoke into durable segments");
         let step = upkeep(&step);
         assert!(
             matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
@@ -407,7 +407,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         );
 
         // Order two: delete, checkpoint, reopen, THEN undelete — the
-        // revoke must resolve a deletion that lives in durable tables,
+        // revoke must resolve a deletion that lives in durable segments,
         // not the WAL tail.
         let inode_id = fs
             .stat_path_blocking(&namespace_id, "/docs/report.txt")

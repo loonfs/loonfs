@@ -1,4 +1,4 @@
-//! Flushes the visible WAL tail into metadata tables, publishes a manifest
+//! Flushes the visible WAL tail into metadata segments, publishes a manifest
 //! for the current head, and advances `metadata/root.json` by compare-and-swap.
 //! This does not create a checkpoint record.
 //!
@@ -7,14 +7,14 @@
 //! version for retention is a separate concern layered on top by
 //! [`create`](super::create).
 
-use super::build::{build_manifest_l0_run_tables, build_manifest_tables};
-use super::load::{head_from_manifest, load_basis_metadata_tables};
+use super::build::{build_manifest_l0_run_segments, build_manifest_segments};
+use super::load::{head_from_manifest, load_basis_metadata_segments};
 use super::publish::{
     manifest_write_failure, publish_metadata_root, write_namespace_manifest,
     ManifestPublicationOutcome,
 };
-use super::runs::{flatten_manifest_tables, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
-use super::scan::VerifiedMetadataTables;
+use super::runs::{flatten_manifest_segments, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
+use super::scan::VerifiedMetadataSegments;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
 use crate::error::CoreError;
@@ -67,7 +67,7 @@ pub(super) enum TryFlushWal {
     RaceLost,
 }
 
-/// Flushes the visible WAL tail into metadata tables and advances
+/// Flushes the visible WAL tail into metadata segments and advances
 /// `metadata/root.json` to a manifest covering the current head.
 ///
 /// The WAL delta lands as one new L0 run when the root lags the head; the
@@ -108,7 +108,7 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
 /// One flush attempt against one fresh projection.
 ///
 /// The metadata publication budget covers this attempt end to end: the
-/// measurement starts before any table object is written and gates the root
+/// measurement starts before any segment object is written and gates the root
 /// compare-and-swap, so an over-budget build aborts with only unreachable
 /// immutable outputs behind it.
 pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
@@ -132,7 +132,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     // checkpoint record can pin only its own.
     let basis_manifest = projection.basis.manifest();
     if projection.basis.is_owned_by(namespace_id)
-        && projection.manifest_tables.manifest().payload.head_seq == head_seq
+        && projection.manifest_segments.manifest().payload.head_seq == head_seq
     {
         let basis_manifest = basis_manifest.expect("an owned basis names a manifest");
         return Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
@@ -164,7 +164,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_write_failure)?;
     // The publication budget gates the root compare-and-swap: past it, the
-    // written tables and manifest may have aged into the GC grace window,
+    // written segments and manifest may have aged into the GC grace window,
     // so this attempt must abort without publishing (format spec, "Garbage
     // collection", rule 1). The orphans are reclaimed by a later pass.
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
@@ -177,7 +177,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         &manifest,
         projection.basis.is_owned_by(namespace_id).then(|| {
             projection
-                .manifest_tables
+                .manifest_segments
                 .manifest()
                 .payload
                 .manifest_object_id
@@ -218,8 +218,8 @@ pub(super) struct RootProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: HeadState,
     pub(super) basis: MetadataBasis,
     pub(super) floor_seq: ChangeSeq,
-    pub(super) manifest_tables: VerifiedMetadataTables<'a, S>,
-    /// Rows that are not in any SST yet: the genesis root inode when the
+    pub(super) manifest_segments: VerifiedMetadataSegments<'a, S>,
+    /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.
     pub(super) tail_state: MetadataState,
 }
@@ -249,10 +249,10 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         return Err(advanced_floor_without_root(namespace_id, floor_seq));
     }
     let basis =
-        load_basis_metadata_tables(store, None, namespace_id, &loaded.basis, head.created_at_ms)
+        load_basis_metadata_segments(store, None, namespace_id, &loaded.basis, head.created_at_ms)
             .await?;
-    let manifest_tables = basis.tables;
-    let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
+    let manifest_segments = basis.segments;
+    let manifest_head = head_from_manifest(&head, manifest_segments.manifest());
     let wal_chain = load_validated_wal_chain(
         store,
         WalChainLoadRequest {
@@ -285,7 +285,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         head,
         basis: loaded.basis,
         floor_seq,
-        manifest_tables,
+        manifest_segments,
         tail_state: replayed.resulting_metadata_state,
     })
 }
@@ -354,7 +354,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     manifest_object_id: ManifestObjectId,
 ) -> Result<NamespaceManifestEnvelope> {
     let head_seq = projection.head.seq;
-    let previous_manifest = projection.manifest_tables.manifest();
+    let previous_manifest = projection.manifest_segments.manifest();
 
     // A WAL flush keeps existing runs and writes the WAL delta as one new L0
     // run. Reorganization merges L0 runs into the base separately.
@@ -363,11 +363,11 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     // one root-inode row sits at sequence zero, which no delta run above
     // that sequence would carry. The namespace's first manifest is
     // therefore one complete base run over the whole projected state.
-    let (base_seq, metadata_files) = if matches!(projection.basis, MetadataBasis::Genesis) {
+    let (base_seq, segments) = if matches!(projection.basis, MetadataBasis::Genesis) {
         (
             head_seq,
-            flatten_manifest_tables(
-                build_manifest_tables(
+            flatten_manifest_segments(
+                build_manifest_segments(
                     store,
                     namespace_id,
                     head_seq,
@@ -379,10 +379,10 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
             ),
         )
     } else {
-        let mut metadata_files = previous_manifest.payload.metadata_files.clone();
+        let mut segments = previous_manifest.payload.segments.clone();
         if previous_manifest.payload.head_seq < head_seq {
-            metadata_files.extend(flatten_manifest_tables(
-                build_manifest_l0_run_tables(
+            segments.extend(flatten_manifest_segments(
+                build_manifest_l0_run_segments(
                     store,
                     namespace_id,
                     head_seq,
@@ -392,7 +392,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                 .await?,
             ));
         }
-        (previous_manifest.payload.base_seq, metadata_files)
+        (previous_manifest.payload.base_seq, segments)
     };
 
     NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
@@ -405,7 +405,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         writer_epoch: projection.head.writer_epoch,
         next_inode_id: projection.head.next_inode_id,
         retention_floor_seq: projection.floor_seq,
-        metadata_files,
+        segments,
     })
     .map_err(|err| {
         CoreError::Internal(format!(

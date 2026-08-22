@@ -2,9 +2,9 @@
 //! over the manifest, with head-etag freshness checks against concurrent
 //! publishers.
 
-use crate::checkpoint::VerifiedMetadataTables;
+use crate::checkpoint::VerifiedMetadataSegments;
 use crate::checkpoint::{
-    head_from_manifest, load_basis_metadata_tables, LoadedMetadataBasis, MetadataTableCache,
+    head_from_manifest, load_basis_metadata_segments, LoadedMetadataBasis, MetadataSegmentCache,
 };
 use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
@@ -25,13 +25,13 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head: HeadState,
     pub(super) head_etag: String,
     pub(super) acquired_writer: AcquiredWriter,
-    manifest_tables: VerifiedMetadataTables<'a, S>,
+    manifest_segments: VerifiedMetadataSegments<'a, S>,
     tail_state: MetadataState,
 }
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.manifest_tables, &self.tail_state)
+        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state)
     }
 
     pub(crate) fn content_store_id(&self) -> &ContentStoreId {
@@ -51,7 +51,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         committed_seq: ChangeSeq,
     ) -> Result<Option<CommittedChange>> {
         super::changes::find_committed_change_at(
-            self.manifest_tables.store(),
+            self.manifest_segments.store(),
             &self.head.namespace_id,
             committed_seq,
         )
@@ -147,7 +147,7 @@ impl PublishTailProjection {
 
 pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
-    table_cache: Option<&'a MetadataTableCache>,
+    segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     acquired_writer: AcquiredWriter,
     cached_projection: Option<&PublishTailProjection>,
@@ -169,9 +169,9 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     }
     ensure_publish_head_matches_acquired_writer(&head, &acquired_writer)?;
     let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
-    let loaded_basis = load_basis_metadata_tables(
+    let loaded_basis = load_basis_metadata_segments(
         store,
-        table_cache,
+        segment_cache,
         namespace_id,
         &loaded.basis,
         head.created_at_ms,
@@ -193,7 +193,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         load_publish_tail_projection(store, &head, key, &loaded_basis).await?
     };
 
-    let manifest_tables = loaded_basis.tables;
+    let manifest_segments = loaded_basis.segments;
     let tail_state = projection.tail_state.clone();
     ensure_publish_head_etag_still_current(store, namespace_id, &head_etag, &acquired_writer)
         .await?;
@@ -204,7 +204,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             head,
             head_etag,
             acquired_writer,
-            manifest_tables,
+            manifest_segments,
             tail_state,
         },
         projection,
@@ -232,7 +232,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     key: PublishProjectionKey,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<PublishTailProjection> {
-    let manifest_head = head_from_manifest(head, loaded_basis.tables.manifest());
+    let manifest_head = head_from_manifest(head, loaded_basis.segments.manifest());
     let wal_chain = load_validated_wal_chain(
         store,
         WalChainLoadRequest {

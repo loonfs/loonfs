@@ -960,11 +960,11 @@ impl NamespacePublisher {
     /// Returns the publisher's lazily created commit engine.
     ///
     /// Each publish loads the namespace identity from the head, so construction
-    /// only needs the shared table cache and writer session.
+    /// only needs the shared segment cache and writer session.
     fn engine_for<'slot>(&self, slot: &'slot mut EngineSlot) -> &'slot mut NamespaceCommitEngine {
         slot.engine.get_or_insert_with(|| {
             NamespaceCommitEngine::new(self.namespace_id.clone())
-                .table_cache(self.read_core.metadata_table_cache())
+                .segment_cache(self.read_core.metadata_segment_cache())
                 .writer_session(Arc::clone(&slot.session))
         })
     }

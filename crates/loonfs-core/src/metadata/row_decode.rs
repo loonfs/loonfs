@@ -1,6 +1,6 @@
 //! Decodes durable manifest rows into the in-memory metadata record types.
 //!
-//! Every table scan is family-scoped, so a row of any other kind in the
+//! Every segment scan is family-scoped, so a row of any other kind in the
 //! result is namespace corruption, not a case to skip: each decoder
 //! hard-rejects foreign rows instead of filtering them out.
 
@@ -12,11 +12,11 @@ use crate::metadata::{
 };
 use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, TombstoneRowAction};
 
-/// The scanned table can only hold `expected_kind` rows; the foreign row's
+/// The scanned segment can only hold `expected_kind` rows; the foreign row's
 /// self-keyed row key names its actual kind and identity.
 fn foreign_row(expected_kind: &str, row: &MetadataRow) -> CoreError {
     CoreError::NamespaceCorrupt(format!(
-        "manifest table scan expected `{expected_kind}` rows but found foreign row `{}`",
+        "manifest segment scan expected `{expected_kind}` rows but found foreign row `{}`",
         row.row_key()
     ))
 }

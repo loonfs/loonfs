@@ -345,7 +345,7 @@ fn gc_conclusion(gc: &GcResponse, submitted_cursor: Option<&str>) -> Maintenance
 
 fn reclaimed_anything(gc: &GcResponse) -> bool {
     gc.deleted_wal_segments > 0
-        || gc.deleted_metadata_tables > 0
+        || gc.deleted_metadata_segments > 0
         || gc.deleted_manifests > 0
         || gc.deleted_checkpoint_records > 0
         || gc.released_fork_checkpoints > 0

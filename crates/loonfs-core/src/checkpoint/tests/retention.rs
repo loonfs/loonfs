@@ -113,11 +113,11 @@ async fn current_manifest_no<S: ObjectStore + ?Sized>(
 }
 
 fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> {
-    runs_from_metadata_files(&manifest.payload)
+    runs_from_segments(&manifest.payload)
         .into_iter()
         .flat_map(|run| {
-            run.tables.into_iter().flat_map(|table| {
-                table
+            run.segments.into_iter().flat_map(|family_segments| {
+                family_segments
                     .segments
                     .into_iter()
                     .map(|descriptor| descriptor.object_key.clone())
@@ -140,7 +140,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
     right: &MetadataState,
 ) -> bool {
     let normalize = |state: &MetadataState| {
-        CHECKPOINT_TABLE_FAMILIES
+        CHECKPOINT_ROW_FAMILIES
             .into_iter()
             .map(|family| {
                 let rows = manifest_rows_for_family(state, family)
@@ -197,7 +197,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
 }
 
 fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
-    for family in CHECKPOINT_TABLE_FAMILIES {
+    for family in CHECKPOINT_ROW_FAMILIES {
         let rows = manifest_rows_for_family(metadata_state, family);
         let mut seen = BTreeSet::new();
         for row in rows {
@@ -210,26 +210,30 @@ fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
     }
 }
 
-type TableRunShape = (ApiMetadataTableFamily, u64, usize);
-type ManifestRunShape = (ChangeSeq, u32, Vec<TableRunShape>);
+type FamilyRunShape = (ApiMetadataRowFamily, u64, usize);
+type ManifestRunShape = (ChangeSeq, u32, Vec<FamilyRunShape>);
 
 fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunShape> {
-    runs_from_metadata_files(&manifest.payload)
+    runs_from_segments(&manifest.payload)
         .into_iter()
         .map(|run| {
-            let tables = run
-                .tables
+            let segments = run
+                .segments
                 .into_iter()
-                .map(|table| {
-                    let row_count = table
+                .map(|family_segments| {
+                    let row_count = family_segments
                         .segments
                         .iter()
                         .map(|descriptor| descriptor.row_count)
                         .sum();
-                    (table.family, row_count, table.segments.len())
+                    (
+                        family_segments.family,
+                        row_count,
+                        family_segments.segments.len(),
+                    )
                 })
                 .collect();
-            (run.run_seq, run.level, tables)
+            (run.run_seq, run.level, segments)
         })
         .collect()
 }
@@ -294,7 +298,8 @@ impl crate::time::MonotonicTimer for SteppingTimer {
 #[tokio::test]
 async fn retention_advancement_uses_published_manifest_and_updates_floor_only() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -309,7 +314,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     assert_eq!(
         store.count(OperationClass::Read),
         0,
-        "retention should validate manifest descriptors without loading metadata SST payloads"
+        "retention should validate manifest descriptors without loading metadata segment payloads"
     );
 
     write_file_bytes(
@@ -1109,7 +1114,8 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
 #[tokio::test]
 async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -1149,7 +1155,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     .await
     .expect("budgeted step");
     let super::MetadataReorganizeOutcome::CompactionPlanned { group, .. } = blocked.outcome else {
-        panic!("one byte must not admit an SST run");
+        panic!("one byte must not admit a metadata run");
     };
     assert_eq!(
         current_manifest_no(&store, &namespace_id).await,
@@ -1411,7 +1417,10 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .await
         .expect("materialization");
     let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
-    let compacted_run_prefix = format!("namespaces/{}/metadata/tables/tbl_", namespace_id.as_str());
+    let compacted_run_prefix = format!(
+        "namespaces/{}/metadata/segments/seg_",
+        namespace_id.as_str()
+    );
 
     assert_eq!(
         compacted_materialized.manifest.payload.base_seq,
@@ -1419,7 +1428,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
     );
     assert!(l0_runs(&compacted_materialized.manifest).is_empty());
     assert_eq!(
-        runs_from_metadata_files(&compacted_materialized.manifest.payload).len(),
+        runs_from_segments(&compacted_materialized.manifest.payload).len(),
         1
     );
     assert!(!compacted_run_keys.is_empty());
@@ -1466,7 +1475,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
             .expect("load first manifest");
     let revision_keys_before = base_segment_object_keys_for_family(
         &first_materialized.manifest,
-        ApiMetadataTableFamily::Revisions,
+        ApiMetadataRowFamily::Revisions,
     );
     assert!(revision_keys_before.len() >= 3);
 
@@ -1501,7 +1510,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
             .expect("load compacted manifest");
     let revision_keys_after = base_segment_object_keys_for_family(
         &compacted_materialized.manifest,
-        ApiMetadataTableFamily::Revisions,
+        ApiMetadataRowFamily::Revisions,
     );
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
@@ -1510,11 +1519,9 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
     assert!(l0_runs(&compacted_materialized.manifest).is_empty());
     // Groups untouched since the first fold keep their older base run, so
     // several base runs may coexist; what matters is that no delta remains.
-    assert!(
-        runs_from_metadata_files(&compacted_materialized.manifest.payload)
-            .iter()
-            .all(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
-    );
+    assert!(runs_from_segments(&compacted_materialized.manifest.payload)
+        .iter()
+        .all(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL));
     assert!(revision_keys_after
         .iter()
         .all(|key| !revision_keys_before.contains(key)));
@@ -1725,7 +1732,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
 }
 
 /// An over-budget reorganization unit aborts the same way: no root motion,
-/// orphan tables left for garbage collection.
+/// orphan segments left for garbage collection.
 #[tokio::test]
 async fn over_budget_reorganization_aborts_without_publishing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1809,14 +1816,14 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     super::reorganize::ReorganizationSelection,
 ) {
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
-    let tables = load_verified_manifest_tables(store, namespace_id, &manifest_object_id)
+    let segments = load_verified_manifest_segments(store, namespace_id, &manifest_object_id)
         .await
-        .expect("load manifest tables");
-    let group = super::reorganize::select_family_group(&tables.manifest().payload, None)
+        .expect("load manifest segments");
+    let group = super::reorganize::select_family_group(&segments.manifest().payload, None)
         .expect("a family group with L0 rows to fold");
     let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
     let selection = super::reorganize::select_reorganization_input(
-        &tables,
+        &segments,
         group,
         policy,
         frozen_floor_seq,
@@ -1840,23 +1847,23 @@ fn bounded_merge(
 
 /// Rows one run holds in one family group: the quantity the per-step row
 /// budget is measured against.
-fn group_run_rows(run: &MetadataRunManifest, group: &[ApiMetadataTableFamily]) -> u64 {
-    run.tables
+fn group_run_rows(run: &MetadataRunManifest, group: &[ApiMetadataRowFamily]) -> u64 {
+    run.segments
         .iter()
-        .filter(|table| group.contains(&table.family))
-        .flat_map(|table| &table.segments)
+        .filter(|family_segments| group.contains(&family_segments.family))
+        .flat_map(|family_segments| &family_segments.segments)
         .map(|descriptor| descriptor.row_count)
         .sum()
 }
 
 fn group_segment_object_keys(
     run: &MetadataRunManifest,
-    group: &[ApiMetadataTableFamily],
+    group: &[ApiMetadataRowFamily],
 ) -> Vec<String> {
-    run.tables
+    run.segments
         .iter()
-        .filter(|table| group.contains(&table.family))
-        .flat_map(|table| &table.segments)
+        .filter(|family_segments| group.contains(&family_segments.family))
+        .flat_map(|family_segments| &family_segments.segments)
         .map(|descriptor| descriptor.object_key.clone())
         .collect()
 }
@@ -2012,7 +2019,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
                     assert!(
                         base_segments
                             .iter()
-                            .all(|segment| referenced.contains(segment)),
+                            .all(|segment_key| referenced.contains(segment_key)),
                         "the base must still be untouched when the job is planned"
                     );
                     delta_runs_when_the_compaction_was_planned =
@@ -2053,9 +2060,9 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     );
     assert_eq!(group_base_runs(&after.manifest, group.families()).len(), 1);
     let remaining = run_segment_object_keys(&after.manifest);
-    for segment in &base_segments {
+    for segment_key in &base_segments {
         assert!(
-            !remaining.contains(segment),
+            !remaining.contains(segment_key),
             "the frozen base's segments must be replaced by the rebuilt run"
         );
     }
@@ -2154,7 +2161,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let (group, _) =
         select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
     assert!(
-        group.contains(ApiMetadataTableFamily::DirentryUnbinds),
+        group.contains(ApiMetadataRowFamily::DirentryUnbinds),
         "this test is about the binding families, got {group:?}"
     );
     let base_rows = group_run_rows(&base_run(&before.manifest), group.families());
@@ -2224,11 +2231,8 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         "a merge above the base must be a pure rewrite"
     );
     assert!(
-        !manifest_rows_for_family(
-            &after.metadata_state,
-            ApiMetadataTableFamily::DirentryUnbinds
-        )
-        .is_empty(),
+        !manifest_rows_for_family(&after.metadata_state, ApiMetadataRowFamily::DirentryUnbinds)
+            .is_empty(),
         "the cancelling row must survive the merge"
     );
     let projection = load_current_projection(&store, &namespace_id)
@@ -2391,7 +2395,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         ..MetadataLsmPolicy::default()
     };
 
-    let group = group_containing(ApiMetadataTableFamily::DirentryUnbinds);
+    let group = group_containing(ApiMetadataRowFamily::DirentryUnbinds);
     let mut compacted_groups = 0usize;
     for cycle in 0..4u64 {
         for file in 0..4u64 {

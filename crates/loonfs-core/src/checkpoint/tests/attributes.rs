@@ -1,5 +1,5 @@
 //! The attribute family: its row keys, the fold that drops superseded
-//! revisions, and the sequence-correct lookup over published tables.
+//! revisions, and the sequence-correct lookup over published segments.
 
 use super::*;
 use crate::metadata::{AttributesRevisionRecord, MetadataStateBuilder, MetadataView};
@@ -47,18 +47,18 @@ fn state_from_attributes(records: Vec<AttributesRevisionRecord>) -> MetadataStat
     builder.finish()
 }
 
-fn attribute_rows(state: &MetadataState) -> BTreeMap<ApiMetadataTableFamily, Vec<MetadataRow>> {
+fn attribute_rows(state: &MetadataState) -> BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>> {
     BTreeMap::from([(
-        ApiMetadataTableFamily::Attributes,
-        manifest_rows_for_family(state, ApiMetadataTableFamily::Attributes),
+        ApiMetadataRowFamily::Attributes,
+        manifest_rows_for_family(state, ApiMetadataRowFamily::Attributes),
     )])
 }
 
 fn kept_revisions(
-    rows_by_family: &BTreeMap<ApiMetadataTableFamily, Vec<MetadataRow>>,
+    rows_by_family: &BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
 ) -> Vec<(u64, u64)> {
     rows_by_family
-        .get(&ApiMetadataTableFamily::Attributes)
+        .get(&ApiMetadataRowFamily::Attributes)
         .expect("family rows")
         .iter()
         .map(|row| match row {
@@ -141,7 +141,7 @@ fn the_fold_keeps_a_latest_empty_revision() {
     .expect("fold attributes");
 
     let kept = rows_by_family
-        .remove(&ApiMetadataTableFamily::Attributes)
+        .remove(&ApiMetadataRowFamily::Attributes)
         .expect("family rows");
     assert!(
         matches!(
@@ -210,7 +210,7 @@ fn the_fold_refuses_to_compact_repeated_revision_numbers() {
 /// it is the answer. This is what a checkpoint-basis or fork-basis read
 /// depends on.
 #[tokio::test]
-async fn a_published_table_answers_at_the_sequence_the_read_asks_for() {
+async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -220,7 +220,7 @@ async fn a_published_table_answers_at_the_sequence_the_read_asks_for() {
         attributes_record(InodeId(7), 3, 9, &[("owner", "hopper")]),
     ]);
 
-    let tables = build_manifest_tables(
+    let segments = build_manifest_segments(
         &store,
         &namespace_id,
         ChangeSeq(9),
@@ -229,10 +229,10 @@ async fn a_published_table_answers_at_the_sequence_the_read_asks_for() {
         NonZeroUsize::new(64).expect("segment row budget"),
     )
     .await
-    .expect("build tables");
-    let attribute_segments = tables
+    .expect("build segments");
+    let attribute_segments = segments
         .iter()
-        .find(|table| table.family == ApiMetadataTableFamily::Attributes)
+        .find(|family_segments| family_segments.family == ApiMetadataRowFamily::Attributes)
         .expect("the flush writes the attribute family")
         .segments
         .clone();
@@ -245,17 +245,17 @@ async fn a_published_table_answers_at_the_sequence_the_read_asks_for() {
         "every attribute revision is published"
     );
 
-    let manifest = publish_manifest_with_tables(
+    let manifest = publish_manifest_with_segments(
         &store,
         &namespace_id,
         ManifestNo(1),
         ChangeSeq(9),
-        flatten_manifest_tables(tables),
+        flatten_manifest_segments(segments),
     )
     .await;
-    let verified = load_verified_manifest_tables(&store, &namespace_id, &manifest)
+    let verified = load_verified_manifest_segments(&store, &namespace_id, &manifest)
         .await
-        .expect("load manifest tables");
+        .expect("load manifest segments");
 
     for (visible_seq, expected_revision, expected_owner) in [
         (9_u64, 3_u64, "hopper"),
@@ -263,7 +263,7 @@ async fn a_published_table_answers_at_the_sequence_the_read_asks_for() {
         (6, 2, "grace"),
         (5, 1, "ada"),
     ] {
-        let view = MetadataView::over_manifest_tables(&verified, ChangeSeq(visible_seq));
+        let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(visible_seq));
         let (revision, map) = view
             .attributes_at_visible_seq(InodeId(7))
             .await
@@ -278,14 +278,14 @@ async fn a_published_table_answers_at_the_sequence_the_read_asks_for() {
 
     // Below every row, and for an inode that has none: the concrete empty
     // state, not a missing answer.
-    let view = MetadataView::over_manifest_tables(&verified, ChangeSeq(2));
+    let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(2));
     assert_eq!(
         view.attributes_at_visible_seq(InodeId(7))
             .await
             .expect("read attributes"),
         (AttributeRevisionNo(0), Attributes::default())
     );
-    let view = MetadataView::over_manifest_tables(&verified, ChangeSeq(9));
+    let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(9));
     assert_eq!(
         view.attributes_at_visible_seq(InodeId(8))
             .await
@@ -294,12 +294,12 @@ async fn a_published_table_answers_at_the_sequence_the_read_asks_for() {
     );
 }
 
-async fn publish_manifest_with_tables<S: ObjectStore + ?Sized>(
+async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
     head_seq: ChangeSeq,
-    metadata_files: Vec<MetadataFileRef>,
+    segments: Vec<MetadataSegmentRef>,
 ) -> ManifestObjectId {
     let manifest_object_id = ManifestObjectId::generate(manifest_no);
     let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
@@ -312,7 +312,7 @@ async fn publish_manifest_with_tables<S: ObjectStore + ?Sized>(
         writer_epoch: loonfs_api::WriterEpoch(1),
         next_inode_id: InodeId(64),
         retention_floor_seq: ChangeSeq(0),
-        metadata_files,
+        segments,
     })
     .expect("manifest envelope");
     write_namespace_manifest(store, &manifest)

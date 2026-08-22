@@ -7,14 +7,14 @@
 //! head, the WAL, or any later manifest: a consumer that wants what changed
 //! after the pinned sequence reads the change feed.
 
-use super::cache::MetadataTableCache;
+use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
-use super::load::load_verified_manifest_tables_with_cache;
+use super::load::load_verified_manifest_segments_with_cache;
 use super::record::load_checkpoint_record;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::MetadataView;
 use loonfs_api::wire::control::{CheckpointRecordState, CheckpointStatus};
-use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{
     ChangeSeq, CheckpointId, ContentRef, InodeId, InodeKind, NamespaceId, PageRequest, RevisionNo,
@@ -86,15 +86,15 @@ pub struct CheckpointFilesPage {
 /// that is provably still there.
 pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     store: &S,
-    table_cache: Option<&MetadataTableCache>,
+    segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
     request: PageRequest<CheckpointFilesPageCursor>,
 ) -> Result<CheckpointFilesPage> {
     let record = load_pinning_checkpoint_record(store, namespace_id, checkpoint_id).await?;
-    let tables = load_verified_manifest_tables_with_cache(
+    let segments = load_verified_manifest_segments_with_cache(
         store,
-        table_cache,
+        segment_cache,
         namespace_id,
         &record.manifest_object_id,
     )
@@ -105,7 +105,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
         ),
         other => CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(other)),
     })?;
-    let manifest = tables.manifest();
+    let manifest = segments.manifest();
     if manifest.payload_checksum != record.manifest_payload_checksum
         || manifest.payload.head_seq != record.manifest_head_seq
     {
@@ -115,7 +115,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     }
 
     let checkpoint_seq = record.manifest_head_seq;
-    let view = MetadataView::over_manifest_tables(&tables, checkpoint_seq);
+    let view = MetadataView::over_manifest_segments(&segments, checkpoint_seq);
     let mut session = view.session();
 
     // One row past the page proves whether another file exists, so a cursor
@@ -129,9 +129,9 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     let upper_bound = string_prefix_upper_bound(lookup_keys::INODE_ROW_PREFIX);
     let mut files = Vec::with_capacity(wanted);
     while files.len() < wanted {
-        let rows = tables
+        let rows = segments
             .scan_range_page_with_keys(
-                MetadataTableFamily::Inodes,
+                MetadataRowFamily::Inodes,
                 &lower_bound,
                 upper_bound.as_deref(),
                 wave_rows,

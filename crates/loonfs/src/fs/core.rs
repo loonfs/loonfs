@@ -22,7 +22,7 @@ use loonfs_api::{
     PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
-    MetadataTableCache, StoredMetadataBlockCache, WalTailProjectionCache,
+    MetadataSegmentCache, StoredMetadataBlockCache, WalTailProjectionCache,
     WalTailProjectionCacheConfig,
 };
 use loonfs_core::time::current_time_ms;
@@ -47,7 +47,7 @@ pub(crate) struct ReadCoreInner {
     pub(crate) store: SharedObjectStore,
     pub(crate) config: ReadConfig,
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
-    pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
+    pub(crate) metadata_segment_cache: Arc<MetadataSegmentCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
     /// Where this runtime's publication, maintenance, and collection
@@ -107,31 +107,26 @@ impl ReadCoreInner {
 }
 
 impl ReadCore {
-    /// Opens a read core. `shared_metadata_table_cache` substitutes an
-    /// existing decoded-block cache for a freshly sized one, so handles
-    /// with distinct actor identities can still share warmed blocks —
-    /// sound across cores because entries are keyed by immutable
-    /// identities (payload checksums and manifest object keys); the
-    /// sharing caller owns the sizing decision, and
-    /// `config.runtime_cache.metadata_table_cache` goes unused.
+    /// Opens a read core. When `shared_metadata_segment_cache` is set, the
+    /// core reuses that decoded-block cache instead of creating one from
+    /// `config.runtime_cache.metadata_segment_cache`. Sharing is safe because
+    /// entries are keyed by immutable payload checksums and manifest keys.
     ///
-    /// `stored_metadata_block_cache` is the node-local cache of encoded
-    /// blocks the fresh decoded cache carries beneath it. It applies only
-    /// when this core sizes its own cache: a shared cache already carries
-    /// whatever handle it was built with, which is what makes the sharing
-    /// caller's sizing decision cover both tiers together.
+    /// `stored_metadata_block_cache` provides a node-local encoded-block cache
+    /// when this core creates its own decoded cache. A shared decoded cache
+    /// already has its encoded cache configured.
     pub(crate) fn open(
         store: SharedObjectStore,
         config: ReadConfig,
-        shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
+        shared_metadata_segment_cache: Option<Arc<MetadataSegmentCache>>,
         stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
         instruments: Arc<RuntimeInstruments>,
     ) -> Self {
-        let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
-            Arc::new(MetadataTableCache::with_stored_block_cache_and_observer(
-                config.runtime_cache.metadata_table_cache.clone(),
+        let metadata_segment_cache = shared_metadata_segment_cache.unwrap_or_else(|| {
+            Arc::new(MetadataSegmentCache::with_stored_block_cache_and_observer(
+                config.runtime_cache.metadata_segment_cache.clone(),
                 stored_metadata_block_cache,
-                instruments.metadata_table_cache_observer(),
+                instruments.metadata_segment_cache_observer(),
             ))
         });
         let wal_tail_projection_cache = Arc::new(WalTailProjectionCache::with_observer(
@@ -149,7 +144,7 @@ impl ReadCore {
                 store,
                 config,
                 control_cache: Mutex::new(RuntimeControlCache::default()),
-                metadata_table_cache,
+                metadata_segment_cache,
                 wal_tail_projection_cache,
                 cache_stats: RuntimeCacheStatsInner::new(Arc::clone(&instruments)),
                 instruments,
@@ -165,8 +160,8 @@ impl ReadCore {
 
     /// This runtime's shared decoded-block cache handle, for builders
     /// that open another core sharing it.
-    pub(crate) fn metadata_table_cache(&self) -> Arc<MetadataTableCache> {
-        Arc::clone(&self.inner.metadata_table_cache)
+    pub(crate) fn metadata_segment_cache(&self) -> Arc<MetadataSegmentCache> {
+        Arc::clone(&self.inner.metadata_segment_cache)
     }
 
     pub(crate) fn trace_mode(&self) -> &'static str {
@@ -250,7 +245,7 @@ impl ReadCore {
     /// Snapshots the runtime cache counters.
     pub(crate) fn runtime_cache_stats(&self) -> RuntimeCacheStats {
         self.inner.cache_stats.snapshot(
-            self.inner.metadata_table_cache.stats(),
+            self.inner.metadata_segment_cache.stats(),
             self.inner.wal_tail_projection_cache.stats(),
         )
     }

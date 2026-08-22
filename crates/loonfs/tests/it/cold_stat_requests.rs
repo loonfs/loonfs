@@ -1,7 +1,7 @@
 //! Pins the cold first-stat request shape: a fresh handle resolving a path
 //! over a manifest that carries several unfolded L0 runs must not pay a
 //! per-run filter fetch (the manifest's inline filter copies answer those),
-//! and every metadata-table object it does touch is small enough to load
+//! and every metadata-segment object it does touch is small enough to load
 //! whole with a single ranged GET.
 //!
 //! This is the regression guard for the cold-stat latency cliff: the run
@@ -13,7 +13,7 @@ use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
     MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
 };
-use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataTableFamily};
+use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_api::AbsolutePath;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -156,10 +156,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
     let direntry_l0_runs: BTreeSet<_> = manifest
         .payload
-        .metadata_files
+        .segments
         .iter()
         .filter(|descriptor| {
-            descriptor.level == 0 && descriptor.family == MetadataTableFamily::DirentryBinds
+            descriptor.level == 0 && descriptor.family == MetadataRowFamily::DirentryBinds
         })
         .map(|descriptor| descriptor.run_seq)
         .collect();
@@ -171,7 +171,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     assert!(
         manifest
             .payload
-            .metadata_files
+            .segments
             .iter()
             .filter(|descriptor| descriptor.level == 0)
             .all(|descriptor| descriptor.filter_inline.is_some()),
@@ -179,7 +179,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     );
     let filter_offsets: BTreeSet<(String, u64)> = manifest
         .payload
-        .metadata_files
+        .segments
         .iter()
         .map(|descriptor| {
             (
@@ -188,9 +188,9 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             )
         })
         .collect();
-    let table_keys: BTreeSet<String> = manifest
+    let segment_keys: BTreeSet<String> = manifest
         .payload
-        .metadata_files
+        .segments
         .iter()
         .map(|descriptor| descriptor.object_key.clone())
         .collect();
@@ -223,12 +223,15 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     );
 
     let gets = log.take_gets();
-    let table_gets: Vec<&RecordedGet> = gets
+    let segment_gets: Vec<&RecordedGet> = gets
         .iter()
-        .filter(|(key, _)| table_keys.contains(key))
+        .filter(|(key, _)| segment_keys.contains(key))
         .collect();
-    assert!(!table_gets.is_empty(), "a cold stat reads metadata tables");
-    for (key, range) in &table_gets {
+    assert!(
+        !segment_gets.is_empty(),
+        "a cold stat reads metadata segments"
+    );
+    for (key, range) in &segment_gets {
         let start = range.map(|(start, _)| start);
         assert!(
             !filter_offsets.contains(&(key.clone(), start.unwrap_or(0))),
