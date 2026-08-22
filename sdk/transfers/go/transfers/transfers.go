@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"hash/crc64"
@@ -273,23 +272,15 @@ func getFileProxied(ctx context.Context, c *client.Client, in GetFileInput) (*Ge
 	}, nil
 }
 
-// fileProjection decodes the file fields stored in Fern's extra properties.
+// fileProjection reads the file half of a path entry union.
 func fileProjection(entry *loonfs.AuthoritativePathEntry) (*loonfs.AuthoritativePathEntryFile, error) {
 	if entry == nil {
 		return nil, fmt.Errorf("transfers: path entry is nil")
 	}
-	data, err := json.Marshal(entry.GetExtraProperties())
-	if err != nil {
-		return nil, fmt.Errorf("transfers: encode path entry projection: %w", err)
+	if entry.File == nil {
+		return nil, fmt.Errorf("transfers: path is a %s, not a file", entry.InodeKind)
 	}
-	var projection loonfs.AuthoritativePathEntryKind
-	if err := json.Unmarshal(data, &projection); err != nil {
-		return nil, fmt.Errorf("transfers: decode path entry projection: %w", err)
-	}
-	if projection.File == nil {
-		return nil, fmt.Errorf("transfers: path is a %s, not a file", projection.InodeKind)
-	}
-	return projection.File, nil
+	return entry.File, nil
 }
 
 func beginUploadRequest(
@@ -527,18 +518,10 @@ func completedUploadStatus(response *loonfs.UploadSessionResponse) (*loonfs.Uplo
 	if response == nil {
 		return nil, fmt.Errorf("transfers: upload session response is nil")
 	}
-	data, err := json.Marshal(response.GetExtraProperties())
-	if err != nil {
-		return nil, fmt.Errorf("transfers: encode upload session response: %w", err)
+	if response.Completed == nil || response.Completed.ContentRef == nil {
+		return nil, fmt.Errorf("transfers: upload is %s, not completed", response.Status)
 	}
-	var status loonfs.UploadSessionStatus
-	if err := json.Unmarshal(data, &status); err != nil {
-		return nil, fmt.Errorf("transfers: decode upload status: %w", err)
-	}
-	if status.Completed == nil || status.Completed.ContentRef == nil {
-		return nil, fmt.Errorf("transfers: upload did not complete")
-	}
-	return status.Completed, nil
+	return response.Completed, nil
 }
 
 func splitParts(payload []byte, partSize int) [][]byte {

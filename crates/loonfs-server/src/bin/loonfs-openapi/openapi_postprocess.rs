@@ -100,6 +100,20 @@ pub(crate) enum OpenapiPostprocessError {
     InvalidPaginationOperation { method: &'static str, path: String },
     #[error("OpenAPI union variant `{schema_name}` conflicts with an existing component schema")]
     UnionVariantSchemaCollision { schema_name: String },
+    #[error("OpenAPI composite `{schema_name}` combines two discriminated unions")]
+    UnionCompositeHasTwoUnions { schema_name: String },
+    #[error("OpenAPI composite `{schema_name}` defines property `{property}` twice")]
+    UnionCompositeDuplicateProperty {
+        schema_name: String,
+        property: String,
+    },
+    #[error(
+        "OpenAPI union `{union_name}` is flattened into `{schema_name}` and referenced elsewhere"
+    )]
+    SharedUnionComposite {
+        schema_name: String,
+        union_name: String,
+    },
     #[error("proxy operation `{operation_id}` does not appear in the full OpenAPI document")]
     MissingProxyOperation { operation_id: String },
     #[error(
@@ -165,6 +179,13 @@ impl Value {
         }
     }
 
+    fn as_array_mut(&mut self) -> Option<&mut Vec<Self>> {
+        match self {
+            Self::Array(values) => Some(values),
+            _ => None,
+        }
+    }
+
     fn as_object(&self) -> Option<&Map> {
         match self {
             Self::Object(object) => Some(object),
@@ -197,6 +218,7 @@ pub(crate) fn openapi_json_pretty(
     drop_null_from_response_schemas(&mut document);
     add_union_discriminators(&mut document, &mut Vec::new());
     extract_union_variants(&mut document)?;
+    merge_union_composites(&mut document)?;
     add_operation_retry_classes(&mut document)?;
     add_pagination_metadata(&mut document)?;
     Ok(serde_json::to_string_pretty(&document)?)
@@ -826,6 +848,279 @@ fn register_extracted_schema(
     Ok(())
 }
 
+/// Planned rewrite for an `allOf` that contains a discriminated union.
+struct UnionComposite {
+    composite_name: String,
+    union_name: String,
+    /// Variant references for the replacement `oneOf`.
+    one_of: Vec<Value>,
+    /// Component names for the variants that receive envelope fields.
+    variant_names: Vec<String>,
+    discriminator: Value,
+    envelope: UnionEnvelope,
+    /// Components that may be removed after the rewrite.
+    merged_names: Vec<String>,
+}
+
+/// Non-union fields from an `allOf` composite.
+#[derive(Default)]
+struct UnionEnvelope {
+    properties: Map,
+    required: Vec<String>,
+}
+
+impl UnionEnvelope {
+    /// Adds one composite member's fields in document order.
+    fn extend(
+        &mut self,
+        composite_name: &str,
+        member: &Value,
+    ) -> Result<(), OpenapiPostprocessError> {
+        if let Some(properties) = member.get("properties").and_then(Value::as_object) {
+            for (name, schema) in properties {
+                insert_new_property(composite_name, &mut self.properties, name, schema.clone())?;
+            }
+        }
+        for name in required_names(member) {
+            if !self.required.contains(&name) {
+                self.required.push(name);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Rewrites `allOf: [union, envelope]` as a top-level discriminated `oneOf`.
+/// Each variant receives the envelope fields. This preserves the wire schema
+/// while avoiding generator bugs that discard either half of `allOf`.
+fn merge_union_composites(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+    let schemas = document
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .expect("OpenAPI document has no component schemas object");
+    let mut composites = Vec::new();
+
+    for (composite_name, composite) in schemas {
+        if let Some(composite) = plan_union_composite(schemas, composite_name, composite)? {
+            composites.push(composite);
+        }
+    }
+    if composites.is_empty() {
+        return Ok(());
+    }
+    reject_shared_unions(document, &composites)?;
+
+    let mut merged_names = BTreeSet::new();
+    let schemas = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("components"))
+        .and_then(Value::as_object_mut)
+        .and_then(|components| components.get_mut("schemas"))
+        .and_then(Value::as_object_mut)
+        .expect("OpenAPI document has no component schemas object");
+
+    for composite in composites {
+        for variant_name in &composite.variant_names {
+            let variant = schemas
+                .get_mut(variant_name)
+                .expect("OpenAPI union variant component is missing");
+            merge_envelope(&composite.composite_name, variant, &composite.envelope)?;
+        }
+
+        let schema = schemas
+            .get_mut(&composite.composite_name)
+            .and_then(Value::as_object_mut)
+            .expect("OpenAPI composite component is not an object");
+        for field in ["allOf", "properties", "required", "type"] {
+            schema.shift_remove(field);
+        }
+        schema.insert("oneOf".to_owned(), Value::Array(composite.one_of));
+        schema.insert("discriminator".to_owned(), composite.discriminator);
+        merged_names.extend(composite.merged_names);
+    }
+
+    remove_unreferenced_components(document, &merged_names);
+    Ok(())
+}
+
+/// Plans a union-composite rewrite, or returns `None` for other schemas.
+fn plan_union_composite(
+    schemas: &Map,
+    composite_name: &str,
+    composite: &Value,
+) -> Result<Option<UnionComposite>, OpenapiPostprocessError> {
+    let Some(members) = composite.get("allOf").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let mut union = None;
+    let mut envelope = UnionEnvelope::default();
+    let mut merged_names = Vec::new();
+
+    for member in members {
+        let referenced = member
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(component_schema_name)
+            .and_then(|name| Some((schemas.get(&name)?, name)));
+        match referenced {
+            Some((schema, name)) if is_discriminated_union(schema) => {
+                if union.is_some() {
+                    return Err(OpenapiPostprocessError::UnionCompositeHasTwoUnions {
+                        schema_name: composite_name.to_owned(),
+                    });
+                }
+                merged_names.push(name.clone());
+                union = Some((schema, name));
+            }
+            Some((schema, name)) => {
+                merged_names.push(name);
+                envelope.extend(composite_name, schema)?;
+            }
+            None => envelope.extend(composite_name, member)?,
+        }
+    }
+
+    let Some((union, union_name)) = union else {
+        return Ok(None);
+    };
+    let one_of = union
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .expect("discriminated union has a oneOf array")
+        .clone();
+    let variant_names = one_of
+        .iter()
+        .map(|variant| {
+            variant
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(component_schema_name)
+                .expect("extracted union variant references a component schema")
+        })
+        .collect();
+
+    Ok(Some(UnionComposite {
+        composite_name: composite_name.to_owned(),
+        union_name,
+        one_of,
+        variant_names,
+        discriminator: union
+            .get("discriminator")
+            .expect("discriminated union has a discriminator")
+            .clone(),
+        envelope,
+        merged_names,
+    }))
+}
+
+/// Returns whether a schema is a discriminated `oneOf`.
+fn is_discriminated_union(schema: &Value) -> bool {
+    schema.get("oneOf").and_then(Value::as_array).is_some() && schema.get("discriminator").is_some()
+}
+
+/// Adds the envelope fields to one union variant.
+fn merge_envelope(
+    composite_name: &str,
+    variant: &mut Value,
+    envelope: &UnionEnvelope,
+) -> Result<(), OpenapiPostprocessError> {
+    let variant = variant
+        .as_object_mut()
+        .expect("OpenAPI union variant is not an object");
+    let properties = variant
+        .entry("properties".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .expect("OpenAPI union variant properties is not an object");
+    for (name, schema) in &envelope.properties {
+        insert_new_property(composite_name, properties, name, schema.clone())?;
+    }
+
+    let required = variant
+        .entry("required".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("OpenAPI union variant required is not an array");
+    for name in &envelope.required {
+        if !required.iter().any(|value| value.as_str() == Some(name)) {
+            required.push(Value::String(name.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn insert_new_property(
+    composite_name: &str,
+    properties: &mut Map,
+    name: &str,
+    schema: Value,
+) -> Result<(), OpenapiPostprocessError> {
+    if properties.contains_key(name) {
+        return Err(OpenapiPostprocessError::UnionCompositeDuplicateProperty {
+            schema_name: composite_name.to_owned(),
+            property: name.to_owned(),
+        });
+    }
+    properties.insert(name.to_owned(), schema);
+    Ok(())
+}
+
+/// Rejects a union referenced outside the composite being rewritten. Reusing
+/// its modified variants elsewhere would add fields that are not present there.
+fn reject_shared_unions(
+    document: &Value,
+    composites: &[UnionComposite],
+) -> Result<(), OpenapiPostprocessError> {
+    let mut references = Vec::new();
+    collect_component_references(document, &mut references);
+
+    for composite in composites {
+        let reference = component_schema_reference(&composite.union_name);
+        let readers = references
+            .iter()
+            .filter(|candidate| **candidate == reference)
+            .count();
+        if readers > 1 {
+            return Err(OpenapiPostprocessError::SharedUnionComposite {
+                schema_name: composite.composite_name.clone(),
+                union_name: composite.union_name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Removes merged components that are no longer referenced.
+fn remove_unreferenced_components(document: &mut Value, merged_names: &BTreeSet<String>) {
+    let mut references = Vec::new();
+    collect_component_references(document, &mut references);
+    let referenced = references.into_iter().collect::<BTreeSet<_>>();
+
+    let schemas = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("components"))
+        .and_then(Value::as_object_mut)
+        .and_then(|components| components.get_mut("schemas"))
+        .and_then(Value::as_object_mut)
+        .expect("OpenAPI document has no component schemas object");
+    schemas.retain(|name, _| {
+        !merged_names.contains(name) || referenced.contains(&component_schema_reference(name))
+    });
+}
+
+/// Returns a schema's required property names in document order.
+fn required_names(schema: &Value) -> Vec<String> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
 fn fixed_discriminator_value(variant: &Value, property_name: &str) -> Option<String> {
     fixed_required_properties(variant)?
         .into_iter()
@@ -833,9 +1128,13 @@ fn fixed_discriminator_value(variant: &Value, property_name: &str) -> Option<Str
 }
 
 fn component_schema_for_reference<'a>(schemas: &'a Map, reference: &str) -> Option<&'a Value> {
-    let encoded_name = reference.strip_prefix("#/components/schemas/")?;
-    let schema_name = decode_json_pointer_segment(encoded_name);
-    schemas.get(&schema_name)
+    schemas.get(&component_schema_name(reference)?)
+}
+
+fn component_schema_name(reference: &str) -> Option<String> {
+    reference
+        .strip_prefix("#/components/schemas/")
+        .map(decode_json_pointer_segment)
 }
 
 fn component_schema_reference(schema_name: &str) -> String {
@@ -1356,6 +1655,243 @@ mod tests {
             unordered(&document).pointer("/components/schemas/Choice/oneOf/0/$ref"),
             Some(&serde_json::json!("#/components/schemas/ChoiceFirst"))
         );
+    }
+
+    /// Extracts union variants and then rewrites their composites.
+    fn extract_and_merge(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+        add_union_discriminators(document, &mut Vec::new());
+        extract_union_variants(document).expect("extract union variants");
+        merge_union_composites(document)
+    }
+
+    #[test]
+    fn merges_an_inline_envelope_into_every_union_variant() {
+        let mut document = ordered(serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Session": {
+                        "allOf": [
+                            {"$ref": "#/components/schemas/SessionStatus"},
+                            {
+                                "type": "object",
+                                "required": ["upload_id"],
+                                "properties": {"upload_id": {"type": "string"}}
+                            }
+                        ],
+                        "description": "One upload session."
+                    },
+                    "SessionStatus": {
+                        "oneOf": [
+                            {
+                                "title": "SessionStatusOpen",
+                                "required": ["status"],
+                                "properties": {"status": {"const": "open"}}
+                            },
+                            {
+                                "title": "SessionStatusDone",
+                                "required": ["status"],
+                                "properties": {"status": {"const": "done"}}
+                            }
+                        ]
+                    }
+                }
+            }
+        }));
+
+        extract_and_merge(&mut document).expect("merge union composites");
+        let actual = unordered(&document);
+        assert_eq!(
+            actual.pointer("/components/schemas/Session"),
+            Some(&serde_json::json!({
+                "description": "One upload session.",
+                "oneOf": [
+                    {"$ref": "#/components/schemas/SessionStatusOpen"},
+                    {"$ref": "#/components/schemas/SessionStatusDone"}
+                ],
+                "discriminator": {
+                    "propertyName": "status",
+                    "mapping": {
+                        "open": "#/components/schemas/SessionStatusOpen",
+                        "done": "#/components/schemas/SessionStatusDone"
+                    }
+                }
+            }))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/SessionStatusOpen"),
+            Some(&serde_json::json!({
+                "required": ["status", "upload_id"],
+                "properties": {
+                    "status": {"const": "open"},
+                    "upload_id": {"type": "string"}
+                }
+            }))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/SessionStatusDone/properties/upload_id"),
+            Some(&serde_json::json!({"type": "string"}))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/SessionStatus"),
+            None,
+            "the union component is unreferenced after the composite is rewritten"
+        );
+    }
+
+    #[test]
+    fn merges_a_referenced_envelope_and_drops_its_component() {
+        let mut document = ordered(serde_json::json!({
+            "components": {
+                "schemas": {
+                    // The union does not have to come first.
+                    "Entry": {
+                        "allOf": [
+                            {"$ref": "#/components/schemas/EntryAttributes"},
+                            {"$ref": "#/components/schemas/EntryKind"},
+                            {
+                                "type": "object",
+                                "required": ["path"],
+                                "properties": {"path": {"type": "string"}}
+                            }
+                        ]
+                    },
+                    "EntryKind": {
+                        "oneOf": [{
+                            "title": "EntryDirectory",
+                            "required": ["inode_kind"],
+                            "properties": {"inode_kind": {"const": "dir"}}
+                        }]
+                    },
+                    "EntryAttributes": {
+                        "type": "object",
+                        "properties": {"attributes": {"type": "string"}}
+                    }
+                }
+            }
+        }));
+
+        extract_and_merge(&mut document).expect("merge union composites");
+        let actual = unordered(&document);
+        assert_eq!(
+            actual.pointer("/components/schemas/EntryDirectory"),
+            Some(&serde_json::json!({
+                "required": ["inode_kind", "path"],
+                "properties": {
+                    "inode_kind": {"const": "dir"},
+                    "attributes": {"type": "string"},
+                    "path": {"type": "string"}
+                }
+            }))
+        );
+        assert_eq!(actual.pointer("/components/schemas/EntryKind"), None);
+        assert_eq!(actual.pointer("/components/schemas/EntryAttributes"), None);
+    }
+
+    #[test]
+    fn leaves_a_composite_without_a_union_unchanged() {
+        let mut document = ordered(serde_json::json!({
+            "components": {
+                "schemas": {
+                    "CreateCheckpointResponse": {
+                        "allOf": [
+                            {"$ref": "#/components/schemas/Checkpoint"},
+                            {
+                                "type": "object",
+                                "required": ["namespace_id"],
+                                "properties": {"namespace_id": {"type": "string"}}
+                            }
+                        ]
+                    },
+                    "Checkpoint": {
+                        "type": "object",
+                        "required": ["checkpoint_id"],
+                        "properties": {"checkpoint_id": {"type": "string"}}
+                    }
+                }
+            }
+        }));
+        let before = document.clone();
+
+        merge_union_composites(&mut document).expect("leave the composite alone");
+        assert_eq!(document, before);
+    }
+
+    #[test]
+    fn rejects_a_composite_that_redefines_a_variant_property() {
+        let mut document = ordered(serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Session": {
+                        "allOf": [
+                            {"$ref": "#/components/schemas/SessionStatus"},
+                            {
+                                "type": "object",
+                                "required": ["status"],
+                                "properties": {"status": {"type": "string"}}
+                            }
+                        ]
+                    },
+                    "SessionStatus": {
+                        "oneOf": [{
+                            "title": "SessionStatusOpen",
+                            "required": ["status"],
+                            "properties": {"status": {"const": "open"}}
+                        }]
+                    }
+                }
+            }
+        }));
+
+        let error = extract_and_merge(&mut document)
+            .expect_err("a redefined property should fail generation");
+        assert!(matches!(
+            error,
+            OpenapiPostprocessError::UnionCompositeDuplicateProperty {
+                schema_name,
+                property,
+            } if schema_name == "Session" && property == "status"
+        ));
+    }
+
+    #[test]
+    fn rejects_a_union_a_second_schema_also_reads() {
+        let mut document = ordered(serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Session": {
+                        "allOf": [
+                            {"$ref": "#/components/schemas/SessionStatus"},
+                            {
+                                "type": "object",
+                                "required": ["upload_id"],
+                                "properties": {"upload_id": {"type": "string"}}
+                            }
+                        ]
+                    },
+                    "SessionStatus": {
+                        "oneOf": [{
+                            "title": "SessionStatusOpen",
+                            "required": ["status"],
+                            "properties": {"status": {"const": "open"}}
+                        }]
+                    },
+                    "SessionAudit": {
+                        "type": "object",
+                        "properties": {"status": {"$ref": "#/components/schemas/SessionStatus"}}
+                    }
+                }
+            }
+        }));
+
+        let error =
+            extract_and_merge(&mut document).expect_err("a shared union should fail generation");
+        assert!(matches!(
+            error,
+            OpenapiPostprocessError::SharedUnionComposite {
+                schema_name,
+                union_name,
+            } if schema_name == "Session" && union_name == "SessionStatus"
+        ));
     }
 
     #[test]

@@ -29,6 +29,7 @@ from .types import (
     RevisionNo,
     UploadContentClaim,
     UploadPartChecksumClaim,
+    UploadSessionResponse,
 )
 
 __all__ = ["GetFileResult", "PutFileResult", "get_file", "put_file"]
@@ -195,7 +196,7 @@ def _get_file_proxied(
         entry = client.filesystem.stat_path(namespace_id, path=path)
         if entry.inode_kind != "file":
             raise RuntimeError(f"path {path!r} is a {entry.inode_kind}, not a file")
-        claim = ContentRef(**entry.content_ref)
+        claim = entry.content_ref
         revision_no = entry.revision_no
     else:
         claim = None
@@ -410,14 +411,14 @@ def _send_presigned(
     return response
 
 
-def _completed_content(response) -> _StagedContent:
+def _completed_content(response: UploadSessionResponse) -> _StagedContent:
     if response.status != "completed":
         raise RuntimeError(
             f"upload {response.upload_id!r} completed with status "
             f"{response.status!r}"
         )
     return _StagedContent(
-        content_ref=ContentRef(**response.content_ref),
+        content_ref=response.content_ref,
         content_token=response.content_token,
     )
 

@@ -7,7 +7,7 @@ import re
 import socket
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -21,6 +21,8 @@ import pytest
 import uvicorn
 from loonfs_sdk import (
     ActorRef,
+    AuthoritativePathEntry,
+    AuthoritativePathEntry_File,
     BeginUploadRequest_DirectMultipart,
     BeginUploadRequest_DirectPut,
     BeginUploadRequest_ServiceProxied,
@@ -31,7 +33,6 @@ from loonfs_sdk import (
     CompleteUploadRequest_DirectMultipart,
     CompleteUploadRequest_DirectPut,
     CompletedUploadPart,
-    ContentRef,
     DirectMultipartUploadOptions,
     FilesystemOperation_CreateDirectory,
     FilesystemOperation_DeletePath,
@@ -44,6 +45,8 @@ from loonfs_sdk import (
     UploadContentClaim,
     UploadPartChecksumClaim,
     UploadSessionResponse,
+    UploadSessionResponse_Aborted,
+    UploadSessionResponse_Completed,
 )
 from loonfs_sdk.proxy import LoonFSProxy
 from loonfs_sdk.transfers import get_file, put_file
@@ -468,21 +471,30 @@ def _put_presigned(access: Any, content: bytes) -> httpx.Response:
     return response
 
 
-def _content_ref(value: object) -> ContentRef:
-    if isinstance(value, ContentRef):
-        return value
-    if isinstance(value, Mapping):
-        return ContentRef(**value)
-    raise AssertionError("response has no content reference")
+def _completed_upload(response: UploadSessionResponse) -> UploadSessionResponse_Completed:
+    assert isinstance(
+        response, UploadSessionResponse_Completed
+    ), f"upload {response.upload_id} is {response.status}, not completed"
+    return response
 
 
-def _completed_content(response: Any) -> tuple[ContentRef, str | None, int]:
-    assert response.status == "completed"
-    return (
-        _content_ref(response.content_ref),
-        getattr(response, "content_token", None),
-        response.completed_at_ms,
-    )
+def _aborted_upload(response: UploadSessionResponse) -> UploadSessionResponse_Aborted:
+    assert isinstance(
+        response, UploadSessionResponse_Aborted
+    ), f"upload {response.upload_id} is {response.status}, not aborted"
+    return response
+
+
+def _file_entry(entry: AuthoritativePathEntry) -> AuthoritativePathEntry_File:
+    assert isinstance(
+        entry, AuthoritativePathEntry_File
+    ), f"path {entry.path} is a {entry.inode_kind}, not a file"
+    return entry
+
+
+def _wire(model: pydantic.BaseModel) -> JsonObject:
+    """Render one SDK model back into the JSON the proxy route accepts."""
+    return model.model_dump(mode="json")
 
 
 def _read_proxied(client: LoonFS, namespace_id: str, path: str) -> bytes:
@@ -708,13 +720,9 @@ def test_proxy(
             proxied_complete_response,
             "proxy service-proxied complete response",
         )
-        proxied_complete = UploadSessionResponse(**proxied_complete_data)
-        assert proxied_complete.status == "completed"
-        proxied_content_ref = proxied_complete_data["content_ref"]
-        assert isinstance(proxied_content_ref, dict)
-        assert ContentRef(**proxied_content_ref) == uploaded.content_ref
-        proxied_content_token = proxied_complete_data["content_token"]
-        assert isinstance(proxied_content_token, dict)
+        proxied_complete = UploadSessionResponse_Completed(**proxied_complete_data)
+        assert proxied_complete.content_ref == uploaded.content_ref
+        assert proxied_complete.content_token is not None
         proxied_commit = _proxy_apply_commit(
             client,
             request,
@@ -722,9 +730,9 @@ def test_proxy(
             {
                 "kind": "put_file",
                 "path": request.proxied_path,
-                "content_ref": proxied_content_ref,
+                "content_ref": _wire(proxied_complete.content_ref),
             },
-            proxied_content_token,
+            _wire(proxied_complete.content_token),
         )
         assert proxied_commit.committed_seq == expected.proxied_committed_seq
 
@@ -768,12 +776,9 @@ def test_proxy(
             direct_complete_response,
             "proxy direct-PUT complete response",
         )
-        direct_complete = UploadSessionResponse(**direct_complete_data)
-        assert direct_complete.status == "completed"
-        direct_content_ref = direct_complete_data["content_ref"]
-        assert isinstance(direct_content_ref, dict)
-        direct_content_token = direct_complete_data["content_token"]
-        assert isinstance(direct_content_token, dict)
+        direct_complete = UploadSessionResponse_Completed(**direct_complete_data)
+        assert direct_complete.content_ref.size_bytes == len(payload)
+        assert direct_complete.content_token is not None
         direct_commit = _proxy_apply_commit(
             client,
             request,
@@ -781,9 +786,9 @@ def test_proxy(
             {
                 "kind": "put_file",
                 "path": request.direct_path,
-                "content_ref": direct_content_ref,
+                "content_ref": _wire(direct_complete.content_ref),
             },
-            direct_content_token,
+            _wire(direct_complete.content_token),
         )
         assert direct_commit.committed_seq == expected.direct_committed_seq
 
@@ -868,7 +873,9 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
         begin.upload_id,
         request=CompleteUploadRequest_DirectPut(content=claim),
     )
-    content_ref, content_token, _ = _completed_content(completed)
+    completed = _completed_upload(completed)
+    content_ref = completed.content_ref
+    content_token = completed.content_token
     assert content_ref.size_bytes == expected.size_bytes
     assert content_ref.checksum.algorithm == expected.checksum_algorithm
     assert content_ref.checksum == claim.checksum
@@ -883,8 +890,10 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
         content_tokens=[content_token] if content_token is not None else None,
     )
     assert committed.committed_seq == expected.committed_seq
-    stat = harness.client.filesystem.stat_path(request.namespace_id, path=request.path)
-    assert _content_ref(stat.content_ref) == content_ref
+    stat = _file_entry(
+        harness.client.filesystem.stat_path(request.namespace_id, path=request.path)
+    )
+    assert stat.content_ref == content_ref
     assert _read_proxied(harness.client, request.namespace_id, request.path) == payload
 
 
@@ -956,21 +965,22 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         begin.upload_id,
         request=completion_request,
     )
-    first_content_ref, _, first_completed_at_ms = _completed_content(first)
+    first_completed = _completed_upload(first)
+    first_content_ref = first_completed.content_ref
     replayed = harness.client.uploads.complete_upload(
         request.namespace_id,
         begin.upload_id,
         request=completion_request,
     )
-    replayed_content_ref, replayed_token, replayed_completed_at_ms = _completed_content(
-        replayed
-    )
+    replayed_completed = _completed_upload(replayed)
+    replayed_content_ref = replayed_completed.content_ref
+    replayed_token = replayed_completed.content_token
 
     assert replayed.namespace_id == first.namespace_id
     assert replayed.upload_id == first.upload_id
     assert replayed.mode == first.mode
     assert replayed_content_ref == first_content_ref
-    assert replayed_completed_at_ms == first_completed_at_ms
+    assert replayed_completed.completed_at_ms == first_completed.completed_at_ms
     assert first_content_ref.size_bytes == expected.size_bytes
     assert first_content_ref.checksum == whole_checksum
     assert first_content_ref.checksum == _checksum(
@@ -1021,9 +1031,11 @@ def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> No
         request.namespace_id,
         request=BeginUploadRequest_ServiceProxied(),
     )
-    first = harness.client.uploads.abort_upload(request.namespace_id, begin.upload_id)
-    replayed = harness.client.uploads.abort_upload(
-        request.namespace_id, begin.upload_id
+    first = _aborted_upload(
+        harness.client.uploads.abort_upload(request.namespace_id, begin.upload_id)
+    )
+    replayed = _aborted_upload(
+        harness.client.uploads.abort_upload(request.namespace_id, begin.upload_id)
     )
 
     assert first.mode == expected.mode
@@ -1048,13 +1060,15 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     )
     assert committed.committed_seq == expected.committed_seq
 
-    stat = harness.client.filesystem.stat_path(request.namespace_id, path=request.path)
+    stat = _file_entry(
+        harness.client.filesystem.stat_path(request.namespace_id, path=request.path)
+    )
     downloaded = get_file(
         harness.client,
         namespace_id=request.namespace_id,
         path=request.path,
     )
-    assert _content_ref(stat.content_ref) == downloaded.content_ref
+    assert stat.content_ref == downloaded.content_ref
     assert downloaded.content_ref.size_bytes == expected.size_bytes
     assert downloaded.content_ref.checksum.algorithm == expected.checksum_algorithm
     assert len(downloaded.content) == downloaded.content_ref.size_bytes

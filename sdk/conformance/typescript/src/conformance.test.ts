@@ -239,10 +239,9 @@ interface RunningRecordingServer extends RunningProxy {
 
 type StreamingRequestInit = RequestInit & { duplex?: "half" };
 
-type CompletedUpload = LoonFS.UploadSessionResponse & LoonFS.UploadSessionStatus.Completed;
-type AbortedUpload = LoonFS.UploadSessionResponse & LoonFS.UploadSessionStatus.Aborted;
-type FileEntry = LoonFS.AuthoritativePathEntry &
-    LoonFS.AuthoritativePathEntryFile & { kind: "file" };
+type CompletedUpload = Extract<LoonFS.UploadSessionResponse, { status: "completed" }>;
+type AbortedUpload = Extract<LoonFS.UploadSessionResponse, { status: "aborted" }>;
+type FileEntry = Extract<LoonFS.AuthoritativePathEntry, { inode_kind: "file" }>;
 
 
 function jsonObject(value: unknown, label: string): JsonObject {
@@ -707,15 +706,24 @@ async function assertBrowserTransfer(
 }
 
 function completedUpload(response: LoonFS.UploadSessionResponse): CompletedUpload {
-    const completed = response as CompletedUpload;
-    assert.equal(completed.status, "completed");
-    return completed;
+    if (response.status !== "completed") {
+        throw new Error(`upload ${response.upload_id} is ${response.status}, not completed`);
+    }
+    return response;
 }
 
 function abortedUpload(response: LoonFS.UploadSessionResponse): AbortedUpload {
-    const aborted = response as AbortedUpload;
-    assert.equal(aborted.status, "aborted");
-    return aborted;
+    if (response.status !== "aborted") {
+        throw new Error(`upload ${response.upload_id} is ${response.status}, not aborted`);
+    }
+    return response;
+}
+
+function fileEntry(entry: LoonFS.AuthoritativePathEntry): FileEntry {
+    if (entry.inode_kind !== "file") {
+        throw new Error(`path ${entry.path} is a ${entry.inode_kind}, not a file`);
+    }
+    return entry;
 }
 
 function checksum(algorithm: LoonFS.ChecksumAlgorithm, bytes: Uint8Array): LoonFS.Checksum {
@@ -1342,10 +1350,12 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
         ),
     );
     assert.equal(committed.committed_seq, expected.committed_seq);
-    const stat = (await activeHarness.client.filesystem.statPath({
-        namespace_id: request.namespace_id,
-        path: request.path,
-    })) as FileEntry;
+    const stat = fileEntry(
+        await activeHarness.client.filesystem.statPath({
+            namespace_id: request.namespace_id,
+            path: request.path,
+        }),
+    );
     assert.deepEqual(stat.content_ref, completed.content_ref);
     assert.deepEqual(
         await readProxied(activeHarness.client, request.namespace_id, request.path),
@@ -1509,10 +1519,12 @@ conformanceTest("download", async (activeHarness, testCase) => {
         commit_id: request.commit_id,
     });
     assert.equal(committed.committed_seq, expected.committed_seq);
-    const stat = (await activeHarness.client.filesystem.statPath({
-        namespace_id: request.namespace_id,
-        path: request.path,
-    })) as FileEntry;
+    const stat = fileEntry(
+        await activeHarness.client.filesystem.statPath({
+            namespace_id: request.namespace_id,
+            path: request.path,
+        }),
+    );
     const download = await getFile(activeHarness.client, {
         namespace_id: request.namespace_id,
         path: request.path,
@@ -1550,10 +1562,12 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         commit_id: request.commit_ids.upload,
     });
     assert.equal(upload.committed_seq, expected.upload_committed_seq);
-    const stat = (await activeHarness.client.filesystem.statPath({
-        namespace_id: request.namespace_id,
-        path: request.upload_path,
-    })) as FileEntry;
+    const stat = fileEntry(
+        await activeHarness.client.filesystem.statPath({
+            namespace_id: request.namespace_id,
+            path: request.upload_path,
+        }),
+    );
     assert.equal(stat.size_bytes, expected.size_bytes);
     const uploadedInode = stat.inode_id;
 

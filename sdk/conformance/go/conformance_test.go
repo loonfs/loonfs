@@ -490,8 +490,8 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("replay multipart completion: %v", err)
 	}
 	replayedStatus := requireCompletedStatus(t, replayed)
-	if replayed.NamespaceID != first.NamespaceID || replayed.UploadID != first.UploadID || replayed.Mode != first.Mode {
-		t.Errorf("replayed upload identity = %#v, want %#v", replayed, first)
+	if replayedStatus.NamespaceID != firstStatus.NamespaceID || replayedStatus.UploadID != firstStatus.UploadID || replayedStatus.Mode != firstStatus.Mode {
+		t.Errorf("replayed upload identity = %#v, want %#v", replayedStatus, firstStatus)
 	}
 	assertContentRefEqual(t, replayedStatus.ContentRef, firstStatus.ContentRef)
 	if replayedStatus.CompletedAtMs != firstStatus.CompletedAtMs {
@@ -588,17 +588,13 @@ func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("replay abort: %v", err)
 	}
-	firstStatusEnvelope := uploadSessionStatus(t, first)
-	if firstStatusEnvelope.Status != expected.Status {
-		t.Errorf("upload status = %q, want %q", firstStatusEnvelope.Status, expected.Status)
+	if first.Status != expected.Status {
+		t.Errorf("upload status = %q, want %q", first.Status, expected.Status)
 	}
-	if firstStatusEnvelope.Aborted == nil {
-		t.Fatalf("upload status = %q, want aborted", firstStatusEnvelope.Status)
-	}
-	firstStatus := firstStatusEnvelope.Aborted
+	firstStatus := requireAbortedStatus(t, first)
 	replayedStatus := requireAbortedStatus(t, replayed)
-	if replayed.NamespaceID != first.NamespaceID || replayed.UploadID != first.UploadID || replayed.Mode != first.Mode {
-		t.Errorf("replayed abort identity = %#v, want %#v", replayed, first)
+	if replayedStatus.NamespaceID != firstStatus.NamespaceID || replayedStatus.UploadID != firstStatus.UploadID || replayedStatus.Mode != firstStatus.Mode {
+		t.Errorf("replayed abort identity = %#v, want %#v", replayedStatus, firstStatus)
 	}
 	if replayedStatus.AbortedAtMs != firstStatus.AbortedAtMs {
 		t.Errorf("replayed aborted_at_ms = %d, want %d", replayedStatus.AbortedAtMs, firstStatus.AbortedAtMs)
@@ -728,7 +724,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	if file.SizeBytes != expected.SizeBytes {
 		t.Errorf("uploaded size_bytes = %d, want %d", file.SizeBytes, expected.SizeBytes)
 	}
-	uploadedInode := stat.InodeID
+	uploadedInode := identityOf(stat).inodeID
 
 	initialListing := listPathEntries(t, h.client, request.NamespaceID, request.Directory)
 	if !listingContainsPath(initialListing, request.UploadPath) {
@@ -825,7 +821,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	var removedEntry *loonfs.TrashEntry
 	for _, entry := range trash.Results {
-		if entry.InodeID == uploadedInode {
+		if string(entry.InodeID) == uploadedInode {
 			removedEntry = entry
 			break
 		}
@@ -970,10 +966,11 @@ func listedNames(t *testing.T, entries []*loonfs.AuthoritativePathEntry) []strin
 	t.Helper()
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry.DisplayName == nil {
+		name := identityOf(entry).displayName
+		if name == "" {
 			t.Fatal("listed entry has no display_name")
 		}
-		names = append(names, string(*entry.DisplayName))
+		names = append(names, name)
 	}
 	return names
 }
@@ -1599,35 +1596,18 @@ func assertSuccessfulTransfer(t *testing.T, response *http.Response) {
 	t.Fatalf("presigned request returned %s: %s", response.Status, detail)
 }
 
-func uploadSessionStatus(t *testing.T, response *loonfs.UploadSessionResponse) *loonfs.UploadSessionStatus {
-	t.Helper()
-	if response == nil {
-		t.Fatal("upload session response is nil")
-	}
-	if _, ok := response.GetExtraProperties()["status"]; !ok {
-		t.Fatal("upload session response has no status")
-	}
-	data, err := json.Marshal(response.GetExtraProperties())
-	if err != nil {
-		t.Fatalf("encode upload status: %v", err)
-	}
-	var status loonfs.UploadSessionStatus
-	if err := json.Unmarshal(data, &status); err != nil {
-		t.Fatalf("decode upload status: %v", err)
-	}
-	return &status
-}
-
 func requireCompletedStatus(
 	t *testing.T,
 	response *loonfs.UploadSessionResponse,
 ) *loonfs.UploadSessionStatusCompleted {
 	t.Helper()
-	status := uploadSessionStatus(t, response)
-	if status.Completed == nil || status.Completed.ContentRef == nil {
-		t.Fatalf("upload status = %q, want completed", status.Status)
+	if response == nil {
+		t.Fatal("upload session response is nil")
 	}
-	return status.Completed
+	if response.Completed == nil || response.Completed.ContentRef == nil {
+		t.Fatalf("upload status = %q, want completed", response.Status)
+	}
+	return response.Completed
 }
 
 func requireAbortedStatus(
@@ -1635,11 +1615,13 @@ func requireAbortedStatus(
 	response *loonfs.UploadSessionResponse,
 ) *loonfs.UploadSessionStatusAborted {
 	t.Helper()
-	status := uploadSessionStatus(t, response)
-	if status.Aborted == nil {
-		t.Fatalf("upload status = %q, want aborted", status.Status)
+	if response == nil {
+		t.Fatal("upload session response is nil")
 	}
-	return status.Aborted
+	if response.Aborted == nil {
+		t.Fatalf("upload status = %q, want aborted", response.Status)
+	}
+	return response.Aborted
 }
 
 func requireFileProjection(t *testing.T, entry *loonfs.AuthoritativePathEntry) *loonfs.AuthoritativePathEntryFile {
@@ -1647,18 +1629,46 @@ func requireFileProjection(t *testing.T, entry *loonfs.AuthoritativePathEntry) *
 	if entry == nil {
 		t.Fatal("path entry is nil")
 	}
-	data, err := json.Marshal(entry.GetExtraProperties())
-	if err != nil {
-		t.Fatalf("encode path entry projection: %v", err)
+	if entry.File == nil {
+		t.Fatalf("path entry kind = %q, want file", entry.InodeKind)
 	}
-	var projection loonfs.AuthoritativePathEntryKind
-	if err := json.Unmarshal(data, &projection); err != nil {
-		t.Fatalf("decode path entry projection: %v", err)
+	return entry.File
+}
+
+// pathEntryIdentity is the common subset of the generated path-entry variants.
+type pathEntryIdentity struct {
+	path        string
+	inodeID     string
+	displayName string
+}
+
+func identityOf(entry *loonfs.AuthoritativePathEntry) pathEntryIdentity {
+	if entry == nil {
+		return pathEntryIdentity{}
 	}
-	if projection.File == nil {
-		t.Fatalf("path entry kind = %q, want file", projection.InodeKind)
+	if entry.Dir != nil {
+		return pathEntryIdentity{
+			path:        string(entry.Dir.Path),
+			inodeID:     string(entry.Dir.InodeID),
+			displayName: displayNameOf(entry.Dir.DisplayName),
+		}
 	}
-	return projection.File
+	if entry.File != nil {
+		return pathEntryIdentity{
+			path:        string(entry.File.Path),
+			inodeID:     string(entry.File.InodeID),
+			displayName: displayNameOf(entry.File.DisplayName),
+		}
+	}
+	return pathEntryIdentity{}
+}
+
+// displayNameOf returns an empty string for the root entry.
+func displayNameOf(name *loonfs.DisplayName) string {
+	if name == nil {
+		return ""
+	}
+	return string(*name)
 }
 
 func commitCompletedFile(
@@ -1746,7 +1756,7 @@ func listPathEntries(
 
 func listingContainsPath(entries []*loonfs.AuthoritativePathEntry, path string) bool {
 	for _, entry := range entries {
-		if entry != nil && string(entry.Path) == path {
+		if identityOf(entry).path == path {
 			return true
 		}
 	}
