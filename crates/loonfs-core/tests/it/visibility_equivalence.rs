@@ -166,12 +166,12 @@ impl VisibilityHarness {
     async fn undelete(
         &self,
         inode_id: InodeId,
-        deleted_at_seq: ChangeSeq,
+        deletion_seq: ChangeSeq,
         path: &str,
     ) -> Result<CommitResponse, CoreError> {
         self.publish_operation(FilesystemOperation::Undelete {
             inode_id,
-            deletion_seq: deleted_at_seq,
+            deletion_seq,
             path: Some(AbsolutePath::parse(path).expect("valid path")),
         })
         .await

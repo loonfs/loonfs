@@ -212,7 +212,7 @@ impl PageCursor for FileRevisionsPageCursor {
 /// Cursor for one trash listing position.
 ///
 /// Trash pagination advances oldest deletion first, in ascending
-/// `(deleted_at_seq, root_inode_id)` order — the order the derived
+/// `(deletion_seq, root_inode_id)` order — the order the derived
 /// active-deletion family is keyed in. Like every cursor, it is an ordering
 /// resume tolerating forward head drift: the next page evaluates at whatever
 /// head is loaded and continues strictly after the deletion generation named
@@ -222,7 +222,7 @@ pub struct TrashPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
     /// Commit sequence of the deletion the previous page ended on.
-    pub last_deleted_at_seq: ChangeSeq,
+    pub last_deletion_seq: ChangeSeq,
     /// Deleted root inode the previous page ended on.
     pub last_root_inode_id: InodeId,
 }
@@ -477,7 +477,7 @@ mod tests {
     fn trash_cursor_round_trips() {
         let cursor = TrashPageCursor {
             head_seq: ChangeSeq(11),
-            last_deleted_at_seq: ChangeSeq(10),
+            last_deletion_seq: ChangeSeq(10),
             last_root_inode_id: InodeId(7),
         };
 

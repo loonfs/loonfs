@@ -750,12 +750,14 @@ the generation as `tombstone_seq` and `tombstone_delta_index` beside
 independent optional `parent_inode_id`, `name_key`, and `display_name`
 fields does not decode.
 
-The `active-deletions` family tracks which deletions can still be restored. A
-`set` tombstone adds a `listed` row keyed by `(deleted_at_seq, root_inode_id)`.
-The API exposes that pair as `(deletion_seq, inode_id)`. The row also stores
-the deletion time and `deleted_direntry`. A `revoke` tombstone adds a
-`removed` row with the same key. The two rows sort together with `removed`
-first, so reorganization can discard both.
+The `active-deletions` family tracks deletions that can still be restored. A
+`set` tombstone creates a `listed` row keyed by `(deletion_seq,
+root_inode_id)`. The API exposes `root_inode_id` as `inode_id`. The row also
+stores the deletion time and `deleted_direntry`.
+
+A `revoke` tombstone creates a `removed` row with the same key and records the
+revoke's sequence as `revocation_seq`. `removed` sorts before `listed`, which
+lets reorganization discard both rows together.
 
 The recoverable set is read as a range scan in deletion order. Tombstone rows
 remain authoritative because this family is derived from them.

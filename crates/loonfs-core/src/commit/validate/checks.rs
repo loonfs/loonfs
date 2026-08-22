@@ -384,7 +384,7 @@ fn next_attributes_revision_no(
 async fn validate_undelete_target<S: ObjectStore + ?Sized>(
     metadata_state: &PublishValidationView<'_, S>,
     inode_id: InodeId,
-    deleted_at_seq: ChangeSeq,
+    deletion_seq: ChangeSeq,
     committed_seq: ChangeSeq,
 ) -> Result<SubtreeTombstoneRecord, CoreError> {
     // A child of a deleted directory is covered by its ancestor's tombstone,
@@ -400,10 +400,10 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
     // Only a deletion from a strictly earlier commit is recoverable.
     // Assigned sequences are guessable (head + 1), so this prevents one
     // multi-op commit from minting ambiguous deletion generations.
-    if deleted_at_seq >= committed_seq {
+    if deletion_seq >= committed_seq {
         return Err(CommitValidationError::UndeleteTargetsCurrentCommit {
             inode_id,
-            requested_seq: deleted_at_seq,
+            requested_seq: deletion_seq,
         }
         .into());
     }
@@ -416,10 +416,10 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
     };
     // Recovery is scoped to the deletion the caller observed, never whatever
     // deletion is active now, and revalidation applies the same generation.
-    if active.generation.seq != deleted_at_seq {
+    if active.generation.seq != deletion_seq {
         return Err(CommitValidationError::UndeleteGenerationMismatch {
             inode_id,
-            requested_seq: deleted_at_seq,
+            requested_seq: deletion_seq,
             active_seq: active.generation.seq,
         }
         .into());

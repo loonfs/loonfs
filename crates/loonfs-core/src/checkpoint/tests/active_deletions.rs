@@ -152,9 +152,9 @@ fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
         matches!(
             &delta_rows[0],
             MetadataRow::ActiveDeletion {
-                action: ActiveDeletionRowAction::Removed { revoked_at_seq },
+                action: ActiveDeletionRowAction::Removed { revocation_seq },
                 ..
-            } if *revoked_at_seq == ChangeSeq(9)
+            } if *revocation_seq == ChangeSeq(9)
         ),
         "unexpected delta row: {:?}",
         delta_rows[0]
@@ -235,7 +235,7 @@ async fn undelete<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     commit_id: &str,
     inode_id: InodeId,
-    deleted_at_seq: ChangeSeq,
+    deletion_seq: ChangeSeq,
     absolute_path: &str,
     context: &MutationContext,
 ) -> loonfs_api::CommitResponse {
@@ -245,7 +245,7 @@ async fn undelete<S: ObjectStore + ?Sized>(
         commit_id,
         FilesystemOperation::Undelete {
             inode_id,
-            deletion_seq: deleted_at_seq,
+            deletion_seq,
             path: Some(AbsolutePath::parse(absolute_path).expect("path")),
         },
         context,
@@ -435,7 +435,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
                 deletions.insert(path.to_owned(), (deleted_inode_id, response.committed_seq));
             }
             HistoryStep::Undelete(deleted_path, restored_path) => {
-                let (inode_id, deleted_at_seq) = deletions
+                let (inode_id, deletion_seq) = deletions
                     .remove(deleted_path)
                     .expect("undelete follows a recorded delete");
                 undelete(
@@ -443,7 +443,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
                     &namespace_id,
                     &commit_id,
                     inode_id,
-                    deleted_at_seq,
+                    deletion_seq,
                     restored_path,
                     &context,
                 )
@@ -526,7 +526,7 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
             .windows(2)
             .all(|pair| (pair[0].deletion_seq, pair[0].inode_id)
                 < (pair[1].deletion_seq, pair[1].inode_id)),
-        "entries must ascend by (deleted_at_seq, root_inode_id): {entries:?}"
+        "entries must ascend by (deletion_seq, root_inode_id): {entries:?}"
     );
 }
 
@@ -573,7 +573,7 @@ async fn trash_pages_resume_after_the_generation_the_cursor_names() {
         .clone()
         .expect("five deletions do not fit one page of two");
     assert_eq!(
-        (cursor.last_deleted_at_seq, cursor.last_root_inode_id),
+        (cursor.last_deletion_seq, cursor.last_root_inode_id),
         (first.items[1].deletion_seq, first.items[1].inode_id),
         "the cursor names the generation the page ended on"
     );

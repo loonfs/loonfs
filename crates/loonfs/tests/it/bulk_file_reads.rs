@@ -194,7 +194,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .await
         .expect("stat before delete")
         .inode_id;
-    let deleted_at_seq = fs
+    let deletion_seq = fs
         .writer
         .delete_path(
             namespace_id,
@@ -208,7 +208,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .undelete(
             namespace_id,
             recovered_inode_id,
-            deleted_at_seq,
+            deletion_seq,
             Some("/notes/restored.txt"),
             UndeleteOptions::new(loonfs_test_support::test_actor()),
         )
@@ -667,7 +667,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         )
         .await
         .expect("delete subtree");
-    let recovered_deleted_at_seq = fs
+    let recovered_deletion_seq = fs
         .writer
         .delete_path(
             &namespace_id,
@@ -681,7 +681,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         .undelete(
             &namespace_id,
             recovered,
-            recovered_deleted_at_seq,
+            recovered_deletion_seq,
             Some("/m/recovered-again.txt"),
             UndeleteOptions::new(loonfs_test_support::test_actor()),
         )

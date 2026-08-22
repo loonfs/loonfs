@@ -774,7 +774,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// authority, never a second decode of the family.
     pub(crate) async fn recoverable_deletion(
         &self,
-        deleted_at_seq: ChangeSeq,
+        deletion_seq: ChangeSeq,
         root_inode_id: InodeId,
     ) -> Result<Option<RecoverableDeletion>, CoreError> {
         // The pager resumes strictly after a (sequence, inode) pair, and no
@@ -785,10 +785,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             return Ok(None);
         };
         let mut page = self
-            .active_deletions_page(Some((deleted_at_seq, predecessor)), 1)
+            .active_deletions_page(Some((deletion_seq, predecessor)), 1)
             .await?;
         Ok(page.pop().filter(|deletion| {
-            deletion.deleted_at_seq == deleted_at_seq && deletion.root_inode_id == root_inode_id
+            deletion.deletion_seq == deletion_seq && deletion.root_inode_id == root_inode_id
         }))
     }
 
@@ -802,8 +802,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
         let visible_seq = self.visible_seq();
         let lower_bound = match start_after {
-            Some((deleted_at_seq, root_inode_id)) => {
-                lookup_keys::active_deletion_key_after(deleted_at_seq, root_inode_id)
+            Some((deletion_seq, root_inode_id)) => {
+                lookup_keys::active_deletion_key_after(deletion_seq, root_inode_id)
             }
             None => lookup_keys::ACTIVE_DELETION_ROW_PREFIX.to_owned(),
         };
@@ -862,7 +862,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 continue;
             }
             last_row_key = Some(row_key);
-            let generation = (record.deleted_at_seq, record.root_inode_id);
+            let generation = (record.deletion_seq, record.root_inode_id);
             match record.into_recoverable() {
                 None => removed_generation = Some(generation),
                 Some(deletion) if removed_generation != Some(generation) => entries.push(deletion),

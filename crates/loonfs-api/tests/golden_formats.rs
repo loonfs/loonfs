@@ -1686,7 +1686,7 @@ fn sample_tombstone_revoke_row() -> MetadataRow {
 fn sample_active_deletion_listed_row() -> MetadataRow {
     MetadataRow::ActiveDeletion {
         root_inode_id: InodeId(5),
-        deleted_at_seq: ChangeSeq(8),
+        deletion_seq: ChangeSeq(8),
         action: ActiveDeletionRowAction::Listed {
             deleted_at_ms: 4_000,
             deleted_by: actor(),
@@ -1706,9 +1706,9 @@ fn sample_active_deletion_listed_row() -> MetadataRow {
 fn sample_active_deletion_removed_row() -> MetadataRow {
     MetadataRow::ActiveDeletion {
         root_inode_id: InodeId(5),
-        deleted_at_seq: ChangeSeq(8),
+        deletion_seq: ChangeSeq(8),
         action: ActiveDeletionRowAction::Removed {
-            revoked_at_seq: ChangeSeq(9),
+            revocation_seq: ChangeSeq(9),
         },
     }
 }

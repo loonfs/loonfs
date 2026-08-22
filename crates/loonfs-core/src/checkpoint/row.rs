@@ -34,7 +34,7 @@ fn active_deletion_row(tombstone: &crate::metadata::SubtreeTombstoneRecord) -> M
     let record = active_deletion_from_tombstone(tombstone);
     MetadataRow::ActiveDeletion {
         root_inode_id: record.root_inode_id,
-        deleted_at_seq: record.deleted_at_seq,
+        deletion_seq: record.deletion_seq,
         action: match record.action {
             ActiveDeletionAction::Listed {
                 deleted_at_ms,
@@ -45,8 +45,8 @@ fn active_deletion_row(tombstone: &crate::metadata::SubtreeTombstoneRecord) -> M
                 deleted_by,
                 deleted_direntry,
             },
-            ActiveDeletionAction::Removed { revoked_at_seq } => {
-                ActiveDeletionRowAction::Removed { revoked_at_seq }
+            ActiveDeletionAction::Removed { revocation_seq } => {
+                ActiveDeletionRowAction::Removed { revocation_seq }
             }
         },
     }
@@ -182,12 +182,12 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         // A removal marker belongs to the run of the undelete that produced
         // it, not to the run of the deletion whose key it repeats.
         MetadataRow::ActiveDeletion {
-            deleted_at_seq,
+            deletion_seq,
             action,
             ..
         } => match action {
-            ActiveDeletionRowAction::Listed { .. } => *deleted_at_seq,
-            ActiveDeletionRowAction::Removed { revoked_at_seq } => *revoked_at_seq,
+            ActiveDeletionRowAction::Listed { .. } => *deletion_seq,
+            ActiveDeletionRowAction::Removed { revocation_seq } => *revocation_seq,
         },
         MetadataRow::CommitReceipt { committed_seq, .. }
         | MetadataRow::AttributesRevision { committed_seq, .. } => *committed_seq,
