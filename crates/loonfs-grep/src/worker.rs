@@ -395,9 +395,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let collected = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling {
                 target_seq,
-                cursor,
+                cursor_inode_id,
                 checkpoint_id,
-            } => collect_backfill_unit(&reads, checkpoint_id, *target_seq, *cursor, policy).await,
+            } => {
+                collect_backfill_unit(&reads, checkpoint_id, *target_seq, *cursor_inode_id, policy)
+                    .await
+            }
             GrepIndexStatus::Active {
                 built_through_seq,
                 next_event_index,
@@ -630,7 +633,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 Some(after_inode_id) => (
                     GrepIndexStatus::Backfilling {
                         target_seq,
-                        cursor: Some(after_inode_id),
+                        cursor_inode_id: Some(after_inode_id),
                         checkpoint_id,
                     },
                     None,
@@ -712,7 +715,7 @@ fn backfilling_root(
         namespace_id.clone(),
         GrepIndexStatus::Backfilling {
             target_seq,
-            cursor: None,
+            cursor_inode_id: None,
             checkpoint_id,
         },
         GrepIndexState::new(None, next_run_ordinal),

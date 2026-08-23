@@ -96,7 +96,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
         store,
         segment_cache,
         namespace_id,
-        &record.manifest_object_id,
+        &record.manifest.manifest_object_id,
     )
     .await
     .map_err(|error| match error {
@@ -106,15 +106,15 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
         other => CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(other)),
     })?;
     let manifest = segments.manifest();
-    if manifest.payload_checksum != record.manifest_payload_checksum
-        || manifest.payload.head_seq != record.manifest_head_seq
+    if manifest.payload_checksum != record.manifest.manifest_payload_checksum
+        || manifest.payload.head_seq != record.manifest.manifest_head_seq
     {
         return Err(CoreError::NamespaceCorrupt(format!(
             "checkpoint `{checkpoint_id}` basis does not match its manifest"
         )));
     }
 
-    let checkpoint_seq = record.manifest_head_seq;
+    let checkpoint_seq = record.manifest.manifest_head_seq;
     let view = MetadataView::over_manifest_segments(&segments, checkpoint_seq);
     let mut session = view.session();
 

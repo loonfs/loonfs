@@ -55,11 +55,11 @@ pub(super) fn ensure_root_matches_manifest(
     root: &MetadataRootState,
     manifest: &NamespaceManifestEnvelope,
 ) -> crate::error::Result<()> {
-    if manifest.payload_checksum != root.manifest_payload_checksum {
+    if manifest.payload_checksum != root.manifest.manifest_payload_checksum {
         return Err(CoreError::NamespaceCorrupt(format!(
             "metadata root for namespace `{namespace_id}` references manifest `{}` with checksum `{}`, but the manifest carries `{}`",
-            root.manifest_no,
-            root.manifest_payload_checksum,
+            root.manifest.manifest_no,
+            root.manifest.manifest_payload_checksum,
             manifest.payload_checksum,
         )));
     }

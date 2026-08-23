@@ -51,7 +51,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     };
     let root = loaded_root.state;
     let manifest_segments =
-        load_verified_manifest_segments(store, namespace_id, &root.manifest_object_id)
+        load_verified_manifest_segments(store, namespace_id, &root.manifest.manifest_object_id)
             .await
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))

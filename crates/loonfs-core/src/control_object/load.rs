@@ -2,7 +2,7 @@
 
 use super::ControlObjectLoadError;
 use crate::error::{CoreError, StoreFailureClass};
-use loonfs_api::wire::control::{decode_control_object, ControlObjectKind};
+use loonfs_api::wire::control::{decode_control_object, ControlObjectKind, ForkBasis, ManifestRef};
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -25,6 +25,8 @@ pub(crate) enum EmbeddedIdentityMismatch {
         expected: String,
         actual: String,
     },
+    /// A fork basis incorrectly references its target namespace.
+    ForkBasisOwner { namespace_id: NamespaceId },
 }
 
 enum ControlLoadFailure {
@@ -94,6 +96,31 @@ pub(crate) fn expect_identity_field(
     })
 }
 
+/// Requires a root or checkpoint record to reference its own namespace.
+pub(crate) fn expect_own_manifest(
+    namespace_id: &NamespaceId,
+    manifest: &ManifestRef,
+) -> Result<(), EmbeddedIdentityMismatch> {
+    expect_identity_field(
+        "manifest owner namespace",
+        namespace_id.as_str(),
+        manifest.owner_namespace_id.as_str(),
+    )
+}
+
+/// Requires a fork basis to reference a different namespace.
+pub(crate) fn expect_foreign_fork_basis(
+    namespace_id: &NamespaceId,
+    fork_basis: &ForkBasis,
+) -> Result<(), EmbeddedIdentityMismatch> {
+    if fork_basis.manifest.owner_namespace_id != *namespace_id {
+        return Ok(());
+    }
+    Err(EmbeddedIdentityMismatch::ForkBasisOwner {
+        namespace_id: namespace_id.clone(),
+    })
+}
+
 pub(crate) fn core_control_load_error(error: ControlObjectLoadError) -> CoreError {
     match error {
         ControlObjectLoadError::Store {
@@ -142,6 +169,12 @@ fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadE
             field: field.to_owned(),
             expected,
             actual,
+        },
+        ControlLoadFailure::EmbeddedIdentity(EmbeddedIdentityMismatch::ForkBasisOwner {
+            namespace_id,
+        }) => ControlObjectLoadError::ForkBasisOwnerIsSelf {
+            object_key: object_key.to_owned(),
+            namespace_id,
         },
         ControlLoadFailure::MissingEtag => ControlObjectLoadError::Store {
             object_key: object_key.to_owned(),

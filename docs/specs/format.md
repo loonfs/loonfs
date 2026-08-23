@@ -349,6 +349,24 @@ same pointers in the mutable head may not. The head uses strict decoders for
 `visible_wal_tip` and `recent_segments` so a guarded rewrite cannot discard
 unknown data.
 
+A durable object that references a namespace manifest stores this shape under `manifest`:
+
+```json
+{
+  "owner_namespace_id": "demo",
+  "manifest_no": 2,
+  "manifest_object_id": "00000000000000000002-0123456789abcdef",
+  "manifest_head_seq": 17,
+  "manifest_payload_checksum": "sha256:<64 lowercase hex>"
+}
+```
+
+`owner_namespace_id` identifies the namespace that stores the manifest and its segments. `manifest_no` is its logical position, `manifest_object_id` is its immutable object id, and `manifest_head_seq` is the greatest namespace sequence it contains. `manifest_payload_checksum` must match the referenced envelope. Metadata roots, checkpoint records, and fork bases all use this shape, which rejects unknown fields.
+
+A metadata root or checkpoint record must reference a manifest owned by its own namespace. A fork basis must reference a different namespace. Violations return `namespace_corrupt`.
+
+Grep manifests have no logical position or head sequence, so grep root pointers use the smaller shape defined in section 4.2.2.
+
 Readers of small mutable control objects must use a full-object read that
 returns bytes and the object identity metadata for those same bytes. This does
 not by itself guarantee freshness; it guarantees self-consistency. A reader
@@ -883,11 +901,7 @@ The head records the namespace's immutable identity:
 - `fork_basis`, optional: present in every head of a fork target, absent in
   every head of a created namespace
 
-`fork_basis` records five facts: `source_namespace_id`,
-`source_manifest_object_id`, `source_manifest_checksum`,
-`source_checkpoint_id`, and `fork_seq` — the source sequence at which the
-target's own history begins. Section 2.9.1 says what a reader may do with
-them.
+`fork_basis` contains the source `manifest` reference and `source_checkpoint_id`. The manifest's `manifest_head_seq` is the first sequence in the target's history, so no separate fork sequence is stored. Section 2.9.1 defines how readers use this reference.
 
 Every successor head the publisher writes carries those fields forward
 verbatim, along with `namespace_id`. They are the namespace's identity, not
@@ -958,21 +972,9 @@ touches the WAL head, so the head changes only when commits land. A missing,
 stale, or unverifiable floor means "retain more history", never less, and the
 floor never affects live commit visibility.
 
-Create and fork write no floor. An absent floor means "retain from the
-namespace's birth sequence": 0 for a created namespace, and
-`fork_basis.fork_seq` for a fork target, which is the sequence its own history
-begins at and below which it never had WAL history to retain. The object is
-created by the first retention-floor advance and not before.
+Create and fork do not write a floor. Without one, a created namespace retains history from sequence 0. A fork retains history from `fork_basis.manifest.manifest_head_seq`, the first sequence in the target's history. The first retention-floor advance creates the floor object.
 
-`metadata/root.json` is the live read/recovery pointer. It is updated only by
-monotonic compare-and-swap on its own etag: a replacement must not decrease
-`manifest_head_seq`, a same-seq replacement may reference a different manifest
-(that is how pure compaction publishes a better physical layout of the same
-logical state), and a lower-seq attempt no-ops in favor of the newer root.
-The root never defines live visibility, and a stale root only costs extra WAL
-replay. A reader that observes `root.manifest_head_seq > head.seq` reloads
-the head — the root can only reference published state, so a fresh head read
-observes at least the root's seq; this race is not corruption.
+`metadata/root.json` is the read and recovery pointer. It stores `namespace_id`, one `manifest` reference (section 1.7), and `updated_at_ms`. Updates use compare-and-swap and cannot decrease `manifest.manifest_head_seq`. An update at the same sequence may select a different manifest after compaction. An update at a lower sequence has no effect. The root does not define live visibility; a stale root only requires more WAL replay. If a reader sees `root.manifest.manifest_head_seq > head.seq`, it reloads the head because the two reads may have occurred on opposite sides of a commit.
 
 Create and fork write no root either. `metadata/root.json` is created by the
 namespace's first flush or reorganization, which is the first moment there is
@@ -980,14 +982,7 @@ a materialized file set worth pointing at. Until then the head resolves the
 basis on its own. Once the root exists it is the basis, and `fork_basis`
 becomes provenance only.
 
-A checkpoint is a durable pin to a namespace manifest version, stored as a
-first-class record under `checkpoints/` — never inside a manifest, and never
-an input to latest visibility. A record carries its basis facts (manifest
-number, seq, payload checksum, head commit id), a required tagged `owner`, and
-a tagged `status`. A `user` owner carries a name label and an optional
-`expires_at_ms`; a `fork` owner carries the target namespace the pin protects
-and a required `expires_at_ms`. There is no expiry field at the record's top
-level.
+A checkpoint pins one namespace manifest version in a record under `checkpoints/`. It does not affect current visibility. The record stores a `manifest` reference (section 1.7), the `head_commit_id` at that manifest, and tagged `owner` and `status` fields. A `user` owner has a name and optional `expires_at_ms`. A `fork` owner has the target namespace and a required `expires_at_ms`. The record has no top-level expiry field.
 
 Creation is write-then-verify: write the record active, then verify — under
 the self-enforced verify budget — that the floor has not passed the basis and
@@ -1076,8 +1071,8 @@ for another.
    manifest is the expected shape rather than a missing object.
 3. **The root is absent and the head carries a `fork_basis`: the basis is the
    source namespace's manifest.** The head names it:
-   `fork_basis.source_manifest_object_id`, read under
-   `fork_basis.source_namespace_id`'s prefix.
+   `fork_basis.manifest.manifest_object_id`, read under
+   `fork_basis.manifest.owner_namespace_id`'s prefix.
 
 Case 3 is the only cross-namespace read in the format, and the head is the
 only thing that may authorize one. Call this rule the **head-authorized
@@ -1086,14 +1081,7 @@ into another namespace's prefix on its own say-so, because only the head is
 carried forward verbatim by every publication and so only the head can be
 trusted to still mean what it said when the fork happened.
 
-The foreign basis is hard-validated on every load. The manifest that comes
-back must carry a `namespace_id` equal to `fork_basis.source_namespace_id`,
-and a `payload_checksum` equal to `fork_basis.source_manifest_checksum`. Both
-must hold. Either mismatch is `namespace_corrupt` and the load stops there.
-The two checks are what make a cross-namespace read safe, so a failed check
-can never be answered by reading something else instead: there is no fallback
-path, no search for a nearby manifest, and no dropping back to the genesis
-basis.
+Every load validates the source manifest. Its `namespace_id` must equal `fork_basis.manifest.owner_namespace_id`, and its `payload_checksum` must equal `fork_basis.manifest.manifest_payload_checksum`. Either mismatch returns `namespace_corrupt`; the reader does not try another manifest or fall back to the genesis basis.
 
 `fork_basis.source_checkpoint_id` names the fork-owned checkpoint record on
 the source that keeps the basis manifest and its segments alive. That record,
@@ -1283,10 +1271,11 @@ object:
    pointer), concurrently. The head also supplies the `content_store_id`
    every later step needs.
 2. Load and verify the manifest the root references; its payload checksum
-   must match the root's `manifest_payload_checksum`. The manifest references
-   one or more materialized metadata runs through its `head_seq`. When the
-   root is absent, resolve the basis from the head instead (section 2.9.1):
-   the genesis state, or the head-authorized source manifest.
+   must match the root's `manifest.manifest_payload_checksum`. The manifest
+   references one or more materialized metadata runs through its `head_seq`.
+   When the root is absent, resolve the basis from the head instead
+   (section 2.9.1): the genesis state, or the head-authorized source
+   manifest.
 3. Use the visible WAL tip named by the head to identify the visible segment
    chain after the basis `head_seq`, then replay the logical commit records in ascending
    `seq` order through `head.seq`. Each logical commit appends normalized rows
@@ -1613,14 +1602,7 @@ A namespace with no `metadata/root.json` has nothing to derive a target from,
 so its floor never advances; it retains from its birth sequence until a flush
 publishes a root (section 2.9).
 
-Advancement then CASes only `wal/floor.json` — creating it on the first
-advance — recording the new `floor_seq` together with its verification stamp.
-Floor updates are monotonic: a replacement never decreases `floor_seq`, and
-`floor_seq <= metadata/root.manifest_head_seq` holds. The floor is necessary
-but not sufficient for deletion — being below it makes an object a deletion
-candidate; actual deletion additionally requires delete-time re-verification,
-and if the floor ever observably passes an active checkpoint's basis,
-retention wins ("Garbage collection").
+Advancement updates only `wal/floor.json` with compare-and-swap, creating the object on the first advance. The update stores `floor_seq` with its verification stamp and never lowers the floor. `floor_seq <= metadata/root.manifest.manifest_head_seq` must hold. Being below the floor makes an object a deletion candidate, but deletion also requires verification at delete time. If the floor passes an active checkpoint's basis, retention wins ("Garbage collection").
 
 A WAL flush materializes the current durable namespace
 file-set version: if there is no manifest for the current head, the
@@ -1691,12 +1673,7 @@ context. The protocol is:
    for as long as the target lives; nothing under the target's prefix protects
    them. Every attempt takes its own record; no attempt reuses, refreshes, or
    revives an earlier one's.
-3. Read the manifest that record pins for the target's fork sequence and next
-   inode id, then build the complete active target head: the source's
-   `content_store_id` copied verbatim from the source head,
-   and a `fork_basis` naming the source namespace, that manifest's object id
-   and payload checksum, the source checkpoint id, and the fork sequence.
-   Write it with create-if-absent.
+3. Read the pinned manifest to get the target's next inode id. Build the active target head with the source's `content_store_id` and a `fork_basis` containing the record's `manifest` reference and checkpoint id. The reference's `manifest_head_seq` is the target's fork sequence. Write the head with create-if-absent.
 4. Read the source checkpoint record once. The fork succeeds only if the
    record is active **and** its fork owner's
    `expires_at_ms > now + FORK_GUARD_MARGIN_MS`.
@@ -1729,12 +1706,7 @@ being one publication plus provider bounds plus clock skew.
 `FORK_GUARD_MARGIN_MS` is one provider operation's total wall time — the
 staleness bound on the guard's own read.
 
-The fork does not copy content-store blobs or source metadata segments, and
-writes no target manifest, root, or floor. A successful fork has independent
-namespace history from the fork point, starting its own WAL at
-`fork_seq + 1`. Future target WAL, checkpoints, and metadata segments are written
-under the target namespace root. Until the target's first flush publishes a
-root, its head resolves the basis (section 2.9.1).
+The fork does not copy content blobs or source metadata segments, and it does not write a target manifest, root, or floor. The target starts its own WAL one sequence above `fork_basis.manifest.manifest_head_seq`. New WAL segments, checkpoints, and metadata segments are stored under the target namespace. Until the first target flush creates a root, readers resolve the basis from the head (section 2.9.1).
 
 #### 3.9.3 Conflicting installs
 
@@ -1785,11 +1757,9 @@ succeed. Completion verifies the object before changing the status. Abort
 changes the status before deleting the object. This prevents cleanup from
 deleting an object for a session that is still open. Cleanup is safe to retry.
 
-Each session has `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, a
-tagged `transport`, and a tagged `status`. The content identity is assigned
-when the session begins.
+Each session has `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, a tagged `mode`, and a tagged `status`. The content identity is assigned when the session begins. The durable record uses `mode`, matching the API.
 
-The transport does not change:
+The mode does not change:
 
 - `service_proxied` stores a `staging` state: `idle`, `claimed`, or
   `staged { content_ref }`.
@@ -1805,9 +1775,9 @@ The following invariants are checked when a record is read:
 
 - Every staged or completed content reference uses the session's
   `content_id`.
-- The record carries a `transport` and a `status`. Neither has a default and
+- The record carries a `mode` and a `status`. Neither has a default and
   neither may be omitted.
-- A completed `direct_put` session's checksum uses the transport's stored
+- A completed `direct_put` session's checksum uses the mode's stored
   `checksum_algorithm`.
 
 A record that fails any invariant is rejected as corrupt. Upload sessions use
@@ -1989,6 +1959,8 @@ starts without grep state until grep is enabled for the target.
   `manifest_payload_checksum`, which must equal the named manifest envelope's
   own `payload_checksum`.
 
+This is not the namespace manifest reference from section 1.7. A grep manifest has no logical position or head sequence, so the pointer contains only the two fields above.
+
 Each immutable manifest has the same envelope grammar with
 `kind = "grep_manifest"` and `format_version = 1`. Its payload is the full
 grep state: `namespace_id`, `status`, nested `index` bookkeeping, and the
@@ -2008,8 +1980,8 @@ It holds what every phase has — the in-progress `reorganize` state and the
 `status` tag beside it:
 
 - `backfilling`: `target_seq` (the namespace sequence the pinned checkpoint
-  captured), optional `cursor` (the inode the walk resumes strictly after),
-  and `checkpoint_id`;
+  captured), optional `cursor_inode_id` (the inode the walk resumes strictly
+  after), and `checkpoint_id`;
 - `active`: `built_through_seq` and an optional `next_event_index`;
 - `disabled`: no fields, no segments, and no reorganization.
 

@@ -374,8 +374,8 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_head.content_store_id, content_store_id);
     assert_eq!(clone_head.seq, ChangeSeq(1));
     let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
-    assert_eq!(fork_basis.source_namespace_id, source_namespace_id);
-    assert_eq!(fork_basis.fork_seq, ChangeSeq(1));
+    assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
+    assert_eq!(fork_basis.manifest.manifest_head_seq, ChangeSeq(1));
     assert!(fork_basis.source_checkpoint_id.as_str().starts_with("chk_"));
 
     let source_record = loonfs_core::control::load_namespace_checkpoint_record_control(
@@ -386,15 +386,9 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     .await
     .expect("read source checkpoint record")
     .expect("source checkpoint record exists");
-    assert_eq!(source_record.manifest_head_seq, ChangeSeq(1));
-    assert_eq!(
-        source_record.manifest_object_id,
-        fork_basis.source_manifest_object_id
-    );
-    assert_eq!(
-        source_record.manifest_payload_checksum,
-        fork_basis.source_manifest_checksum
-    );
+    assert_eq!(source_record.manifest.manifest_head_seq, ChangeSeq(1));
+    // The fork basis and checkpoint record must use the same manifest.
+    assert_eq!(source_record.manifest, fork_basis.manifest);
     assert!(
         matches!(
             &source_record.owner,
@@ -498,7 +492,10 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             .expect("clone metadata root");
     let clone_manifest_bytes = store
         .get(
-            &metadata_manifest_object(&clone_namespace_id, &clone_root.state.manifest_object_id),
+            &metadata_manifest_object(
+                &clone_namespace_id,
+                &clone_root.state.manifest.manifest_object_id,
+            ),
             None,
         )
         .await
@@ -573,7 +570,7 @@ async fn a_fork_basis_checksum_mismatch_is_corruption() {
 
     let mut head = head_state(&store, &clone).await;
     let fork_basis = head.fork_basis.as_mut().expect("fork basis");
-    fork_basis.source_manifest_checksum =
+    fork_basis.manifest.manifest_payload_checksum =
         loonfs_api::sha256_digest(b"not-the-source-manifest-payload");
     let envelope =
         HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head).expect("head envelope");
@@ -627,7 +624,7 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
     .await
     .expect("read record")
     .expect("record exists");
-    let manifest_key = metadata_manifest_object(&clone, &record.manifest_object_id);
+    let manifest_key = metadata_manifest_object(&clone, &record.manifest.manifest_object_id);
     assert!(
         store
             .head(&manifest_key)
@@ -770,8 +767,10 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     .await
     .expect("read source checkpoint record")
     .expect("source checkpoint record exists");
-    let manifest_key =
-        metadata_manifest_object(&source_namespace_id, &source_record.manifest_object_id);
+    let manifest_key = metadata_manifest_object(
+        &source_namespace_id,
+        &source_record.manifest.manifest_object_id,
+    );
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await

@@ -649,7 +649,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             return Ok(Finalization::Abandoned);
         };
         let segments =
-            load_verified_manifest_segments(store, namespace_id, &root.manifest_object_id)
+            load_verified_manifest_segments(store, namespace_id, &root.manifest.manifest_object_id)
                 .await
                 .map_err(manifest_load_failure)?;
         if snapshot_segment_keys(&segments, spec).as_ref() != Some(snapshot_keys) {
@@ -698,7 +698,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             store,
             namespace_id,
             &manifest,
-            Some(root.manifest_object_id.clone()),
+            Some(root.manifest.manifest_object_id.clone()),
             current_time_ms()?,
         )
         .await?;
@@ -742,7 +742,7 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     else {
         return Ok(None);
     };
-    load_verified_manifest_segments(store, namespace_id, &root.manifest_object_id)
+    load_verified_manifest_segments(store, namespace_id, &root.manifest.manifest_object_id)
         .await
         .map(Some)
         .map_err(manifest_load_failure)

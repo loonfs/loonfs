@@ -53,7 +53,7 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
         .await
         .expect("materialization after");
 
-    assert_eq!(after.root.manifest_no, checkpoint.manifest_no);
+    assert_eq!(after.root.manifest.manifest_no, checkpoint.manifest_no);
     assert_eq!(before.head.seq, after.head.seq);
     assert!(metadata_states_equivalent(
         &before.metadata_state,
@@ -131,15 +131,15 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.root.manifest_no, ManifestNo(1));
+    assert_eq!(materialization.root.manifest.manifest_no, ManifestNo(1));
     let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
     assert!(CheckpointId::parse(record.checkpoint_id.as_str()).is_ok());
-    assert_eq!(record.manifest_head_seq, ChangeSeq(0));
-    assert_eq!(record.manifest_no, ManifestNo(1));
+    assert_eq!(record.manifest.manifest_head_seq, ChangeSeq(0));
+    assert_eq!(record.manifest.manifest_no, ManifestNo(1));
 }
 
 #[tokio::test]
@@ -213,7 +213,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.root.manifest_no, ManifestNo(1));
+    assert_eq!(materialization.root.manifest.manifest_no, ManifestNo(1));
 }
 
 #[tokio::test]
@@ -356,8 +356,8 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest_no, first.manifest_no);
-    assert_eq!(record.manifest_head_seq, first.checkpoint_seq);
+    assert_eq!(record.manifest.manifest_no, first.manifest_no);
+    assert_eq!(record.manifest.manifest_head_seq, first.checkpoint_seq);
     assert_eq!(
         record.status,
         loonfs_api::wire::control::CheckpointStatus::Active {}
@@ -518,7 +518,7 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
             .expect("read checkpoint record")
             .expect("record exists")
             .state;
-        assert_eq!(record.manifest_no, response.manifest_no);
+        assert_eq!(record.manifest.manifest_no, response.manifest_no);
     }
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
@@ -865,7 +865,7 @@ async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_no: Some(materialization.root.manifest_no),
+            basis_manifest_no: Some(materialization.root.manifest.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
@@ -901,7 +901,7 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_no: Some(materialization.root.manifest_no),
+            basis_manifest_no: Some(materialization.root.manifest.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
@@ -965,7 +965,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_no: Some(materialization.root.manifest_no),
+            basis_manifest_no: Some(materialization.root.manifest.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
@@ -981,7 +981,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         &store,
         &namespace_id,
         &manifest_without_checkpoint,
-        Some(materialization.root.manifest_object_id.clone()),
+        Some(materialization.root.manifest.manifest_object_id.clone()),
         context.now_ms,
     )
     .await
@@ -1000,9 +1000,9 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest_no, ManifestNo(1));
+    assert_eq!(record.manifest.manifest_no, ManifestNo(1));
     assert_eq!(
-        record.manifest_payload_checksum,
+        record.manifest.manifest_payload_checksum,
         manifest_without_checkpoint.payload_checksum
     );
 }
@@ -1035,7 +1035,7 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_no: Some(materialization.root.manifest_no),
+            basis_manifest_no: Some(materialization.root.manifest.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },

@@ -1035,7 +1035,8 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
         let root = load_namespace_metadata_root_control(&store, &namespace_id)
             .await
             .expect("load metadata root");
-        let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest_object_id);
+        let manifest_key =
+            metadata_manifest_object(&namespace_id, &root.state.manifest.manifest_object_id);
         let bytes = store
             .get(&manifest_key, None)
             .await

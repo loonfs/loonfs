@@ -100,26 +100,41 @@ pub struct WalFloorState {
     pub updated_at_ms: u64,
 }
 
+/// One reference to a namespace manifest.
+///
+/// Durable objects embed this shape under `manifest`. It identifies the
+/// manifest and provides the checksum required to verify it.
+///
+/// See [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestRef {
+    /// Namespace under whose prefix the manifest and its segments live.
+    pub owner_namespace_id: NamespaceId,
+    /// Monotonic logical position of the referenced manifest.
+    pub manifest_no: ManifestNo,
+    /// Immutable object selected at `manifest_no`.
+    pub manifest_object_id: ManifestObjectId,
+    /// Greatest owner-namespace sequence the referenced manifest materializes.
+    pub manifest_head_seq: ChangeSeq,
+    /// Must equal `payload_checksum` in the referenced manifest envelope.
+    pub manifest_payload_checksum: String,
+}
+
 /// Cold pointer to the best known materialized metadata root.
 ///
 /// Manifest publication compare-and-swaps this object, never the WAL head,
 /// so head watchers see only commits. Updates are monotonic in
-/// `manifest_head_seq`; a same-seq replacement may reference a different
-/// manifest (pure compaction), and a lower-seq replacement no-ops. This
-/// object never defines live visibility.
+/// `manifest.manifest_head_seq`; a same-seq replacement may reference a
+/// different manifest (pure compaction), and a lower-seq replacement no-ops.
+/// This object never defines live visibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataRootState {
     /// Namespace whose materialized file set this root selects.
     pub namespace_id: NamespaceId,
-    /// Monotonic logical position of the selected manifest.
-    pub manifest_no: ManifestNo,
-    /// Immutable candidate chosen at `manifest_no`.
-    pub manifest_object_id: ManifestObjectId,
-    /// Greatest namespace sequence represented by the selected manifest.
-    pub manifest_head_seq: ChangeSeq,
-    /// Must equal `payload_checksum` in the referenced manifest envelope.
-    pub manifest_payload_checksum: String,
+    /// Manifest selected by this root. Its owner must be `namespace_id`.
+    pub manifest: ManifestRef,
     /// Unix-millisecond wall-clock stamp for observability and GC grace policy, not ordering.
     pub updated_at_ms: u64,
 }
@@ -263,14 +278,8 @@ pub struct CheckpointRecordState {
     pub checkpoint_id: CheckpointId,
     /// Source namespace whose manifest and metadata remain pinned.
     pub namespace_id: NamespaceId,
-    /// Logical manifest position of the pinned basis.
-    pub manifest_no: ManifestNo,
-    /// Immutable manifest candidate selected at `manifest_no`.
-    pub manifest_object_id: ManifestObjectId,
-    /// Greatest source sequence materialized by the pinned manifest.
-    pub manifest_head_seq: ChangeSeq,
-    /// Must equal `payload_checksum` in the referenced manifest envelope.
-    pub manifest_payload_checksum: String,
+    /// Manifest pinned by this record. Its owner must be `namespace_id`.
+    pub manifest: ManifestRef,
     /// Commit identity at the pinned manifest head, verified against its payload.
     pub head_commit_id: CommitId,
     /// Unix-millisecond creation stamp used by GC grace policy, never validity ordering.
@@ -400,17 +409,12 @@ pub enum NamespaceStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkBasis {
-    /// Namespace whose durable tree owns the basis manifest and its segments.
-    pub source_namespace_id: NamespaceId,
-    /// Immutable manifest the target starts from, under the source's prefix.
-    pub source_manifest_object_id: ManifestObjectId,
-    /// Must equal `payload_checksum` in the referenced manifest envelope.
-    pub source_manifest_checksum: String,
+    /// Source manifest used as the target's initial state. Its owner must
+    /// differ from the target namespace. `manifest_head_seq` is the target's
+    /// initial sequence.
+    pub manifest: ManifestRef,
     /// Source checkpoint record pinning the basis for as long as the target lives.
     pub source_checkpoint_id: CheckpointId,
-    /// Source sequence the target's history begins at: its birth seq, and
-    /// the floor below which the target never had WAL history of its own.
-    pub fork_seq: ChangeSeq,
 }
 
 /// Carries the authoritative visibility, allocation, and fencing state of a namespace.
@@ -590,15 +594,14 @@ impl<'de> Deserialize<'de> for ProxiedStaging {
     }
 }
 
-/// The transport never changes, and each variant stores only the state
-/// required by that upload path.
+/// Upload mode and its mode-specific state. The mode never changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum UploadSessionTransport {
+pub enum UploadSessionMode {
     /// The service receives the bytes and writes the content object itself,
     /// so it learns size and digest from the bytes as they pass.
     ServiceProxied {
-        /// Exclusive staging progress, which applies only to this transport.
+        /// Exclusive staging progress, which applies only to this mode.
         staging: ProxiedStaging,
     },
     /// The client writes the whole object through one presigned request.
@@ -630,8 +633,8 @@ pub enum UploadSessionTransport {
     },
 }
 
-impl UploadSessionTransport {
-    /// The content reference this transport names, when it names one.
+impl UploadSessionMode {
+    /// Returns the content reference stored by this mode, when present.
     fn content_ref(&self) -> Option<&ContentRef> {
         match self {
             Self::ServiceProxied {
@@ -699,7 +702,7 @@ impl std::fmt::Display for UploadSessionRecordStatus {
 
 /// Tracks one durable content-upload workflow independently of commit publication.
 ///
-/// The tagged transport and status variants permit only valid field
+/// The tagged mode and status variants permit only valid field
 /// combinations.
 ///
 /// See [upload before publish](../../../docs/specs/format.md#242-upload-before-publish).
@@ -719,7 +722,7 @@ pub struct UploadSessionState {
     /// Unix-millisecond creation stamp.
     pub created_at_ms: u64,
     /// How the bytes reach object storage, settled when the session opened.
-    pub transport: UploadSessionTransport,
+    pub mode: UploadSessionMode,
     /// The session's status, and the field every upload operation
     /// compare-and-swaps against.
     pub status: UploadSessionRecordStatus,
@@ -737,7 +740,7 @@ impl UploadSessionState {
     ///
     fn validate(&self) -> Result<(), String> {
         for content_ref in self
-            .transport
+            .mode
             .content_ref()
             .into_iter()
             .chain(self.status.content_ref())
@@ -756,9 +759,9 @@ impl UploadSessionState {
             }
         }
         if let (
-            UploadSessionTransport::DirectPut { checksum_algorithm },
+            UploadSessionMode::DirectPut { checksum_algorithm },
             UploadSessionRecordStatus::Completed { content_ref, .. },
-        ) = (&self.transport, &self.status)
+        ) = (&self.mode, &self.status)
         {
             if content_ref.checksum.algorithm != *checksum_algorithm {
                 return Err(format!(
@@ -779,15 +782,14 @@ struct StrictUploadSessionState {
     upload_id: UploadId,
     content_id: ContentId,
     created_at_ms: u64,
-    transport: StrictUploadSessionTransport,
+    mode: StrictUploadSessionMode,
     status: StrictUploadSessionRecordStatus,
 }
 
-/// The transport read back through the same strict content-ref decoder the
-/// rest of the record uses.
+/// Strict upload-mode shape used while decoding a session record.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StrictUploadSessionTransport {
+enum StrictUploadSessionMode {
     ServiceProxied {
         staging: StrictProxiedStaging,
     },
@@ -801,16 +803,16 @@ enum StrictUploadSessionTransport {
     },
 }
 
-impl From<StrictUploadSessionTransport> for UploadSessionTransport {
-    fn from(transport: StrictUploadSessionTransport) -> Self {
-        match transport {
-            StrictUploadSessionTransport::ServiceProxied { staging } => Self::ServiceProxied {
+impl From<StrictUploadSessionMode> for UploadSessionMode {
+    fn from(mode: StrictUploadSessionMode) -> Self {
+        match mode {
+            StrictUploadSessionMode::ServiceProxied { staging } => Self::ServiceProxied {
                 staging: staging.into(),
             },
-            StrictUploadSessionTransport::DirectPut { checksum_algorithm } => {
+            StrictUploadSessionMode::DirectPut { checksum_algorithm } => {
                 Self::DirectPut { checksum_algorithm }
             }
-            StrictUploadSessionTransport::DirectMultipart {
+            StrictUploadSessionMode::DirectMultipart {
                 provider_upload_id,
                 part_size_bytes,
                 checksum_algorithm,
@@ -920,7 +922,7 @@ impl<'de> Deserialize<'de> for UploadSessionState {
             upload_id: record.upload_id,
             content_id: record.content_id,
             created_at_ms: record.created_at_ms,
-            transport: record.transport.into(),
+            mode: record.mode.into(),
             status: record.status.into(),
         };
         session.validate().map_err(serde::de::Error::custom)?;
@@ -1212,15 +1214,18 @@ mod tests {
 
         let mut forked = head.clone();
         forked.fork_basis = Some(ForkBasis {
-            source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
-            source_manifest_object_id: ManifestObjectId::parse(
-                "00000000000000000007-0123456789abcdef",
-            )
-            .expect("valid manifest object id"),
-            source_manifest_checksum: "sha256:test".to_owned(),
+            manifest: ManifestRef {
+                owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
+                manifest_no: ManifestNo(7),
+                manifest_object_id: ManifestObjectId::parse(
+                    "00000000000000000007-0123456789abcdef",
+                )
+                .expect("valid manifest object id"),
+                manifest_head_seq: ChangeSeq(7),
+                manifest_payload_checksum: "sha256:test".to_owned(),
+            },
             source_checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000002")
                 .expect("valid checkpoint id"),
-            fork_seq: ChangeSeq(7),
         });
         assert_eq!(
             head.ensure_successor_identity(&forked)

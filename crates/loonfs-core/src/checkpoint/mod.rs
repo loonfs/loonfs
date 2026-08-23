@@ -108,7 +108,7 @@ fn checkpoint_summary(
         owner,
         created_at_ms: record.created_at_ms,
         expires_at_ms,
-        checkpoint_seq: record.manifest_head_seq,
-        manifest_no: record.manifest_no,
+        checkpoint_seq: record.manifest.manifest_head_seq,
+        manifest_no: record.manifest.manifest_no,
     }
 }

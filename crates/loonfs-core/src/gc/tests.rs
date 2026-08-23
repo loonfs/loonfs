@@ -26,8 +26,8 @@ use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
-    ControlObjectKind, ProxiedStaging, UploadSessionRecordStatus, UploadSessionState,
-    UploadSessionTransport,
+    ControlObjectKind, ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus,
+    UploadSessionState,
 };
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
@@ -397,7 +397,7 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         upload_id: upload_id.clone(),
         content_id: loonfs_api::ContentId::generate(),
         created_at_ms: 1_000,
-        transport: UploadSessionTransport::ServiceProxied {
+        mode: UploadSessionMode::ServiceProxied {
             staging: ProxiedStaging::Idle,
         },
         status: loonfs_api::wire::control::UploadSessionRecordStatus::Open {
@@ -508,7 +508,7 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
     .expect("read record")
     .expect("record exists")
     .state;
-    let basis_key = metadata_manifest_object(&namespace_id, &record.manifest_object_id);
+    let basis_key = metadata_manifest_object(&namespace_id, &record.manifest.manifest_object_id);
     store.delete(&basis_key).await.expect("drop basis manifest");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -644,7 +644,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
 
     // The deleted source keeps exactly what the living clone needs.
     let fork_record = read_fork_record(&store, &source).await;
-    let basis_key = metadata_manifest_object(&source, &fork_record.manifest_object_id);
+    let basis_key = metadata_manifest_object(&source, &fork_record.manifest.manifest_object_id);
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
@@ -3035,7 +3035,7 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     let basis = crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
-        &first_record.manifest_object_id,
+        &first_record.manifest.manifest_object_id,
     )
     .await
     .expect("dead basis manifest survives its record");
@@ -3061,7 +3061,7 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
-        &first_record.manifest_object_id,
+        &first_record.manifest.manifest_object_id,
     )
     .await
     .is_err());
@@ -3554,7 +3554,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
-        &survivor.manifest_object_id,
+        &survivor.manifest.manifest_object_id,
     )
     .await
     .is_ok());
@@ -3633,7 +3633,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         crate::checkpoint::load_namespace_manifest_envelope(
             &store,
             &namespace_id,
-            &keeper.manifest_object_id,
+            &keeper.manifest.manifest_object_id,
         )
         .await
         .is_ok(),
@@ -3710,7 +3710,7 @@ async fn gc_retains_active_checkpoint_bases() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
-        &first_record.manifest_object_id,
+        &first_record.manifest.manifest_object_id,
     )
     .await
     .is_ok());
@@ -3801,7 +3801,7 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
         crate::checkpoint::load_namespace_manifest_envelope(
             &store,
             &source,
-            &fork_record.manifest_object_id,
+            &fork_record.manifest.manifest_object_id,
         )
         .await
         .is_ok(),
@@ -3816,7 +3816,7 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &source,
-        &fork_record.manifest_object_id,
+        &fork_record.manifest.manifest_object_id,
     )
     .await
     .is_err());
@@ -3935,7 +3935,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &source,
-        &fork_record.manifest_object_id,
+        &fork_record.manifest.manifest_object_id,
     )
     .await
     .is_ok());
@@ -4011,7 +4011,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
         assert!(crate::checkpoint::load_namespace_manifest_envelope(
             &store,
             &source,
-            &fork_record.manifest_object_id,
+            &fork_record.manifest.manifest_object_id,
         )
         .await
         .is_ok());

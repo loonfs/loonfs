@@ -8,7 +8,7 @@ use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::v0::CompleteMultipartUploadRequest;
 use loonfs_api::{
-    wire::control::{ControlObjectKind, UploadSessionState, UploadSessionTransport},
+    wire::control::{ControlObjectKind, UploadSessionMode, UploadSessionState},
     ContentRef, DestinationBehavior, NamespaceId, UploadId,
 };
 use loonfs_api::{Checksum, ChecksumAlgorithm};
@@ -533,13 +533,12 @@ mod direct_multipart {
             .await
             .expect("begin direct multipart");
         let state = session_state(store, &namespace_id, &begin.upload_id).await;
-        // A multipart session is opened knowing nothing about its payload,
-        // which is why its transport carries no content reference at all.
-        let UploadSessionTransport::DirectMultipart {
+        // Multipart sessions do not know the completed content reference yet.
+        let UploadSessionMode::DirectMultipart {
             provider_upload_id,
             part_size_bytes,
             checksum_algorithm,
-        } = state.transport.clone()
+        } = state.mode.clone()
         else {
             panic!("a multipart begin opens a multipart session");
         };
