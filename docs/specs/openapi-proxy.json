@@ -2290,10 +2290,6 @@
             "description": "Unix milliseconds at which the current epoch's acquirer took it, when\nthe head recorded one. Writer ids are process labels, so two runs on\none machine can share one; the stamp is what tells them apart.",
             "minimum": 0
           },
-          "active_deletion_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Deletion generation actually active for the inode."
-          },
           "active_writer": {
             "type": "string",
             "description": "Writer id recorded by the current epoch's acquirer, when the head\nrecorded one."
@@ -2305,6 +2301,10 @@
           "actual_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
             "description": "Attribute revision that is actually current for the inode."
+          },
+          "actual_deletion_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Deletion generation actually active for the inode."
           },
           "actual_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -2334,6 +2334,10 @@
             "$ref": "#/components/schemas/AttributeRevisionNo",
             "description": "Attribute revision the request expected to be current."
           },
+          "expected_deletion_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Deletion generation the undelete expected to be active."
+          },
           "expected_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Head sequence a namespace delete required the namespace to still be\nat."
@@ -2342,7 +2346,7 @@
             "$ref": "#/components/schemas/RevisionNo",
             "description": "Revision the request expected to be current."
           },
-          "fenced_epoch": {
+          "fenced_writer_epoch": {
             "$ref": "#/components/schemas/WriterEpoch",
             "description": "Epoch the failing writer session held when it was displaced."
           },
@@ -2357,10 +2361,6 @@
             "format": "int32",
             "description": "Position, in the request's operation list, of the operation that\nfailed. A commit applies all of its operations or none of them, so\nthis names the one that stopped the whole request.",
             "minimum": 0
-          },
-          "requested_deletion_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Deletion generation an undelete asked to recover."
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",

@@ -457,7 +457,7 @@ impl CoreError {
     pub fn details(&self) -> Option<ErrorDetails> {
         match self {
             CoreError::WriterFenced(fence) => Some(ErrorDetails {
-                fenced_epoch: Some(fence.fenced_epoch),
+                fenced_writer_epoch: Some(fence.fenced_epoch),
                 active_writer_epoch: Some(fence.active_epoch),
                 active_writer: fence.active_writer.clone(),
                 active_acquired_at_ms: fence.active_acquired_at_ms,
@@ -610,7 +610,7 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             requested_seq,
         } => Some(ErrorDetails {
             inode_id: Some(*inode_id),
-            requested_deletion_seq: Some(*requested_seq),
+            expected_deletion_seq: Some(*requested_seq),
             ..ErrorDetails::default()
         }),
         CommitValidationError::UndeleteGenerationMismatch {
@@ -619,8 +619,8 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             active_seq,
         } => Some(ErrorDetails {
             inode_id: Some(*inode_id),
-            requested_deletion_seq: Some(*requested_seq),
-            active_deletion_seq: Some(*active_seq),
+            expected_deletion_seq: Some(*requested_seq),
+            actual_deletion_seq: Some(*active_seq),
             ..ErrorDetails::default()
         }),
         // The expected revision the guard carried is what a caller compares
@@ -981,7 +981,7 @@ mod tests {
             active_acquired_at_ms: Some(2_000),
         });
         let details = fenced.details().expect("fence details");
-        assert_eq!(details.fenced_epoch, Some(WriterEpoch(3)));
+        assert_eq!(details.fenced_writer_epoch, Some(WriterEpoch(3)));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(details.active_writer.as_deref(), Some("writer-b"));
         assert_eq!(details.active_acquired_at_ms, Some(2_000));
