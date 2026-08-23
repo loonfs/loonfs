@@ -6,7 +6,7 @@ use super::error::ApiResponseError;
 use super::handlers_uploads::{
     content_preparation_for_puts, current_unix_ms, ContentTokenVerifier, PutContentPreparation,
 };
-use super::{authorize, AppJson, AppQuery, AppState, NamespaceIdPath};
+use super::{authorize, AppJson, AppQuery, AppState, NamespaceIdPath, NoQuery};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -37,22 +37,25 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PathQuery {
     path: Option<String>,
     include_attributes: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PathPageQuery {
     path: Option<String>,
     limit: Option<String>,
     cursor: Option<String>,
 }
 
-/// The directory listing's query. It repeats [`PathPageQuery`]'s fields
-/// rather than composing them because the query extractor deserializes with
-/// `serde_urlencoded`, which does not support `#[serde(flatten)]`.
+/// The directory-listing query. These fields are repeated because
+/// `serde_urlencoded` does not support `#[serde(flatten)]`, and flattening
+/// would also prevent strict unknown-field checks.
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ListPathPageQuery {
     path: Option<String>,
     limit: Option<String>,
@@ -61,12 +64,14 @@ pub(super) struct ListPathPageQuery {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PageQuery {
     pub(super) limit: Option<String>,
     pub(super) cursor: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ContentQuery {
     path: Option<String>,
     revision_no: Option<String>,
@@ -104,6 +109,7 @@ impl Stream for DownloadBodyStream {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ChangesQuery {
     after_seq: Option<String>,
     limit: Option<String>,
@@ -357,6 +363,7 @@ pub(super) async fn get_file_bytes(
         ),
         responses(
             (status = 200, description = "Recoverable deletions", body = ListTrashResponse),
+            (status = 400, description = "Invalid limit or cursor", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
@@ -466,9 +473,11 @@ pub(super) async fn list_file_revisions(
 pub(super) async fn create_commit(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
+    query: AppQuery<NoQuery>,
     AppJson(request): AppJson<ApiCommitRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     let ApiCommitRequest {
         commit_id,
         actor,

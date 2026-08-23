@@ -10,7 +10,7 @@ use super::error::ApiResponseError;
 use super::handlers_filesystem::parse_revision_no;
 use super::handlers_inodes::{parse_inode_id, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
-use super::{AppJson, AppPath, AppState, NamespaceIdPath};
+use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 #[cfg(feature = "openapi")]
@@ -72,9 +72,11 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
 pub(super) async fn create_download(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
+    query: AppQuery<NoQuery>,
     AppJson(request): AppJson<BeginDownloadRequest>,
 ) -> Result<Json<BeginDownloadResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     // A store either authorizes direct transfers or it does not, and one
     // that does can always sign a read — so this asks for the bundle, not
     // for a direction within it.
@@ -128,10 +130,12 @@ pub(super) async fn create_download_by_inode(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<InodeRevisionPathParams>,
+    query: AppQuery<NoQuery>,
     AppJson(_request): AppJson<BeginDownloadByInodeRequest>,
 ) -> Result<Json<BeginDownloadByInodeResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     let path = path.into_params()?;
+    query.into_params()?;
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let issuer = direct_get_issuer(&state)?;

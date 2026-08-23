@@ -46,6 +46,11 @@ indexmap = { version = "2", features = ["serde"] }
 # Pinned exactly: the cache-directory geometry code reads foyer's block-file
 # naming, so a version bump is a deliberate change with its own review.
 foyer = { version = "=0.22.3", features = ["serde"] }
+# Named directly, though axum already carries both: the server decodes query
+# strings itself so that an unknown parameter is reported the same way an
+# unknown JSON body field is. `form_urlencoded` splits the query string into
+# pairs and `serde_urlencoded` deserializes them.
+form_urlencoded = "1"
 futures = "0.3"
 fs4 = "0.13"
 getrandom = "0.3"
@@ -67,6 +72,7 @@ serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = { version = "1", features = ["raw_value"] }
 serde_path_to_error = "0.1"
+serde_urlencoded = "0.7"
 sha2 = "0.10"
 hmac = "0.12"
 loonfs-model = { path = "crates/loonfs-model" }

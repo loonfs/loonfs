@@ -3,7 +3,9 @@
 
 use super::error::ApiResponseError;
 use super::handlers_filesystem::{parse_public_ordinal, resolve_page_limit};
-use super::{authorize, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, OptionalAppJson};
+use super::{
+    authorize, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson,
+};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -35,6 +37,7 @@ fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: 
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DeleteNamespaceQuery {
     /// Delete only if the head is still at this sequence (`stale_head` on
     /// mismatch).
@@ -42,6 +45,7 @@ pub(super) struct DeleteNamespaceQuery {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CheckpointPageQuery {
     limit: Option<String>,
     cursor: Option<String>,
@@ -58,6 +62,7 @@ pub(super) struct CheckpointPageQuery {
         description = "Returns a summary of supported features and limits.",
         responses(
             (status = 200, description = "Capability document", body = loonfs_api::CapabilityDocument),
+            (status = 400, description = "Unknown query parameter", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
@@ -66,8 +71,10 @@ pub(super) struct CheckpointPageQuery {
 pub(super) async fn get_capabilities(
     State(state): State<AppState>,
     headers: HeaderMap,
+    query: AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
+    query.into_params()?;
     let mut capabilities = state.reader.capabilities();
     // Each direct transport is advertised from the issuer that performs it,
     // so a provider that signs whole-object writes but has no multipart API
@@ -184,8 +191,10 @@ pub(super) async fn get_capabilities(
 )]
 pub(super) async fn create_namespace(
     State(state): State<AppState>,
+    query: AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
+    query.into_params()?;
     let namespace = state
         .writer
         .create_namespace(&request.namespace_id, CreateNamespaceOptions::default())
@@ -218,9 +227,11 @@ pub(super) async fn get_namespace(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
+    query: AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     let namespace = state
         .reader
         .get_namespace(&namespace_id)
@@ -253,9 +264,11 @@ pub(super) async fn get_namespace_diagnostics(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
+    query: AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::NamespaceDiagnostics>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     let diagnostics = state
         .admin
         .get_namespace_diagnostics(&namespace_id)
@@ -341,9 +354,11 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
 pub(super) async fn fork_namespace(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
+    query: AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
     let source_namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     let namespace = state
         .writer
         .fork_namespace(&source_namespace_id, &request.new_namespace_id)
@@ -376,9 +391,11 @@ pub(super) async fn fork_namespace(
 pub(super) async fn create_checkpoint(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
+    query: AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateCheckpointRequest>,
 ) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     let response = state
         .admin
         .create_checkpoint(
@@ -479,10 +496,12 @@ pub(super) async fn release_checkpoint(
     namespace_id_path: NamespaceIdPath,
     path: AppPath<CheckpointPathParams>,
     headers: HeaderMap,
+    query: AppQuery<NoQuery>,
 ) -> Result<Json<ReleaseCheckpointResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let CheckpointPathParams { checkpoint_id } = path.into_params()?;
+    query.into_params()?;
     let checkpoint_id = parse_checkpoint_id(&checkpoint_id)?;
     let response = state
         .admin
@@ -532,9 +551,11 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
 pub(super) async fn run_maintenance(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
+    query: AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<MaintenanceStepRequest>,
 ) -> Result<Json<MaintenanceStepResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     let plan =
         loonfs::MaintenancePlan::from_request(request.unwrap_or_default()).map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)

@@ -29,6 +29,16 @@
               }
             }
           },
+          "400": {
+            "description": "Unknown query parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Unauthorized",
             "content": {
@@ -829,6 +839,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ListTrashResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
