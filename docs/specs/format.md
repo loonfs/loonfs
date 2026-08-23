@@ -2148,9 +2148,8 @@ and grep maintenance does not collect core-owned objects.
   (section 3.1.3).
 - **Every encoding is pinned by golden-byte fixtures**
   (`crates/loonfs-api/tests/golden_formats.rs`). An encoder change that alters
-  durable bytes fails those tests. During pre-release development, an
-  intentional change regenerates the version-1 fixture in place; after the
-  first stable release, it follows the evolution rules above.
+  durable bytes fails those tests. The grep families are pinned under the same
+  mechanism in `crates/loonfs-grep/tests/golden/`.
 
 ## 5. Extension-owned materialization
 

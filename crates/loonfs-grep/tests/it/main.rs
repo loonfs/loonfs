@@ -3,6 +3,7 @@
 //! runs its tests as threads instead of as separate processes.
 
 mod common;
+mod golden_formats;
 mod grams_index;
 mod grep_service_differential;
 mod grep_worker;
