@@ -120,7 +120,7 @@ impl MaintenanceJob for MetadataJob {
         {
             Ok(step) => {
                 let metadata = step
-                    .metadata
+                    .metadata_maintenance
                     .expect("a plan selecting metadata upkeep reports it");
                 let conclusion = metadata_conclusion(&metadata);
                 // Quiet sub-outcomes emit nothing at default levels, so this

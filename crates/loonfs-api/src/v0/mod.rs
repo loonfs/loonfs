@@ -27,15 +27,16 @@ pub use downloads::{
     BeginDownloadResponse,
 };
 pub use operations::{
-    AdvanceRetentionResponse, ApiError, Checkpoint, CheckpointOwnerSummary, CommitRequest,
-    CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, ErrorDetails,
-    FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
-    GcRequest, GcResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, ReleaseCheckpointResponse,
-    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, StoreProbeCheckOutcome,
-    StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse, WalFlushStepOutcome,
+    AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, Checkpoint,
+    CheckpointOwnerSummary, CommitRequest, CreateCheckpointRequest, CreateCheckpointResponse,
+    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
+    ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse,
+    ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
+    ListFileRevisionsResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse,
+    WalFlushStepOutcome,
 };
 pub use reads::{
     AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,

@@ -45,7 +45,7 @@ fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_api::GcRespons
 
 /// The upkeep report a step that selected metadata is obliged to carry.
 fn upkeep(step: &loonfs_api::MaintenanceStepResponse) -> &loonfs_api::MetadataMaintenanceResponse {
-    step.metadata
+    step.metadata_maintenance
         .as_ref()
         .expect("a step selecting metadata upkeep reports it")
 }
@@ -83,7 +83,7 @@ fn post_maintenance_step(
     post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
         "test-token",
-        serde_json::json!({ "metadata": {} }),
+        serde_json::json!({ "metadata_maintenance": {} }),
     )
 }
 
@@ -107,7 +107,7 @@ fn post_retention_advance(
     post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
         "test-token",
-        serde_json::json!({ "advance_retention": true }),
+        serde_json::json!({ "retention": {} }),
     )
 }
 
@@ -401,10 +401,10 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
         .maintenance_step(
             &namespace,
             &loonfs_api::MaintenanceStepRequest {
-                metadata: Some(loonfs_api::MetadataMaintenanceRequest {
+                metadata_maintenance: Some(loonfs_api::MetadataMaintenanceRequest {
                     max_wal_tail_segments: Some(1),
                 }),
-                advance_retention: true,
+                retention: Some(loonfs_api::AdvanceRetentionRequest::default()),
                 gc: Some(loonfs_api::GcRequest::default()),
             },
         )

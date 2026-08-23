@@ -14,12 +14,13 @@ use loonfs_api::{
         DirectPutUpload, ObjectTransferAccess, UploadContentResponse, UploadMode,
         UploadSessionResponse, UploadSessionStatus,
     },
-    AdvanceRetentionResponse, ApiError, Checkpoint, CheckpointOwnerSummary, CommitRequest,
-    ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    FilesystemOperation, ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    MetadataMaintenanceRequest, MetadataMaintenanceResponse, ReleaseCheckpointResponse,
-    ReorganizeStepOutcome, RetainedCandidates, RevisionNo, TrashEntry, WalFlushStepOutcome,
+    AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, Checkpoint,
+    CheckpointOwnerSummary, CommitRequest, ContentRef, CreateCheckpointRequest,
+    CreateCheckpointResponse, CreateNamespaceRequest, FilesystemOperation, ForkNamespaceRequest,
+    GcRequest, GcResponse, ListCheckpointsResponse, ListFileRevisionsResponse, ListTrashResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, ReleaseCheckpointResponse, ReorganizeStepOutcome,
+    RetainedCandidates, RevisionNo, TrashEntry, WalFlushStepOutcome,
 };
 
 /// Builds the static OpenAPI document for the v0 HTTP API.
@@ -100,6 +101,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         ReleaseCheckpointResponse,
         MaintenanceStepRequest,
         MetadataMaintenanceRequest,
+        AdvanceRetentionRequest,
         WalFlushStepOutcome,
         ReorganizeStepOutcome,
         MetadataMaintenanceResponse,

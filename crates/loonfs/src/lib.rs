@@ -87,8 +87,8 @@ pub use loonfs_api::v0::{
     UploadSessionResponse, UploadSessionStatus,
 };
 pub use loonfs_api::{
-    ActorId, ActorKind, ActorRef, AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo,
-    AttributeValue, Attributes, AttributesProjection, AuthoritativeFileBytes,
+    ActorId, ActorKind, ActorRef, AdvanceRetentionRequest, AdvanceRetentionResponse, AttributeKey,
+    AttributeRevisionNo, AttributeValue, Attributes, AttributesProjection, AuthoritativeFileBytes,
     AuthoritativePathEntry, AuthoritativePathEntryKind, CapabilityDocument, ChangeSeq, Checkpoint,
     CheckpointId, CheckpointOwnerSummary, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
     ContentRefKind, CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,

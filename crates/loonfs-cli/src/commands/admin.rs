@@ -18,8 +18,8 @@ use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
 use loonfs_api::{
-    ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceStepRequest,
-    MetadataMaintenanceRequest,
+    AdvanceRetentionRequest, ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode,
+    GcRequest, MaintenanceStepRequest, MetadataMaintenanceRequest,
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
@@ -86,10 +86,10 @@ async fn run_admin_step(
     // A step always runs metadata maintenance. The flags add retention or
     // garbage collection when requested.
     let request = MaintenanceStepRequest {
-        metadata: Some(MetadataMaintenanceRequest {
+        metadata_maintenance: Some(MetadataMaintenanceRequest {
             max_wal_tail_segments: args.max_wal_tail_segments,
         }),
-        advance_retention: args.retention,
+        retention: args.retention.then(AdvanceRetentionRequest::default),
         gc: args.gc.then(GcRequest::default),
     };
     let response = context
@@ -374,7 +374,7 @@ async fn run_admin_flush(
         .maintenance_step(
             &context.namespace,
             MaintenanceStepRequest {
-                metadata: Some(MetadataMaintenanceRequest {
+                metadata_maintenance: Some(MetadataMaintenanceRequest {
                     max_wal_tail_segments: Some(1),
                 }),
                 ..MaintenanceStepRequest::default()
@@ -402,7 +402,7 @@ async fn run_admin_retention_advance(
         .maintenance_step(
             &context.namespace,
             MaintenanceStepRequest {
-                advance_retention: true,
+                retention: Some(AdvanceRetentionRequest::default()),
                 ..MaintenanceStepRequest::default()
             },
         )

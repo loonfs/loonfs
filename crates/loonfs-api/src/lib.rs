@@ -149,14 +149,15 @@ pub use secret::SecretString;
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
-    AdvanceRetentionResponse, ApiError, AttributesProjection, AuthoritativeFileBytes,
-    AuthoritativePathEntry, AuthoritativePathEntryKind, Checkpoint, CheckpointOwnerSummary,
-    CommitRequest, CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
-    ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, ReleaseCheckpointResponse,
-    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, TrashEntry, WalFlushStepOutcome,
+    AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, AttributesProjection,
+    AuthoritativeFileBytes, AuthoritativePathEntry, AuthoritativePathEntryKind, Checkpoint,
+    CheckpointOwnerSummary, CommitRequest, CommitResponse, CreateCheckpointRequest,
+    CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,
+    DeleteNamespaceResponse, DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation,
+    FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch,
+    GrepRequest, GrepResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    TrashEntry, WalFlushStepOutcome,
 };

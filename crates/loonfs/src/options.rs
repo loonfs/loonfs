@@ -81,10 +81,10 @@ impl MaintenancePlan {
     pub fn from_request(request: MaintenanceStepRequest) -> Result<Self> {
         Ok(Self {
             metadata: request
-                .metadata
+                .metadata_maintenance
                 .map(metadata_options_from_request)
                 .transpose()?,
-            advance_retention: request.advance_retention,
+            advance_retention: request.retention.is_some(),
             gc: request.gc.map(|request| {
                 let mut config = gc_config_from_request(request);
                 if config.max_objects.is_none() {
@@ -209,6 +209,7 @@ impl Default for ReadFileStreamOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_api::AdvanceRetentionRequest;
 
     fn plan(request: MaintenanceStepRequest) -> MaintenancePlan {
         MaintenancePlan::from_request(request).expect("the request selects an action")
@@ -241,14 +242,14 @@ mod tests {
     #[test]
     fn each_action_is_selected_on_its_own() {
         assert!(plan(MaintenanceStepRequest {
-            metadata: Some(MetadataMaintenanceRequest::default()),
+            metadata_maintenance: Some(MetadataMaintenanceRequest::default()),
             ..MaintenanceStepRequest::default()
         })
         .metadata
         .is_some());
 
         let retention = plan(MaintenanceStepRequest {
-            advance_retention: true,
+            retention: Some(AdvanceRetentionRequest::default()),
             ..MaintenanceStepRequest::default()
         });
         assert!(retention.advance_retention);
@@ -258,7 +259,7 @@ mod tests {
     #[test]
     fn an_absent_threshold_resolves_to_the_default() {
         let step = plan(MaintenanceStepRequest {
-            metadata: Some(MetadataMaintenanceRequest::default()),
+            metadata_maintenance: Some(MetadataMaintenanceRequest::default()),
             ..MaintenanceStepRequest::default()
         });
         assert_eq!(
@@ -271,7 +272,7 @@ mod tests {
     fn a_useless_flush_threshold_is_rejected() {
         for threshold in [0, WalTailPolicy::DEFAULT.reject_writes_at_segments + 1] {
             let error = MaintenancePlan::from_request(MaintenanceStepRequest {
-                metadata: Some(MetadataMaintenanceRequest {
+                metadata_maintenance: Some(MetadataMaintenanceRequest {
                     max_wal_tail_segments: Some(threshold),
                 }),
                 ..MaintenanceStepRequest::default()

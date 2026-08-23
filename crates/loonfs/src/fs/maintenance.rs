@@ -232,7 +232,7 @@ impl FsAdmin {
             Err(error) => return Err(error),
         };
 
-        let metadata = if let Some(options) = plan.metadata {
+        let metadata_maintenance = if let Some(options) = plan.metadata {
             Some(
                 self.run_metadata(namespace_id, options, &status_before)
                     .await?,
@@ -254,7 +254,7 @@ impl FsAdmin {
         Ok(MaintenanceStepResponse {
             namespace_id: namespace_id.clone(),
             status_before,
-            metadata,
+            metadata_maintenance,
             retention,
             gc,
         })

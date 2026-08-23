@@ -781,21 +781,22 @@ named in a fixed order:
 
 | Field | Action |
 | --- | --- |
-| `metadata` | Folds the visible WAL tail into metadata segments and advances the metadata root once the tail reaches `max_wal_tail_segments`, then merges one bounded metadata reorganization unit. The two are one action: folding a tail is what creates the delta runs a merge consumes. |
-| `advance_retention` | Advances the retention floor to the flushed manifest head. |
+| `metadata_maintenance` | Folds the visible WAL tail into metadata segments and advances the metadata root once the tail reaches `max_wal_tail_segments`, then merges one bounded metadata reorganization unit. The two are one action: folding a tail is what creates the delta runs a merge consumes. |
+| `retention` | Advances the retention floor to the flushed manifest head. |
 | `gc` | Runs one bounded garbage-collection pass. |
+
+Every field above is an options object. Include a field to select that action; an empty object uses the server defaults. `retention` has no options yet, so its value must be an empty object.
 
 A body that names no action is rejected as `invalid_request`, which includes
 sending no body at all. None of the actions creates a checkpoint record.
 
-Each action reports separately in the response, under the field that
-selected it: `metadata` (carrying `wal_flush` and `reorganize`), `retention`
-(carrying `retention_floor_seq`), and `gc`. An absent report means the body
-did not name that action — it never means an action ran and found nothing to
-do, which is what the outcomes inside a report say. Compare
-`retention.retention_floor_seq` with `status_before.retention_floor_seq` to
-see whether the floor moved. Races and supersessions are outcomes, not
-errors.
+This request selects all three actions:
+
+```json
+{"metadata_maintenance":{"max_wal_tail_segments":8},"retention":{},"gc":{"max_objects":1024}}
+```
+
+Each selected action reports under the same field that selected it. `metadata_maintenance` contains `wal_flush` and `reorganize`, `retention` contains `retention_floor_seq`, and `gc` contains the collection result. An absent field means the action was not selected. Compare `retention.retention_floor_seq` with `status_before.retention_floor_seq` to see whether the floor moved. Races and supersessions are outcomes, not errors.
 
 A deleted namespace accepts a step that names `gc` alone, which is how its
 reclaimable state is collected; naming anything else is refused with
@@ -817,16 +818,7 @@ group needs a job and the handle serving the request has no background work
 behind it at all, so nothing will run one until an operator does; the
 self-hosting guide names the call.
 
-Inside `metadata`, `max_wal_tail_segments` overrides the flush threshold;
-zero, and any value above the write-rejection threshold, are rejected as
-`invalid_request`. Nothing surrenders replay history unless
-`advance_retention` is true. `gc` overrides `grace_window_ms`, bounds one
-invocation with `max_objects`, and resumes with `cursor`; a grace window
-below the derived safety floor or a zero budget is rejected as
-`invalid_request`. Upload sessions and the content they leave
-behind are not under `grace_window_ms` alone: a session carries its own
-lease, and how long a completed session's content is protected is derived
-rather than configured (format spec, "Garbage collection", rule 11).
+Inside `metadata_maintenance`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request includes `retention`. Inside `gc`, `grace_window_ms` overrides the grace window, `max_objects` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
 `max_objects` bounds the whole pass, from its first read to its last, and
 not only the candidates it enumerates. Building the live root set spends it
 too: the head and metadata root together, the retention floor, each
@@ -1005,7 +997,7 @@ independent.
 The first is the **metadata retention floor**. It limits how far back clients
 can replay the WAL. Advancing the floor makes older WAL segments eligible for
 garbage collection. It advances only through an explicit request:
-`POST .../maintenance/run` with `advance_retention: true`, or
+`POST .../maintenance/run` with a body naming `retention`, or
 `loonfs admin retention advance`. It does not remove file revisions.
 
 The second is the **content reclamation grace**, which is slightly longer than
