@@ -280,7 +280,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         if self.sweep.live.protects_wal_segment(key) {
             self.report.retain(RetainedReason::Referenced);
         } else if self.sweep_aged(key, self.policy.grace_window_ms).await? {
-            self.report.deleted_wal_segments += 1;
+            self.report.deleted.wal_segments += 1;
         }
         Ok(())
     }
@@ -292,7 +292,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         } else if self.sweep.live.segments.contains(key) {
             self.report.retain(RetainedReason::Referenced);
         } else if self.sweep_aged(key, self.policy.grace_window_ms).await? {
-            self.report.deleted_metadata_segments += 1;
+            self.report.deleted.metadata_segments += 1;
         }
         Ok(())
     }
@@ -315,7 +315,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             .owner_of(self.store, self.namespace_id, key, self.mutation.now_ms)
             .await?
         {
-            StagedObject::OwnedByALiveJob => self.report.retain(RetainedReason::GraceWindow),
+            StagedObject::OwnedByALiveJob => self.report.retain(RetainedReason::WithinGraceWindow),
             StagedObject::UnrecognizedKey => {
                 self.report.retain(RetainedReason::UnrecognizedKey);
             }
@@ -326,7 +326,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                     .await?
                     && key.ends_with(".sst.zst")
                 {
-                    self.report.deleted_metadata_segments += 1;
+                    self.report.deleted.metadata_segments += 1;
                 }
             }
         }
@@ -344,7 +344,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             }
             Some(Ok(_)) => {
                 if self.sweep_aged(key, self.policy.grace_window_ms).await? {
-                    self.report.deleted_manifests += 1;
+                    self.report.deleted.manifests += 1;
                 }
             }
             // A key under the manifest prefix that does not name a manifest
@@ -364,7 +364,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         )
         .await?
         {
-            self.report.released_missing_basis_checkpoints += 1;
+            self.report.released_checkpoints.missing_basis += 1;
         } else {
             self.report.retain(RetainedReason::CheckpointNotReleasable);
         }
@@ -378,7 +378,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         }
         match maybe_release_fork_checkpoint(self.store, key, self.mutation).await? {
             ForkCheckpointSweep::Released => {
-                self.report.released_fork_checkpoints += 1;
+                self.report.released_checkpoints.fork += 1;
                 return Ok(());
             }
             ForkCheckpointSweep::Retained => {
@@ -399,9 +399,9 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         {
             CheckpointSweep::Delete => {
                 self.delete_key(key).await?;
-                self.report.deleted_checkpoint_records += 1;
+                self.report.deleted.checkpoint_records += 1;
             }
-            CheckpointSweep::Released => self.report.released_expired_checkpoints += 1,
+            CheckpointSweep::Released => self.report.released_checkpoints.expired += 1,
             CheckpointSweep::Retain => self.report.retain(RetainedReason::CheckpointNotReleasable),
         }
         Ok(())
@@ -426,9 +426,9 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         {
             UploadSessionSweep::Delete { reclaimed_content } => {
                 self.delete_key(key).await?;
-                self.report.deleted_upload_sessions += 1;
+                self.report.deleted.upload_sessions += 1;
                 if reclaimed_content {
-                    self.report.deleted_content_objects += 1;
+                    self.report.deleted.content_objects += 1;
                 }
             }
             UploadSessionSweep::Retain { reclaimable_at_ms } => {
@@ -459,7 +459,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             // nothing is counted for it either.
             GraceAge::Gone => return Ok(false),
             GraceAge::Young => {
-                self.report.retain(RetainedReason::GraceWindow);
+                self.report.retain(RetainedReason::WithinGraceWindow);
                 return Ok(false);
             }
             GraceAge::Unknown => {
@@ -509,7 +509,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                     .clone_from(&self.policy.unchanged_cursor),
             }
         }
-        self.report.degraded_retention = self.sweep.degraded;
+        self.report.retention_degraded = self.sweep.degraded;
         Ok(self.report)
     }
 }

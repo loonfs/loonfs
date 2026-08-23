@@ -130,7 +130,7 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
 
     let staged_at_ms = loonfs::current_time_ms().expect("wall clock");
     let inside = collect(&store, &namespace_id, staged_at_ms).await;
-    assert_eq!(inside.deleted_content_objects, 0);
+    assert_eq!(inside.deleted.content_objects, 0);
     assert!(
         exists(&store, &orphan_key).await,
         "inside the grace a receipt could still admit a commit for these bytes"
@@ -143,11 +143,11 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
     )
     .await;
     assert_eq!(
-        past.deleted_content_objects, 1,
+        past.deleted.content_objects, 1,
         "the prepared object is the one reclamation"
     );
     assert_eq!(
-        past.deleted_upload_sessions, 2,
+        past.deleted.upload_sessions, 2,
         "both sessions have said everything they will say"
     );
     assert!(!exists(&store, &orphan_key).await);
@@ -189,9 +189,9 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     )
     .await;
 
-    assert_eq!(report.deleted_upload_sessions, 1);
+    assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(
-        report.deleted_content_objects, 0,
+        report.deleted.content_objects, 0,
         "metadata protects the bytes the moment the commit lands"
     );
     assert!(exists(&store, &published_key).await);
@@ -260,9 +260,9 @@ async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survi
     )
     .await;
 
-    assert_eq!(report.deleted_upload_sessions, 2);
+    assert_eq!(report.deleted.upload_sessions, 2);
     assert_eq!(
-        report.deleted_content_objects, 1,
+        report.deleted.content_objects, 1,
         "exactly the duplicate the rerun staged"
     );
     assert!(
@@ -323,7 +323,7 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
     let staged_at_ms = loonfs::current_time_ms().expect("wall clock");
     let inside = collect(&store, &namespace_id, staged_at_ms).await;
     assert_eq!(
-        inside.deleted_upload_sessions, 0,
+        inside.deleted.upload_sessions, 0,
         "the lease has not passed"
     );
 
@@ -332,7 +332,7 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
     let aborted_at_ms = staged_at_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1;
     collect(&store, &namespace_id, aborted_at_ms).await;
     let reaped = collect(&store, &namespace_id, aborted_at_ms + GRACE_MS + 1).await;
-    assert_eq!(reaped.deleted_upload_sessions, 1);
+    assert_eq!(reaped.deleted.upload_sessions, 1);
     assert!(session_keys(&store, &namespace_id).await.is_empty());
 }
 

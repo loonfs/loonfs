@@ -4239,6 +4239,56 @@
           }
         }
       },
+      "DeletedObjectCounts": {
+        "type": "object",
+        "description": "Objects deleted by one GC pass, grouped by object family. Every field is\npresent, including zero counts.",
+        "required": [
+          "wal_segments",
+          "metadata_segments",
+          "manifests",
+          "checkpoint_records",
+          "upload_sessions",
+          "content_objects"
+        ],
+        "properties": {
+          "checkpoint_records": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Released checkpoint records deleted after their grace window.",
+            "minimum": 0
+          },
+          "content_objects": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Content objects deleted after their completed upload session passed\nthe reclamation grace period and no reachable data referenced them.\nCleanup of abandoned sessions is not counted here.",
+            "minimum": 0
+          },
+          "manifests": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unreferenced manifests deleted.",
+            "minimum": 0
+          },
+          "metadata_segments": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unreferenced metadata segments deleted.",
+            "minimum": 0
+          },
+          "upload_sessions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Upload-session control objects deleted after the reap window.",
+            "minimum": 0
+          },
+          "wal_segments": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unreferenced WAL segments deleted.",
+            "minimum": 0
+          }
+        }
+      },
       "DestinationBehavior": {
         "type": "string",
         "description": "Destination-conflict behavior for path-oriented puts, moves, and copies.",
@@ -4540,72 +4590,29 @@
       },
       "GcResponse": {
         "type": "object",
-        "description": "Result of one mark-and-sweep garbage-collection pass.",
+        "description": "Result of one mark-and-sweep garbage-collection pass.\n\nDeletion counts are grouped by object family. Checkpoint releases and\nretained candidates are grouped by reason.",
         "required": [
           "namespace_id",
-          "deleted_wal_segments",
-          "deleted_metadata_segments",
-          "deleted_manifests",
-          "deleted_checkpoint_records",
-          "released_fork_checkpoints",
-          "released_expired_checkpoints",
-          "deleted_upload_sessions",
-          "deleted_content_objects",
-          "released_missing_basis_checkpoints",
+          "deleted",
+          "released_checkpoints",
           "retained_candidates",
           "retained",
-          "degraded_retention",
+          "retention_degraded",
           "content_reclamation_deferred",
           "budget_exhausted"
         ],
         "properties": {
           "budget_exhausted": {
             "type": "boolean",
-            "description": "True when the pass stopped because `max_objects` ran out before it\nfinished. Whatever it did before that is reported here and stands;\nrerun with the returned cursor, or with a larger budget, to\ncontinue. A budget too small for the namespace's own roots stops a\npass before it decides anything at all, which is what this says and\nan empty report on its own does not."
+            "description": "True when the pass reached `max_objects` before it finished. Use\n`next_cursor` to continue or run again with a larger limit."
           },
           "content_reclamation_deferred": {
             "type": "boolean",
-            "description": "True when the pass skipped completed-content reclamation because\nwhat it needs — the namespace's live roots, then the reference\ncollection over them — did not fit in `max_objects`. Nothing was\never decided from a partial collection; a later pass with room for\nthe whole scan reclaims what this one left behind. A pass that had\nroom for the roots swept every other candidate normally around the\nskip, and one that did not also reports `budget_exhausted`."
+            "description": "True when `max_objects` was too small to build the complete reference\nset required for completed-content reclamation."
           },
-          "degraded_retention": {
-            "type": "boolean",
-            "description": "True when ambiguous roots suppressed manifest/segment deletion."
-          },
-          "deleted_checkpoint_records": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Released checkpoint records deleted after their grace window.",
-            "minimum": 0
-          },
-          "deleted_content_objects": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Content objects reclaimed because their upload session completed,\naged past the derived reclamation grace, and nothing the namespace\ncan reach references them. The upload half's cleanup of abandoned\nsessions is not counted here: it deletes unconditionally, whether or\nnot the session ever wrote anything.",
-            "minimum": 0
-          },
-          "deleted_manifests": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Unreferenced manifests deleted.",
-            "minimum": 0
-          },
-          "deleted_metadata_segments": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Unreferenced metadata segments deleted.",
-            "minimum": 0
-          },
-          "deleted_upload_sessions": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Upload-session control objects deleted after the reap window.",
-            "minimum": 0
-          },
-          "deleted_wal_segments": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Unreferenced WAL segments deleted.",
-            "minimum": 0
+          "deleted": {
+            "$ref": "#/components/schemas/DeletedObjectCounts",
+            "description": "Objects the pass deleted, split by object family."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -4613,41 +4620,31 @@
           },
           "next_cursor": {
             "type": "string",
-            "description": "Opaque resume token when more candidates remain. Resuming rebuilds\nevery safety proof; the token carries enumeration position only and\nis valid only against the same namespace."
+            "description": "Opaque resume token when more candidates remain. It is valid only for\nthe same namespace."
           },
           "next_reclamation_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "The soonest instant still ahead of this pass at which something it\nretained becomes reclaimable: an open session's lease plus the grace\nwindow, an aborted session's grace, or a completed session's derived\ncontent-reclamation grace. A scheduler reads this to decide when to\ncome back, so a namespace needs no other side channel to have its\nreclamation happen.\n\nIt reports what this pass saw and nothing more. A pass that stopped\non `next_cursor` examined only part of the keyspace, and candidates\nthat age out under a plain grace window on their object timestamps\ncarry no deadline here at all, so absence is never a claim that\nnothing is owed.",
+            "description": "Earliest known time when a retained upload session may become\nreclaimable. This covers open-session leases and grace periods for\naborted or completed sessions. It only reflects candidates inspected\nby this pass, so absence does not mean no future work remains.",
             "minimum": 0
           },
-          "released_expired_checkpoints": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Checkpoint records released because their expiry passed, or because\nthey sit on a terminally deleted namespace.",
-            "minimum": 0
-          },
-          "released_fork_checkpoints": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Fork-owned checkpoint records released because their target namespace\nis provably gone.",
-            "minimum": 0
-          },
-          "released_missing_basis_checkpoints": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Active checkpoint records released because their basis manifest is\nverifiably gone.",
-            "minimum": 0
+          "released_checkpoints": {
+            "$ref": "#/components/schemas/ReleasedCheckpointCounts",
+            "description": "Checkpoint records the pass released, split by the reason each one\nwas released."
           },
           "retained": {
             "$ref": "#/components/schemas/RetainedCandidates",
-            "description": "The same total, split by the decision that spared each candidate.\nThe total above stays because it is what every existing consumer\nreads; this says why."
+            "description": "`retained_candidates` grouped by reason."
           },
           "retained_candidates": {
             "type": "integer",
             "format": "int64",
             "description": "Candidates retained at delete time (grace window, missing\ntimestamps, or reachable from the fresh root set).",
             "minimum": 0
+          },
+          "retention_degraded": {
+            "type": "boolean",
+            "description": "True when ambiguous roots suppressed manifest/segment deletion."
           }
         }
       },
@@ -5158,6 +5155,35 @@
           }
         }
       },
+      "ReleasedCheckpointCounts": {
+        "type": "object",
+        "description": "Checkpoint records released by one GC pass, grouped by reason.\n\nReleasing a record stops it from pinning data. A later pass may delete the\nrecord after its grace window and count that under\n[`DeletedObjectCounts::checkpoint_records`].",
+        "required": [
+          "fork",
+          "expired",
+          "missing_basis"
+        ],
+        "properties": {
+          "expired": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records released because their expiry passed, or because they sit on\na terminally deleted namespace.",
+            "minimum": 0
+          },
+          "fork": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Fork-owned records released because their target namespace is\nprovably gone.",
+            "minimum": 0
+          },
+          "missing_basis": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active records released because their basis manifest is verifiably\ngone.",
+            "minimum": 0
+          }
+        }
+      },
       "ReorganizeStepOutcome": {
         "oneOf": [
           {
@@ -5198,10 +5224,10 @@
       },
       "RetainedCandidates": {
         "type": "object",
-        "description": "Why a pass kept what it kept: `retained_candidates` split by the\ndecision that spared each candidate.\n\nThe reasons are a closed set — one per place the sweep decides against\ndeleting — so every field is always reported, and a zero is the answer\nthat nothing was kept for that reason. The counts sum to\n`retained_candidates`.\n\nRetention is a decision per candidate examined, not per object in the\nnamespace: one object examined by two passes is counted by each.",
+        "description": "Candidates inspected but not deleted by one GC pass.\n\nEvery field is present, including zero counts. The fields sum to\n`retained_candidates` in [`GcResponse`].\n\nAn object inspected by multiple passes is counted once per pass.",
         "required": [
           "referenced",
-          "grace_window",
+          "within_grace_window",
           "no_provider_timestamp",
           "no_reference_manifest",
           "degraded_roots",
@@ -5215,61 +5241,61 @@
           "checkpoint_not_releasable": {
             "type": "integer",
             "format": "int64",
-            "description": "A checkpoint record this pass could have advanced but could not\nprove ready: a lost compare-and-swap, an unreadable record, a fork\ntarget not provably gone, a released record still inside its grace\nwindow, or an active pin that is simply doing its job. The pins\nthemselves are listed by\n`GET /v0/admin/namespaces/{ns}/checkpoints`.",
+            "description": "Checkpoint records that could not be safely released or deleted.",
             "minimum": 0
           },
           "content_scan_deferred": {
             "type": "integer",
             "format": "int64",
-            "description": "A completed session whose content reclamation was skipped because\nthe reference scan did not fit in `max_objects`\n(`content_reclamation_deferred` is set too).",
+            "description": "Completed sessions skipped because the reference scan exceeded\n`max_objects`. The response also sets `content_reclamation_deferred`.",
             "minimum": 0
           },
           "degraded_roots": {
             "type": "integer",
             "format": "int64",
-            "description": "Root resolution failed somewhere in this pass, so manifest and segment\ndeletion was suppressed wholesale (`degraded_retention` is set too).",
-            "minimum": 0
-          },
-          "grace_window": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Unreachable, but younger than the grace window by the object's own\nprovider timestamp. A later pass deletes it.",
+            "description": "Candidates kept because root resolution failed. The response also\nsets `retention_degraded`.",
             "minimum": 0
           },
           "no_provider_timestamp": {
             "type": "integer",
             "format": "int64",
-            "description": "Unreachable, and the provider reported no last-modified time at all,\nso the object's age is unknown and it is treated as young.",
+            "description": "Unreachable candidates with no provider timestamp. Their age is\nunknown, so the pass keeps them.",
             "minimum": 0
           },
           "no_reference_manifest": {
             "type": "integer",
             "format": "int64",
-            "description": "Unreachable, but this namespace published no manifest old enough to\nsay what it referenced when the grace window opened, so nothing\nproves the object was already unreferenced then. A reader that pinned\nits anchor inside the window may still be reading it, and the pass\nkeeps it until a manifest ages past the window.",
+            "description": "Unreachable candidates that cannot be checked against a manifest old\nenough to cover the grace window.",
             "minimum": 0
           },
           "referenced": {
             "type": "integer",
             "format": "int64",
-            "description": "Selected as unreachable, then found reachable by the re-verification\nthat runs immediately before every deletion. A candidate the pass\nalready knew was reachable is never examined at all, so this counts\nthe namespace moving underneath the pass rather than the size of its\nlive set.",
+            "description": "Candidates found reachable during the final check before deletion.",
             "minimum": 0
           },
           "unrecognized_key": {
             "type": "integer",
             "format": "int64",
-            "description": "A key under a swept family that this collector does not recognize as\none of its own. Never deleted, whatever its age.",
+            "description": "Unrecognized keys in a family scanned by GC. These keys are never\ndeleted.",
             "minimum": 0
           },
           "upload_session_undecided": {
             "type": "integer",
             "format": "int64",
-            "description": "An upload session held over for a reason no clock resolves: a lost\ncompare-and-swap, a record that vanished mid-pass, or a reference\nset this pass could not establish. Only a later pass answers it.",
+            "description": "Upload sessions kept because the pass could not determine whether\nthey were safe to delete.",
             "minimum": 0
           },
           "upload_session_window": {
             "type": "integer",
             "format": "int64",
-            "description": "An upload session waiting out a window a clock resolves: an open\nsession's lease plus the grace, an aborted session's grace, or a\ncompleted session's derived content-reclamation grace.\n`next_reclamation_at_ms` reports the soonest of these.",
+            "description": "Upload sessions still protected by a lease or grace window.",
+            "minimum": 0
+          },
+          "within_grace_window": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unreachable, but younger than the grace window by the object's own\nprovider timestamp. A later pass deletes it.",
             "minimum": 0
           }
         }

@@ -1003,8 +1003,8 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
     )
     .await
     .expect("gc a namespace with no root");
-    assert_eq!(report.deleted_wal_segments, 0, "{report:?}");
-    assert!(!report.degraded_retention);
+    assert_eq!(report.deleted.wal_segments, 0, "{report:?}");
+    assert!(!report.retention_degraded);
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/keep.txt")
             .await
@@ -1025,7 +1025,7 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
     )
     .await
     .expect("gc the tombstone");
-    assert!(report.deleted_wal_segments >= 1, "{report:?}");
+    assert!(report.deleted.wal_segments >= 1, "{report:?}");
     let surviving = namespace_keys(&store, &namespace_id).await;
     assert_eq!(
         surviving,

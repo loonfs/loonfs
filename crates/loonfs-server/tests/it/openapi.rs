@@ -167,14 +167,16 @@ fn no_schema_a_response_reaches_admits_null() {
 
 /// Fields that the server always includes in these response types.
 const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
+    ("DeletedObjectCounts", "content_objects"),
+    ("DeletedObjectCounts", "upload_sessions"),
     ("GcResponse", "budget_exhausted"),
     ("GcResponse", "content_reclamation_deferred"),
-    ("GcResponse", "deleted_content_objects"),
-    ("GcResponse", "deleted_upload_sessions"),
-    ("GcResponse", "released_expired_checkpoints"),
-    ("GcResponse", "released_missing_basis_checkpoints"),
+    ("GcResponse", "deleted"),
+    ("GcResponse", "released_checkpoints"),
     ("GcResponse", "retained"),
     ("GrepMatch", "line_truncated"),
+    ("ReleasedCheckpointCounts", "expired"),
+    ("ReleasedCheckpointCounts", "missing_basis"),
 ];
 
 #[test]

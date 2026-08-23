@@ -29,14 +29,14 @@ pub use downloads::{
 pub use operations::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, Checkpoint,
     CheckpointOwnerSummary, CommitRequest, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
-    ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
+    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DeletedObjectCounts,
+    DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome,
+    FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
     ListFileRevisionsResponse, MaintenanceStepRequest, MaintenanceStepResponse,
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
-    StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse,
-    WalFlushStepOutcome,
+    ReleaseCheckpointResponse, ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates,
+    RetainedReason, StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest,
+    StoreProbeResponse, WalFlushStepOutcome,
 };
 pub use reads::{
     AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,

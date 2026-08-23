@@ -338,20 +338,22 @@ fn gc_conclusion(gc: &GcResponse, submitted_cursor: Option<&str>) -> Maintenance
         }
         Some(_) => MaintenanceStepConclusion::Progressed,
         None if reclaimed_anything(gc) => MaintenanceStepConclusion::Progressed,
-        None if gc.budget_exhausted || gc.degraded_retention => MaintenanceStepConclusion::Blocked,
+        None if gc.budget_exhausted || gc.retention_degraded => MaintenanceStepConclusion::Blocked,
         None => MaintenanceStepConclusion::Idle,
     }
 }
 
 fn reclaimed_anything(gc: &GcResponse) -> bool {
-    gc.deleted_wal_segments > 0
-        || gc.deleted_metadata_segments > 0
-        || gc.deleted_manifests > 0
-        || gc.deleted_checkpoint_records > 0
-        || gc.released_fork_checkpoints > 0
-        || gc.released_expired_checkpoints > 0
-        || gc.deleted_upload_sessions > 0
-        || gc.released_missing_basis_checkpoints > 0
+    // A content object is only ever deleted together with the upload session
+    // that staged it, so the session count already covers it.
+    gc.deleted.wal_segments > 0
+        || gc.deleted.metadata_segments > 0
+        || gc.deleted.manifests > 0
+        || gc.deleted.checkpoint_records > 0
+        || gc.deleted.upload_sessions > 0
+        || gc.released_checkpoints.fork > 0
+        || gc.released_checkpoints.expired > 0
+        || gc.released_checkpoints.missing_basis > 0
 }
 
 #[cfg(test)]
@@ -500,7 +502,7 @@ mod tests {
         assert_eq!(gc_conclusion(&clean, None), MaintenanceStepConclusion::Idle);
 
         let mut reclaimed = GcResponse::empty(namespace.clone());
-        reclaimed.deleted_upload_sessions = 1;
+        reclaimed.deleted.upload_sessions = 1;
         assert_eq!(
             gc_conclusion(&reclaimed, None),
             MaintenanceStepConclusion::Progressed
@@ -515,7 +517,7 @@ mod tests {
         );
 
         let mut degraded = GcResponse::empty(namespace);
-        degraded.degraded_retention = true;
+        degraded.retention_degraded = true;
         assert_eq!(
             gc_conclusion(&degraded, None),
             MaintenanceStepConclusion::Blocked
@@ -580,7 +582,7 @@ mod tests {
 
         let mut reclaimed_then_stopped = GcResponse::empty(namespace);
         reclaimed_then_stopped.budget_exhausted = true;
-        reclaimed_then_stopped.deleted_wal_segments = 2;
+        reclaimed_then_stopped.deleted.wal_segments = 2;
         assert_eq!(
             gc_conclusion(&reclaimed_then_stopped, None),
             MaintenanceStepConclusion::Progressed,
@@ -615,7 +617,7 @@ mod tests {
         assert_eq!(parked.continuation, Some("page-2".to_owned()));
 
         let mut finished = GcResponse::empty(namespace_id("demo"));
-        finished.deleted_wal_segments = 3;
+        finished.deleted.wal_segments = 3;
         let cleared = gc_step_result(finished, Some("page-2"));
         assert_eq!(cleared.conclusion, MaintenanceStepConclusion::Progressed);
         assert_eq!(

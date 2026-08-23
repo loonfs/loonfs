@@ -956,6 +956,8 @@ cursor may re-examine work or defer a newly inserted key that sorts before its
 position until the next full pass; it can never make a newly live object
 deletable.
 
+A GC response groups related counts. `deleted` contains counts for `wal_segments`, `metadata_segments`, `manifests`, `checkpoint_records`, `upload_sessions`, and `content_objects`. `released_checkpoints` contains `fork`, `expired`, and `missing_basis` counts. Every count field is present, including zero values.
+
 Every GC response also carries `retained`, which is `retained_candidates`
 split by the decision that spared each candidate. The reasons are a closed
 set, so every field is always present and a zero means nothing was kept for
@@ -964,10 +966,10 @@ that reason, and the fields sum to the total:
 | Reason | Means |
 | --- | --- |
 | `referenced` | Selected as unreachable, then found reachable by the re-verification that runs immediately before every deletion. A candidate the pass already knew was reachable is never examined, so this counts the namespace moving underneath the pass, not the size of its live set. |
-| `grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
+| `within_grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it is treated as young. |
 | `no_reference_manifest` | Unreachable and aged, but the namespace has published no manifest old enough to say what it referenced when the grace window opened. A reader that pinned its anchor inside the window may still be reading the object, so the pass keeps it until a manifest ages past the window. |
-| `degraded_roots` | Root resolution failed somewhere in the pass, so manifest and segment deletion was suppressed wholesale. `degraded_retention` is set too. |
+| `degraded_roots` | Root resolution failed somewhere in the pass, so manifest and segment deletion was suppressed wholesale. `retention_degraded` is set too. |
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
 | `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, an unreadable record, a fork target not provably gone, a released record still inside its grace, or an active pin doing its job. |
 | `upload_session_window` | An upload session waiting out a window a clock resolves — the same waits `next_reclamation_at_ms` reports. |

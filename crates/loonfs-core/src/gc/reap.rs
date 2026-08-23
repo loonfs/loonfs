@@ -134,7 +134,7 @@ impl AgedSweep {
     pub fn retained_reason(self) -> Option<RetainedReason> {
         match self {
             Self::Deleted | Self::AlreadyGone => None,
-            Self::RetainedInGraceWindow => Some(RetainedReason::GraceWindow),
+            Self::RetainedInGraceWindow => Some(RetainedReason::WithinGraceWindow),
             Self::RetainedWithoutTimestamp => Some(RetainedReason::NoProviderTimestamp),
         }
     }

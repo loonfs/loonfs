@@ -341,11 +341,11 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
     // window: the unbounded pass completes, deletes nothing, and reads
     // keep working.
     let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
-    assert_eq!(report.deleted_wal_segments, 0);
-    assert_eq!(report.deleted_metadata_segments, 0);
-    assert_eq!(report.deleted_manifests, 0);
-    assert_eq!(report.deleted_checkpoint_records, 0);
-    assert!(!report.degraded_retention);
+    assert_eq!(report.deleted.wal_segments, 0);
+    assert_eq!(report.deleted.metadata_segments, 0);
+    assert_eq!(report.deleted.manifests, 0);
+    assert_eq!(report.deleted.checkpoint_records, 0);
+    assert!(!report.retention_degraded);
     assert!(report.next_cursor.is_none());
 
     let bytes = client.get_file_bytes(&target).await.expect("read file");
@@ -424,8 +424,8 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
         loonfs_api::ReorganizeStepOutcome::NotNeeded
     );
     let gc = forced.gc.clone().expect("gc report present when opted in");
-    assert_eq!(gc.deleted_wal_segments, 0);
-    assert!(!gc.degraded_retention);
+    assert_eq!(gc.deleted.wal_segments, 0);
+    assert!(!gc.retention_degraded);
 
     let bytes = client.get_file_bytes(&target).await.expect("read file");
     assert_eq!(bytes, b"hello step\n");
