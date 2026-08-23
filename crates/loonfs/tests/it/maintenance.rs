@@ -373,7 +373,10 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
             .retention_floor_seq,
         ChangeSeq(2)
     );
-    assert_eq!(step.metadata, None, "an unnamed action reports nothing");
+    assert_eq!(
+        step.metadata_maintenance, None,
+        "an unnamed action reports nothing"
+    );
 }
 
 /// A plan that names nothing is not a step, whichever surface built it.

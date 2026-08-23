@@ -377,7 +377,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         .await
         .expect("run a writer-scheduled step");
     assert_eq!(
-        step.metadata
+        step.metadata_maintenance
             .expect("a metadata plan reports its upkeep")
             .reorganize,
         ReorganizeStepOutcome::UnitPublished,
@@ -465,7 +465,7 @@ async fn a_standalone_step_reports_the_compaction_the_explicit_call_runs() {
         .await
         .expect("run a standalone step");
     assert_eq!(
-        step.metadata
+        step.metadata_maintenance
             .expect("a metadata plan reports its upkeep")
             .reorganize,
         ReorganizeStepOutcome::CompactionRequired,

@@ -712,7 +712,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             .maintenance_step_namespace(&namespace_id, MaintenancePlan::metadata())
             .await
             .expect("explicit maintenance step")
-            .metadata
+            .metadata_maintenance
             .expect("metadata selected");
         assert_ne!(
             step.wal_flush,

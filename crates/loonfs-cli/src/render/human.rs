@@ -111,7 +111,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         // did not: the line says what ran, never what was skipped.
         CommandData::MaintenanceStepped(response) => {
             let mut clauses = Vec::new();
-            if let Some(metadata) = &response.metadata {
+            if let Some(metadata) = &response.metadata_maintenance {
                 clauses.push(wal_flush_summary(
                     &metadata.wal_flush,
                     response.status_before.wal_tail_segments,

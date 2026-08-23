@@ -72,7 +72,7 @@ pub(crate) async fn collect_checkpoints(
 
 /// The upkeep report a step that selected metadata is obliged to carry.
 pub(crate) fn upkeep(step: &MaintenanceStepResponse) -> &MetadataMaintenanceResponse {
-    step.metadata
+    step.metadata_maintenance
         .as_ref()
         .expect("a plan selecting metadata upkeep reports it")
 }

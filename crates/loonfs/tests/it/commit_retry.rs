@@ -713,7 +713,7 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
             .maintenance_step_namespace(&namespace_id, MaintenancePlan::metadata())
             .await
             .expect("upkeep step")
-            .metadata
+            .metadata_maintenance
             .expect("metadata selected");
         if matches!(step.reorganize, ReorganizeStepOutcome::NotNeeded) {
             break;

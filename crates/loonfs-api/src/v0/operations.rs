@@ -919,6 +919,12 @@ impl RetainedCandidates {
     }
 }
 
+/// Selects retention-floor advancement. This request has no options yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AdvanceRetentionRequest {}
+
 /// Result of advancing the retention floor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -943,13 +949,14 @@ pub struct MaintenanceStepRequest {
     /// reorganization step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub metadata: Option<MetadataMaintenanceRequest>,
-    /// Advance the retention floor to the flushed manifest head. Nothing
-    /// surrenders replay history unless this is true.
-    #[serde(default)]
-    pub advance_retention: bool,
-    /// Run one bounded mark-and-sweep garbage-collection pass. Nothing
-    /// sweeps unless this is present.
+    pub metadata_maintenance: Option<MetadataMaintenanceRequest>,
+    /// Advance the retention floor to the flushed manifest head. Include this
+    /// field to select the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub retention: Option<AdvanceRetentionRequest>,
+    /// Run one bounded mark-and-sweep garbage-collection pass. Omit this
+    /// field to skip garbage collection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub gc: Option<GcRequest>,
@@ -1041,7 +1048,7 @@ pub struct MaintenanceStepResponse {
     /// What the metadata-upkeep action did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub metadata: Option<MetadataMaintenanceResponse>,
+    pub metadata_maintenance: Option<MetadataMaintenanceResponse>,
     /// Where the retention floor ended up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -1832,15 +1839,16 @@ mod tests {
     #[test]
     fn maintenance_request_bodies_reject_unknown_fields() {
         serde_json::from_value::<MaintenanceStepRequest>(serde_json::json!({
-            "metadata": {"max_wal_tail_segments": 4},
-            "advance_retention": true,
+            "metadata_maintenance": {"max_wal_tail_segments": 4},
+            "retention": {},
             "gc": {"grace_window_ms": 1_800_000, "max_objects": 32}
         }))
         .expect("the same body without a typo decodes");
 
         for body in [
-            serde_json::json!({"advance_retenton": true}),
-            serde_json::json!({"metadata": {"maxWalTailSegments": 4}}),
+            serde_json::json!({"retenton": {}}),
+            serde_json::json!({"retention": {"through_seq": 4}}),
+            serde_json::json!({"metadata_maintenance": {"maxWalTailSegments": 4}}),
             serde_json::json!({"gc": {"max_object": 32}}),
         ] {
             assert!(

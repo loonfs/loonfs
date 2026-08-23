@@ -8,7 +8,7 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::CommitRequest as CoreCommitRequest;
 use loonfs::{CreateNamespaceOptions, FsWriter, ListChangesOptions, StoreConfig};
-use loonfs_api::v0::{CreateCheckpointRequest, MaintenanceStepRequest};
+use loonfs_api::v0::{AdvanceRetentionRequest, CreateCheckpointRequest, MaintenanceStepRequest};
 use loonfs_api::{
     v0::{CommittedChange, FilesystemChange},
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, ContentRef,
@@ -384,7 +384,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
         .maintenance_step(
             &namespace,
             &MaintenanceStepRequest {
-                advance_retention: true,
+                retention: Some(AdvanceRetentionRequest::default()),
                 ..MaintenanceStepRequest::default()
             },
         )
