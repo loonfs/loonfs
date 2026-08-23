@@ -3,10 +3,10 @@
 #![allow(clippy::panic, clippy::unwrap_used)]
 
 use bytes::Bytes;
+use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompleteUploadRequest,
-    DirectMultipartUploadOptions, FilesystemChange, UploadContentClaim, UploadMode,
-    UploadPartChecksumClaim, UploadSessionStatus,
+    FilesystemChange, UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
     ActorRef, ApiError, ChangeSeq, Checksum, CommitId, CommitRequest, FilesystemOperation,
@@ -308,22 +308,20 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .await
         .expect("begin direct PUT");
     assert_eq!(upload_mode_name(begin.mode()), expected.mode);
-    let (upload_id, direct_put) = match begin {
+    let (upload_id, checksum_algorithm, access) = match begin {
         BeginUploadResponse::DirectPut {
             upload_id,
-            direct_put,
+            checksum_algorithm,
+            access,
             ..
-        } => (upload_id, direct_put),
+        } => (upload_id, checksum_algorithm, access),
         other => panic!("expected direct_put, found {other:?}"),
     };
-    assert_eq!(
-        direct_put.checksum_algorithm.as_str(),
-        expected.checksum_algorithm
-    );
+    assert_eq!(checksum_algorithm.as_str(), expected.checksum_algorithm);
 
     harness
         .client
-        .upload_via_presigned_url(&direct_put.access, payload)
+        .upload_via_presigned_url(&access, payload)
         .await
         .expect("transfer direct PUT");
     let completed = harness
@@ -334,7 +332,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
             &CompleteUploadRequest::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: payload.len() as u64,
-                    checksum: Checksum::compute(direct_put.checksum_algorithm, payload),
+                    checksum: Checksum::compute(checksum_algorithm, payload),
                 },
             },
         )
@@ -430,19 +428,17 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         .await
         .expect("begin multipart upload");
     assert_eq!(upload_mode_name(begin.mode()), expected.mode);
-    let (upload_id, multipart) = match begin {
+    let (upload_id, part_size_bytes, checksum_algorithm) = match begin {
         BeginUploadResponse::DirectMultipart {
             upload_id,
-            direct_multipart,
+            part_size_bytes,
+            checksum_algorithm,
             ..
-        } => (upload_id, direct_multipart),
+        } => (upload_id, part_size_bytes, checksum_algorithm),
         other => panic!("expected direct_multipart, found {other:?}"),
     };
-    assert_eq!(multipart.part_size_bytes, request.part_size_bytes);
-    assert_eq!(
-        multipart.checksum_algorithm.as_str(),
-        expected.checksum_algorithm
-    );
+    assert_eq!(part_size_bytes, request.part_size_bytes);
+    assert_eq!(checksum_algorithm.as_str(), expected.checksum_algorithm);
 
     let chunks = payload
         .chunks(usize::try_from(request.part_size_bytes).expect("part size fits usize"))
@@ -453,7 +449,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         .enumerate()
         .map(|(index, chunk)| UploadPartChecksumClaim {
             part_number: index as u32 + 1,
-            checksum: Checksum::compute(multipart.checksum_algorithm, chunk),
+            checksum: Checksum::compute(checksum_algorithm, chunk),
         })
         .collect::<Vec<_>>();
     let signed = harness
@@ -479,7 +475,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         );
     }
     completed_parts.sort_by_key(|part| part.part_number);
-    let whole_checksum = Checksum::compute(multipart.checksum_algorithm, &payload);
+    let whole_checksum = Checksum::compute(checksum_algorithm, &payload);
     let completion_request = CompleteMultipartUploadRequest {
         content: UploadContentClaim {
             size_bytes: payload.len() as u64,

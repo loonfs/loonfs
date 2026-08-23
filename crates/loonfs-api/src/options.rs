@@ -1,10 +1,4 @@
-//! Per-operation option shapes shared by the runtime and client surfaces.
-//!
-//! `loonfs` (embedded runtime) and `loonfs-client` (HTTP client) expose the
-//! same semantic filesystem operations, so the options that parameterize them
-//! are defined once here and re-exported by both under their existing names.
-//! Keeping one definition is what stops the two surfaces from drifting a
-//! field apart.
+//! Per-operation options shared by the embedded runtime and HTTP client.
 //!
 //! There is one type per operation, even where two of them currently hold the
 //! same fields: options follow the operation they parameterize, so a guard
@@ -243,4 +237,12 @@ impl UndeleteOptions {
             commit: CommitOptions::new(actor),
         }
     }
+}
+
+/// Options for starting a direct multipart upload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirectMultipartUploadOptions {
+    /// Byte length of every part except the last. `None` uses the server
+    /// default. Providers accept at most 10,000 parts.
+    pub part_size_bytes: Option<u64>,
 }

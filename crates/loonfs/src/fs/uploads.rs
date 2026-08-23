@@ -20,7 +20,8 @@ use crate::{
     BeginUploadRequest, BeginUploadResponse, ChecksumAlgorithm, CompleteMultipartUploadRequest,
     MaintenanceJobId, NamespaceId, UploadContentResponse, UploadMode, UploadSessionResponse,
 };
-use loonfs_api::v0::{DirectMultipartUploadOptions, UploadPartChecksumClaim};
+use loonfs_api::options::DirectMultipartUploadOptions;
+use loonfs_api::v0::UploadPartChecksumClaim;
 use loonfs_api::UploadId;
 
 impl FsWriter {

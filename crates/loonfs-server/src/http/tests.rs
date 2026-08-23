@@ -157,6 +157,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "wal_tail_segments",
     "updated_at_ms",
     "updated_by",
+    "upload_id",
     "upload_session_undecided",
     "upload_session_window",
     "content_token",

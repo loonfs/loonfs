@@ -496,7 +496,8 @@ mod streamed_content {
 /// providers' actual multipart behaviour.
 mod direct_multipart {
     use super::*;
-    use loonfs_api::v0::{CompletedUploadPart, DirectMultipartUploadOptions, UploadContentClaim};
+    use loonfs_api::options::DirectMultipartUploadOptions;
+    use loonfs_api::v0::{CompletedUploadPart, UploadContentClaim};
     use loonfs_api::wire::control::{decode_control_object, UploadSessionRecordStatus};
     use loonfs_core::{gc_namespace, GcConfig};
     use loonfs_objectstore::keys::content_blob;

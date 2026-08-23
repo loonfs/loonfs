@@ -1440,10 +1440,44 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         "public checksum-bearing shapes should reuse Checksum; found {checksum_ref_count} refs"
     );
 
-    let multipart = schemas
-        .get("DirectMultipartUpload")
-        .expect("DirectMultipartUpload schema");
-    assert!(required_fields(multipart).contains("checksum_algorithm"));
+    // Each direct response keeps its mode-specific fields at the top level.
+    for (schema_name, expected_fields) in [
+        (
+            "BeginUploadResponseDirectPut",
+            &["checksum_algorithm", "access"][..],
+        ),
+        (
+            "BeginUploadResponseDirectMultipart",
+            &["part_size_bytes", "checksum_algorithm"][..],
+        ),
+    ] {
+        let variant = schemas
+            .get(schema_name)
+            .unwrap_or_else(|| panic!("{schema_name} schema"));
+        let required = required_fields(variant);
+        for field in expected_fields {
+            assert!(
+                required.contains(field),
+                "{schema_name} should require `{field}` beside `mode`"
+            );
+        }
+    }
+    assert!(required_fields(
+        schemas
+            .get("BeginUploadDirectMultipart")
+            .expect("BeginUploadDirectMultipart schema")
+    )
+    .contains("mode"));
+    for retired_schema in [
+        "DirectPutUpload",
+        "DirectMultipartUpload",
+        "DirectMultipartUploadOptions",
+    ] {
+        assert!(
+            !schemas.contains_key(retired_schema),
+            "retired nested upload schema `{retired_schema}` remains in OpenAPI"
+        );
+    }
 
     let completion_variants = schemas
         .get("CompleteUploadRequest")
@@ -1502,6 +1536,9 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
             "root_inode_id",
             "deleted_at_seq",
             "validated_content_token",
+            "direct_put",
+            "direct_multipart",
+            "multipart",
         ] {
             assert!(
                 !properties.contains_key(retired_name),

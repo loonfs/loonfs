@@ -317,10 +317,10 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("begin direct PUT: %v", err)
 	}
-	if begin.DirectPut == nil || begin.DirectPut.DirectPut == nil {
+	if begin.DirectPut == nil {
 		t.Fatalf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
 	}
-	directPut := begin.DirectPut.DirectPut
+	directPut := begin.DirectPut
 	if begin.Mode != expected.Mode {
 		t.Errorf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
 	}
@@ -406,19 +406,17 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: request.NamespaceID,
 		Body: &loonfs.BeginUploadRequest{
 			DirectMultipart: &loonfs.BeginUploadDirectMultipart{
-				Multipart: &loonfs.DirectMultipartUploadOptions{
-					PartSizeBytes: &request.PartSizeBytes,
-				},
+				PartSizeBytes: &request.PartSizeBytes,
 			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("begin multipart upload: %v", err)
 	}
-	if begin.DirectMultipart == nil || begin.DirectMultipart.DirectMultipart == nil {
+	if begin.DirectMultipart == nil {
 		t.Fatalf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
 	}
-	multipart := begin.DirectMultipart.DirectMultipart
+	multipart := begin.DirectMultipart
 	if begin.Mode != expected.Mode {
 		t.Errorf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
 	}
@@ -1114,11 +1112,11 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	directBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.BeginUploadRequest{
 		DirectPut: &loonfs.BeginUploadDirectPut{SizeBytes: &sizeBytes},
 	})
-	if directBegin.DirectPut == nil || directBegin.DirectPut.DirectPut == nil {
+	if directBegin.DirectPut == nil {
 		t.Fatalf("proxy begin upload mode = %q, want direct_put", directBegin.Mode)
 	}
 	directUploadID := string(directBegin.DirectPut.UploadID)
-	directPut := directBegin.DirectPut.DirectPut
+	directPut := directBegin.DirectPut
 	putPresigned(t, directPut.Access, payload, false)
 	directClaim := &loonfs.UploadContentClaim{
 		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),

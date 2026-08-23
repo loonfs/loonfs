@@ -434,7 +434,8 @@ impl Client {
             .await?;
         let BeginUploadResponse::DirectPut {
             upload_id,
-            direct_put,
+            checksum_algorithm,
+            access,
             ..
         } = begin
         else {
@@ -444,19 +445,14 @@ impl Client {
             DirectPutBody::Held(bytes) => {
                 let content = UploadContentClaim {
                     size_bytes: bytes.len() as u64,
-                    checksum: Checksum::compute(direct_put.checksum_algorithm, bytes),
+                    checksum: Checksum::compute(checksum_algorithm, bytes),
                 };
-                (
-                    self.upload_via_presigned_url(&direct_put.access, bytes)
-                        .await,
-                    content,
-                )
+                (self.upload_via_presigned_url(&access, bytes).await, content)
             }
             DirectPutBody::Streamed(source) => {
-                let (source, observation) =
-                    observed_direct_put_source(source, direct_put.checksum_algorithm);
+                let (source, observation) = observed_direct_put_source(source, checksum_algorithm);
                 let written = self
-                    .upload_streamed_via_presigned_url(&direct_put.access, source)
+                    .upload_streamed_via_presigned_url(&access, source)
                     .await;
                 let content = observation
                     .lock()
@@ -505,24 +501,17 @@ impl Client {
                     .await?;
                 let BeginUploadResponse::DirectMultipart {
                     upload_id,
-                    direct_multipart,
+                    part_size_bytes,
+                    checksum_algorithm,
                     ..
                 } = begin
                 else {
                     return Err(negotiated_a_different_upload_mode());
                 };
                 if let Some(journal) = continuity.journal {
-                    journal.began(
-                        &upload_id,
-                        direct_multipart.part_size_bytes,
-                        direct_multipart.checksum_algorithm,
-                    );
+                    journal.began(&upload_id, part_size_bytes, checksum_algorithm);
                 }
-                (
-                    upload_id,
-                    direct_multipart.part_size_bytes,
-                    direct_multipart.checksum_algorithm,
-                )
+                (upload_id, part_size_bytes, checksum_algorithm)
             }
         };
         let uploaded = match self

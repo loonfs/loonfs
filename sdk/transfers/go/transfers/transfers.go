@@ -294,9 +294,7 @@ func createUploadRequest(
 	request := &loonfs.BeginUploadRequest{}
 	worthCutting := sizeBytes >= multipartMinimumBytes
 	if worthCutting && capabilities.Features[featureDirectMultipart] {
-		request.DirectMultipart = &loonfs.BeginUploadDirectMultipart{
-			Multipart: &loonfs.DirectMultipartUploadOptions{},
-		}
+		request.DirectMultipart = &loonfs.BeginUploadDirectMultipart{}
 	} else {
 		proxyLimit, hasProxyLimit := capabilities.Limits[limitUploadMaximumBytes]
 		fitsProxy := !hasProxyLimit || sizeBytes <= proxyLimit
@@ -351,15 +349,12 @@ func transferDirectPut(
 	payload []byte,
 	begin *loonfs.BeginUploadResponseDirectPut,
 ) (*loonfs.UploadSessionResponse, error) {
-	if begin.DirectPut == nil {
-		return nil, fmt.Errorf("transfers: direct PUT response is incomplete")
-	}
-	checksum, err := computeChecksum(begin.DirectPut.ChecksumAlgorithm, payload)
+	checksum, err := computeChecksum(begin.ChecksumAlgorithm, payload)
 	if err != nil {
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: direct PUT: %w", err)
 	}
-	if _, err := putPresigned(ctx, begin.DirectPut.Access, payload); err != nil {
+	if _, err := putPresigned(ctx, begin.Access, payload); err != nil {
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: direct PUT: %w", err)
 	}
@@ -387,13 +382,10 @@ func transferDirectMultipart(
 	payload []byte,
 	begin *loonfs.BeginUploadResponseDirectMultipart,
 ) (*loonfs.UploadSessionResponse, error) {
-	if begin.DirectMultipart == nil {
-		return nil, fmt.Errorf("transfers: multipart response is incomplete")
-	}
-	partSizeBytes := begin.DirectMultipart.PartSizeBytes
+	partSizeBytes := begin.PartSizeBytes
 	partSize := int(partSizeBytes)
 	if partSizeBytes <= 0 || int64(partSize) != partSizeBytes {
-		return nil, fmt.Errorf("transfers: invalid multipart part size %d", begin.DirectMultipart.PartSizeBytes)
+		return nil, fmt.Errorf("transfers: invalid multipart part size %d", partSizeBytes)
 	}
 	parts := splitParts(payload, partSize)
 	if len(parts) == 0 {
@@ -402,7 +394,7 @@ func transferDirectMultipart(
 	}
 	claims := make([]*loonfs.UploadPartChecksumClaim, len(parts))
 	for index, part := range parts {
-		checksum, checksumErr := computeChecksum(begin.DirectMultipart.ChecksumAlgorithm, part)
+		checksum, checksumErr := computeChecksum(begin.ChecksumAlgorithm, part)
 		if checksumErr != nil {
 			abortUpload(ctx, c, namespaceID, begin.UploadID)
 			return nil, fmt.Errorf("transfers: checksum part %d: %w", index+1, checksumErr)
@@ -453,7 +445,7 @@ func transferDirectMultipart(
 			PartNumber: partNumber,
 		})
 	}
-	wholeChecksum, err := computeChecksum(begin.DirectMultipart.ChecksumAlgorithm, payload)
+	wholeChecksum, err := computeChecksum(begin.ChecksumAlgorithm, payload)
 	if err != nil {
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: checksum multipart payload: %w", err)

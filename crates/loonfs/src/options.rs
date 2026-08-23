@@ -1,11 +1,7 @@
-//! Per-operation option types for the runtime handle surface, plus the
-//! request-to-options resolutions the server and embedded hosts share.
+//! Runtime options and request-to-options conversions.
 //!
-//! The options that also parameterize the HTTP client's identical operations
-//! are defined once in [`loonfs_api::options`] and re-exported here, so the
-//! two surfaces cannot drift a field apart. That is every path operation,
-//! read and write. What stays defined below is runtime-only: maintenance,
-//! checkpoints, namespace creation, and change-feed paging.
+//! Options shared with the HTTP client are re-exported from
+//! [`loonfs_api::options`]. Runtime-only options remain in this module.
 //!
 //! Results are the `loonfs-api` wire shapes themselves: the handles return
 //! `MaintenanceStepResponse` and `GcResponse` directly, the same way they
@@ -19,9 +15,9 @@ use loonfs_core::publish::WalTailPolicy;
 use std::num::NonZeroU64;
 
 pub use loonfs_api::options::{
-    CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions,
-    MoveOptions, PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
-    UpdateAttributesOptions,
+    CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
+    DirectMultipartUploadOptions, ListPathEntriesOptions, MoveOptions, PutFileOptions,
+    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
 };
 
 /// The actions one maintenance step performs.

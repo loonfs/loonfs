@@ -36,11 +36,11 @@ use loonfs_api::{
         BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
         BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitResponse as ApiCommitResponse, CommittedChange, CompleteMultipartUploadRequest,
-        CompleteUploadRequest, CompletedUploadPart, ContentToken, DirectMultipartUploadOptions,
-        GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, ObjectTransferAccess,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest,
-        StoreProbeResponse, UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim,
-        UploadSessionResponse, UploadSessionStatus,
+        CompleteUploadRequest, CompletedUploadPart, ContentToken, GrepGcRequest, GrepGcResponse,
+        GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
+        SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest, StoreProbeResponse,
+        UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim, UploadSessionResponse,
+        UploadSessionStatus,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId,
     Checksum, ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
@@ -69,9 +69,9 @@ pub use ClientError as Error;
 /// Per-operation options, defined once in `loonfs-api` and shared with the
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
 pub use loonfs_api::options::{
-    CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions,
-    MoveOptions, PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
-    UpdateAttributesOptions,
+    CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
+    DirectMultipartUploadOptions, ListPathEntriesOptions, MoveOptions, PutFileOptions,
+    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.
