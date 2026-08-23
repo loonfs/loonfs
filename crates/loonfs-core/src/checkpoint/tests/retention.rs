@@ -153,7 +153,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             committed_seq,
                             commit_id,
                             committed_at_ms,
-                            actor,
+                            committed_by,
                             delta_index,
                             content_ref,
                         } => MetadataRow::FileRevision {
@@ -162,7 +162,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             committed_seq,
                             commit_id,
                             committed_at_ms,
-                            actor,
+                            committed_by,
                             delta_index,
                             content_ref: loonfs_api::ContentRef {
                                 content_id: loonfs_api::ContentId::parse(
@@ -174,14 +174,14 @@ fn metadata_states_equivalent_ignoring_content_identity(
                         },
                         MetadataRow::CommitReceipt {
                             commit_id,
-                            actor,
+                            committed_by,
                             semantic_commit_fingerprint: _,
                             committed_seq,
                             committed_at_ms,
                             message,
                         } => MetadataRow::CommitReceipt {
                             commit_id,
-                            actor,
+                            committed_by,
                             semantic_commit_fingerprint: "<normalized>".to_owned(),
                             committed_seq,
                             committed_at_ms,

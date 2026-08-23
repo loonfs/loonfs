@@ -72,7 +72,7 @@ pub struct RevisionRecord {
     pub committed_seq: ChangeSeq,
     pub commit_id: CommitId,
     pub committed_at_ms: u64,
-    pub actor: ActorRef,
+    pub committed_by: ActorRef,
     pub revision_delta_index: u32,
     pub content_ref: ContentRef,
 }
@@ -84,7 +84,7 @@ pub struct SubtreeTombstoneRecord {
     pub tombstone_delta_index: u32,
     pub commit_id: CommitId,
     pub deleted_at_ms: u64,
-    pub actor: ActorRef,
+    pub deleted_by: ActorRef,
     /// Action recorded by this event. The newest event for each root determines
     /// state; a newest `Revoke` means no tombstone is active.
     pub action: SubtreeTombstoneAction,
@@ -99,7 +99,7 @@ pub struct ModelAttributeRevision {
     pub committed_seq: ChangeSeq,
     pub commit_id: CommitId,
     pub delta_index: u32,
-    pub actor: ActorRef,
+    pub updated_by: ActorRef,
     pub updated_at_ms: u64,
     /// The map after the update, in key order. An empty list is the cleared
     /// state, not a missing record.
@@ -217,7 +217,7 @@ impl MetadataState {
                         committed_seq,
                         commit_id: commit_id.clone(),
                         committed_at_ms,
-                        actor: actor.clone(),
+                        committed_by: actor.clone(),
                         revision_delta_index: *delta_index,
                         content_ref: content_ref.clone(),
                     });
@@ -235,7 +235,7 @@ impl MetadataState {
                             tombstone_delta_index: *delta_index,
                             commit_id: commit_id.clone(),
                             deleted_at_ms: committed_at_ms,
-                            actor: actor.clone(),
+                            deleted_by: actor.clone(),
                             action: SubtreeTombstoneAction::Set {
                                 deleted_binding: deleted_direntry.as_ref().map(|direntry| {
                                     DeletedBinding {
@@ -260,7 +260,7 @@ impl MetadataState {
                             tombstone_delta_index: *delta_index,
                             commit_id: commit_id.clone(),
                             deleted_at_ms: committed_at_ms,
-                            actor: actor.clone(),
+                            deleted_by: actor.clone(),
                             action: SubtreeTombstoneAction::Revoke {
                                 target: DeletionGeneration {
                                     seq: target.seq,
@@ -283,7 +283,7 @@ impl MetadataState {
                             committed_seq,
                             commit_id: commit_id.clone(),
                             delta_index: *delta_index,
-                            actor: actor.clone(),
+                            updated_by: actor.clone(),
                             updated_at_ms: committed_at_ms,
                             entries: attributes
                                 .iter()

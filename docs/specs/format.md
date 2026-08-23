@@ -564,7 +564,7 @@ The revision row for the current file contents:
   "revision_no": 7,
   "committed_seq": 91,
   "committed_at_ms": 1752625000000,
-  "actor": { "kind": "service", "id": "render-worker" },
+  "committed_by": { "kind": "service", "id": "render-worker" },
   "content_ref": {
     "kind": "blob_v1",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
@@ -593,16 +593,14 @@ indexes, filters, or cache keys. The WAL commit envelope provides the actor and
 timestamp when a commit is applied. Individual `WalDelta` values do not repeat
 them.
 
-The metadata rows store attribution as follows:
+Metadata rows use these attribution fields:
 
 - Each new inode stores `created_by` and `created_at_ms`. This includes parent
   directories created automatically by a commit.
-- Each file revision stores `actor` and `committed_at_ms`.
-- Each tombstone event stores `actor` and `deleted_at_ms`. The corresponding
-  active-deletion row copies these values into `deleted_by` and
-  `deleted_at_ms`.
-- Each persisted attribute revision stores `actor` and `updated_at_ms`. The
-  initial empty state at revision 0 is not persisted and has neither value.
+- Each file revision stores `committed_by` and `committed_at_ms`.
+- Each commit receipt stores `committed_by` and `committed_at_ms`.
+- Each tombstone event stores `deleted_by` and `deleted_at_ms`. The corresponding active-deletion row copies both values.
+- Each persisted attribute revision stores `updated_by` and `updated_at_ms`. The initial empty state at revision 0 is not persisted and has neither value.
 - Directory bind and unbind rows store neither an actor nor a timestamp.
 
 Each timestamp comes from the commit that wrote the metadata row. Timestamps
@@ -789,7 +787,7 @@ fields does not decode.
 The `active_deletions` family tracks deletions that can still be restored. A
 `set` tombstone creates a `listed` row keyed by `(deletion_seq,
 root_inode_id)`. The API exposes `root_inode_id` as `inode_id`. The row also
-stores the deletion time and `deleted_direntry`.
+copies `deleted_by`, `deleted_at_ms`, and `deleted_direntry` from the tombstone event.
 
 A `revoke` tombstone creates a `removed` row with the same key and records the
 revoke's sequence as `revocation_seq`. `removed` sorts before `listed`, which
@@ -1049,11 +1047,7 @@ segment whose rows are out of order as malformed. Readers load the referenced
 runs, then replay only the visible WAL chain after the manifest's `head_seq`.
 
 The WAL preserves commit order even when a segment contains several commits.
-Each commit stores `commit_id`, `semantic_commit_fingerprint`, `actor`,
-`committed_at_ms`, an optional `message`, and its metadata changes. The actor
-contains a `kind` and `id` and is stored once per commit, not once per change.
-Validation inputs and operation results are not stored. Checkpoints keep replay
-bounded as history grows.
+Each commit stores `commit_id`, `semantic_commit_fingerprint`, `committed_by`, `committed_at_ms`, an optional `message`, and its metadata changes. The actor reference contains a `kind` and an `id` and is stored once per commit. Validation inputs and operation results are not stored. Checkpoints keep replay work bounded as history grows.
 
 #### 2.9.1 Resolving the metadata basis
 
@@ -1581,6 +1575,12 @@ checkpoint instead of replaying from an obsolete cursor.
 
 #### 3.8.1 Attribution and retention
 
+Durable attribution fields describe the recorded event. Inode rows use `created_by`; file revisions, commit receipts, and WAL commits use `committed_by`; tombstones and active deletions use `deleted_by`; and attribute revisions use `updated_by`.
+
+Maintenance jobs record their writer as `writer_id`, matching the namespace head. Only compaction leases store this value for a job.
+
+The commit fingerprint preimage in section 3.3.1 describes the commit request rather than a durable record. It uses `actor_kind` and `actor_id`, matching `CommitRequest.actor`.
+
 Retained commits keep their actor in the change feed and in metadata for inode
 creation, file revisions, current attributes, and active deletions.
 
@@ -1892,7 +1892,7 @@ inline copy's length disagrees with its handle, so the read path assumes both.
 Readers reject out-of-order rows, out-of-order index entries, and checksum
 failures as malformed. The segment format is versioned by the manifest that
 references it (`namespace_manifest` `format_version`), since a segment is
-unreachable except through a manifest.
+unreachable except through a manifest. Rows inside a segment use the attribution fields defined in section 3.8.1.
 
 A run is identified by its `run_seq` and `level` together, and holds one
 family's segments from one producer: a WAL flush's delta run or a rebuild's

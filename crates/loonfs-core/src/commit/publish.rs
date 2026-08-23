@@ -256,7 +256,7 @@ mod tests {
                     seq,
                     commit_id: CommitId::parse(format!("publish-record-{index}"))
                         .expect("valid commit id"),
-                    actor: loonfs_test_support::test_actor(),
+                    committed_by: loonfs_test_support::test_actor(),
                     semantic_commit_fingerprint: format!("fingerprint-{index}"),
                     committed_at_ms: 4_200,
                     message: None,

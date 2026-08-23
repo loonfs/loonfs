@@ -122,7 +122,7 @@ pub(super) fn committed_change_from_wal_record(
     Ok(CommittedChange {
         committed_seq: record.seq,
         commit_id: record.commit_id.clone(),
-        committed_by: record.actor.clone(),
+        committed_by: record.committed_by.clone(),
         committed_at_ms: record.committed_at_ms,
         message: record.message.clone(),
         events: events_from_wal_deltas(&record.deltas)?,

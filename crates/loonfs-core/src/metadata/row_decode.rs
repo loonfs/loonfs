@@ -100,7 +100,7 @@ pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRec
             committed_seq,
             commit_id,
             committed_at_ms,
-            actor,
+            committed_by,
             delta_index,
             content_ref,
         } => Ok(RevisionRecord {
@@ -109,7 +109,7 @@ pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRec
             committed_seq,
             commit_id,
             committed_at_ms,
-            actor,
+            committed_by,
             revision_delta_index: delta_index,
             content_ref,
         }),
@@ -136,13 +136,13 @@ pub(crate) fn tombstone_from_manifest_row(
             commit_id,
             action,
             deleted_at_ms,
-            actor,
+            deleted_by,
         } => Ok(SubtreeTombstoneRecord {
             root_inode_id,
             generation,
             commit_id,
             deleted_at_ms,
-            actor,
+            deleted_by,
             action: subtree_tombstone_action(action),
         }),
         other => Err(foreign_row("tombstone", &other)),
@@ -185,14 +185,14 @@ pub(crate) fn commit_receipt_from_manifest_row(
     match row {
         MetadataRow::CommitReceipt {
             commit_id,
-            actor,
+            committed_by,
             semantic_commit_fingerprint,
             committed_seq,
             committed_at_ms,
             message,
         } => Ok(CommitReceiptRecord {
             commit_id,
-            actor,
+            committed_by,
             semantic_commit_fingerprint,
             committed_seq,
             committed_at_ms,
@@ -212,7 +212,7 @@ pub(crate) fn attributes_revision_from_manifest_row(
             committed_seq,
             commit_id,
             delta_index,
-            actor,
+            updated_by,
             updated_at_ms,
             attributes,
         } => Ok(AttributesRevisionRecord {
@@ -221,7 +221,7 @@ pub(crate) fn attributes_revision_from_manifest_row(
             committed_seq,
             commit_id,
             delta_index,
-            actor,
+            updated_by,
             updated_at_ms,
             attributes,
         }),
@@ -274,7 +274,7 @@ mod tests {
                 deleted_direntry: None,
             },
             deleted_at_ms: 4_000,
-            actor: loonfs_api::ActorRef::loonfs_system(),
+            deleted_by: loonfs_api::ActorRef::loonfs_system(),
         };
         assert!(inode_from_manifest_row(tombstone).is_err());
     }

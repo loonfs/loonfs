@@ -561,7 +561,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 committed_seq: revision.committed_seq,
                 commit_id: revision.commit_id,
                 committed_at_ms: revision.committed_at_ms,
-                committed_by: revision.actor,
+                committed_by: revision.committed_by,
                 content_ref: revision.content_ref,
             })
             .collect();
@@ -593,7 +593,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             revision_no: revision.revision_no,
             size_bytes: revision.content_ref.size_bytes,
             content_ref: revision.content_ref.clone(),
-            revision_committed_by: revision.actor,
+            revision_committed_by: revision.committed_by,
             revision_committed_at_ms: revision.committed_at_ms,
         };
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
@@ -767,7 +767,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     revision_no: revision.revision_no,
                     size_bytes: revision.content_ref.size_bytes,
                     content_ref: revision.content_ref,
-                    revision_committed_by: revision.actor,
+                    revision_committed_by: revision.committed_by,
                     revision_committed_at_ms: revision.committed_at_ms,
                 }
             }

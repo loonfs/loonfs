@@ -319,7 +319,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
         records: vec![WalCommitPayload {
             seq: ChangeSeq(2),
             commit_id: commit_id(),
-            actor: actor(),
+            committed_by: actor(),
             semantic_commit_fingerprint:
                 "v1:sha256:0000000000000000000000000000000000000000000000000000000000000042"
                     .to_owned(),
@@ -712,7 +712,7 @@ fn control_objects_match_golden_bytes() {
             job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
                 .expect("valid compaction id"),
             namespace_id: namespace_id(),
-            owner_id: "writer-1".to_owned(),
+            writer_id: "writer-1".to_owned(),
             status: CompactionLeaseStatus::Active {},
             started_at_ms: 1_000,
             heartbeat_at_ms: 3_000,
@@ -1637,9 +1637,9 @@ fn wal_decode_tolerates_additive_fields_inside_tombstone_deltas() {
 /// Actor references reject unknown fields in every context because the same
 /// type is also used in request bodies.
 #[test]
-fn wal_decode_rejects_an_additive_field_inside_the_commit_actor() {
+fn wal_decode_rejects_an_additive_field_inside_the_commit_attribution() {
     let document = wal_document_with_payload_edit(&sample_wal_envelope(), |payload| {
-        with_future_field(cbor_entry(payload_commit(payload), "actor"));
+        with_future_field(cbor_entry(payload_commit(payload), "committed_by"));
     });
 
     let error = decode_wal_segment_envelope_zstd(&document)
@@ -1652,15 +1652,16 @@ fn wal_decode_rejects_an_additive_field_inside_the_commit_actor() {
 }
 
 #[test]
-fn wal_decode_rejects_a_version_one_commit_without_an_actor() {
+fn wal_decode_rejects_a_version_one_commit_without_committed_by() {
     let document = wal_document_with_payload_edit(&sample_wal_envelope(), |payload| {
-        cbor_map_of(payload_commit(payload)).retain(|(key, _)| key.as_text() != Some("actor"));
+        cbor_map_of(payload_commit(payload))
+            .retain(|(key, _)| key.as_text() != Some("committed_by"));
     });
 
     let error = decode_wal_segment_envelope_zstd(&document)
         .expect_err("version-one WAL commits require an actor");
     assert!(
-        matches!(&error, EnvelopeCodecError::PayloadDecode(message) if message.contains("actor")),
+        matches!(&error, EnvelopeCodecError::PayloadDecode(message) if message.contains("committed_by")),
         "unexpected corruption error: {error}"
     );
 }
@@ -1850,7 +1851,7 @@ fn sample_tombstone_set_row() -> MetadataRow {
             }),
         },
         deleted_at_ms: 4_000,
-        actor: actor(),
+        deleted_by: actor(),
     }
 }
 
@@ -1870,7 +1871,7 @@ fn sample_tombstone_revoke_row() -> MetadataRow {
             },
         },
         deleted_at_ms: 4_100,
-        actor: actor(),
+        deleted_by: actor(),
     }
 }
 
@@ -1916,7 +1917,7 @@ fn sample_cleared_attributes_row() -> MetadataRow {
         committed_seq: ChangeSeq(7),
         commit_id: commit_id(),
         delta_index: 1,
-        actor: actor(),
+        updated_by: actor(),
         updated_at_ms: 7_000,
         attributes: Attributes::default(),
     }
@@ -1930,7 +1931,7 @@ fn sample_populated_attributes_row() -> MetadataRow {
         committed_seq: ChangeSeq(5),
         commit_id: commit_id(),
         delta_index: 0,
-        actor: actor(),
+        updated_by: actor(),
         updated_at_ms: 5_000,
         attributes: sample_attributes(),
     }
@@ -1939,7 +1940,7 @@ fn sample_populated_attributes_row() -> MetadataRow {
 fn sample_commit_receipt_row() -> MetadataRow {
     MetadataRow::CommitReceipt {
         commit_id: commit_id(),
-        actor: actor(),
+        committed_by: actor(),
         semantic_commit_fingerprint: "fp:golden".to_owned(),
         committed_seq: ChangeSeq(9),
         committed_at_ms: 9_000,
@@ -1976,7 +1977,7 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             committed_seq: ChangeSeq(3),
             commit_id: commit_id(),
             committed_at_ms: 3_000,
-            actor: actor(),
+            committed_by: actor(),
             delta_index: 0,
             content_ref: sample_content_ref(),
         },
@@ -1986,7 +1987,7 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             committed_seq: ChangeSeq(4),
             commit_id: commit_id(),
             committed_at_ms: 4_000,
-            actor: actor(),
+            committed_by: actor(),
             delta_index: 0,
             content_ref: sample_crc_content_ref(),
         },
@@ -2322,19 +2323,19 @@ fn decode_edited_row(row: &ciborium::Value, why: &str) -> MetadataRow {
 }
 
 #[test]
-fn commit_receipt_rows_without_an_actor_are_corrupt() {
+fn commit_receipt_rows_without_committed_by_are_corrupt() {
     let mut row = row_cbor(&MetadataRow::CommitReceipt {
         commit_id: commit_id(),
-        actor: actor(),
+        committed_by: actor(),
         semantic_commit_fingerprint: "v1:sha256:receipt".to_owned(),
         committed_seq: ChangeSeq(9),
         committed_at_ms: 9_000,
         message: None,
     });
-    cbor_map_of(&mut row).retain(|(key, _)| key.as_text() != Some("actor"));
+    cbor_map_of(&mut row).retain(|(key, _)| key.as_text() != Some("committed_by"));
     let refusal = assert_row_is_corrupt(&row, "a receipt without attribution is corrupt");
     assert!(
-        refusal.contains("missing field `actor`"),
+        refusal.contains("missing field `committed_by`"),
         "unexpected refusal: {refusal}"
     );
 }
@@ -2483,26 +2484,30 @@ fn provenance_rows_reject_every_missing_required_field() {
                 committed_seq: ChangeSeq(3),
                 commit_id: commit_id(),
                 committed_at_ms: 3_000,
-                actor: actor(),
+                committed_by: actor(),
                 delta_index: 0,
                 content_ref: sample_content_ref(),
             },
-            &["commit_id", "actor"][..],
+            &["commit_id", "committed_by"][..],
         ),
-        (sample_tombstone_set_row(), &["commit_id", "actor"][..]),
+        (sample_tombstone_set_row(), &["commit_id", "deleted_by"][..]),
         (sample_active_deletion_listed_row(), &["deleted_by"][..]),
         (
             sample_populated_attributes_row(),
-            &["commit_id", "actor", "updated_at_ms"][..],
+            &["commit_id", "updated_by", "updated_at_ms"][..],
         ),
     ];
 
     for (row, required_fields) in cases {
+        // The active-deletion row states its attribution inside `action`;
+        // every other row states it at the top level.
+        let nested_in_action = matches!(row, MetadataRow::ActiveDeletion { .. });
         for required_field in required_fields {
             let mut encoded = row_cbor(&row);
-            let map = match required_field {
-                &"deleted_by" => cbor_map_of(cbor_entry(&mut encoded, "action")),
-                _ => cbor_map_of(&mut encoded),
+            let map = if nested_in_action {
+                cbor_map_of(cbor_entry(&mut encoded, "action"))
+            } else {
+                cbor_map_of(&mut encoded)
             };
             map.retain(|(key, _)| key.as_text() != Some(required_field));
             let refusal =
@@ -2529,7 +2534,7 @@ fn attribute_rows_reject_the_retired_tagged_value_shape() {
         committed_seq: ChangeSeq(5),
         commit_id: commit_id(),
         delta_index: 0,
-        actor: actor(),
+        updated_by: actor(),
         updated_at_ms: 5_000,
         attributes: sample_attributes(),
     });
@@ -2559,7 +2564,7 @@ fn attribute_rows_reject_a_map_over_its_limits() {
         committed_seq: ChangeSeq(5),
         commit_id: commit_id(),
         delta_index: 0,
-        actor: actor(),
+        updated_by: actor(),
         updated_at_ms: 5_000,
         attributes: sample_attributes(),
     });

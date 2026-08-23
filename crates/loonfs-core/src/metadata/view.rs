@@ -446,7 +446,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 (
                     record.attributes_revision_no,
                     record.attributes,
-                    Some(record.actor),
+                    Some(record.updated_by),
                     Some(record.updated_at_ms),
                 )
             })

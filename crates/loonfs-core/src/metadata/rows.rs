@@ -86,7 +86,7 @@ pub struct RevisionRecord {
     /// Observational wall-clock stamp of the owning commit; never a
     /// validity input — `committed_seq` is the order.
     pub committed_at_ms: u64,
-    pub actor: ActorRef,
+    pub committed_by: ActorRef,
     pub revision_delta_index: u32,
     pub content_ref: ContentRef,
 }
@@ -101,10 +101,9 @@ pub struct SubtreeTombstoneRecord {
     pub commit_id: CommitId,
     /// Wall-clock stamp of the recording commit.
     pub deleted_at_ms: u64,
-    pub actor: ActorRef,
-    /// What this event did. Newest generation wins at every read site: a
-    /// `Set` newest means that deletion is active, a `Revoke` newest means
-    /// none is, and a later re-delete supersedes the revoke.
+    pub deleted_by: ActorRef,
+    /// Event action. The newest generation determines whether the deletion is
+    /// active.
     pub action: SubtreeTombstoneAction,
 }
 
@@ -194,7 +193,7 @@ pub(crate) fn active_deletion_from_tombstone(
             deletion_seq: tombstone.generation.seq,
             action: ActiveDeletionAction::Listed {
                 deleted_at_ms: tombstone.deleted_at_ms,
-                deleted_by: tombstone.actor.clone(),
+                deleted_by: tombstone.deleted_by.clone(),
                 deleted_direntry: deleted_direntry.clone(),
             },
         },
@@ -257,7 +256,7 @@ pub(crate) struct RecoverableDeletion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitReceiptRecord {
     pub commit_id: CommitId,
-    pub actor: ActorRef,
+    pub committed_by: ActorRef,
     pub semantic_commit_fingerprint: String,
     pub committed_seq: ChangeSeq,
     /// Observational wall-clock stamp of the commit; never a validity
@@ -281,7 +280,7 @@ pub struct AttributesRevisionRecord {
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     pub delta_index: u32,
-    pub actor: ActorRef,
+    pub updated_by: ActorRef,
     /// Time of the attribute update, in Unix milliseconds. `committed_seq`
     /// determines order.
     pub updated_at_ms: u64,
@@ -538,7 +537,7 @@ fn inode_decoded_bytes(record: &InodeRecord) -> usize {
 fn subtree_tombstone_decoded_bytes(record: &SubtreeTombstoneRecord) -> usize {
     size_of::<SubtreeTombstoneRecord>()
         + record.commit_id.as_str().len()
-        + actor_ref_decoded_bytes(&record.actor)
+        + actor_ref_decoded_bytes(&record.deleted_by)
 }
 
 fn direntry_bind_decoded_bytes(record: &DirentryBindRecord) -> usize {
@@ -554,14 +553,14 @@ fn direntry_unbind_decoded_bytes(record: &DirentryUnbindRecord) -> usize {
 fn revision_decoded_bytes(record: &RevisionRecord) -> usize {
     size_of::<RevisionRecord>()
         + record.commit_id.as_str().len()
-        + actor_ref_decoded_bytes(&record.actor)
+        + actor_ref_decoded_bytes(&record.committed_by)
         + content_ref_decoded_bytes(&record.content_ref)
 }
 
 fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
     size_of::<CommitReceiptRecord>()
         + record.commit_id.as_str().len()
-        + actor_ref_decoded_bytes(&record.actor)
+        + actor_ref_decoded_bytes(&record.committed_by)
         + record.semantic_commit_fingerprint.len()
         + record.message.as_ref().map_or(0, String::len)
 }
@@ -571,7 +570,7 @@ fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
 fn attributes_revision_decoded_bytes(record: &AttributesRevisionRecord) -> usize {
     size_of::<AttributesRevisionRecord>()
         + record.commit_id.as_str().len()
-        + actor_ref_decoded_bytes(&record.actor)
+        + actor_ref_decoded_bytes(&record.updated_by)
         + record.attributes.logical_bytes()
 }
 

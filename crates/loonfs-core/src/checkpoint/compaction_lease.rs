@@ -135,7 +135,7 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
                 namespace_id = namespace_id.as_str(),
                 object_key = object_key.as_str(),
                 job_id = metadata_compaction_id.as_str(),
-                owner_id = reaping.owner_id.as_str(),
+                writer_id = reaping.writer_id.as_str(),
                 heartbeat_at_ms = reaping.heartbeat_at_ms,
                 "a streaming metadata compaction lease expired; garbage collection claimed its \
                  prefix and the job that wrote it can no longer publish"
@@ -184,7 +184,7 @@ impl<'a> CompactionLease<'a> {
     pub(super) fn new(
         namespace_id: &NamespaceId,
         job_id: &MetadataCompactionId,
-        owner_id: &str,
+        writer_id: &str,
         started_at_ms: u64,
         timer: &'a dyn MonotonicTimer,
     ) -> Self {
@@ -194,7 +194,7 @@ impl<'a> CompactionLease<'a> {
             state: MetadataCompactionLeaseState {
                 job_id: job_id.clone(),
                 namespace_id: namespace_id.clone(),
-                owner_id: owner_id.to_owned(),
+                writer_id: writer_id.to_owned(),
                 status: CompactionLeaseStatus::Active {},
                 started_at_ms,
                 heartbeat_at_ms: started_at_ms,

@@ -58,7 +58,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
     let payload = WalCommitPayload {
         seq: ChangeSeq(9),
         commit_id: owning_commit_id.clone(),
-        actor: actor(),
+        committed_by: actor(),
         semantic_commit_fingerprint: "v1:sha256:test".to_owned(),
         committed_at_ms: 4_200,
         message: None,
@@ -408,7 +408,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
         vec![
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
-                actor: loonfs_test_support::test_actor(),
+                committed_by: loonfs_test_support::test_actor(),
                 semantic_commit_fingerprint: "old".to_owned(),
                 committed_seq: ChangeSeq(1),
                 committed_at_ms: 4_200,
@@ -416,7 +416,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
             },
             CommitReceiptRecord {
                 commit_id: CommitId::parse("other-commit").expect("valid commit id"),
-                actor: loonfs_test_support::test_actor(),
+                committed_by: loonfs_test_support::test_actor(),
                 semantic_commit_fingerprint: "other".to_owned(),
                 committed_seq: ChangeSeq(3),
                 committed_at_ms: 4_200,
@@ -424,7 +424,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
             },
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
-                actor: loonfs_test_support::test_actor(),
+                committed_by: loonfs_test_support::test_actor(),
                 semantic_commit_fingerprint: "new".to_owned(),
                 committed_seq: ChangeSeq(2),
                 committed_at_ms: 4_200,
@@ -465,7 +465,7 @@ fn revisions_advance_watermark_and_receipt_index() {
         committed_seq: ChangeSeq(2),
         commit_id: commit_id(2),
         committed_at_ms: 4_200,
-        actor: actor(),
+        committed_by: actor(),
         revision_delta_index: 0,
         content_ref: content_ref.clone(),
     });
@@ -475,13 +475,13 @@ fn revisions_advance_watermark_and_receipt_index() {
         committed_seq: ChangeSeq(3),
         commit_id: commit_id(3),
         committed_at_ms: 4_200,
-        actor: actor(),
+        committed_by: actor(),
         revision_delta_index: 0,
         content_ref: replacement_ref.clone(),
     });
     builder.push_commit_receipt(CommitReceiptRecord {
         commit_id: receipt_commit_id.clone(),
-        actor: loonfs_test_support::test_actor(),
+        committed_by: loonfs_test_support::test_actor(),
         semantic_commit_fingerprint: "fingerprint".to_owned(),
         committed_seq: ChangeSeq(3),
         committed_at_ms: 4_200,

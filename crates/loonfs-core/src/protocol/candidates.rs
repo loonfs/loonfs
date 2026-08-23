@@ -233,7 +233,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
                 namespace_id: namespace_id.clone(),
                 commit_id: record.commit_id.clone(),
                 committed_seq: record.committed_seq,
-                committed_by: record.actor.clone(),
+                committed_by: record.committed_by.clone(),
                 committed_at_ms: record.committed_at_ms,
                 message: record.message.clone(),
                 events: None,

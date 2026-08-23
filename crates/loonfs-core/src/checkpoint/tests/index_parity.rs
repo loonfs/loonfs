@@ -1286,7 +1286,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
             committed_seq,
             commit_id,
             committed_at_ms,
-            actor,
+            committed_by,
             delta_index,
             content_ref,
         } => MetadataRow::FileRevision {
@@ -1295,7 +1295,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
             committed_seq,
             commit_id,
             committed_at_ms,
-            actor,
+            committed_by,
             delta_index,
             content_ref,
         },

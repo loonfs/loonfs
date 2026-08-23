@@ -1482,7 +1482,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
         let segment = decode_wal_segment_envelope_zstd(&bytes).expect("decode WAL segment");
         if segment.payload.records.len() == 2 {
             for record in segment.payload.records {
-                batched_actors.insert(record.commit_id.to_string(), record.actor);
+                batched_actors.insert(record.commit_id.to_string(), record.committed_by);
             }
         }
     }
