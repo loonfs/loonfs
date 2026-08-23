@@ -620,11 +620,7 @@ commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
 a process restart, resubmit the same request with the same `commit_id` and
 read the definitive answer from the response.
 
-The blocking Rust client automatically retries reads, commits, replay-safe
-upload stages, upload completion, and idempotent maintenance calls. It makes
-one attempt for every `new_attempt` operation: namespace create, fork, and
-delete; upload-session begin; checkpoint create; maintenance step; grep-index
-collection; and store probe. Presigned direct PUT also makes one attempt.
+The blocking Rust client retries operations labeled `idempotent` or `replayable`. It makes one attempt for operations labeled `not_idempotent`: namespace create, fork, and delete; upload-session begin; checkpoint create; maintenance; grep-index collection; and store probe. Presigned direct PUT also receives one attempt.
 
 Commits record a durable receipt binding the `commit_id` to its
 `committed_seq`; replay reads that receipt, and a reuse conflict reports the
@@ -703,51 +699,51 @@ proxy in front of it.
 
 Every operation includes an `x-loonfs-retry` value for generated SDKs:
 
-- `safe`: the operation is read-only, or resending the same request is harmless.
-- `replay`: resend the same request to receive the original result.
-- `new_attempt`: another request starts new work or returns a final conflict.
+- `idempotent`: clients may repeat the request safely.
+- `replayable`: repeating the request returns the original result. Commits replay by `commit_id`, and upload completion returns the first result.
+- `not_idempotent`: generated clients make one automatic attempt and leave recovery to the application.
 
 The table below lists the retry class for every v0 operation.
 
 | Purpose | Operation ID | Retry class | Representative HTTP shape |
 | --- | --- | --- | --- |
-| Check server health | `get_health` | `safe` | `GET /health` |
-| Check server readiness | `get_readiness` | `safe` | `GET /readiness` |
-| Read deployment capabilities | `get_capabilities` | `safe` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `new_attempt` | `POST /v0/namespaces` |
-| Read a namespace | `get_namespace` | `safe` | `GET /v0/namespaces/{ns}` |
-| Read a path entry | `get_path_entry` | `safe` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
-| Read an inode | `get_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
-| List path entries | `list_path_entries` | `safe` | `GET /v0/namespaces/{ns}/filesystem/entries?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
-| List file revisions by path | `list_file_revisions` | `safe` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
-| List file revisions by inode | `list_file_revisions_by_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
-| Read current or prior file content by path | `get_file_bytes` | `safe` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` (`revision_no` is optional) |
-| Read prior file content by inode | `get_file_revision_bytes_by_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
-| Start a download by path | `create_download` | `safe` | `POST /v0/namespaces/{ns}/filesystem/downloads` |
-| Start a download by inode | `create_download_by_inode` | `safe` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with body `{}` |
-| List recoverable deletions | `list_trash` | `safe` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
-| Create a commit | `create_commit` | `replay` | `POST /v0/namespaces/{ns}/commits` |
-| Create an upload session | `create_upload` | `new_attempt` | `POST /v0/namespaces/{ns}/uploads` |
-| Upload content through the server | `put_upload_content` | `safe` | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
-| Create multipart upload URLs | `sign_upload_parts` | `safe` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
-| Complete an upload | `complete_upload` | `replay` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
-| Read an upload session | `get_upload` | `safe` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
-| Abort an upload session | `abort_upload` | `safe` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
-| Read committed changes | `list_changes` | `safe` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
-| Fork a namespace | `fork_namespace` | `new_attempt` | `POST /v0/namespaces/{source_ns}/forks` |
-| Delete a namespace | `delete_namespace` | `new_attempt` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
-| Read namespace diagnostics | `get_namespace_diagnostics` | `safe` | `GET /v0/admin/namespaces/{ns}/diagnostics` |
-| Create a checkpoint | `create_checkpoint` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
-| List checkpoints | `list_checkpoints` | `safe` | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Release a checkpoint | `release_checkpoint` | `safe` | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
-| Run maintenance | `run_maintenance` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/maintenance/run` |
-| Search file contents | `grep` | `safe` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
-| Read grep index status | `get_grep_index` | `safe` | `GET /v0/admin/namespaces/{ns}/grep/index` |
-| Enable the grep index | `enable_grep_index` | `safe` | `POST /v0/admin/namespaces/{ns}/grep/index/enable`; idempotent |
-| Disable the grep index | `disable_grep_index` | `safe` | `POST /v0/admin/namespaces/{ns}/grep/index/disable`; idempotent |
-| Collect grep index garbage | `gc_grep_index` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/grep/index/gc`; supports `max_objects` and `next_cursor` |
-| Test object storage | `probe_store` | `new_attempt` | `POST /v0/admin/store/probe` with body `{}` |
-| Scrape metrics | `get_metrics` | `safe` | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
+| Check server health | `get_health` | `idempotent` | `GET /health` |
+| Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
+| Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
+| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces` |
+| Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
+| Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
+| Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
+| List path entries | `list_path_entries` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entries?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
+| List file revisions by path | `list_file_revisions` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
+| List file revisions by inode | `list_file_revisions_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
+| Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` (`revision_no` is optional) |
+| Read prior file content by inode | `get_file_revision_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
+| Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` |
+| Start a download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with body `{}` |
+| List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
+| Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits` |
+| Create an upload session | `create_upload` | `not_idempotent` | `POST /v0/namespaces/{ns}/uploads` |
+| Upload content through the server | `put_upload_content` | `idempotent` | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
+| Create multipart upload URLs | `sign_upload_parts` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
+| Complete an upload | `complete_upload` | `replayable` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
+| Read an upload session | `get_upload` | `idempotent` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
+| Abort an upload session | `abort_upload` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
+| Read committed changes | `list_changes` | `idempotent` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
+| Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks` |
+| Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
+| Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/admin/namespaces/{ns}/diagnostics` |
+| Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/admin/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
+| List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
+| Release a checkpoint | `release_checkpoint` | `idempotent` | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
+| Run maintenance | `run_maintenance` | `not_idempotent` | `POST /v0/admin/namespaces/{ns}/maintenance/run` |
+| Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
+| Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/admin/namespaces/{ns}/grep/index` |
+| Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/admin/namespaces/{ns}/grep/index/enable`; idempotent |
+| Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/admin/namespaces/{ns}/grep/index/disable`; idempotent |
+| Collect grep index garbage | `gc_grep_index` | `not_idempotent` | `POST /v0/admin/namespaces/{ns}/grep/index/gc`; supports `max_objects` and `next_cursor` |
+| Test object storage | `probe_store` | `not_idempotent` | `POST /v0/admin/store/probe` with body `{}` |
+| Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 
 The status, enable, and disable routes all return one flat grep-index object:
 `namespace_id`, lifecycle fields tagged by `status`, `next_run_ordinal`, and
