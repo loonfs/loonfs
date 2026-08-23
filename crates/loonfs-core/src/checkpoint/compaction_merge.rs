@@ -14,6 +14,7 @@ use super::validate::validate_manifest_row_seq_range;
 use crate::error::Result;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
+use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -201,7 +202,7 @@ impl SegmentRowIterator {
             .map_err(manifest_load_failure)?;
             self.next_block = end;
             validate_manifest_row_seq_range(
-                &descriptor.object_key,
+                &metadata_segment_object_key(descriptor),
                 blocks.iter().flat_map(|block| block.rows.iter()),
                 descriptor.run_seq,
             )

@@ -23,6 +23,7 @@ use loonfs_api::wire::sst_blocks::{
     decode_data_block, decode_filter_block, decode_index_block, BlockHandle, SegmentFilter,
     SegmentIndexEntry, SstBlockCodecError,
 };
+use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::sync::Arc;
 
@@ -102,7 +103,7 @@ pub(super) async fn stored_block_section<T>(
             // hardware or filesystem problem an operator has to know about,
             // so it is a warning rather than a debug line.
             tracing::warn!(
-                object_key = %descriptor.object_key,
+                object_key = %metadata_segment_object_key(descriptor),
                 "local block cache entry did not decode, refetching from the store: {reason}"
             );
             cache.invalidate(&key);
@@ -209,6 +210,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     descriptor: &MetadataSegmentRef,
     want: MetadataSegmentBlockKind,
 ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
+    let object_key = metadata_segment_object_key(descriptor);
     let filter_handle = descriptor.filter_block;
     let index_handle = descriptor.index_block;
     let object_len = segment_object_len(descriptor);
@@ -216,7 +218,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     let fetch_offset = match want {
         MetadataSegmentBlockKind::Data | MetadataSegmentBlockKind::Manifest => {
             return Err(segment_codec_error(
-                &descriptor.object_key,
+                &object_key,
                 "segment section fetch supports only filter and index blocks",
             ));
         }
@@ -224,13 +226,8 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
         MetadataSegmentBlockKind::Filter => filter_handle.offset,
         MetadataSegmentBlockKind::Index => index_handle.offset,
     };
-    let bytes = load_section_bytes(
-        store,
-        &descriptor.object_key,
-        fetch_offset,
-        object_len - fetch_offset,
-    )
-    .await?;
+    let bytes =
+        load_section_bytes(store, &object_key, fetch_offset, object_len - fetch_offset).await?;
     let section = |handle: &BlockHandle| -> Option<&[u8]> {
         let start = usize::try_from(handle.offset.checked_sub(fetch_offset)?).ok()?;
         bytes.get(start..start + handle.stored_len as usize)
@@ -247,7 +244,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             );
             let entries = Arc::new(
                 decode_index_block(stored, &index_handle)
-                    .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
+                    .map_err(|err| segment_codec_error(&object_key, err))?,
             );
             let block = DecodedMetadataSegmentBlock::Index {
                 decoded_bytes: index_handle.decoded_len as usize,
@@ -277,7 +274,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                 stored,
             );
             let filter = decode_filter_block(stored, &filter_handle)
-                .map_err(|err| segment_codec_error(&descriptor.object_key, err))?;
+                .map_err(|err| segment_codec_error(&object_key, err))?;
             let block = DecodedMetadataSegmentBlock::Filter {
                 decoded_bytes: filter_handle.decoded_len as usize,
                 filter: Arc::new(filter),
@@ -301,7 +298,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             for entry in entries.iter() {
                 let Some(stored) = section(&entry.block) else {
                     return Err(segment_codec_error(
-                        &descriptor.object_key,
+                        &object_key,
                         "data block outside the segment object bounds",
                     ));
                 };
@@ -313,7 +310,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                     stored,
                 );
                 let decoded = decode_data_block(stored, &entry.block)
-                    .map_err(|err| segment_codec_error(&descriptor.object_key, err))?;
+                    .map_err(|err| segment_codec_error(&object_key, err))?;
                 let block = decoded_data_cache_block(descriptor.family, decoded);
                 publish_segment_block(
                     segment_cache,
@@ -335,7 +332,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     };
     wanted.ok_or_else(|| {
         segment_codec_error(
-            &descriptor.object_key,
+            &object_key,
             "requested section outside the segment object bounds",
         )
     })
@@ -416,15 +413,16 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
             )
             .await
         } else {
+            let object_key = metadata_segment_object_key(descriptor);
             let stored = load_section_bytes(
                 store,
-                &descriptor.object_key,
+                &object_key,
                 handle.offset,
                 u64::from(handle.stored_len),
             )
             .await?;
             let entries = decode_index_block(&stored, &handle)
-                .map_err(|err| segment_codec_error(&descriptor.object_key, err))?;
+                .map_err(|err| segment_codec_error(&object_key, err))?;
             Ok(DecodedMetadataSegmentBlock::Index {
                 decoded_bytes: handle.decoded_len as usize,
                 entries: Arc::new(entries),
@@ -441,7 +439,7 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
         DecodedMetadataSegmentBlock::Filter { .. }
         | DecodedMetadataSegmentBlock::Data { .. }
         | DecodedMetadataSegmentBlock::Manifest { .. } => Err(segment_codec_error(
-            &descriptor.object_key,
+            &metadata_segment_object_key(descriptor),
             "cache returned a non-index block for an index key",
         )),
     }
@@ -467,14 +465,14 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         return Ok(filter);
     }
     if let Some(inline) = &descriptor.filter_inline {
-        let bytes = hex_decode_bytes(inline).map_err(|err| {
-            segment_codec_error(&descriptor.object_key, format!("inline filter: {err}"))
-        })?;
+        let object_key = metadata_segment_object_key(descriptor);
+        let bytes = hex_decode_bytes(inline)
+            .map_err(|err| segment_codec_error(&object_key, format!("inline filter: {err}")))?;
         // The handle names and verifies the durable filter block; decoding
         // the inline copy against it proves the two are byte-identical.
         let filter = Arc::new(
             decode_filter_block(&bytes, &handle)
-                .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
+                .map_err(|err| segment_codec_error(&object_key, err))?,
         );
         let block = DecodedMetadataSegmentBlock::Filter {
             decoded_bytes: handle.decoded_len as usize,
@@ -519,7 +517,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         DecodedMetadataSegmentBlock::Index { .. }
         | DecodedMetadataSegmentBlock::Data { .. }
         | DecodedMetadataSegmentBlock::Manifest { .. } => Err(segment_codec_error(
-            &descriptor.object_key,
+            &metadata_segment_object_key(descriptor),
             "cache returned a non-filter block",
         )),
     }

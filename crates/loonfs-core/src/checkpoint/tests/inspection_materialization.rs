@@ -5,7 +5,7 @@ use super::super::block_load::{
 };
 use super::super::cache::MetadataSegmentCache;
 use super::super::error::ManifestLoadError;
-use super::super::load::{ensure_segment_object_key, load_namespace_manifest_envelope_if_present};
+use super::super::load::load_namespace_manifest_envelope_if_present;
 use super::super::row::manifest_row_kind;
 use super::super::runs::{
     runs_in_materialization_order, MetadataFamilySegments, MAX_MAINTENANCE_SEGMENT_IO,
@@ -24,7 +24,9 @@ use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_api::{ManifestNo, ManifestObjectId, NamespaceId};
-use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
+use loonfs_objectstore::keys::{
+    metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
+};
 use loonfs_objectstore::ObjectStore;
 
 #[cfg(test)]
@@ -161,14 +163,8 @@ where
     let mut revision_rows = Vec::new();
     let mut revision_by_inode_desc_rows = Vec::new();
     for family_segments in ordered {
-        let mut descriptors = Vec::with_capacity(family_segments.segments.len());
-        for descriptor in &family_segments.segments {
-            ensure_segment_object_key(descriptor)?;
-            descriptors.push(descriptor);
-        }
-
-        let mut loaded_segments = Vec::with_capacity(descriptors.len());
-        for chunk in descriptors.chunks(MAX_MAINTENANCE_SEGMENT_IO) {
+        let mut loaded_segments = Vec::with_capacity(family_segments.segments.len());
+        for chunk in family_segments.segments.chunks(MAX_MAINTENANCE_SEGMENT_IO) {
             loaded_segments.extend(
                 try_join_all(
                     chunk
@@ -179,7 +175,7 @@ where
             );
         }
 
-        for (descriptor, row_set) in descriptors.into_iter().zip(loaded_segments) {
+        for (descriptor, row_set) in family_segments.segments.iter().zip(loaded_segments) {
             let rows: Vec<MetadataRow> = row_set.rows().cloned().collect();
             match family_segments.family {
                 MetadataRowFamily::DirentryBinds => {
@@ -199,7 +195,7 @@ where
             append_rows_to_metadata(
                 metadata_state,
                 family_segments.family,
-                &descriptor.object_key,
+                &metadata_segment_object_key(descriptor),
                 &rows,
             )?;
         }
@@ -247,7 +243,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
     let row_count = row_set.rows().count();
     if row_count as u64 != descriptor.row_count {
         return Err(ManifestLoadError::SegmentDescriptorMismatch {
-            object_key: descriptor.object_key.clone(),
+            object_key: metadata_segment_object_key(descriptor),
             message: format!(
                 "row count mismatch: expected {}, actual {row_count}",
                 descriptor.row_count,
@@ -257,7 +253,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
     if let (Some(first), Some(last)) = (row_set.row_keys().next(), row_set.row_keys().last()) {
         if descriptor.min_key != *first || descriptor.max_key != *last {
             return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                object_key: descriptor.object_key.clone(),
+                object_key: metadata_segment_object_key(descriptor),
                 message: "descriptor min/max key mismatch".to_owned(),
             });
         }

@@ -15,7 +15,7 @@ use loonfs::{
 };
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_api::AbsolutePath;
-use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
 use std::collections::BTreeSet;
@@ -184,7 +184,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .iter()
         .map(|descriptor| {
             (
-                descriptor.object_key.clone(),
+                metadata_segment_object_key(descriptor),
                 descriptor.filter_block.offset,
             )
         })
@@ -193,7 +193,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .payload
         .segments
         .iter()
-        .map(|descriptor| descriptor.object_key.clone())
+        .map(metadata_segment_object_key)
         .collect();
 
     // The measured operation: first stat on a fresh handle, nothing warm.

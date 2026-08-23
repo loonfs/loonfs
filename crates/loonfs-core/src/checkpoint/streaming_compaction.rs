@@ -71,6 +71,7 @@ use crate::time::StdMonotonicTimer;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId};
+use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -666,7 +667,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             .payload
             .segments
             .iter()
-            .filter(|descriptor| !snapshot_keys.contains(&descriptor.object_key))
+            .filter(|descriptor| !snapshot_keys.contains(&metadata_segment_object_key(descriptor)))
             .cloned()
             .collect();
         next_segments.extend(result.output_segments.iter().cloned());
@@ -765,10 +766,7 @@ pub(super) fn snapshot_segment_keys<S: ObjectStore + ?Sized>(
             .scan_runs
             .iter()
             .find(|run| run.run_seq == *run_seq && run.level == *level)?;
-        keys.extend(
-            group_run_descriptors(run, spec.group())
-                .map(|descriptor| descriptor.object_key.clone()),
-        );
+        keys.extend(group_run_descriptors(run, spec.group()).map(metadata_segment_object_key));
     }
     Some(keys)
 }

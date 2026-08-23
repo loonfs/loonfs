@@ -85,7 +85,8 @@ use loonfs_api::{
     ManifestNo, ManifestObjectId, NameKey, NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::keys::{
-    metadata_manifest_object, metadata_manifest_prefix, metadata_segment, wal_head, wal_segment,
+    metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key, wal_head,
+    wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -468,7 +469,7 @@ pub(crate) async fn staged_keys_of_the_current_manifest<S: ObjectStore + ?Sized>
             .payload
             .segments
             .iter()
-            .map(|descriptor| descriptor.object_key.clone())
+            .map(metadata_segment_object_key)
             .filter(|key| key.starts_with(&staging_prefix))
             .collect();
     assert!(
@@ -631,7 +632,7 @@ fn base_segment_object_keys_for_family(
         .expect("the family's segments")
         .segments
         .iter()
-        .map(|descriptor| descriptor.object_key.clone())
+        .map(metadata_segment_object_key)
         .collect()
 }
 

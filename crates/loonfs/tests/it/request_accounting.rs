@@ -15,7 +15,7 @@ use loonfs::{
 use loonfs_api::AbsolutePath;
 
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
 use std::collections::BTreeMap;
@@ -47,7 +47,7 @@ async fn segment_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> S
         .iter()
         .map(|descriptor| {
             (
-                descriptor.object_key.clone(),
+                metadata_segment_object_key(descriptor),
                 (
                     format!("{:?}", descriptor.family),
                     descriptor.level,

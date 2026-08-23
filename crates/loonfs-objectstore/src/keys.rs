@@ -1,6 +1,7 @@
 //! Key construction for every durable object family.
 
 use crate::layout::ObjectLayout;
+use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{
     CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
     MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
@@ -106,6 +107,23 @@ pub fn metadata_compaction_segment(
     )
 }
 
+/// Derives a metadata segment's object key from its manifest descriptor.
+///
+/// `compaction_job_id` selects the compaction prefix. Descriptors without a
+/// job id use the namespace's `metadata/segments/` prefix.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
+    match &descriptor.compaction_job_id {
+        Some(compaction_job_id) => metadata_compaction_segment(
+            &descriptor.owner_namespace_id,
+            compaction_job_id,
+            &descriptor.segment_id,
+        ),
+        None => metadata_segment(&descriptor.owner_namespace_id, &descriptor.segment_id),
+    }
+}
+
 /// Builds the mutable lease key one streaming compaction job holds over its
 /// own prefix.
 ///
@@ -174,12 +192,14 @@ mod tests {
     use super::{
         checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_prefix,
         metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
-        namespace_prefix, upload_session, wal_floor, wal_head, wal_segment,
-        wal_segment_id_from_key, wal_segment_prefix,
+        metadata_segment_object_key, namespace_prefix, upload_session, wal_floor, wal_head,
+        wal_segment, wal_segment_id_from_key, wal_segment_prefix,
     };
     use crate::layout::ObjectLayout;
+    use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
+    use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
-        CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
+        ChangeSeq, CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
         MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
     };
 
@@ -429,6 +449,52 @@ mod tests {
         assert_eq!(
             upload_session(&namespace_id(), &upload_id()),
             "namespaces/ns-1/uploads/upl_00000000000000000000000000000001.json"
+        );
+    }
+
+    fn segment_descriptor(compaction_job_id: Option<MetadataCompactionId>) -> MetadataSegmentRef {
+        MetadataSegmentRef {
+            owner_namespace_id: namespace_id(),
+            segment_id: metadata_segment_id(),
+            compaction_job_id,
+            run_seq: ChangeSeq(1),
+            level: 0,
+            family: MetadataRowFamily::Inodes,
+            segment_index: 0,
+            row_count: 0,
+            min_key: String::new(),
+            max_key: String::new(),
+            index_block: BlockHandle {
+                offset: 0,
+                stored_len: 0,
+                decoded_len: 0,
+                crc32c: 0,
+            },
+            filter_block: BlockHandle {
+                offset: 0,
+                stored_len: 0,
+                decoded_len: 0,
+                crc32c: 0,
+            },
+            filter_inline: None,
+            object_checksum: "sha256:unused".to_owned(),
+        }
+    }
+
+    /// Segment descriptors derive standard and compaction object keys.
+    #[test]
+    fn segment_descriptors_derive_published_and_staging_keys() {
+        assert_eq!(
+            metadata_segment_object_key(&segment_descriptor(None)),
+            metadata_segment(&namespace_id(), &metadata_segment_id())
+        );
+        assert_eq!(
+            metadata_segment_object_key(&segment_descriptor(Some(metadata_compaction_id()))),
+            metadata_compaction_segment(
+                &namespace_id(),
+                &metadata_compaction_id(),
+                &metadata_segment_id()
+            )
         );
     }
 

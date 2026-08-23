@@ -565,14 +565,14 @@ async fn manifest_l0_run_missing_segment_fails_load() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_no)
             .await
             .expect("load materialized manifest");
-    let deleted_key = l0_runs(&materialized.manifest)[0]
-        .segments
-        .iter()
-        .flat_map(|family_segments| family_segments.segments.iter())
-        .next()
-        .expect("l0 run segment")
-        .object_key
-        .clone();
+    let deleted_key = metadata_segment_object_key(
+        l0_runs(&materialized.manifest)[0]
+            .segments
+            .iter()
+            .flat_map(|family_segments| family_segments.segments.iter())
+            .next()
+            .expect("l0 run segment"),
+    );
     store.delete(&deleted_key).await.expect("delete l0 segment");
 
     match load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_no)
@@ -582,94 +582,6 @@ async fn manifest_l0_run_missing_segment_fails_load() {
             assert_eq!(object_key, deleted_key);
         }
         other => panic!("expected missing l0 segment, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn manifest_materialization_rejects_off_pattern_segment_keys() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
-    let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no(first))
-            .await
-            .expect("load first manifest");
-    let mut bad_base_manifest = first_materialized.manifest.clone();
-    let manifest_key =
-        metadata_manifest_object(&namespace_id, &bad_base_manifest.payload.manifest_object_id);
-    let expected_base_key = {
-        let base_descriptor = bad_base_manifest
-            .payload
-            .segments
-            .iter_mut()
-            .find(|descriptor| {
-                descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
-                    && descriptor.family == ApiMetadataRowFamily::Inodes
-            })
-            .expect("base metadata file");
-        let expected = metadata_segment(
-            &base_descriptor.owner_namespace_id,
-            &base_descriptor.segment_id,
-        );
-        base_descriptor.object_key = format!("{}-wrong", base_descriptor.object_key);
-        expected
-    };
-
-    match load_manifest_metadata_state_for_inspection_from_manifest(
-        &store,
-        &namespace_id,
-        &manifest_key,
-        &bad_base_manifest,
-    )
-    .await
-    {
-        Err(ManifestLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
-            assert_eq!(expected, expected_base_key);
-        }
-        other => panic!("expected base segment key mismatch, got {other:?}"),
-    }
-
-    let second = write_file_and_checkpoint(&store, &namespace_id, &context, 2).await;
-    let second_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no(second))
-            .await
-            .expect("load second manifest");
-    let mut bad_l0_manifest = second_materialized.manifest.clone();
-    let manifest_key =
-        metadata_manifest_object(&namespace_id, &bad_l0_manifest.payload.manifest_object_id);
-    let expected_l0_key = {
-        let l0_descriptor = bad_l0_manifest
-            .payload
-            .segments
-            .iter_mut()
-            .find(|descriptor| {
-                descriptor.level == CHECKPOINT_L0_RUN_LEVEL
-                    && descriptor.family == ApiMetadataRowFamily::Inodes
-            })
-            .expect("l0 metadata file");
-        let expected =
-            metadata_segment(&l0_descriptor.owner_namespace_id, &l0_descriptor.segment_id);
-        l0_descriptor.object_key = format!("{}-wrong", l0_descriptor.object_key);
-        expected
-    };
-
-    match load_manifest_metadata_state_for_inspection_from_manifest(
-        &store,
-        &namespace_id,
-        &manifest_key,
-        &bad_l0_manifest,
-    )
-    .await
-    {
-        Err(ManifestLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
-            assert_eq!(expected, expected_l0_key);
-        }
-        other => panic!("expected l0 segment key mismatch, got {other:?}"),
     }
 }
 

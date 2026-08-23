@@ -345,9 +345,8 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
         segments: vec![MetadataSegmentRef {
             owner_namespace_id: namespace_id(),
             segment_id: segment_id(),
-            object_key:
-                "namespaces/demo/metadata/segments/seg_0123456789abcdef0123456789abcdef.sst.zst"
-                    .to_owned(),
+            // WAL flush segments use the standard metadata segment prefix.
+            compaction_job_id: None,
             run_seq: ChangeSeq(2),
             level: 0,
             family: MetadataRowFamily::Inodes,

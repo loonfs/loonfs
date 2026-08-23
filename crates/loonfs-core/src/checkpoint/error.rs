@@ -81,11 +81,6 @@ pub enum ManifestLoadError {
     ReadSegment { object_key: String, message: String },
     #[error("metadata segment codec error for `{object_key}`: {message}")]
     SegmentCodec { object_key: String, message: String },
-    #[error("metadata segment key mismatch for `{object_key}`: expected `{expected}`")]
-    SegmentObjectKeyMismatch {
-        object_key: String,
-        expected: String,
-    },
     #[error("metadata segment descriptor mismatch for `{object_key}`: {message}")]
     SegmentDescriptorMismatch { object_key: String, message: String },
     #[error(

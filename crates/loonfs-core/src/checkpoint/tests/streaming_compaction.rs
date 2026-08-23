@@ -1234,9 +1234,10 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
         result.output_segments.len()
     );
     assert!(
-        result.output_segments.iter().all(|descriptor| descriptor
-            .object_key
-            .starts_with(&metadata_compaction_prefix(&namespace_id))),
+        result.output_segments.iter().all(|descriptor| {
+            metadata_segment_object_key(descriptor)
+                .starts_with(&metadata_compaction_prefix(&namespace_id))
+        }),
         "every output segment is written to the staging directory"
     );
     // Every reverse row the floor covers costs one point read, and no other
@@ -1430,7 +1431,7 @@ async fn group_segment_keys<S: ObjectStore + ?Sized>(
     snapshot_runs_for_group(segments.manifest(), group)
         .iter()
         .flat_map(|run| group_run_descriptors(run, group))
-        .map(|descriptor| descriptor.object_key.clone())
+        .map(metadata_segment_object_key)
         .collect()
 }
 
@@ -1693,7 +1694,7 @@ fn classify_reads(reads: &[(String, u64, u64)], descriptors: &[MetadataSegmentRe
         profile.stored_bytes += bytes;
         let Some(descriptor) = descriptors
             .iter()
-            .find(|descriptor| descriptor.object_key == *key)
+            .find(|descriptor| metadata_segment_object_key(descriptor) == *key)
         else {
             profile.other_reads += 1;
             continue;
@@ -2212,7 +2213,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     let referenced: BTreeSet<String> = result
         .output_segments
         .iter()
-        .map(|descriptor| descriptor.object_key.clone())
+        .map(metadata_segment_object_key)
         .collect();
     publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
 
@@ -2237,7 +2238,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
         .payload
         .segments
         .iter()
-        .map(|descriptor| descriptor.object_key.clone())
+        .map(metadata_segment_object_key)
         .collect();
     assert!(
         orphans.iter().all(|orphan| !manifest_keys.contains(orphan)),
@@ -2879,7 +2880,7 @@ async fn group_segments_outside_the_job<S: ObjectStore + ?Sized>(
             group.contains(descriptor.family)
                 && !inputs.contains(&(descriptor.run_seq, descriptor.level))
         })
-        .map(|descriptor| descriptor.object_key.clone())
+        .map(metadata_segment_object_key)
         .collect()
 }
 
@@ -2894,7 +2895,7 @@ async fn referenced_segment_keys<S: ObjectStore + ?Sized>(
         .payload
         .segments
         .iter()
-        .map(|descriptor| descriptor.object_key.clone())
+        .map(metadata_segment_object_key)
         .collect()
 }
 

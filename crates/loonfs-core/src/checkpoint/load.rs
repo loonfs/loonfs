@@ -27,13 +27,8 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestKind, NamespaceManifestPayload,
     NAMESPACE_MANIFEST_FORMAT_VERSION,
 };
-use loonfs_api::{
-    ChangeSeq, ManifestNo, ManifestObjectId, MetadataCompactionId, NamespaceId, WriterEpoch,
-};
-use loonfs_objectstore::keys::{
-    metadata_compaction_job_id_from_key, metadata_compaction_segment, metadata_manifest_object,
-    metadata_segment,
-};
+use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, WriterEpoch};
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 use tracing::Instrument;
@@ -352,7 +347,6 @@ fn validate_manifest_segment_descriptors(
             validate_segment_numbering(&family_segments.segments)?;
             validate_segment_key_order(&family_segments.segments)?;
             for descriptor in &family_segments.segments {
-                ensure_segment_object_key(descriptor)?;
                 // The one segment layout: the filter block sits immediately
                 // before the index block at the object tail. The read path
                 // assumes it (a filter fetch extends through the index; the
@@ -362,7 +356,7 @@ fn validate_manifest_segment_descriptors(
                     descriptor.filter_block.offset + u64::from(descriptor.filter_block.stored_len);
                 if filter_end != descriptor.index_block.offset {
                     return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                        object_key: descriptor.object_key.clone(),
+                        object_key: metadata_segment_object_key(descriptor),
                         message: format!(
                             "filter block ends at {filter_end} but the index block starts at {}; \
                              the filter must directly precede the index",
@@ -374,7 +368,7 @@ fn validate_manifest_segment_descriptors(
                     let expected_hex_len = 2 * descriptor.filter_block.stored_len as usize;
                     if inline.len() != expected_hex_len {
                         return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                            object_key: descriptor.object_key.clone(),
+                            object_key: metadata_segment_object_key(descriptor),
                             message: format!(
                                 "inline filter is {} hex chars but the filter block stores {} bytes",
                                 inline.len(),
@@ -394,7 +388,7 @@ fn validate_manifest_segment_descriptors(
                         || descriptor.min_key > descriptor.max_key)
                 {
                     return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                        object_key: descriptor.object_key.clone(),
+                        object_key: metadata_segment_object_key(descriptor),
                         message: format!(
                             "segment holds {} rows with key range `{}`..=`{}`; a segment with \
                              rows must carry a non-empty ascending key range",
@@ -453,7 +447,7 @@ fn validate_segment_numbering(descriptors: &[MetadataSegmentRef]) -> Result<(), 
     for (position, descriptor) in descriptors.iter().enumerate() {
         if descriptor.segment_index as usize != position {
             return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                object_key: descriptor.object_key.clone(),
+                object_key: metadata_segment_object_key(descriptor),
                 message: format!(
                     "segment carries index {} at position {position} of family `{:?}` in run seq \
                      `{}` level {}; a family's segments within one run are numbered from zero, \
@@ -480,7 +474,7 @@ fn validate_segment_key_order(descriptors: &[MetadataSegmentRef]) -> Result<(), 
         if let Some(previous) = previous {
             if descriptor.min_key <= previous.max_key {
                 return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                    object_key: descriptor.object_key.clone(),
+                    object_key: metadata_segment_object_key(descriptor),
                     message: format!(
                         "segment starts at `{}`, at or below the preceding segment's last key \
                          `{}`, in family `{:?}` of run seq `{}` level {}; one producer writes a \
@@ -532,33 +526,4 @@ fn validate_one_base_run_per_family_group(
         });
     }
     Ok(())
-}
-
-pub(super) fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
-    metadata_segment(&descriptor.owner_namespace_id, &descriptor.segment_id)
-}
-
-/// Checks that a segment uses either its published key or a valid compaction
-/// staging key. Publication references staged segments without moving them,
-/// so both locations use the same descriptor and encoding.
-pub(super) fn ensure_segment_object_key(
-    descriptor: &MetadataSegmentRef,
-) -> Result<(), ManifestLoadError> {
-    let expected = metadata_segment_object_key(descriptor);
-    let staged = metadata_compaction_job_id_from_key(&descriptor.object_key)
-        .and_then(|job_id| MetadataCompactionId::parse(job_id).ok())
-        .map(|metadata_compaction_id| {
-            metadata_compaction_segment(
-                &descriptor.owner_namespace_id,
-                &metadata_compaction_id,
-                &descriptor.segment_id,
-            )
-        });
-    if descriptor.object_key == expected || staged.as_deref() == Some(&descriptor.object_key) {
-        return Ok(());
-    }
-    Err(ManifestLoadError::SegmentObjectKeyMismatch {
-        object_key: descriptor.object_key.clone(),
-        expected,
-    })
 }

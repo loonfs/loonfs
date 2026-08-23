@@ -15,7 +15,7 @@ use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegment
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_api::{sha256_digest, ChangeSeq, MetadataCompactionId, MetadataSegmentId, NamespaceId};
-use loonfs_objectstore::keys::{metadata_compaction_segment, metadata_segment};
+use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroUsize;
 
@@ -184,13 +184,11 @@ impl<'a> MetadataSegmentDestination<'a> {
         }
     }
 
-    fn object_key(self, segment_id: &MetadataSegmentId) -> String {
+    /// Returns the job id used to derive a compaction segment's key.
+    fn compaction_job_id(self) -> Option<MetadataCompactionId> {
         match self {
-            Self::Published { namespace_id } => metadata_segment(namespace_id, segment_id),
-            Self::CompactionStaging {
-                namespace_id,
-                job_id,
-            } => metadata_compaction_segment(namespace_id, job_id, segment_id),
+            Self::Published { .. } => None,
+            Self::CompactionStaging { job_id, .. } => Some(job_id.clone()),
         }
     }
 
@@ -224,39 +222,35 @@ pub(super) struct MetadataSegmentWriteRequest<'a> {
     rows: Vec<MetadataRow>,
 }
 
+/// Builds and writes one metadata segment, then returns its descriptor.
 pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
     request: MetadataSegmentWriteRequest<'_>,
 ) -> Result<MetadataSegmentRef> {
-    let object_key = request.destination.object_key(&request.segment_id);
+    let segment_id = request.segment_id;
     let mut builder = SegmentBlocksBuilder::default();
     for row in &request.rows {
         let row_key = row.row_key_for_family(request.family);
         let filter_key = row.filter_key_for_family(request.family);
         builder.push(&row_key, &filter_key, row).map_err(|err| {
             CoreError::Internal(format!(
-                "failed to build metadata segment `{}`: {err}",
-                object_key
+                "failed to build metadata segment `{segment_id}`: {err}"
             ))
         })?;
     }
     let built = builder.finish().map_err(|err| {
         CoreError::Internal(format!(
-            "failed to build metadata segment `{}`: {err}",
-            object_key
+            "failed to build metadata segment `{segment_id}`: {err}"
         ))
     })?;
-    store
-        .put_immutable_verified(&object_key, Bytes::from(built.bytes.clone()))
-        .await?;
     let filter_inline = (built.filter.stored_len <= INLINE_SEGMENT_FILTER_MAX_BYTES).then(|| {
         let start = built.filter.offset as usize;
         hex_encode_bytes(&built.bytes[start..start + built.filter.stored_len as usize])
     });
-    Ok(MetadataSegmentRef {
+    let descriptor = MetadataSegmentRef {
         owner_namespace_id: request.destination.namespace_id().clone(),
-        segment_id: request.segment_id,
-        object_key,
+        segment_id,
+        compaction_job_id: request.destination.compaction_job_id(),
         run_seq: request.run_seq,
         level: request.level,
         family: request.family,
@@ -268,7 +262,14 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         filter_block: built.filter,
         filter_inline,
         object_checksum: sha256_digest(&built.bytes),
-    })
+    };
+    store
+        .put_immutable_verified(
+            &metadata_segment_object_key(&descriptor),
+            Bytes::from(built.bytes),
+        )
+        .await?;
+    Ok(descriptor)
 }
 
 pub(super) fn segment_manifest_rows(
@@ -292,37 +293,4 @@ pub(super) fn segment_rows_by_row_key_range(
             rows: rows.to_vec(),
         })
         .collect()
-}
-
-#[cfg(test)]
-mod destination_tests {
-    use super::*;
-
-    #[test]
-    fn destinations_preserve_published_and_staging_layouts() {
-        let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
-        let job_id =
-            MetadataCompactionId::parse("cmp_00000000000000000000000000000001").expect("job id");
-        let segment_id =
-            MetadataSegmentId::parse("seg_00000000000000000000000000000001").expect("segment id");
-
-        assert_eq!(
-            MetadataSegmentDestination::Published {
-                namespace_id: &namespace_id,
-            }
-            .object_key(&segment_id),
-            "namespaces/ns-1/metadata/segments/\
-             seg_00000000000000000000000000000001.sst.zst",
-        );
-        assert_eq!(
-            MetadataSegmentDestination::CompactionStaging {
-                namespace_id: &namespace_id,
-                job_id: &job_id,
-            }
-            .object_key(&segment_id),
-            "namespaces/ns-1/metadata/compactions/\
-             cmp_00000000000000000000000000000001/segments/\
-             seg_00000000000000000000000000000001.sst.zst",
-        );
-    }
 }

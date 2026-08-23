@@ -271,7 +271,8 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             left.min_key
                 .cmp(&right.min_key)
                 .then(left.max_key.cmp(&right.max_key))
-                .then(left.object_key.cmp(&right.object_key))
+                // Segment ids are unique and provide the final tie-breaker.
+                .then(left.segment_id.cmp(&right.segment_id))
         });
 
         let mut rows = Vec::<(String, MetadataRow)>::new();

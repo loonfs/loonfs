@@ -19,6 +19,7 @@ use loonfs_api::wire::manifest::{
     ActiveDeletionRowAction, MetadataRow, MetadataRowFamily, MetadataSegmentRef,
 };
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
+use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -53,13 +54,9 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         {
             return Ok(decoded_data_cache_block(descriptor.family, decoded));
         }
-        let bytes = load_section_bytes(
-            store,
-            &descriptor.object_key,
-            handle.offset,
-            handle.stored_len as u64,
-        )
-        .await?;
+        let object_key = metadata_segment_object_key(descriptor);
+        let bytes =
+            load_section_bytes(store, &object_key, handle.offset, handle.stored_len as u64).await?;
         offer_stored_block(
             segment_cache,
             descriptor,
@@ -70,7 +67,7 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         Ok(decoded_data_cache_block(
             descriptor.family,
             decode_data_block(&bytes, &handle)
-                .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
+                .map_err(|err| segment_codec_error(&object_key, err))?,
         ))
     };
     let block = match segment_cache {
@@ -83,7 +80,7 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         DecodedMetadataSegmentBlock::Index { .. }
         | DecodedMetadataSegmentBlock::Filter { .. }
         | DecodedMetadataSegmentBlock::Manifest { .. } => Err(segment_codec_error(
-            &descriptor.object_key,
+            &metadata_segment_object_key(descriptor),
             "cache returned a non-data block for a data key",
         )),
     }
@@ -236,7 +233,8 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     let first = &span[0].block;
     let last = &span[span.len() - 1].block;
     let span_len = last.offset + u64::from(last.stored_len) - first.offset;
-    let bytes = load_section_bytes(store, &descriptor.object_key, first.offset, span_len).await?;
+    let object_key = metadata_segment_object_key(descriptor);
+    let bytes = load_section_bytes(store, &object_key, first.offset, span_len).await?;
     let mut first_block = None;
     let mut retained = Vec::with_capacity(span.len());
     for entry in span {
@@ -245,7 +243,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
         let stored = &bytes[begin..begin + handle.stored_len as usize];
         let decoded = Arc::new(
             decode_data_block(stored, &handle)
-                .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
+                .map_err(|err| segment_codec_error(&object_key, err))?,
         );
         let cache_key =
             segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Data, handle.offset);

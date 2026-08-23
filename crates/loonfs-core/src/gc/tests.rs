@@ -33,7 +33,8 @@ use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_compaction_lease, metadata_compaction_segment,
     metadata_manifest_object, metadata_manifest_prefix, metadata_root, metadata_segment,
-    metadata_segment_prefix, wal_head, wal_segment, wal_segment_prefix,
+    metadata_segment_object_key, metadata_segment_prefix, wal_head, wal_segment,
+    wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -3039,10 +3040,10 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     )
     .await
     .expect("dead basis manifest survives its record");
-    for file in &basis.payload.segments {
+    for descriptor in &basis.payload.segments {
         assert!(
             store
-                .head(&file.object_key)
+                .head(&metadata_segment_object_key(descriptor))
                 .await
                 .expect("head segment")
                 .is_some(),
