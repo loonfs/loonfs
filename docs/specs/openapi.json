@@ -4189,31 +4189,6 @@
           }
         }
       },
-      "DeletedDirentry": {
-        "type": "object",
-        "description": "Directory entry removed by a delete operation.",
-        "required": [
-          "parent_inode_id",
-          "name_key",
-          "display_name"
-        ],
-        "properties": {
-          "display_name": {
-            "$ref": "#/components/schemas/DisplayName",
-            "description": "Name shown to users."
-          },
-          "name_key": {
-            "$ref": "#/components/schemas/NameKey",
-            "description": "Name used to look up the entry."
-          },
-          "parent_inode_id": {
-            "type": "string",
-            "description": "Stable inode ID within a namespace",
-            "example": "ino_123",
-            "pattern": "^ino_[1-9][0-9]*$"
-          }
-        }
-      },
       "DestinationBehavior": {
         "type": "string",
         "description": "Destination-conflict behavior for path-oriented puts, moves, and copies.",
@@ -4273,6 +4248,31 @@
           "checksum_algorithm": {
             "$ref": "#/components/schemas/ChecksumAlgorithm",
             "description": "Checksum algorithm the client must use for its completion claim."
+          }
+        }
+      },
+      "DirectoryBinding": {
+        "type": "object",
+        "description": "A directory entry's parent and name.",
+        "required": [
+          "parent_inode_id",
+          "name_key",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Name shown to users."
+          },
+          "name_key": {
+            "$ref": "#/components/schemas/NameKey",
+            "description": "Name used to look up the entry."
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           }
         }
       },
@@ -5407,7 +5407,7 @@
       },
       "TrashEntry": {
         "type": "object",
-        "description": "One deletion that can still be restored.\n\n`inode_id` and `deletion_seq` are sufficient to restore it. The original\nparent and name are included when they were recorded.",
+        "description": "One deletion that can still be restored.\n\n`inode_id` and `deletion_seq` are sufficient to restore it. The removed\ndirectory binding is included when available.",
         "required": [
           "inode_id",
           "deletion_seq",
@@ -5421,6 +5421,10 @@
             "description": "Time of the deletion, in Unix milliseconds.",
             "minimum": 0
           },
+          "deleted_binding": {
+            "$ref": "#/components/schemas/DirectoryBinding",
+            "description": "Directory binding removed by the deletion, when available."
+          },
           "deleted_by": {
             "$ref": "#/components/schemas/ActorRef",
             "description": "Actor responsible for the deletion."
@@ -5429,21 +5433,7 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Commit sequence that identifies this deletion."
           },
-          "display_name": {
-            "$ref": "#/components/schemas/DisplayName",
-            "description": "User-facing spelling of the deleted binding, when recorded."
-          },
           "inode_id": {
-            "type": "string",
-            "description": "Stable inode ID within a namespace",
-            "example": "ino_123",
-            "pattern": "^ino_[1-9][0-9]*$"
-          },
-          "name_key": {
-            "$ref": "#/components/schemas/NameKey",
-            "description": "Canonical key of the deleted binding, when recorded."
-          },
-          "parent_inode_id": {
             "type": "string",
             "description": "Stable inode ID within a namespace",
             "example": "ino_123",
@@ -6176,8 +6166,8 @@
           "kind"
         ],
         "properties": {
-          "deleted_direntry": {
-            "$ref": "#/components/schemas/DeletedDirentry",
+          "deleted_binding": {
+            "$ref": "#/components/schemas/DirectoryBinding",
             "description": "Directory binding removed by the deletion, when the delete\nrecorded one."
           },
           "inode_id": {

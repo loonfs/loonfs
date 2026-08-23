@@ -201,9 +201,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             for (entry, recovery_command) in response.entries.iter().zip(&listing.recovery_commands)
             {
                 let name = entry
-                    .display_name
+                    .deleted_binding
                     .as_ref()
-                    .map(|name| name.as_str().to_owned())
+                    .map(|binding| binding.display_name.as_str().to_owned())
                     .unwrap_or_else(|| "-".to_owned());
                 lines.push(format!(
                     "{}\t{}\t{}\t{}\t{}\t{recovery_command}",

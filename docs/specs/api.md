@@ -1577,15 +1577,7 @@ by `(deletion_seq, inode_id)` — paged with the standard `limit`/`cursor`
 pattern (the cursor is an ordering resume like every other). The listing is a
 range scan over the derived active-deletions family (format spec, section
 2.5), so a page costs the page rather than the namespace's deletion history.
-Those rows are current state and are never dropped at the retention floor, so
-entries never age out of this listing however far the floor advances. Each
-entry carries the inode id and deletion sequence that `undelete` requires,
-`deleted_by` and the deletion's wall-clock stamp from that exact deletion
-generation, and the deleted binding's name when the delete
-recorded one; entries written before names were recorded still carry a
-complete recovery handle. Deletions nest: a path deleted inside an
-already-deleted subtree keeps its own entry, and recovering the outer deletion
-leaves the inner one listed.
+Those rows represent current state and are not removed when the retention floor advances. Each entry includes the inode id and deletion sequence required by `undelete`, plus `deleted_by` and `deleted_at_ms` from that deletion. When available, `deleted_binding` contains the directory binding that was removed. Entries without this binding still contain everything needed for recovery. Nested deletions remain separate entries, and recovering an outer deletion does not remove an inner deletion from the list.
 
 ```json
 {
@@ -1597,9 +1589,11 @@ leaves the inner one listed.
       "deletion_seq": 417,
       "deleted_at_ms": 1752625000000,
       "deleted_by": { "kind": "user", "id": "usr_8f3c" },
-      "parent_inode_id": "ino_7",
-      "name_key": "report.txt",
-      "display_name": "report.txt"
+      "deleted_binding": {
+        "parent_inode_id": "ino_7",
+        "name_key": "report.txt",
+        "display_name": "report.txt"
+      }
     }
   ]
 }
@@ -2280,7 +2274,7 @@ Event kinds:
 | `file_created` | A file was created with its first revision. | `inode_id`, `parent_inode_id`, `display_name`, `revision_no`, `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`. |
-| `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
+| `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus optional `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 

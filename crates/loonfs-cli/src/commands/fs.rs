@@ -797,7 +797,7 @@ pub(crate) async fn run_filesystem_trash(
         .iter()
         .map(|entry| {
             hint.command(
-                entry.display_name.is_some(),
+                entry.deleted_binding.is_some(),
                 entry.inode_id,
                 entry.deletion_seq,
             )

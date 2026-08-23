@@ -11,6 +11,7 @@ use crate::metadata::{
     SubtreeTombstoneRecord,
 };
 use crate::path::read::{load_current_metadata_view, AttributeInclusion};
+use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::manifest::{ActiveDeletionRowAction, DeletedDirentry, TombstoneGeneration};
 use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 
@@ -334,13 +335,11 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
                 deletion_seq: active.generation.seq,
                 deleted_at_ms: active.deleted_at_ms,
                 deleted_by: active.actor,
-                parent_inode_id: deleted_direntry
-                    .as_ref()
-                    .map(|direntry| direntry.parent_inode_id),
-                name_key: deleted_direntry
-                    .as_ref()
-                    .map(|direntry| direntry.name_key.clone()),
-                display_name: deleted_direntry.map(|direntry| direntry.display_name),
+                deleted_binding: deleted_direntry.map(|direntry| DirectoryBinding {
+                    parent_inode_id: direntry.parent_inode_id,
+                    name_key: direntry.name_key,
+                    display_name: direntry.display_name,
+                }),
             })
         })
         .collect()
@@ -510,9 +509,10 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
         .iter()
         .map(|entry| {
             entry
-                .display_name
+                .deleted_binding
                 .as_ref()
-                .expect("a path delete records the deleted name")
+                .expect("a path delete records the deleted binding")
+                .display_name
                 .to_string()
         })
         .collect::<Vec<_>>();

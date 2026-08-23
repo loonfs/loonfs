@@ -60,11 +60,11 @@ impl CommitResponse {
     }
 }
 
-/// Directory entry removed by a delete operation.
+/// A directory entry's parent and name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DeletedDirentry {
-    /// Parent directory of the deleted entry.
+pub struct DirectoryBinding {
+    /// Parent directory containing the entry.
     #[serde(with = "crate::public_inode_id")]
     #[cfg_attr(
         feature = "openapi",
@@ -198,7 +198,7 @@ pub enum FilesystemChange {
         /// recorded one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        deleted_direntry: Option<DeletedDirentry>,
+        deleted_binding: Option<DirectoryBinding>,
     },
     /// A deleted inode was recovered and re-bound.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeUndeleted"))]
@@ -444,7 +444,7 @@ mod tests {
 
         let deleted = FilesystemChange::Deleted {
             inode_id: InodeId(2),
-            deleted_direntry: Some(super::DeletedDirentry {
+            deleted_binding: Some(super::DirectoryBinding {
                 parent_inode_id: InodeId(1),
                 name_key: crate::NameKey::parse("a.txt").expect("valid name key"),
                 display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
@@ -452,7 +452,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&deleted).expect("serialize deleted event"),
-            r#"{"kind":"deleted","inode_id":"ino_2","deleted_direntry":{"parent_inode_id":"ino_1","name_key":"a.txt","display_name":"a.txt"}}"#
+            r#"{"kind":"deleted","inode_id":"ino_2","deleted_binding":{"parent_inode_id":"ino_1","name_key":"a.txt","display_name":"a.txt"}}"#
         );
 
         let undeleted = FilesystemChange::Undeleted {
