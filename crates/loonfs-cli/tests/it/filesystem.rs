@@ -878,7 +878,7 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
     assert_eq!(entries.len(), 2, "{data}");
     let report = entries
         .iter()
-        .find(|entry| entry["display_name"] == "Quarterly Report.PDF")
+        .find(|entry| entry["deleted_binding"]["display_name"] == "Quarterly Report.PDF")
         .expect("report entry");
     assert!(report["deleted_at_ms"].as_u64().expect("ms") > 0);
     assert_eq!(

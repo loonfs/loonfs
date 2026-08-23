@@ -2,9 +2,10 @@
 //! entry, the directory-listing envelope, and the file-bytes read result.
 //! The mutating operation shapes live in [`super::operations`].
 
+use super::DirectoryBinding;
 use crate::{
     AbsolutePath, ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName,
-    InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
+    InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -219,8 +220,8 @@ pub struct AuthoritativeFileBytes {
 
 /// One deletion that can still be restored.
 ///
-/// `inode_id` and `deletion_seq` are sufficient to restore it. The original
-/// parent and name are included when they were recorded.
+/// `inode_id` and `deletion_seq` are sufficient to restore it. The removed
+/// directory binding is included when available.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {
@@ -237,25 +238,10 @@ pub struct TrashEntry {
     pub deleted_at_ms: u64,
     /// Actor responsible for the deletion.
     pub deleted_by: ActorRef,
-    /// Directory that held the deleted binding, when recorded.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::public_inode_id::option"
-    )]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
-    pub parent_inode_id: Option<InodeId>,
-    /// Canonical key of the deleted binding, when recorded.
+    /// Directory binding removed by the deletion, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub name_key: Option<NameKey>,
-    /// User-facing spelling of the deleted binding, when recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub display_name: Option<DisplayName>,
+    pub deleted_binding: Option<DirectoryBinding>,
 }
 
 /// One trash listing page: the namespace's recoverable deletions.
@@ -276,6 +262,7 @@ pub struct ListTrashResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NameKey;
 
     fn entry(
         path: &str,
@@ -500,15 +487,55 @@ mod tests {
     }
 
     #[test]
+    fn a_trash_entry_nests_the_binding_the_deletion_removed() {
+        let trash = TrashEntry {
+            inode_id: InodeId(42),
+            deletion_seq: ChangeSeq(417),
+            deleted_at_ms: 1,
+            deleted_by: ActorRef::loonfs_system(),
+            deleted_binding: Some(DirectoryBinding {
+                parent_inode_id: InodeId(7),
+                name_key: NameKey::parse("report.txt").expect("name key"),
+                display_name: DisplayName::parse("report.txt").expect("display name"),
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&trash).expect("serialize trash entry"),
+            serde_json::json!({
+                "inode_id": "ino_42",
+                "deletion_seq": 417,
+                "deleted_at_ms": 1,
+                "deleted_by": { "kind": "system", "id": "loonfs" },
+                "deleted_binding": {
+                    "parent_inode_id": "ino_7",
+                    "name_key": "report.txt",
+                    "display_name": "report.txt"
+                }
+            })
+        );
+
+        // Omit the field when no binding was recorded.
+        let bindingless = TrashEntry {
+            deleted_binding: None,
+            ..trash
+        };
+        let bindingless_json =
+            serde_json::to_value(bindingless).expect("serialize bindingless entry");
+        assert!(bindingless_json.get("deleted_binding").is_none());
+    }
+
+    #[test]
     fn trash_handle_copies_directly_into_an_undelete_operation() {
         let trash = TrashEntry {
             inode_id: InodeId(42),
             deletion_seq: ChangeSeq(417),
             deleted_at_ms: 1_752_625_000_000,
             deleted_by: ActorRef::loonfs_system(),
-            parent_inode_id: Some(InodeId(7)),
-            name_key: Some(NameKey::parse("report.txt").expect("name key")),
-            display_name: Some(DisplayName::parse("Report.txt").expect("display name")),
+            deleted_binding: Some(DirectoryBinding {
+                parent_inode_id: InodeId(7),
+                name_key: NameKey::parse("report.txt").expect("name key"),
+                display_name: DisplayName::parse("Report.txt").expect("display name"),
+            }),
         };
         let trash_json = serde_json::to_value(trash).expect("serialize trash entry");
         assert_eq!(trash_json["inode_id"], serde_json::json!("ino_42"));

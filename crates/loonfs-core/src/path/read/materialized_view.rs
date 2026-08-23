@@ -20,6 +20,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
+use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::{
     AbsolutePath, AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,
@@ -489,9 +490,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 last_deletion_seq: last.deletion_seq,
                 last_root_inode_id: last.root_inode_id,
             });
-        // The entry keeps parent, key, and name as separate optional fields,
-        // so it projects all three out of the one binding the deletion
-        // recorded.
+        // Convert the durable binding into its public API shape.
         let entries = deletions
             .into_iter()
             .map(|deletion| TrashEntry {
@@ -499,17 +498,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 deletion_seq: deletion.deletion_seq,
                 deleted_at_ms: deletion.deleted_at_ms,
                 deleted_by: deletion.deleted_by,
-                parent_inode_id: deletion
-                    .deleted_direntry
-                    .as_ref()
-                    .map(|direntry| direntry.parent_inode_id),
-                name_key: deletion
-                    .deleted_direntry
-                    .as_ref()
-                    .map(|direntry| direntry.name_key.clone()),
-                display_name: deletion
-                    .deleted_direntry
-                    .map(|direntry| direntry.display_name),
+                deleted_binding: deletion.deleted_direntry.map(|direntry| DirectoryBinding {
+                    parent_inode_id: direntry.parent_inode_id,
+                    name_key: direntry.name_key,
+                    display_name: direntry.display_name,
+                }),
             })
             .collect();
         Ok(Page {

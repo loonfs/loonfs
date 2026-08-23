@@ -20,7 +20,7 @@ mod search;
 mod uploads;
 
 pub use commits::{
-    ChangesResponse, CommitResponse, CommittedChange, DeletedDirentry, FilesystemChange,
+    ChangesResponse, CommitResponse, CommittedChange, DirectoryBinding, FilesystemChange,
 };
 pub use downloads::{
     BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,

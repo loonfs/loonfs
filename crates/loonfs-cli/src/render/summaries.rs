@@ -284,9 +284,9 @@ pub(super) fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> Stri
         } => format!("move '{from_display_name}' -> '{to_display_name}'"),
         FilesystemChange::Deleted {
             inode_id,
-            deleted_direntry,
-        } => match deleted_direntry {
-            Some(direntry) => format!("delete '{}'", direntry.display_name),
+            deleted_binding,
+        } => match deleted_binding {
+            Some(binding) => format!("delete '{}'", binding.display_name),
             None => format!("delete inode {}", public_inode_id(*inode_id)),
         },
         FilesystemChange::Undeleted { display_name, .. } => {
