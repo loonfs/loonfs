@@ -3,8 +3,8 @@
 
 use super::error::{status_for_core_error_code, ApiResponseError};
 use super::{
-    authorize, AppPath, AppState, NamespaceIdPath, UploadBodyBytes, UploadBodyStream,
-    UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
+    authorize, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, UploadBodyBytes,
+    UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -121,12 +121,14 @@ pub(super) struct UploadPathParams {
 pub(super) async fn create_upload(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
+    query: AppQuery<NoQuery>,
     UploadControlJson(request): UploadControlJson<
         BeginUploadRequest,
         MAX_UPLOAD_CONTROL_BODY_BYTES,
     >,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     // Decoding the body settled which transport this is and that it carries
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
@@ -284,6 +286,7 @@ pub(super) async fn sign_upload_parts(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
+    query: AppQuery<NoQuery>,
     UploadControlJson(request): UploadControlJson<
         SignUploadPartsRequest,
         MAX_UPLOAD_CONTROL_BODY_BYTES,
@@ -291,6 +294,7 @@ pub(super) async fn sign_upload_parts(
 ) -> Result<Json<SignUploadPartsResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
+    query.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let Some(issuer) = state
         .direct_transfers
@@ -539,10 +543,12 @@ pub(super) async fn put_upload_content(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
+    query: AppQuery<NoQuery>,
     body: UploadBodyStream,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
+    query.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let (stream, outcome) = body.into_stream();
     match state
@@ -590,10 +596,12 @@ pub(super) async fn complete_upload(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
+    query: AppQuery<NoQuery>,
     body: UploadBodyBytes<MAX_COMPLETION_BODY_BYTES>,
 ) -> Result<Json<UploadSessionResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
+    query.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let body = body.into_bytes();
     let completed = state
@@ -803,12 +811,14 @@ pub(super) async fn get_upload(
     headers: HeaderMap,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
+    query: AppQuery<NoQuery>,
 ) -> Result<Json<UploadSessionResponse>, ApiResponseError> {
     // Completed sessions return a fresh token when they are still allowed to
     // mint one. Authorization runs before the upload id is parsed.
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
+    query.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let (response, receipt) = state
         .writer
@@ -851,10 +861,12 @@ pub(super) async fn abort_upload(
     headers: HeaderMap,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
+    query: AppQuery<NoQuery>,
 ) -> Result<Json<UploadSessionResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
+    query.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let response = state
         .writer

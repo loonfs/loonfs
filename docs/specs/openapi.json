@@ -467,6 +467,16 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Unauthorized",
             "content": {
@@ -530,6 +540,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GrepIndexStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -617,6 +637,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GrepIndexStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -924,6 +954,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CapabilityDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown query parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -1975,6 +2015,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ListTrashResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }

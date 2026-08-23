@@ -4,7 +4,7 @@ use super::error::ApiResponseError;
 use super::serve::AppState;
 use crate::config::AuthPolicy;
 use axum::extract::rejection::PathRejection;
-use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, Query};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -135,10 +135,7 @@ where
     }
 }
 
-/// [`AppPath`]'s query-string twin: missing required parameters, values that
-/// fail their field types (`after_seq=abc`), and undecodable query strings
-/// all surface through [`AppQuery::into_params`] after `authorize`, inside
-/// the envelope.
+/// Defers query-string errors until the handler has authorized the request.
 pub(super) struct AppQuery<T>(Result<T, ApiResponseError>);
 
 impl<T> AppQuery<T> {
@@ -154,15 +151,43 @@ where
 {
     type Rejection = Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        match Query::<T>::from_request_parts(parts, state).await {
-            Ok(Query(value)) => Ok(Self(Ok(value))),
-            Err(rejection) => Ok(Self(Err(ApiResponseError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                &format!("invalid query parameters: {rejection}"),
-            )))),
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(decode_query(parts.uri.query().unwrap_or_default())))
+    }
+}
+
+/// Rejects every query parameter for operations that declare none.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NoQuery {}
+
+/// Decodes a strict query string and reports the failing parameter when
+/// possible.
+fn decode_query<T>(query: &str) -> Result<T, ApiResponseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let deserializer =
+        serde_urlencoded::Deserializer::new(form_urlencoded::parse(query.as_bytes()));
+    serde_path_to_error::deserialize(deserializer).map_err(|error| {
+        let response = ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &format!("invalid query parameters: {}", error.inner()),
+        );
+        match failed_query_parameter(error.path()) {
+            Some(parameter) => response.with_param(parameter),
+            None => response,
         }
+    })
+}
+
+/// Returns the parameter name when the error path contains one map key.
+fn failed_query_parameter(path: &serde_path_to_error::Path) -> Option<String> {
+    let mut segments = path.into_iter();
+    match (segments.next(), segments.next()) {
+        (Some(serde_path_to_error::Segment::Map { key }), None) => Some(key.clone()),
+        _ => None,
     }
 }
 
@@ -689,6 +714,49 @@ mod tests {
             }"#,
         )
         .expect_err("two relative operation paths are ambiguous");
+        assert_eq!(error.param(), None);
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ListingQuery {
+        limit: Option<String>,
+        cursor: Option<String>,
+    }
+
+    #[test]
+    fn query_decode_reports_the_unknown_parameter() {
+        let error = decode_query::<ListingQuery>("limit=10&curser=abc")
+            .expect_err("`curser` is not a parameter of this listing");
+        assert_eq!(error.param(), Some("curser"));
+
+        let error = decode_query::<NoQuery>("verbose=true")
+            .expect_err("an operation with no parameters accepts none");
+        assert_eq!(error.param(), Some("verbose"));
+    }
+
+    #[test]
+    fn query_decode_accepts_an_empty_query_string() {
+        assert!(
+            matches!(
+                decode_query::<ListingQuery>(""),
+                Ok(ListingQuery {
+                    limit: None,
+                    cursor: None
+                })
+            ),
+            "a query string that names no parameter leaves every parameter absent"
+        );
+        assert!(
+            decode_query::<NoQuery>("").is_ok(),
+            "an operation with no parameters accepts a request that sends none"
+        );
+    }
+
+    #[test]
+    fn a_repeated_query_parameter_is_rejected_and_blames_no_one_parameter() {
+        let error = decode_query::<ListingQuery>("cursor=a&cursor=b")
+            .expect_err("one parameter cannot carry two values");
         assert_eq!(error.param(), None);
     }
 

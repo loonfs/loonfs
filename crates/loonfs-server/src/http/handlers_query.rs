@@ -6,7 +6,7 @@ use super::handlers_uploads::current_unix_ms;
 use super::{
     authorize,
     handlers_filesystem::{parse_boolean_query_param, required_query_param, resolve_page_limit},
-    AppQuery, AppState, NamespaceIdPath, OptionalAppJson,
+    AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson,
 };
 use crate::http::error::{status_for_core_error_code, ApiResponseError};
 use axum::extract::State;
@@ -24,6 +24,7 @@ use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceRea
 const MAX_GREP_PATTERN_BYTES: usize = 1024;
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct GrepQuery {
     pattern: Option<String>,
     case_insensitive: Option<String>,
@@ -180,6 +181,7 @@ pub(super) async fn grep_index_not_maintained(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep root enabled or already enabled", body = GrepIndexStatusResponse),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
@@ -193,9 +195,11 @@ pub(super) async fn enable_grep_index(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
+    query: AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndexStatusResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     let outcome = state
         .grep_worker()
         .enable(&namespace_id)
@@ -229,6 +233,7 @@ pub(super) async fn enable_grep_index(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep index status and build progress", body = GrepIndexStatusResponse),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
@@ -240,9 +245,11 @@ pub(super) async fn get_grep_index(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
+    query: AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndexStatusResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     Ok(Json(read_grep_index_status(&state, &namespace_id).await?))
 }
 
@@ -269,6 +276,7 @@ async fn read_grep_index_status(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep root disabled or already disabled", body = GrepIndexStatusResponse),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
@@ -282,9 +290,11 @@ pub(super) async fn disable_grep_index(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
+    query: AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndexStatusResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     // Disabling is one durable compare-and-swap and nothing else. A step
     // already running loses its own publication race to this one and
     // retries; the retry reads a disabled root, concludes there is nothing
@@ -331,10 +341,12 @@ pub(super) async fn gc_grep_index(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
+    query: AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<GrepGcRequest>,
 ) -> Result<Json<GrepGcResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
     let request = request.unwrap_or_default();
     let report = state
         .grep_worker()

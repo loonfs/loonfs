@@ -32,9 +32,9 @@ pub use self::tls::TlsConfigError;
 
 use self::error::{status_for_core_error_code, ApiResponseError, ServedErrorCode};
 use self::extractors::{
-    authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, OptionalAppJson,
-    UploadBodyBytes, UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES,
-    MAX_UPLOAD_CONTROL_BODY_BYTES,
+    authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, NoQuery,
+    OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
+    MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use self::handlers_downloads::{create_download, create_download_by_inode};
 use self::handlers_filesystem::{

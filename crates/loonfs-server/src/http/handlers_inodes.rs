@@ -5,7 +5,7 @@ use super::handlers_filesystem::{
     buffered_download_response, decode_optional_cursor, parse_include_attributes,
     parse_revision_no, resolve_page_limit, PageQuery,
 };
-use super::{authorize, AppPath, AppQuery, AppState, NamespaceIdPath};
+use super::{authorize, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
@@ -40,6 +40,7 @@ pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct StatInodeQuery {
     include_attributes: Option<String>,
 }
@@ -174,10 +175,12 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     namespace_id_path: NamespaceIdPath,
     path: AppPath<InodeRevisionPathParams>,
     headers: HeaderMap,
+    query: AppQuery<NoQuery>,
 ) -> Result<Response, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let path = path.into_params()?;
+    query.into_params()?;
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let permit = state

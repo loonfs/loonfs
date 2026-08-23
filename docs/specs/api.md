@@ -218,8 +218,7 @@ must not parse `message`.
 This contract covers request-shape failures too: a query string, path
 parameter, or JSON body the server cannot parse answers `invalid_request`
 inside this envelope, never a framework plain-text rejection — and
-authorization is checked first, so a malformed request without valid
-credentials answers `unauthorized`.
+authorization is checked first, so a malformed request without valid credentials answers `unauthorized`. An unrecognized query parameter returns `invalid_request` with `param` set to that parameter's name, just like an unknown request-body field (section 6).
 
 `request_id` is the correlation id the server assigned to the request; every
 response — success or error — also carries it as the `x-request-id` header,
@@ -693,6 +692,8 @@ checksum algorithms arrive as new `kind` and `algorithm` values, which is why
 those three schemas are `additionalProperties: false` in responses too. The
 encoding conventions in `format.md` state the same rules and extend them to
 durable shapes.
+
+Query strings reject unknown parameters. For example, `DELETE /v0/namespaces/{ns}?expected_head_sq=418` returns 400 `invalid_request` rather than deleting the namespace without the intended guard. Routes that declare no query parameters reject all query parameters. `GET /health`, `GET /readiness`, and `GET /metrics` are exceptions because probes and scrapers may append their own parameters.
 
 The token is a bearer credential and so is everything the upload routes hand
 back: a presigned direct-upload URL is a capability to write to the

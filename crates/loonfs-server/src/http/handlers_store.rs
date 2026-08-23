@@ -1,7 +1,7 @@
 //! The `admin/v0` routes whose subject is the backing store itself rather
 //! than one namespace.
 
-use super::{AppState, OptionalAppJson};
+use super::{AppQuery, AppState, NoQuery, OptionalAppJson};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::Json;
@@ -32,8 +32,10 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome};
 )]
 pub(super) async fn probe_store(
     State(state): State<AppState>,
+    query: AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<StoreProbeRequest>,
 ) -> Result<Json<StoreProbeResponse>, ApiResponseError> {
+    query.into_params()?;
     let StoreProbeRequest {} = request.unwrap_or_default();
     // The run id scopes the objects this run writes, so two probes against
     // one store never collide, and a provider's own log names the run.
