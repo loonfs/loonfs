@@ -22,7 +22,7 @@ use loonfs_test_support::ids::namespace_id;
 const BACKFILLING_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:358aea64c965cea7287dd10d1dcf6c75100ae2539b814f6d0dae7043d38fc818","payload":{"namespace_id":"docs","status":{"kind":"backfilling","target_seq":7,"cursor_inode_id":7,"checkpoint_id":"chk_00000000000000000000000000000009"},"index":{"format_version":1,"reorganize":{"snapshot_segment_ids":["idx_00000000000000000000000000000001","idx_00000000000000000000000000000002"],"output_segment_ids":["idx_00000000000000000000000000000003"],"row_key_cursor":"gram-6d6e6f-00000000000000000042","output_level":1,"run_no":3},"next_run_no":4},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_no":1,"run_seq":8,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000002","run_no":2,"run_seq":9,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000003","run_no":3,"run_seq":10,"level":1,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
 const ACTIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:fc23e318c24a9243a1f3a665a2fa4523836ffd3c5ca01f144e21866623a50323","payload":{"namespace_id":"docs","status":{"kind":"active","built_through_seq":11,"next_event_index":5},"index":{"format_version":1,"next_run_no":2},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_no":1,"run_seq":8,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
 const DISABLED_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:b93963eec6c2f0c2f452c4ea85f50538cf002bf0aa3fe53a16b3cf81892319af","payload":{"namespace_id":"docs","status":{"kind":"disabled"},"index":{"format_version":1,"next_run_no":4},"segments":[]}}"#;
-const ADDITIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:3c9820b53c34f61fa2a3516bdacfd43972d1426ef2aada4dab4dfd76ab55e2d0","payload":{"namespace_id":"docs","status":{"kind":"active","built_through_seq":11,"future_status":"ignored"},"index":{"format_version":1,"next_run_no":2,"future_index":17},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_no":1,"run_seq":8,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","future_segment":"ignored"}],"future_root":true},"future_envelope":{"retained":true}}"#;
+const ADDITIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:38b945f36e2fa7f9e47af7c5b26a0f6010fe5a5b2752ad725b66fbe40d986538","payload":{"namespace_id":"docs","status":{"kind":"active","built_through_seq":11,"next_event_index":0,"future_status":"ignored"},"index":{"format_version":1,"next_run_no":2,"future_index":17},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_no":1,"run_seq":8,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","future_segment":"ignored"}],"future_root":true},"future_envelope":{"retained":true}}"#;
 
 // Pointer ids are minted, not derived, so each fixture names an arbitrary
 // id and carries the digest of the manifest it points at. That pairing is
@@ -203,6 +203,32 @@ fn decoder_rejects_the_string_format_version_without_a_shim() {
         ),
         Err(GrepEnvelopeCodecError::Envelope(
             EnvelopeCodecError::EnvelopeDecode(_)
+        ))
+    ));
+}
+
+/// An `active` status writes `next_event_index` at every position, zero
+/// included, so bytes that omit it are not bytes this format wrote.
+#[test]
+fn decoder_rejects_an_active_status_that_omits_its_event_index() {
+    let mut document: serde_json::Value =
+        serde_json::from_str(ACTIVE_V1).expect("decode manifest fixture");
+    document["payload"]["status"]
+        .as_object_mut()
+        .expect("the status is an object")
+        .remove("next_event_index");
+    let payload = serde_json::to_string(&document["payload"]).expect("encode edited payload");
+    document["payload_checksum"] =
+        serde_json::Value::from(loonfs_api::sha256_digest(payload.as_bytes()));
+    let edited = format!(
+        "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
+        document["kind"], document["format_version"], document["payload_checksum"], payload,
+    );
+
+    assert!(matches!(
+        decode_grep_manifest(edited.as_bytes()),
+        Err(GrepEnvelopeCodecError::Envelope(
+            EnvelopeCodecError::PayloadDecode(_)
         ))
     ));
 }

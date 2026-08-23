@@ -88,7 +88,9 @@ pub enum GrepIndexStatus {
         /// order, derived from its durable delta vector; incremental
         /// indexing relies on that stable order when a step's budget stops
         /// it inside a commit.
-        #[serde(default, skip_serializing_if = "is_zero")]
+        ///
+        /// Zero is written like any other value. A status that omits the
+        /// field fails to decode.
         next_event_index: u32,
     },
     /// Grep indexing and queries are disabled for this namespace.
@@ -221,10 +223,6 @@ impl GrepIndexState {
             next_run_no,
         }
     }
-}
-
-fn is_zero(value: &u32) -> bool {
-    *value == 0
 }
 
 /// Query-visible descriptor for one immutable grep segment.
