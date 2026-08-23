@@ -2,7 +2,8 @@
 //! and WAL floor.
 
 use crate::control_object::{
-    expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
+    expect_foreign_fork_basis, expect_namespace, expect_own_manifest, load_control_object,
+    ControlObjectLoadError, LoadedControl,
 };
 use crate::namespace::basis::{load_head_and_metadata_basis, MetadataBasis};
 use loonfs_api::wire::control::{ControlObjectKind, HeadState, MetadataRootState, WalFloorState};
@@ -57,7 +58,10 @@ pub(crate) async fn load_metadata_root_object<S: ObjectStore + ?Sized>(
         store,
         object_key,
         ControlObjectKind::MetadataRoot,
-        |state: &MetadataRootState| expect_namespace(expected_namespace_id, &state.namespace_id),
+        |state: &MetadataRootState| {
+            expect_namespace(expected_namespace_id, &state.namespace_id)?;
+            expect_own_manifest(&state.namespace_id, &state.manifest)
+        },
     )
     .await
 }
@@ -73,16 +77,11 @@ pub(crate) async fn load_metadata_root_object_if_present<S: ObjectStore + ?Sized
     }
 }
 
-/// Reads the WAL head and metadata root together (concurrently), tolerating
-/// a namespace that has not materialized a root yet.
+/// Reads the WAL head and metadata root concurrently.
 ///
-/// The root is published by the first flush, so its absence is ordinary for
-/// a young namespace and the caller resolves the basis from the head
-/// instead. When the root is there it can only ever reference published
-/// state, so observing `root.manifest_head_seq > head.seq` means the head
-/// read raced an in-flight commit CAS; a fresh head read observes at least
-/// the root's seq. Bounded reloads resolve the race without treating it as
-/// corruption (format spec, "metadata/root.json").
+/// A new namespace may not have a root until its first flush. If the root is
+/// ahead of the head read at the same time, reload the head because the two
+/// reads may have occurred on opposite sides of a commit.
 pub(crate) async fn load_head_and_metadata_root_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
@@ -97,13 +96,13 @@ pub(crate) async fn load_head_and_metadata_root_if_present<S: ObjectStore + ?Siz
         return Ok((head, None));
     };
     for _reload in 0..=ROOT_AHEAD_HEAD_RELOADS {
-        if root.state.manifest_head_seq <= head.state.seq {
+        if root.state.manifest.manifest_head_seq <= head.state.seq {
             return Ok((head, Some(root)));
         }
         head = load_head_object(store, expected_namespace_id).await?;
     }
     Err(ControlObjectLoadError::RootAheadOfHead {
-        root_manifest_head_seq: root.state.manifest_head_seq,
+        root_manifest_head_seq: root.state.manifest.manifest_head_seq,
         head_seq: head.state.seq,
     })
 }
@@ -117,7 +116,13 @@ pub(crate) async fn load_head_object<S: ObjectStore + ?Sized>(
         store,
         object_key,
         ControlObjectKind::WalHead,
-        |state: &HeadState| expect_namespace(expected_namespace_id, &state.namespace_id),
+        |state: &HeadState| {
+            expect_namespace(expected_namespace_id, &state.namespace_id)?;
+            match &state.fork_basis {
+                None => Ok(()),
+                Some(fork_basis) => expect_foreign_fork_basis(&state.namespace_id, fork_basis),
+            }
+        },
     )
     .await
 }
@@ -176,4 +181,153 @@ pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
         identity: ControlObjectIdentity { etag: loaded.etag },
         state: loaded.state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use loonfs_api::wire::control::{
+        encode_control_state, ForkBasis, ManifestRef, NamespaceStatus,
+    };
+    use loonfs_api::{
+        ChangeSeq, CheckpointId, ContentStoreId, ManifestNo, ManifestObjectId, WriterEpoch,
+    };
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use tempfile::{tempdir, TempDir};
+
+    fn local_store() -> (TempDir, LocalFsStore) {
+        let directory = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        (directory, store)
+    }
+
+    fn namespace(value: &str) -> NamespaceId {
+        NamespaceId::parse(value).expect("valid namespace id")
+    }
+
+    fn manifest_ref(owner: &NamespaceId) -> ManifestRef {
+        ManifestRef {
+            owner_namespace_id: owner.clone(),
+            manifest_no: ManifestNo(1),
+            manifest_object_id: ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
+                .expect("valid manifest object id"),
+            manifest_head_seq: ChangeSeq(1),
+            manifest_payload_checksum: "sha256:test".to_owned(),
+        }
+    }
+
+    async fn write_control<T: serde::Serialize>(
+        store: &LocalFsStore,
+        object_key: &str,
+        kind: ControlObjectKind,
+        state: &T,
+    ) {
+        let bytes = encode_control_state(kind, state).expect("encode control state");
+        store
+            .put_overwrite(object_key, Bytes::from(bytes))
+            .await
+            .expect("write control object");
+    }
+
+    /// A metadata root cannot reference another namespace's manifest.
+    #[tokio::test]
+    async fn root_loader_rejects_a_manifest_owned_by_another_namespace() {
+        let (_directory, store) = local_store();
+        let namespace_id = namespace("demo");
+        let root = MetadataRootState {
+            namespace_id: namespace_id.clone(),
+            manifest: manifest_ref(&namespace("other")),
+            updated_at_ms: 1_000,
+        };
+        write_control(
+            &store,
+            &metadata_root(&namespace_id),
+            ControlObjectKind::MetadataRoot,
+            &root,
+        )
+        .await;
+
+        let error = load_metadata_root_object(&store, &namespace_id)
+            .await
+            .expect_err("a foreign manifest owner should fail");
+
+        assert!(matches!(
+            error,
+            ControlObjectLoadError::IdentityMismatch { field, .. }
+                if field == "manifest owner namespace"
+        ));
+    }
+
+    /// A fork basis cannot reference the target namespace's own manifest.
+    #[tokio::test]
+    async fn head_loader_rejects_a_fork_basis_owned_by_the_namespace_itself() {
+        let (_directory, store) = local_store();
+        let namespace_id = namespace("demo");
+        let mut head = HeadState::initial(
+            namespace_id.clone(),
+            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+                .expect("valid content store id"),
+            1_000,
+        );
+        head.fork_basis = Some(ForkBasis {
+            manifest: manifest_ref(&namespace_id),
+            source_checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
+                .expect("valid checkpoint id"),
+        });
+        write_control(
+            &store,
+            &wal_head(&namespace_id),
+            ControlObjectKind::WalHead,
+            &head,
+        )
+        .await;
+
+        let error = load_head_object(&store, &namespace_id)
+            .await
+            .expect_err("a self-owned fork basis should fail");
+
+        assert_eq!(
+            error,
+            ControlObjectLoadError::ForkBasisOwnerIsSelf {
+                object_key: wal_head(&namespace_id),
+                namespace_id,
+            }
+        );
+    }
+
+    /// A fork basis may reference its source namespace.
+    #[tokio::test]
+    async fn head_loader_accepts_a_fork_basis_owned_by_the_source() {
+        let (_directory, store) = local_store();
+        let namespace_id = namespace("clone");
+        let source_id = namespace("source");
+        let mut head = HeadState::initial(
+            namespace_id.clone(),
+            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+                .expect("valid content store id"),
+            1_000,
+        );
+        head.seq = ChangeSeq(1);
+        head.writer_epoch = WriterEpoch(0);
+        head.status = NamespaceStatus::Active {};
+        head.fork_basis = Some(ForkBasis {
+            manifest: manifest_ref(&source_id),
+            source_checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
+                .expect("valid checkpoint id"),
+        });
+        write_control(
+            &store,
+            &wal_head(&namespace_id),
+            ControlObjectKind::WalHead,
+            &head,
+        )
+        .await;
+
+        let loaded = load_head_object(&store, &namespace_id)
+            .await
+            .expect("a fork target head loads");
+
+        assert_eq!(loaded.state, head);
+    }
 }

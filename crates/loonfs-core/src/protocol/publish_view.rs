@@ -348,8 +348,8 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::namespace::basis::BasisManifest;
     use crate::namespace::bootstrap::bootstrap_metadata_state;
+    use loonfs_api::wire::control::ManifestRef;
     use loonfs_api::ManifestObjectId;
     use loonfs_test_support::ids::namespace_id;
 
@@ -359,13 +359,14 @@ mod tests {
         object_nonce: &str,
         checksum: &str,
     ) -> MetadataBasis {
-        MetadataBasis::Manifest(BasisManifest {
+        MetadataBasis::Manifest(ManifestRef {
             owner_namespace_id: namespace_id(owner),
             manifest_no: loonfs_api::ManifestNo(manifest_no),
             manifest_object_id: ManifestObjectId::parse(format!(
                 "{manifest_no:020}-{object_nonce}"
             ))
             .expect("valid manifest object id"),
+            manifest_head_seq: ChangeSeq(manifest_no),
             manifest_payload_checksum: checksum.to_owned(),
         })
     }

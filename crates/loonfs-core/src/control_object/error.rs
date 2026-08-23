@@ -33,6 +33,13 @@ pub enum ControlObjectLoadError {
         expected: String,
         actual: String,
     },
+    #[error(
+        "control object `{object_key}` records a fork basis over a manifest owned by `{namespace_id}`, which is the namespace's own id; a fork basis names the source namespace"
+    )]
+    ForkBasisOwnerIsSelf {
+        object_key: String,
+        namespace_id: NamespaceId,
+    },
     #[error("invalid control-object key layout `{object_key}` for {expected_family}: {reason}")]
     KeyLayout {
         object_key: String,

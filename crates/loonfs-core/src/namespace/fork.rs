@@ -62,7 +62,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_manifest = load_namespace_manifest_envelope(
         store,
         source_namespace_id,
-        &source_record.manifest_object_id,
+        &source_record.manifest.manifest_object_id,
     )
     .await
     .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;
@@ -70,23 +70,20 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::load_head)?
         .state;
-    let fork_seq = source_record.manifest_head_seq;
+    // Start the target from the manifest pinned by the source checkpoint.
+    let fork_basis = ForkBasis {
+        manifest: source_record.manifest.clone(),
+        source_checkpoint_id: source_record.checkpoint_id.clone(),
+    };
+    let fork_seq = fork_basis.manifest.manifest_head_seq;
 
-    // The target head is the whole installation: it carries the source's
-    // content store (the fork shares content bytes copy-on-write), the
-    // source's name policy, and the basis that authorizes reading the
-    // source's manifest until the target publishes its own.
+    // The target shares the source's content store and begins from the source
+    // manifest until it publishes its own.
     let head = HeadState {
         namespace_id: new_namespace_id.clone(),
         content_store_id: source_head.content_store_id.clone(),
         created_at_ms: context.now_ms,
-        fork_basis: Some(ForkBasis {
-            source_namespace_id: source_namespace_id.clone(),
-            source_manifest_object_id: source_record.manifest_object_id.clone(),
-            source_manifest_checksum: source_manifest.payload_checksum.clone(),
-            source_checkpoint_id: source_record.checkpoint_id.clone(),
-            fork_seq,
-        }),
+        fork_basis: Some(fork_basis),
         seq: fork_seq,
         head_commit_id: source_record.head_commit_id.clone(),
         writer_epoch: WriterEpoch(0),

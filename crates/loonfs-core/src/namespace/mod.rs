@@ -13,5 +13,5 @@ pub(crate) mod fork;
 pub(crate) mod status;
 pub(crate) mod writer_epoch;
 
-pub use basis::{BasisManifest, MetadataBasis};
+pub use basis::MetadataBasis;
 pub use bootstrap::BootstrapNamespaceError;

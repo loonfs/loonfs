@@ -369,12 +369,12 @@ async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
         {
             continue;
         }
-        manifest_object_ids.insert(record.manifest_object_id.clone());
+        manifest_object_ids.insert(record.manifest.manifest_object_id.clone());
         // In a live namespace, a candidate still protects its basis but does
         // not protect its own record key.
         if !candidate {
             active_record_bases
-                .entry(record.manifest_object_id)
+                .entry(record.manifest.manifest_object_id)
                 .or_default()
                 .push(key.clone());
             live.checkpoint_keys.insert(key);

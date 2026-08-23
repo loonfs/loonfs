@@ -38,8 +38,8 @@ use loonfs_api::v0::{
     UploadSessionResponse, UploadSessionStatus,
 };
 use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, NamespaceStatus, ProxiedStaging,
-    UploadSessionRecordStatus, UploadSessionState, UploadSessionTransport,
+    encode_control_state, ControlObjectKind, NamespaceStatus, ProxiedStaging, UploadSessionMode,
+    UploadSessionRecordStatus, UploadSessionState,
 };
 use loonfs_api::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId,
@@ -115,8 +115,7 @@ pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
 ) -> Result<BeginUploadResponse> {
     ensure_upload_namespace_available(store, namespace_id).await?;
     if !matches!(request, BeginUploadRequest::ServiceProxied {}) {
-        // Not a shape check: the direct transports need a deployment that
-        // can presign, and this entry point is the one that cannot.
+        // Direct uploads require a presigned URL issuer.
         return Err(CoreError::InvalidUploadContent(format!(
             "{} requires a presigned URL issuer",
             upload_mode_name(request.mode())
@@ -292,16 +291,17 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
 ///
 /// Other upload modes return an invalid-upload error.
 fn multipart_session_upload(session: &UploadSessionState) -> Result<(&str, ChecksumAlgorithm)> {
-    match &session.transport {
-        UploadSessionTransport::DirectMultipart {
+    match &session.mode {
+        UploadSessionMode::DirectMultipart {
             provider_upload_id,
             checksum_algorithm,
             ..
         } => Ok((provider_upload_id, *checksum_algorithm)),
-        UploadSessionTransport::ServiceProxied { .. }
-        | UploadSessionTransport::DirectPut { .. } => Err(CoreError::InvalidUploadContent(
-            "this upload session is not a direct_multipart upload".to_owned(),
-        )),
+        UploadSessionMode::ServiceProxied { .. } | UploadSessionMode::DirectPut { .. } => {
+            Err(CoreError::InvalidUploadContent(
+                "this upload session is not a direct_multipart upload".to_owned(),
+            ))
+        }
     }
 }
 
@@ -375,22 +375,19 @@ fn multipart_parts(
         .collect()
 }
 
-/// What a session is opened with: everything decided before any byte moves.
-///
-/// The identity and the transport are settled together, so a session cannot
-/// be built holding one transport's details under another's name.
+/// Values fixed when an upload session is created.
 struct NewUploadSession {
     /// The content object this session will write, allocated up front.
     content_id: ContentId,
     /// How the bytes will reach it.
-    transport: UploadSessionTransport,
+    mode: UploadSessionMode,
 }
 
 impl NewUploadSession {
     fn service_proxied() -> Self {
         Self {
             content_id: ContentId::generate(),
-            transport: UploadSessionTransport::ServiceProxied {
+            mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Idle,
             },
         }
@@ -399,7 +396,7 @@ impl NewUploadSession {
     fn direct_put(content_id: ContentId, checksum_algorithm: ChecksumAlgorithm) -> Self {
         Self {
             content_id,
-            transport: UploadSessionTransport::DirectPut { checksum_algorithm },
+            mode: UploadSessionMode::DirectPut { checksum_algorithm },
         }
     }
 
@@ -413,7 +410,7 @@ impl NewUploadSession {
     ) -> Self {
         Self {
             content_id,
-            transport: UploadSessionTransport::DirectMultipart {
+            mode: UploadSessionMode::DirectMultipart {
                 provider_upload_id: provider_upload_id.to_owned(),
                 part_size_bytes,
                 checksum_algorithm,
@@ -434,7 +431,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         upload_id: upload_id.clone(),
         content_id: session.content_id,
         created_at_ms: context.now_ms,
-        transport: session.transport,
+        mode: session.mode,
         status: UploadSessionRecordStatus::Open {
             expires_at_ms: context.now_ms.saturating_add(UPLOAD_SESSION_LEASE_MS),
         },
@@ -530,8 +527,7 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
                 if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
                     return Err(error);
                 }
-                let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport
-                else {
+                let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
                     return Err(CoreError::Internal(
                         "staging slot requested from a direct upload session".to_owned(),
                     ));
@@ -577,7 +573,7 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
             if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
                 return Ok(UploadSessionUpdate::Noop(()));
             }
-            let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport else {
+            let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
                 return Ok(UploadSessionUpdate::Noop(()));
             };
             if !matches!(staging, ProxiedStaging::Claimed) {
@@ -602,12 +598,12 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
     }
 }
 
-/// What one session's transport is called in a message to its client.
-fn transport_name(transport: &UploadSessionTransport) -> &'static str {
-    match transport {
-        UploadSessionTransport::ServiceProxied { .. } => "service_proxied",
-        UploadSessionTransport::DirectPut { .. } => "direct_put",
-        UploadSessionTransport::DirectMultipart { .. } => "direct_multipart",
+/// Returns the public name of an upload mode.
+fn mode_name(mode: &UploadSessionMode) -> &'static str {
+    match mode {
+        UploadSessionMode::ServiceProxied { .. } => "service_proxied",
+        UploadSessionMode::DirectPut { .. } => "direct_put",
+        UploadSessionMode::DirectMultipart { .. } => "direct_multipart",
     }
 }
 
@@ -621,13 +617,10 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
         return Err(error);
     }
-    if !matches!(
-        session.transport,
-        UploadSessionTransport::ServiceProxied { .. }
-    ) {
+    if !matches!(session.mode, UploadSessionMode::ServiceProxied { .. }) {
         return Err(CoreError::InvalidUploadContent(format!(
             "{} sessions must be completed after using the presigned URLs",
-            transport_name(&session.transport)
+            mode_name(&session.mode)
         )));
     }
     Ok((content_store_id, session))
@@ -712,8 +705,7 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                 if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
                     return Err(error);
                 }
-                let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport
-                else {
+                let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
                     return Err(CoreError::Internal(
                         "staged content recorded for a direct upload session".to_owned(),
                     ));
@@ -860,7 +852,7 @@ where
             upload_id: upload_id.clone(),
         });
     }
-    let mode = upload_mode(&loaded.transport);
+    let mode = upload_mode(&loaded.mode);
     let completion = resolve(mode).map_err(CoreError::InvalidUploadContent)?;
     let plan = completion_plan(&loaded, &completion)?;
     if let Some(completed) = already_completed_outcome(
@@ -940,7 +932,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
                     &content_store_id,
                     &upload_id,
                     Some(&verified),
-                    upload_mode(&state.transport),
+                    upload_mode(&state.mode),
                     now_ms,
                 )? {
                     return Ok(UploadSessionUpdate::Noop(completed));
@@ -958,7 +950,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
                     &content_store_id,
                     &upload_id,
                     &verified,
-                    upload_mode(&state.transport),
+                    upload_mode(&state.mode),
                     now_ms,
                     now_ms,
                 );
@@ -1112,7 +1104,7 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.to_owned();
             async move {
-                let mode = upload_mode(&state.transport);
+                let mode = upload_mode(&state.mode);
                 let abandoned = AbandonedUpload::of(&state);
                 let aborted = |aborted_at_ms| UploadSessionResponse {
                     namespace_id: namespace_id.clone(),
@@ -1161,12 +1153,11 @@ pub(crate) struct AbandonedUpload {
 
 impl AbandonedUpload {
     pub(crate) fn of(state: &UploadSessionState) -> Self {
-        let provider_multipart_upload_id = match &state.transport {
-            UploadSessionTransport::DirectMultipart {
+        let provider_multipart_upload_id = match &state.mode {
+            UploadSessionMode::DirectMultipart {
                 provider_upload_id, ..
             } => Some(provider_upload_id.clone()),
-            UploadSessionTransport::ServiceProxied { .. }
-            | UploadSessionTransport::DirectPut { .. } => None,
+            UploadSessionMode::ServiceProxied { .. } | UploadSessionMode::DirectPut { .. } => None,
         };
         Self {
             content_id: state.content_id.clone(),
@@ -1206,7 +1197,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     now_ms: u64,
 ) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    let mode = upload_mode(&loaded.transport);
+    let mode = upload_mode(&loaded.mode);
     let (status, receipt) = match loaded.status {
         UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
             (UploadSessionStatus::Open { expires_at_ms }, None)
@@ -1387,31 +1378,30 @@ impl CompletionPlan<'_> {
     }
 }
 
-fn upload_mode(transport: &UploadSessionTransport) -> UploadMode {
-    match transport {
-        UploadSessionTransport::ServiceProxied { .. } => UploadMode::ServiceProxied,
-        UploadSessionTransport::DirectPut { .. } => UploadMode::DirectPut,
-        UploadSessionTransport::DirectMultipart { .. } => UploadMode::DirectMultipart,
+fn upload_mode(mode: &UploadSessionMode) -> UploadMode {
+    match mode {
+        UploadSessionMode::ServiceProxied { .. } => UploadMode::ServiceProxied,
+        UploadSessionMode::DirectPut { .. } => UploadMode::DirectPut,
+        UploadSessionMode::DirectMultipart { .. } => UploadMode::DirectMultipart,
     }
 }
 
-/// Validates a completion request against the session transport.
+/// Validates a completion request against the session mode.
 fn completion_plan<'a>(
     session: &'a UploadSessionState,
     completion: &'a ResolvedUploadCompletion,
 ) -> Result<CompletionPlan<'a>> {
-    match (&session.transport, completion) {
+    match (&session.mode, completion) {
+        (UploadSessionMode::ServiceProxied { staging }, ResolvedUploadCompletion::KnownContent) => {
+            Ok(CompletionPlan::Proxied {
+                staged: match staging {
+                    ProxiedStaging::Staged(content_ref) => Some(content_ref),
+                    ProxiedStaging::Idle | ProxiedStaging::Claimed => None,
+                },
+            })
+        }
         (
-            UploadSessionTransport::ServiceProxied { staging },
-            ResolvedUploadCompletion::KnownContent,
-        ) => Ok(CompletionPlan::Proxied {
-            staged: match staging {
-                ProxiedStaging::Staged(content_ref) => Some(content_ref),
-                ProxiedStaging::Idle | ProxiedStaging::Claimed => None,
-            },
-        }),
-        (
-            UploadSessionTransport::DirectPut { checksum_algorithm },
+            UploadSessionMode::DirectPut { checksum_algorithm },
             ResolvedUploadCompletion::DirectPut { content },
         ) => Ok(CompletionPlan::DirectPut {
             requested: claimed_content_ref(
@@ -1421,7 +1411,7 @@ fn completion_plan<'a>(
             )?,
         }),
         (
-            UploadSessionTransport::DirectMultipart {
+            UploadSessionMode::DirectMultipart {
                 provider_upload_id,
                 checksum_algorithm,
                 ..
@@ -1437,27 +1427,25 @@ fn completion_plan<'a>(
             checksum_algorithm: *checksum_algorithm,
             parts,
         }),
-        (
-            UploadSessionTransport::ServiceProxied { .. },
-            ResolvedUploadCompletion::DirectPut { .. },
-        ) => Err(CoreError::InvalidUploadContent(
-            "service_proxied completion carries no content claim".to_owned(),
-        )),
-        (UploadSessionTransport::DirectPut { .. }, ResolvedUploadCompletion::KnownContent) => {
+        (UploadSessionMode::ServiceProxied { .. }, ResolvedUploadCompletion::DirectPut { .. }) => {
+            Err(CoreError::InvalidUploadContent(
+                "service_proxied completion carries no content claim".to_owned(),
+            ))
+        }
+        (UploadSessionMode::DirectPut { .. }, ResolvedUploadCompletion::KnownContent) => {
             Err(CoreError::InvalidUploadContent(
                 "direct_put completion requires a content claim".to_owned(),
             ))
         }
         (
-            UploadSessionTransport::ServiceProxied { .. }
-            | UploadSessionTransport::DirectPut { .. },
+            UploadSessionMode::ServiceProxied { .. } | UploadSessionMode::DirectPut { .. },
             ResolvedUploadCompletion::Multipart(_),
         ) => Err(CoreError::InvalidUploadContent(format!(
             "{} completion carries no multipart claim",
-            transport_name(&session.transport)
+            mode_name(&session.mode)
         ))),
         (
-            UploadSessionTransport::DirectMultipart { .. },
+            UploadSessionMode::DirectMultipart { .. },
             ResolvedUploadCompletion::KnownContent | ResolvedUploadCompletion::DirectPut { .. },
         ) => Err(CoreError::InvalidUploadContent(
             "direct_multipart completion requires a content claim and parts".to_owned(),
@@ -1647,7 +1635,7 @@ mod tests {
             content_id: ContentId::parse("con_00000000000000000000000000000001")
                 .expect("content id"),
             created_at_ms: 1,
-            transport: UploadSessionTransport::DirectMultipart {
+            mode: UploadSessionMode::DirectMultipart {
                 provider_upload_id: "provider-upload".to_owned(),
                 part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
                 // Deliberately not the process default. This models a

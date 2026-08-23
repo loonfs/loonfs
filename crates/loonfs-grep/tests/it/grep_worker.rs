@@ -752,7 +752,7 @@ async fn assert_fresh_backfill_attempt(
         .expect("load grep root")
         .expect("grep root exists");
     let GrepIndexStatus::Backfilling {
-        cursor,
+        cursor_inode_id,
         checkpoint_id,
         ..
     } = root.manifest_state().status()
@@ -763,7 +763,7 @@ async fn assert_fresh_backfill_attempt(
         );
     };
     assert_eq!(
-        *cursor, None,
+        *cursor_inode_id, None,
         "a fresh backfill starts the walk from the beginning"
     );
     assert!(
@@ -1364,7 +1364,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     let head = control::head(&store, &namespace_id).await;
     let metadata_root = control::metadata_root(&store, &namespace_id).await;
     assert!(
-        metadata_root.manifest_head_seq < head.seq,
+        metadata_root.manifest.manifest_head_seq < head.seq,
         "the WAL-only revision must sit past metadata materialization"
     );
     let grep_root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
@@ -1633,8 +1633,8 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .fork_basis
         .expect("a fork target has a basis manifest");
     let manifest_key = metadata_manifest_object(
-        &target_basis.source_namespace_id,
-        &target_basis.source_manifest_object_id,
+        &target_basis.manifest.owner_namespace_id,
+        &target_basis.manifest.manifest_object_id,
     );
     let manifest_bytes = store
         .get(&manifest_key, None)

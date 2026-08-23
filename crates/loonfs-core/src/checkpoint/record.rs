@@ -13,8 +13,8 @@
 use super::load::load_namespace_manifest_envelope;
 use super::ManifestLoadError;
 use crate::control_object::{
-    core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
-    ControlObjectLoadError, LoadedControl,
+    core_control_load_error, expect_identity_field, expect_namespace, expect_own_manifest,
+    load_control_object, ControlObjectLoadError, LoadedControl,
 };
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
@@ -84,7 +84,8 @@ pub(crate) async fn load_checkpoint_record_at_key<S: ObjectStore + ?Sized>(
                 "checkpoint id",
                 checkpoint_id.as_str(),
                 state.checkpoint_id.as_str(),
-            )
+            )?;
+            expect_own_manifest(&state.namespace_id, &state.manifest)
         },
     )
     .await
@@ -216,14 +217,14 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;
-    if floor_seq > record.manifest_head_seq {
+    if floor_seq > record.manifest.manifest_head_seq {
         return Ok(CheckpointBasisVerification::Invalid);
     }
     // House rule: Err is not converted into absence or false unless the name says so.
     let manifest = match load_namespace_manifest_envelope(
         store,
         &record.namespace_id,
-        &record.manifest_object_id,
+        &record.manifest.manifest_object_id,
     )
     .await
     {
@@ -237,15 +238,15 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
             ))
         }
     };
-    if manifest.payload_checksum != record.manifest_payload_checksum {
+    if manifest.payload_checksum != record.manifest.manifest_payload_checksum {
         // Both durable objects loaded successfully, so their disagreement is
         // corruption rather than a retention race that a new checkpoint can fix.
         return Err(CoreError::NamespaceCorrupt(format!(
             "checkpoint `{}` for namespace `{}` records manifest `{}` payload checksum `{}`, but the manifest carries `{}`",
             record.checkpoint_id,
             record.namespace_id,
-            record.manifest_object_id,
-            record.manifest_payload_checksum,
+            record.manifest.manifest_object_id,
+            record.manifest.manifest_payload_checksum,
             manifest.payload_checksum,
         )));
     }
@@ -255,7 +256,7 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
+    use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, ManifestRef};
     use loonfs_api::{ChangeSeq, CommitId, ManifestNo, ManifestObjectId};
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -278,12 +279,17 @@ mod tests {
     fn record(namespace_id: NamespaceId, checkpoint_id: CheckpointId) -> CheckpointRecordState {
         CheckpointRecordState {
             checkpoint_id,
-            namespace_id,
-            manifest_no: ManifestNo(1),
-            manifest_object_id: ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
+            namespace_id: namespace_id.clone(),
+            manifest: ManifestRef {
+                owner_namespace_id: namespace_id,
+                manifest_no: ManifestNo(1),
+                manifest_object_id: ManifestObjectId::parse(
+                    "00000000000000000001-0123456789abcdef",
+                )
                 .expect("manifest object id"),
-            manifest_head_seq: ChangeSeq(1),
-            manifest_payload_checksum: "sha256:test".to_owned(),
+                manifest_head_seq: ChangeSeq(1),
+                manifest_payload_checksum: "sha256:test".to_owned(),
+            },
             head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
                 .expect("commit id"),
             created_at_ms: 1,
@@ -346,6 +352,32 @@ mod tests {
         assert!(matches!(
             error,
             ControlObjectLoadError::NamespaceMismatch { .. }
+        ));
+    }
+
+    /// A checkpoint record cannot pin another namespace's manifest.
+    #[tokio::test]
+    async fn loader_rejects_a_record_pinning_another_namespaces_manifest() {
+        let (_directory, store) = local_store();
+        let namespace_id = namespace("demo");
+        let checkpoint_id = checkpoint("chk_00000000000000000000000000000001");
+        let object_key = checkpoint_record(&namespace_id, &checkpoint_id);
+        let mut foreign = record(namespace_id, checkpoint_id);
+        foreign.manifest.owner_namespace_id = namespace("other");
+        let bytes = encode_checkpoint_record(&foreign).expect("record bytes");
+        store
+            .put_overwrite(&object_key, bytes)
+            .await
+            .expect("write record");
+
+        let error = load_checkpoint_record_at_key(&store, &object_key)
+            .await
+            .expect_err("a foreign manifest owner should fail");
+
+        assert!(matches!(
+            error,
+            ControlObjectLoadError::IdentityMismatch { field, .. }
+                if field == "manifest owner namespace"
         ));
     }
 

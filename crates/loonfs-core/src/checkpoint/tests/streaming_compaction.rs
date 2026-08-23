@@ -766,6 +766,7 @@ async fn current_metadata_state<S: ObjectStore + ?Sized>(
             .await
             .expect("read root")
             .state
+            .manifest
             .manifest_no,
     )
     .await

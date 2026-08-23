@@ -543,7 +543,8 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         &namespace_id,
     ))
     .expect("metadata root");
-    let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest_object_id);
+    let manifest_key =
+        metadata_manifest_object(&namespace_id, &root.state.manifest.manifest_object_id);
     let manifest_bytes = block_on(raw_store.get(&manifest_key, None))
         .expect("read namespace manifest")
         .expect("namespace manifest exists");

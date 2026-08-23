@@ -24,9 +24,9 @@
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordState,
     CheckpointStatus, CompactionLeaseStatus, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
-    HeadState, MetadataCompactionLeaseState, MetadataRootState, NamespaceStatus, ProxiedStaging,
-    UploadSessionRecordStatus, UploadSessionState, UploadSessionTransport, WalFloorState,
-    WalSegmentPointer, WriterBlock,
+    HeadState, ManifestRef, MetadataCompactionLeaseState, MetadataRootState, NamespaceStatus,
+    ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus, UploadSessionState,
+    WalFloorState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -376,6 +376,18 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
     .expect("manifest envelope")
 }
 
+/// Returns a manifest reference owned by the sample namespace.
+fn sample_manifest_ref(number: u64) -> ManifestRef {
+    ManifestRef {
+        owner_namespace_id: namespace_id(),
+        manifest_no: ManifestNo(number),
+        manifest_object_id: manifest_object_id(number, "0123456789abcdef"),
+        manifest_head_seq: ChangeSeq(number),
+        manifest_payload_checksum:
+            "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+    }
+}
+
 fn sample_head_state() -> HeadState {
     HeadState {
         namespace_id: namespace_id(),
@@ -408,12 +420,16 @@ fn sample_deleted_head_state() -> HeadState {
 fn sample_fork_head_state() -> HeadState {
     HeadState {
         fork_basis: Some(ForkBasis {
-            source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
-            source_manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
-            source_manifest_checksum:
-                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            manifest: ManifestRef {
+                owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
+                manifest_no: ManifestNo(2),
+                manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
+                manifest_head_seq: ChangeSeq(2),
+                manifest_payload_checksum:
+                    "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                        .to_owned(),
+            },
             source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
-            fork_seq: ChangeSeq(2),
         }),
         ..sample_head_state()
     }
@@ -599,11 +615,7 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::MetadataRoot,
         MetadataRootState {
             namespace_id: namespace_id(),
-            manifest_no: ManifestNo(2),
-            manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
-            manifest_head_seq: ChangeSeq(2),
-            manifest_payload_checksum:
-                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            manifest: sample_manifest_ref(2),
             updated_at_ms: 3_000,
         },
     );
@@ -613,11 +625,7 @@ fn control_objects_match_golden_bytes() {
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
             namespace_id: namespace_id(),
-            manifest_no: ManifestNo(2),
-            manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
-            manifest_head_seq: ChangeSeq(2),
-            manifest_payload_checksum:
-                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            manifest: sample_manifest_ref(2),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: CheckpointOwner::User {
@@ -635,11 +643,7 @@ fn control_objects_match_golden_bytes() {
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000004"),
             namespace_id: namespace_id(),
-            manifest_no: ManifestNo(4),
-            manifest_object_id: manifest_object_id(4, "0123456789abcdef"),
-            manifest_head_seq: ChangeSeq(4),
-            manifest_payload_checksum:
-                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            manifest: sample_manifest_ref(4),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: CheckpointOwner::Fork {
@@ -676,7 +680,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             created_at_ms: 1_000,
-            transport: UploadSessionTransport::ServiceProxied {
+            mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged(sample_content_ref()),
             },
             status: UploadSessionRecordStatus::Completed {
@@ -695,11 +699,7 @@ fn control_objects_match_golden_bytes() {
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000003"),
             namespace_id: namespace_id(),
-            manifest_no: ManifestNo(3),
-            manifest_object_id: manifest_object_id(3, "0123456789abcdef"),
-            manifest_head_seq: ChangeSeq(3),
-            manifest_payload_checksum:
-                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            manifest: sample_manifest_ref(3),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: CheckpointOwner::User {
@@ -720,7 +720,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             created_at_ms: 1_000,
-            transport: UploadSessionTransport::DirectPut {
+            mode: UploadSessionMode::DirectPut {
                 checksum_algorithm: ChecksumAlgorithm::Sha256,
             },
             status: UploadSessionRecordStatus::Open {
@@ -741,7 +741,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_22222222222222222222222222222222"),
             created_at_ms: 1_000,
-            transport: UploadSessionTransport::DirectMultipart {
+            mode: UploadSessionMode::DirectMultipart {
                 provider_upload_id: "provider-upload-id".to_owned(),
                 part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
                 checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
@@ -762,7 +762,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             created_at_ms: 1_000,
-            transport: UploadSessionTransport::ServiceProxied {
+            mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged(sample_content_ref()),
             },
             status: UploadSessionRecordStatus::Open {
@@ -779,7 +779,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_44444444444444444444444444444444"),
             created_at_ms: 1_000,
-            transport: UploadSessionTransport::ServiceProxied {
+            mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Claimed,
             },
             status: UploadSessionRecordStatus::Open {
@@ -796,7 +796,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_11111111111111111111111111111111"),
             created_at_ms: 1_000,
-            transport: UploadSessionTransport::ServiceProxied {
+            mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Idle,
             },
             status: UploadSessionRecordStatus::Aborted {
@@ -920,6 +920,12 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         ControlObjectKind::CheckpointRecord,
         |payload| payload["owner"]["field_from_the_future"] = serde_json::Value::from(true),
     );
+    // Manifest references reject unknown fields in every control object.
+    assert_control_payload_edit_is_corrupt::<MetadataRootState>(
+        "control_metadata_root.v1.json",
+        ControlObjectKind::MetadataRoot,
+        |payload| payload["manifest"]["field_from_the_future"] = serde_json::Value::from(true),
+    );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
@@ -929,7 +935,7 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["transport"]["staging"]["content_ref"]["field_from_the_future"] =
+            payload["mode"]["staging"]["content_ref"]["field_from_the_future"] =
                 serde_json::Value::from(true);
         },
     );
@@ -937,7 +943,7 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         "control_upload_session_claimed.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["transport"]["staging"]["at_ms"] = serde_json::Value::from(1_500);
+            payload["mode"]["staging"]["at_ms"] = serde_json::Value::from(1_500);
         },
     );
     assert!(
@@ -948,7 +954,7 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["transport"]["field_from_the_future"] = serde_json::Value::from(true);
+            payload["mode"]["field_from_the_future"] = serde_json::Value::from(true);
         },
     );
 }
@@ -1056,32 +1062,27 @@ fn mutable_control_enums_fail_closed_on_unknown_variants() {
         "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["transport"]["staging"]["content_ref"]["kind"] =
+            payload["mode"]["staging"]["content_ref"]["kind"] =
                 serde_json::Value::from("future_content_kind");
         },
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
-        |payload| payload["transport"]["kind"] = serde_json::Value::from("future_transport"),
+        |payload| payload["mode"]["kind"] = serde_json::Value::from("future_mode"),
     );
 }
 
-/// The record holds a transport and a state, and each carries only what it
-/// needs. The encoding that spelled those with independent optional fields
-/// beside a bare `mode` is refused outright: `transport` is not optional,
-/// and nothing else is a field this payload has.
+/// Upload sessions reject mode fields outside the tagged `mode` object.
 #[test]
-fn upload_sessions_reject_the_pre_transport_flat_encoding() {
-    // The whole flat payload, exactly as it was written before the
-    // transport became a variant of its own.
+fn upload_sessions_reject_the_pre_mode_flat_encoding() {
+    // Reject a string mode and mode-specific fields at the top level.
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
             let content_ref = payload["status"]["content_ref"].clone();
             let object = payload.as_object_mut().expect("payload object");
-            object.remove("transport");
             object.insert("mode".to_owned(), serde_json::Value::from("direct_put"));
             object.insert(
                 "claimed_checksum".to_owned(),
@@ -1091,10 +1092,8 @@ fn upload_sessions_reject_the_pre_transport_flat_encoding() {
             object.insert("staged_content_ref".to_owned(), content_ref);
         },
     );
-    // Each field of that encoding on its own, over a record that is
-    // otherwise current: none of them is a field this payload has.
+    // Reject each top-level mode-specific field on its own.
     for legacy_field in [
-        "mode",
         "claimed_checksum",
         "direct_put_content_ref",
         "provider_multipart_upload_id",
@@ -1107,8 +1106,13 @@ fn upload_sessions_reject_the_pre_transport_flat_encoding() {
             |payload| payload[legacy_field] = serde_json::Value::from("direct_put"),
         );
     }
-    // A session with no transport at all is not a session: there is no
-    // default to fall back to, which is the point of moving it here.
+    // A mode must be a tagged object, not a string.
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["mode"] = serde_json::Value::from("direct_put"),
+    );
+    // Every session must declare a mode.
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
@@ -1116,7 +1120,7 @@ fn upload_sessions_reject_the_pre_transport_flat_encoding() {
             payload
                 .as_object_mut()
                 .expect("payload object")
-                .remove("transport");
+                .remove("mode");
         },
     );
 }
@@ -1136,7 +1140,7 @@ fn upload_sessions_reject_a_reference_to_another_content_object() {
         "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["transport"]["staging"]["content_ref"]["content_id"] = other.clone();
+            payload["mode"]["staging"]["content_ref"]["content_id"] = other.clone();
         },
     );
 }
@@ -1147,11 +1151,11 @@ fn direct_put_sessions_reject_the_pre_completion_claim_record() {
         "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["transport"]
+            payload["mode"]
                 .as_object_mut()
-                .expect("transport object")
+                .expect("mode object")
                 .remove("checksum_algorithm");
-            payload["transport"]["promised_content"] =
+            payload["mode"]["promised_content"] =
                 serde_json::to_value(sample_content_ref()).expect("content ref");
         },
     );
@@ -1167,7 +1171,7 @@ fn completed_direct_put_sessions_require_the_session_algorithm() {
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["transport"] = serde_json::json!({
+            payload["mode"] = serde_json::json!({
                 "kind": "direct_put",
                 "checksum_algorithm": "crc32c"
             });
@@ -1179,16 +1183,16 @@ fn completed_direct_put_sessions_require_the_session_algorithm() {
     );
 }
 
-/// Rejects upload sessions that omit required transport fields.
+/// Rejects upload sessions that omit required mode fields.
 #[test]
-fn upload_sessions_reject_a_transport_missing_its_own_fields() {
+fn upload_sessions_reject_a_mode_missing_its_own_fields() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["transport"]
+            payload["mode"]
                 .as_object_mut()
-                .expect("transport object")
+                .expect("mode object")
                 .remove("checksum_algorithm");
         },
     );
@@ -1201,29 +1205,28 @@ fn upload_sessions_reject_a_transport_missing_its_own_fields() {
             "control_upload_session_direct_multipart.v1.json",
             ControlObjectKind::UploadSession,
             |payload| {
-                payload["transport"]
+                payload["mode"]
                     .as_object_mut()
-                    .expect("transport object")
+                    .expect("mode object")
                     .remove(missing);
             },
         );
     }
-    // And no transport holds another's details.
+    // A mode cannot contain fields from another variant.
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
-        |payload| payload["transport"]["kind"] = serde_json::Value::from("service_proxied"),
+        |payload| payload["mode"]["kind"] = serde_json::Value::from("service_proxied"),
     );
 }
 
-/// A part size of zero cuts no bytes, so it is not a geometry a multipart
-/// session can be opened with, and not a number this record can hold.
+/// Multipart sessions reject a part size of zero.
 #[test]
 fn upload_sessions_reject_a_zero_multipart_part_size() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
-        |payload| payload["transport"]["part_size_bytes"] = serde_json::Value::from(0),
+        |payload| payload["mode"]["part_size_bytes"] = serde_json::Value::from(0),
     );
 }
 
@@ -1251,10 +1254,13 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
             serde_json::to_value(CheckpointRecordState {
                 checkpoint_id: checkpoint_id("chk_00000000000000000000000000000005"),
                 namespace_id: namespace_id(),
-                manifest_no: ManifestNo(5),
-                manifest_object_id: manifest_object_id(5, "0123456789abcdef"),
-                manifest_head_seq: ChangeSeq(5),
-                manifest_payload_checksum: sha256_digest(b"manifest"),
+                manifest: ManifestRef {
+                    owner_namespace_id: namespace_id(),
+                    manifest_no: ManifestNo(5),
+                    manifest_object_id: manifest_object_id(5, "0123456789abcdef"),
+                    manifest_head_seq: ChangeSeq(5),
+                    manifest_payload_checksum: sha256_digest(b"manifest"),
+                },
                 head_commit_id: commit_id(),
                 created_at_ms: 3_000,
                 owner: CheckpointOwner::User {
@@ -1275,7 +1281,7 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                     .expect("valid upload id"),
                 content_id: content_id("con_11111111111111111111111111111111"),
                 created_at_ms: 1_000,
-                transport: UploadSessionTransport::ServiceProxied {
+                mode: UploadSessionMode::ServiceProxied {
                     staging: ProxiedStaging::Idle,
                 },
                 status: UploadSessionRecordStatus::Aborted {

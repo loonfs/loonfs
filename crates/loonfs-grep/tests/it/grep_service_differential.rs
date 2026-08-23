@@ -253,7 +253,10 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         .await
         .expect("flush materialized commit");
     let materialized_root = control::metadata_root(&fixture.store, &fixture.namespace_id).await;
-    assert_eq!(materialized_root.manifest_head_seq, materialized_head.seq);
+    assert_eq!(
+        materialized_root.manifest.manifest_head_seq,
+        materialized_head.seq
+    );
 
     fixture
         .writer
@@ -267,10 +270,10 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         .expect("write WAL-only file");
     let head = control::head(&fixture.store, &fixture.namespace_id).await;
     let root = control::metadata_root(&fixture.store, &fixture.namespace_id).await;
-    assert_eq!(root.manifest_head_seq, materialized_head.seq);
+    assert_eq!(root.manifest.manifest_head_seq, materialized_head.seq);
     assert_eq!(
         head.seq.0,
-        root.manifest_head_seq.0 + 1,
+        root.manifest.manifest_head_seq.0 + 1,
         "the WAL-only file must be committed immediately after the materialized boundary"
     );
 

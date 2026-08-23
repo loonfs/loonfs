@@ -10,7 +10,7 @@
 use super::build::{build_manifest_l0_run_segments, build_manifest_segments};
 use super::load::{head_from_manifest, load_basis_metadata_segments};
 use super::publish::{
-    manifest_write_failure, publish_metadata_root, write_namespace_manifest,
+    manifest_ref_for, manifest_write_failure, publish_metadata_root, write_namespace_manifest,
     ManifestPublicationOutcome,
 };
 use super::runs::{flatten_manifest_segments, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
@@ -28,7 +28,7 @@ use crate::namespace::basis::{
 };
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
-use loonfs_api::wire::control::{HeadState, NamespaceStatus};
+use loonfs_api::wire::control::{HeadState, ManifestRef, NamespaceStatus};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{
     next_public_ordinal, ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo,
@@ -41,10 +41,8 @@ use tracing::Instrument;
 ///
 /// This may be a newly published manifest or one that was already current.
 pub(super) struct FlushedBasis {
-    pub(super) manifest_no: ManifestNo,
-    pub(super) manifest_object_id: ManifestObjectId,
-    pub(super) manifest_head_seq: ChangeSeq,
-    pub(super) manifest_payload_checksum: String,
+    /// Reference to the manifest that covers the head.
+    pub(super) manifest: ManifestRef,
     /// Head commit the basis covers.
     pub(super) head_commit_id: CommitId,
     /// Head sequence the attempt targeted.
@@ -136,10 +134,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     {
         let basis_manifest = basis_manifest.expect("an owned basis names a manifest");
         return Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
-            manifest_no: basis_manifest.manifest_no,
-            manifest_object_id: basis_manifest.manifest_object_id.clone(),
-            manifest_head_seq: head_seq,
-            manifest_payload_checksum: basis_manifest.manifest_payload_checksum.clone(),
+            manifest: basis_manifest.clone(),
             head_commit_id: projection.head.head_commit_id.clone(),
             target_head_seq: head_seq,
             root_after_manifest_no: basis_manifest.manifest_no,
@@ -194,18 +189,15 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         ),
         ManifestPublicationOutcome::Superseded(current) => (
             FlushWalOutcome::Superseded,
-            current.manifest_no,
-            current.manifest_head_seq,
+            current.manifest.manifest_no,
+            current.manifest.manifest_head_seq,
         ),
         ManifestPublicationOutcome::RootCasRaceLost => {
             return Ok(TryFlushWal::RaceLost);
         }
     };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
-        manifest_no: manifest.payload.manifest_no,
-        manifest_object_id: manifest.payload.manifest_object_id.clone(),
-        manifest_head_seq: manifest.payload.head_seq,
-        manifest_payload_checksum: manifest.payload_checksum.clone(),
+        manifest: manifest_ref_for(namespace_id, &manifest),
         head_commit_id: projection.head.head_commit_id.clone(),
         target_head_seq: head_seq,
         root_after_manifest_no,

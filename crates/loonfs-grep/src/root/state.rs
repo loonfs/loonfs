@@ -71,7 +71,7 @@ pub enum GrepIndexStatus {
         /// the start. Checkpoint file enumeration is ordered by ascending
         /// inode id, so one id is the whole resume position.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cursor: Option<InodeId>,
+        cursor_inode_id: Option<InodeId>,
         /// User-checkpoint pin backing this immutable manifest walk.
         checkpoint_id: CheckpointId,
     },
@@ -118,11 +118,11 @@ impl From<&GrepIndexStatus> for loonfs_api::v0::GrepIndexLifecycle {
             GrepIndexStatus::Disabled {} => Self::Disabled,
             GrepIndexStatus::Backfilling {
                 target_seq,
-                cursor,
+                cursor_inode_id,
                 checkpoint_id,
             } => Self::Backfilling {
                 target_seq: *target_seq,
-                cursor_inode_id: *cursor,
+                cursor_inode_id: *cursor_inode_id,
                 checkpoint_id: checkpoint_id.clone(),
             },
             GrepIndexStatus::Active {

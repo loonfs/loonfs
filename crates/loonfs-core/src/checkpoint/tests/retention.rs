@@ -109,6 +109,7 @@ async fn current_manifest_no<S: ObjectStore + ?Sized>(
         .await
         .expect("read metadata root")
         .state
+        .manifest
         .manifest_no
 }
 
@@ -750,10 +751,13 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
     let stale = loonfs_api::wire::control::CheckpointRecordState {
         checkpoint_id: checkpoint.checkpoint_id.clone(),
         namespace_id: namespace_id.clone(),
-        manifest_no: ManifestNo(0),
-        manifest_object_id: manifest_object_id(ManifestNo(0)),
-        manifest_head_seq: ChangeSeq(0),
-        manifest_payload_checksum: "sha256:stale".to_owned(),
+        manifest: loonfs_api::wire::control::ManifestRef {
+            owner_namespace_id: namespace_id.clone(),
+            manifest_no: ManifestNo(0),
+            manifest_object_id: manifest_object_id(ManifestNo(0)),
+            manifest_head_seq: ChangeSeq(0),
+            manifest_payload_checksum: "sha256:stale".to_owned(),
+        },
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         created_at_ms: context.now_ms,
         owner: loonfs_api::wire::control::CheckpointOwner::User {
@@ -1728,7 +1732,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
         .await
         .expect("in-budget retry succeeds");
     assert_eq!(advanced.outcome, loonfs_api::FlushWalOutcome::Published);
-    assert!(advanced.manifest_no > root_before.manifest_no);
+    assert!(advanced.manifest_no > root_before.manifest.manifest_no);
 }
 
 /// An over-budget reorganization unit aborts the same way: no root motion,

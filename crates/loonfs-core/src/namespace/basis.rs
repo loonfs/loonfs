@@ -19,9 +19,9 @@ use crate::error::CoreError;
 use crate::namespace::control::{
     load_head_and_metadata_root_if_present, load_wal_floor_object, LoadedHeadObject,
 };
-use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::control::{HeadState, ManifestRef};
 use loonfs_api::NamespaceId;
-use loonfs_api::{manifest_object_id_manifest_no, ChangeSeq, ManifestNo, ManifestObjectId};
+use loonfs_api::{ChangeSeq, ManifestNo};
 use loonfs_objectstore::ObjectStore;
 
 /// The materialized starting point every read and flush builds on.
@@ -31,21 +31,8 @@ pub enum MetadataBasis {
     /// synthesized rather than loaded. A created namespace reads from this
     /// until its first flush publishes a manifest.
     Genesis,
-    /// A manifest object, owned by this namespace or — while the head still
-    /// authorizes it — by the fork source.
-    Manifest(BasisManifest),
-}
-
-/// The manifest a basis resolves to, and who owns the objects it names.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BasisManifest {
-    /// Namespace under whose prefix the manifest and its segments live.
-    pub owner_namespace_id: NamespaceId,
-    /// Logical manifest position, which the object id encodes.
-    pub manifest_no: ManifestNo,
-    pub manifest_object_id: ManifestObjectId,
-    /// The `payload_checksum` the loaded manifest must carry.
-    pub manifest_payload_checksum: String,
+    /// A manifest owned by this namespace or its fork source.
+    Manifest(ManifestRef),
 }
 
 /// The semantic identity of a metadata basis after its manifest has been
@@ -80,7 +67,7 @@ impl MetadataBasisIdentity {
 }
 
 impl MetadataBasis {
-    pub fn manifest(&self) -> Option<&BasisManifest> {
+    pub fn manifest(&self) -> Option<&ManifestRef> {
         match self {
             MetadataBasis::Genesis => None,
             MetadataBasis::Manifest(manifest) => Some(manifest),
@@ -117,13 +104,8 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
 ) -> Result<LoadedNamespaceBasis, ControlObjectLoadError> {
     let (head, root) = load_head_and_metadata_root_if_present(store, namespace_id).await?;
     let basis = match root {
-        Some(root) => MetadataBasis::Manifest(BasisManifest {
-            owner_namespace_id: namespace_id.clone(),
-            manifest_no: root.state.manifest_no,
-            manifest_object_id: root.state.manifest_object_id,
-            manifest_payload_checksum: root.state.manifest_payload_checksum,
-        }),
-        None => metadata_basis_without_root(&head.state)?,
+        Some(root) => MetadataBasis::Manifest(root.state.manifest),
+        None => metadata_basis_without_root(&head.state),
     };
     Ok(LoadedNamespaceBasis { head, basis })
 }
@@ -131,26 +113,11 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
 /// Resolves the basis of a namespace whose `metadata/root.json` is absent:
 /// the built-in genesis state, or the fork source's manifest the head
 /// authorizes.
-pub(crate) fn metadata_basis_without_root(
-    head: &HeadState,
-) -> Result<MetadataBasis, ControlObjectLoadError> {
-    let Some(fork_basis) = &head.fork_basis else {
-        return Ok(MetadataBasis::Genesis);
-    };
-    let manifest_no = manifest_object_id_manifest_no(fork_basis.source_manifest_object_id.as_str())
-        .ok_or_else(|| ControlObjectLoadError::Codec {
-            object_key: loonfs_objectstore::keys::wal_head(&head.namespace_id),
-            message: format!(
-                "fork basis manifest object id `{}` does not encode a manifest number",
-                fork_basis.source_manifest_object_id
-            ),
-        })?;
-    Ok(MetadataBasis::Manifest(BasisManifest {
-        owner_namespace_id: fork_basis.source_namespace_id.clone(),
-        manifest_no,
-        manifest_object_id: fork_basis.source_manifest_object_id.clone(),
-        manifest_payload_checksum: fork_basis.source_manifest_checksum.clone(),
-    }))
+pub(crate) fn metadata_basis_without_root(head: &HeadState) -> MetadataBasis {
+    match &head.fork_basis {
+        None => MetadataBasis::Genesis,
+        Some(fork_basis) => MetadataBasis::Manifest(fork_basis.manifest.clone()),
+    }
 }
 
 /// The genesis head fields a synthesized basis replays from: sequence zero,
@@ -162,9 +129,9 @@ pub(crate) fn genesis_next_inode_id() -> loonfs_api::InodeId {
 /// The sequence a namespace's own history begins at: zero for a created
 /// namespace, the fork point for a fork target.
 pub(crate) fn namespace_birth_seq(head: &HeadState) -> ChangeSeq {
-    head.fork_basis
-        .as_ref()
-        .map_or(ChangeSeq(0), |fork_basis| fork_basis.fork_seq)
+    head.fork_basis.as_ref().map_or(ChangeSeq(0), |fork_basis| {
+        fork_basis.manifest.manifest_head_seq
+    })
 }
 
 /// Reads the retention floor, treating a missing floor object as the

@@ -137,7 +137,7 @@ pub mod control {
         load_namespace_metadata_root_control, load_namespace_read_anchor, ControlObjectIdentity,
         LoadedHeadControl, LoadedMetadataRootControl,
     };
-    pub use crate::namespace::{BasisManifest, MetadataBasis};
+    pub use crate::namespace::MetadataBasis;
 }
 
 /// Commit publication types for runtime integrations. Consumed by `loonfs`'s

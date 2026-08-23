@@ -246,11 +246,12 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             MetadataReorganizeOutcome::NotNeeded { l0_runs: 0 },
         ));
     };
-    let segments = load_verified_manifest_segments(store, namespace_id, &root.manifest_object_id)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
+    let segments =
+        load_verified_manifest_segments(store, namespace_id, &root.manifest.manifest_object_id)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
     let previous = segments.manifest();
 
     let l0_runs = l0_run_count(&previous.payload);
@@ -371,7 +372,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         store,
         namespace_id,
         &manifest,
-        Some(root.manifest_object_id.clone()),
+        Some(root.manifest.manifest_object_id.clone()),
         context.now_ms,
     )
     .await?

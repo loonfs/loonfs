@@ -502,8 +502,10 @@ async fn foreign_metadata_segment_owners(
             .await
             .expect("load metadata root")
             .state;
-    let key =
-        loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &root.manifest_object_id);
+    let key = loonfs_objectstore::keys::metadata_manifest_object(
+        namespace_id,
+        &root.manifest.manifest_object_id,
+    );
     let bytes = store
         .get(&key, None)
         .await

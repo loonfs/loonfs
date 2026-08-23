@@ -147,10 +147,10 @@ pub(super) async fn overwrite_manifest(
     let loaded_root = load_metadata_root_object(store, namespace_id)
         .await
         .expect("read root");
-    if loaded_root.state.manifest_no == manifest_no {
+    if loaded_root.state.manifest.manifest_no == manifest_no {
         let mut root = loaded_root.state;
-        root.manifest_object_id = manifest_object_id;
-        root.manifest_payload_checksum = updated_manifest.payload_checksum.clone();
+        root.manifest.manifest_object_id = manifest_object_id;
+        root.manifest.manifest_payload_checksum = updated_manifest.payload_checksum.clone();
         let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
             loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
             root,
@@ -1423,7 +1423,7 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization_before.head,
-            basis_manifest_no: Some(materialization_before.root.manifest_no),
+            basis_manifest_no: Some(materialization_before.root.manifest.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization_before.metadata_state,
         },
@@ -1439,7 +1439,10 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization_after.root.manifest_no, first.manifest_no);
+    assert_eq!(
+        materialization_after.root.manifest.manifest_no,
+        first.manifest_no
+    );
     assert_eq!(
         materialization_after.head.seq,
         orphan_manifest.payload.head_seq

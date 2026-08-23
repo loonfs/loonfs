@@ -70,7 +70,7 @@ use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::wire::control::{HeadState, MetadataRootState};
+use loonfs_api::wire::control::{HeadState, ManifestRef, MetadataRootState};
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataRow,
     MetadataRowFamily as ApiMetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
@@ -343,6 +343,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
         .await
         .expect("read metadata root")
         .state
+        .manifest
         .manifest_no
 }
 
@@ -384,6 +385,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
         .await
         .expect("read metadata root")
         .state
+        .manifest
         .manifest_no;
     let materialized =
         load_manifest_materialization_for_inspection(store, namespace_id, manifest_no)
@@ -499,6 +501,7 @@ async fn current_manifest_object_id<S: ObjectStore + ?Sized>(
         .await
         .expect("read metadata root")
         .state
+        .manifest
         .manifest_object_id
 }
 
