@@ -31,10 +31,11 @@ use crate::storage::content_admission::{
     CompletedUploadReceipt, ContentAdmission, PreparedContent,
 };
 use bytes::Bytes;
+use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompletedUploadPart,
-    DirectMultipartUploadOptions, UploadContentClaim, UploadContentResponse, UploadMode,
-    UploadPartChecksumClaim, UploadSessionResponse, UploadSessionStatus,
+    UploadContentClaim, UploadContentResponse, UploadMode, UploadPartChecksumClaim,
+    UploadSessionResponse, UploadSessionStatus,
 };
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, NamespaceStatus, ProxiedStaging,

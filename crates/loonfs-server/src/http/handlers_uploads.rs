@@ -19,12 +19,12 @@ use loonfs::FsWriter;
 use loonfs_api::ApiError;
 use loonfs_api::ErrorCode;
 use loonfs_api::{
+    options::DirectMultipartUploadOptions,
     v0::{
         BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest,
-        CompleteUploadRequest, DirectMultipartUpload, DirectMultipartUploadOptions,
-        DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
-        SignedUploadPart, UploadContentResponse, UploadMode, UploadSessionResponse,
-        UploadSessionStatus,
+        CompleteUploadRequest, ObjectTransferAccess, SignUploadPartsRequest,
+        SignUploadPartsResponse, SignedUploadPart, UploadContentResponse, UploadMode,
+        UploadSessionResponse, UploadSessionStatus,
     },
     ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
@@ -136,8 +136,8 @@ pub(super) async fn create_upload(
         BeginUploadRequest::DirectPut { size_bytes } => {
             begin_direct_put_upload(state, namespace_id, size_bytes).await
         }
-        BeginUploadRequest::DirectMultipart { multipart } => {
-            begin_direct_multipart_upload(state, namespace_id, multipart).await
+        BeginUploadRequest::DirectMultipart { part_size_bytes } => {
+            begin_direct_multipart_upload(state, namespace_id, part_size_bytes).await
         }
         BeginUploadRequest::ServiceProxied {} => {
             let response = state
@@ -203,14 +203,12 @@ async fn begin_direct_put_upload(
     Ok(Json(BeginUploadResponse::DirectPut {
         namespace_id: prepared.namespace_id,
         upload_id: prepared.upload_id,
-        direct_put: DirectPutUpload {
-            checksum_algorithm,
-            access: ObjectTransferAccess::PresignedUrl {
-                method: signed.method,
-                url: signed.url,
-                headers: signed.headers,
-                expires_at_ms: signed.expires_at_ms,
-            },
+        checksum_algorithm,
+        access: ObjectTransferAccess::PresignedUrl {
+            method: signed.method,
+            url: signed.url,
+            headers: signed.headers,
+            expires_at_ms: signed.expires_at_ms,
         },
     }))
 }
@@ -218,7 +216,7 @@ async fn begin_direct_put_upload(
 async fn begin_direct_multipart_upload(
     state: AppState,
     namespace_id: NamespaceId,
-    options: Option<DirectMultipartUploadOptions>,
+    part_size_bytes: Option<u64>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     if state
         .direct_transfers
@@ -232,26 +230,24 @@ async fn begin_direct_multipart_upload(
              deployment's endpoint cannot",
         ));
     }
-    // A multipart begin declares nothing about the payload, so an absent
-    // `multipart` object simply takes the server's default geometry.
-    let options = options.unwrap_or_default();
-
+    // Use the server's default when no part size is requested.
     let prepared = state
         .writer
-        .begin_direct_multipart_upload_target(&namespace_id, options)
+        .begin_direct_multipart_upload_target(
+            &namespace_id,
+            DirectMultipartUploadOptions { part_size_bytes },
+        )
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_invalid_request_param("/multipart/part_size_bytes")
+                .with_invalid_request_param("/part_size_bytes")
         })?;
 
     Ok(Json(BeginUploadResponse::DirectMultipart {
         namespace_id: prepared.namespace_id,
         upload_id: prepared.upload_id,
-        direct_multipart: DirectMultipartUpload {
-            part_size_bytes: prepared.target.part_size_bytes,
-            checksum_algorithm: prepared.target.checksum_algorithm,
-        },
+        part_size_bytes: prepared.target.part_size_bytes,
+        checksum_algorithm: prepared.target.checksum_algorithm,
     }))
 }
 

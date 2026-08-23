@@ -1065,17 +1065,15 @@ The response includes only a short-lived transfer capability, never raw object-s
   "namespace_id": "demo",
   "upload_id": "upl_...",
   "mode": "direct_put",
-  "direct_put": {
-    "checksum_algorithm": "crc64nvme",
-    "access": {
-      "kind": "presigned_url",
-      "method": "PUT",
-      "url": "https://...",
-      "headers": {
-        "if-none-match": "*"
-      },
-      "expires_at_ms": 1780000000000
-    }
+  "checksum_algorithm": "crc64nvme",
+  "access": {
+    "kind": "presigned_url",
+    "method": "PUT",
+    "url": "https://...",
+    "headers": {
+      "if-none-match": "*"
+    },
+    "expires_at_ms": 1780000000000
   }
 }
 ```
@@ -1152,7 +1150,7 @@ complete-object checksum:
 ```json
 {
   "mode": "direct_multipart",
-  "multipart": { "part_size_bytes": 8388608 }
+  "part_size_bytes": 8388608
 }
 ```
 
@@ -1173,10 +1171,8 @@ The response records the part size and checksum algorithm for the session:
   "namespace_id": "demo",
   "upload_id": "upl_...",
   "mode": "direct_multipart",
-  "direct_multipart": {
-    "part_size_bytes": 8388608,
-    "checksum_algorithm": "crc64nvme"
-  }
+  "part_size_bytes": 8388608,
+  "checksum_algorithm": "crc64nvme"
 }
 ```
 
@@ -1931,12 +1927,10 @@ only the fields for that mode:
 ```json
 { "mode": "service_proxied" }
 { "mode": "direct_put", "size_bytes": 1234 }
-{ "mode": "direct_multipart", "multipart": { "part_size_bytes": 8388608 } }
+{ "mode": "direct_multipart", "part_size_bytes": 8388608 }
 ```
 
-`service_proxied` has no additional fields. `direct_put` accepts an optional
-size hint. `direct_multipart` accepts an optional `multipart` object and uses
-the default part size when it is omitted.
+Mode-specific fields are placed beside `mode`. `service_proxied` has no additional fields. `direct_put` accepts an optional size hint. `direct_multipart` accepts an optional `part_size_bytes` and uses the default when omitted.
 
 Completion requests use the same `mode` values as begin requests:
 
@@ -1951,11 +1945,7 @@ Multipart requires `content` and `parts`. Service-proxied completion has no
 additional fields. Unknown fields, missing fields, and mode mismatches return
 `invalid_request`.
 
-The begin-upload *response* is tagged the same way, in the same `mode`, and
-carries its transport's field and no other's: `service_proxied` carries
-neither `direct_put` nor `direct_multipart`, and each direct mode carries
-only its own. Unlike the request bodies it does not reject unknown fields,
-because a response reader must tolerate what a later server adds.
+The begin-upload response uses the same `mode` tag. `service_proxied` adds no fields beyond `namespace_id` and `upload_id`. `direct_put` adds `checksum_algorithm` and `access`. `direct_multipart` adds `part_size_bytes` and `checksum_algorithm`. Response readers accept unknown fields so newer servers can add fields without breaking older clients.
 
 An upload session allocates its content object when it begins, so repeating
 `PUT /content` with the same bytes for the same upload id writes the same

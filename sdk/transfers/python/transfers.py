@@ -23,7 +23,6 @@ from .types import (
     CompletedUploadPart,
     ContentRef,
     DestinationBehavior,
-    DirectMultipartUploadOptions,
     FilesystemOperation_PutFile,
     ObjectTransferAccess,
     RevisionNo,
@@ -240,9 +239,7 @@ def _create_upload(client: LoonFS, namespace_id: str, content: bytes):
     if size_bytes >= _MULTIPART_MIN_BYTES and features.get(
         _DIRECT_MULTIPART_FEATURE, False
     ):
-        request = BeginUploadRequest_DirectMultipart(
-            multipart=DirectMultipartUploadOptions()
-        )
+        request = BeginUploadRequest_DirectMultipart()
     else:
         proxy_limit = limits.get(_PROXY_UPLOAD_LIMIT)
         fits_proxy = proxy_limit is None or size_bytes <= proxy_limit
@@ -287,7 +284,7 @@ def _stage_upload(
         try:
             _send_presigned(
                 transfer_client,
-                begin.direct_put.access,
+                begin.access,
                 "PUT",
                 content=content,
             )
@@ -300,7 +297,7 @@ def _stage_upload(
             request=CompleteUploadRequest_DirectPut(
                 content=UploadContentClaim(
                     size_bytes=len(content),
-                    checksum=_checksum(begin.direct_put.checksum_algorithm, content),
+                    checksum=_checksum(begin.checksum_algorithm, content),
                 )
             ),
         )
@@ -311,8 +308,8 @@ def _stage_upload(
             transfer_client,
             namespace_id,
             begin.upload_id,
-            begin.direct_multipart.part_size_bytes,
-            begin.direct_multipart.checksum_algorithm,
+            begin.part_size_bytes,
+            begin.checksum_algorithm,
             content,
         )
     raise RuntimeError(f"unsupported upload mode {begin.mode!r}")

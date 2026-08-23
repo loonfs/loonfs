@@ -33,7 +33,6 @@ from loonfs_sdk import (
     CompleteUploadRequest_DirectMultipart,
     CompleteUploadRequest_DirectPut,
     CompletedUploadPart,
-    DirectMultipartUploadOptions,
     FilesystemOperation_CreateDirectory,
     FilesystemOperation_DeletePath,
     FilesystemOperation_MovePath,
@@ -746,7 +745,7 @@ def test_proxy(
                 "proxy direct-PUT begin response",
             )
         )
-        direct_access = direct_begin.direct_put.access
+        direct_access = direct_begin.access
         assert direct_access.method.upper() == "PUT"
         direct_put_response = httpx.request(
             direct_access.method,
@@ -756,7 +755,7 @@ def test_proxy(
         )
         direct_put_response.raise_for_status()
         direct_checksum = _checksum(
-            direct_begin.direct_put.checksum_algorithm,
+            direct_begin.checksum_algorithm,
             payload,
         )
         direct_complete_response = client.post(
@@ -861,12 +860,12 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     )
 
     assert begin.mode == expected.mode
-    assert begin.direct_put.checksum_algorithm == expected.checksum_algorithm
+    assert begin.checksum_algorithm == expected.checksum_algorithm
 
-    _put_presigned(begin.direct_put.access, payload)
+    _put_presigned(begin.access, payload)
     claim = UploadContentClaim(
         size_bytes=len(payload),
-        checksum=_checksum(begin.direct_put.checksum_algorithm, payload),
+        checksum=_checksum(begin.checksum_algorithm, payload),
     )
     completed = harness.client.uploads.complete_upload(
         request.namespace_id,
@@ -906,17 +905,15 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     begin = harness.client.uploads.create_upload(
         request.namespace_id,
         request=BeginUploadRequest_DirectMultipart(
-            multipart=DirectMultipartUploadOptions(
-                part_size_bytes=request.part_size_bytes,
-            )
+            part_size_bytes=request.part_size_bytes,
         ),
     )
 
     assert begin.mode == expected.mode
-    assert begin.direct_multipart.part_size_bytes == request.part_size_bytes
-    assert begin.direct_multipart.checksum_algorithm == expected.checksum_algorithm
+    assert begin.part_size_bytes == request.part_size_bytes
+    assert begin.checksum_algorithm == expected.checksum_algorithm
 
-    part_size = begin.direct_multipart.part_size_bytes
+    part_size = begin.part_size_bytes
     chunks = [
         payload[offset : offset + part_size]
         for offset in range(0, len(payload), part_size)
@@ -925,7 +922,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     claims = [
         UploadPartChecksumClaim(
             part_number=index,
-            checksum=_checksum(begin.direct_multipart.checksum_algorithm, chunk),
+            checksum=_checksum(begin.checksum_algorithm, chunk),
         )
         for index, chunk in enumerate(chunks, start=1)
     ]
@@ -952,7 +949,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
             )
         )
     completed_parts.sort(key=lambda part: part.part_number)
-    whole_checksum = _checksum(begin.direct_multipart.checksum_algorithm, payload)
+    whole_checksum = _checksum(begin.checksum_algorithm, payload)
     completion_request = CompleteUploadRequest_DirectMultipart(
         content=UploadContentClaim(
             size_bytes=len(payload),

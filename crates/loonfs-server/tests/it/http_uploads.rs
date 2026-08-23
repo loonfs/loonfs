@@ -77,9 +77,11 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
 
     for body in [
         // A proxied begin has no geometry to ask for.
-        r#"{"mode":"service_proxied","multipart":{"part_size_bytes":8388608}}"#,
+        r#"{"mode":"service_proxied","part_size_bytes":8388608}"#,
         // A direct put cannot carry multipart geometry.
-        r#"{"mode":"direct_put","multipart":{"part_size_bytes":8388608}}"#,
+        r#"{"mode":"direct_put","part_size_bytes":8388608}"#,
+        // Nor does a multipart begin take a direct put's size hint.
+        r#"{"mode":"direct_multipart","size_bytes":5}"#,
         // A multipart begin promises nothing about its payload.
         r#"{"mode":"direct_multipart","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
         // And a request that does not say how it moves its bytes.

@@ -10,7 +10,7 @@
 use super::*;
 use crate::transport::test_transport::{self, Outcome};
 use futures::stream::StreamExt;
-use loonfs_api::v0::{DirectMultipartUpload, DirectPutUpload, UploadMode};
+use loonfs_api::v0::UploadMode;
 use loonfs_api::{
     CapabilityDocument, ContentId, ContentRef, ContentRefKind, FEATURE_UPLOADS_DIRECT_PUT,
     PROFILE_CORE_V0, PROTOCOL_VERSION,
@@ -196,14 +196,12 @@ fn begin_direct_put(checksum_algorithm: ChecksumAlgorithm) -> Outcome {
     json(&BeginUploadResponse::DirectPut {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
-        direct_put: DirectPutUpload {
-            checksum_algorithm,
-            access: ObjectTransferAccess::PresignedUrl {
-                method: "PUT".to_owned(),
-                url: "http://object.invalid/content".to_owned(),
-                headers: std::collections::BTreeMap::new(),
-                expires_at_ms: u64::MAX,
-            },
+        checksum_algorithm,
+        access: ObjectTransferAccess::PresignedUrl {
+            method: "PUT".to_owned(),
+            url: "http://object.invalid/content".to_owned(),
+            headers: std::collections::BTreeMap::new(),
+            expires_at_ms: u64::MAX,
         },
     })
 }
@@ -212,10 +210,8 @@ fn begin_multipart() -> Outcome {
     json(&BeginUploadResponse::DirectMultipart {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
-        direct_multipart: DirectMultipartUpload {
-            part_size_bytes: TEST_PART_BYTES,
-            checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-        },
+        part_size_bytes: TEST_PART_BYTES,
+        checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
     })
 }
 

@@ -82,9 +82,9 @@ use thiserror::Error;
 
 pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse, CommittedChange,
-    CompleteMultipartUploadRequest, CompleteUploadRequest, DirectPutUpload, FilesystemChange,
-    ObjectTransferAccess, UploadContentClaim, UploadContentResponse, UploadMode,
-    UploadSessionResponse, UploadSessionStatus,
+    CompleteMultipartUploadRequest, CompleteUploadRequest, FilesystemChange, ObjectTransferAccess,
+    UploadContentClaim, UploadContentResponse, UploadMode, UploadSessionResponse,
+    UploadSessionStatus,
 };
 pub use loonfs_api::{
     ActorId, ActorKind, ActorRef, AdvanceRetentionRequest, AdvanceRetentionResponse, AttributeKey,
@@ -201,10 +201,10 @@ pub use maintenance_runner::{
 };
 pub use options::{
     CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, ListChangesOptions, ListPathEntriesOptions,
-    MaintenancePlan, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
-    ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
-    UpdateAttributesOptions,
+    CreateNamespaceOptions, DeleteOptions, DirectMultipartUploadOptions, ListChangesOptions,
+    ListPathEntriesOptions, MaintenancePlan, MetadataMaintenanceOptions, MoveOptions,
+    PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions,
+    UndeleteOptions, UpdateAttributesOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

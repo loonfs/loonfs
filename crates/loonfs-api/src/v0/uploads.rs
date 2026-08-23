@@ -18,20 +18,6 @@ pub struct UploadContentClaim {
     pub checksum: Checksum,
 }
 
-/// Options for starting a direct multipart upload.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct DirectMultipartUploadOptions {
-    /// Byte length of every part except the last, or `None` for the
-    /// server's default.
-    ///
-    /// Providers accept at most 10,000 parts, so this value also limits the
-    /// maximum upload size. Clients can request larger parts for large files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub part_size_bytes: Option<u64>,
-}
-
 /// Upload transport mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -70,10 +56,11 @@ pub enum BeginUploadRequest {
     /// Write the object in parts through presigned part uploads.
     #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectMultipart"))]
     DirectMultipart {
-        /// Part size options. The server uses its default when omitted.
+        /// Byte length of every part except the last. The server uses its
+        /// default when this is omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        multipart: Option<DirectMultipartUploadOptions>,
+        part_size_bytes: Option<u64>,
     },
 }
 
@@ -109,27 +96,6 @@ pub enum ObjectTransferAccess {
         /// Expiration timestamp in Unix milliseconds.
         expires_at_ms: u64,
     },
-}
-
-/// Details for a direct PUT upload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DirectPutUpload {
-    /// Checksum algorithm the client must use for its completion claim.
-    pub checksum_algorithm: ChecksumAlgorithm,
-    /// Short-lived permission to write the object.
-    pub access: ObjectTransferAccess,
-}
-
-/// Settings returned for a direct multipart upload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DirectMultipartUpload {
-    /// Byte length of every part except the last. At most 10,000 parts may
-    /// be uploaded, so this bounds the object at `part_size_bytes × 10_000`.
-    pub part_size_bytes: u64,
-    /// Checksum algorithm for every part and for the complete payload.
-    pub checksum_algorithm: ChecksumAlgorithm,
 }
 
 /// One part's checksum, supplied by the client so the server can sign it
@@ -231,8 +197,10 @@ pub enum BeginUploadResponse {
         namespace_id: NamespaceId,
         /// Durable session identity used by subsequent completion calls.
         upload_id: UploadId,
-        /// The object this session writes, and the capability to write it.
-        direct_put: DirectPutUpload,
+        /// Checksum algorithm the client must use for its completion claim.
+        checksum_algorithm: ChecksumAlgorithm,
+        /// Short-lived permission to write the object.
+        access: ObjectTransferAccess,
     },
     /// Presigned part uploads assemble the object.
     #[cfg_attr(
@@ -245,8 +213,12 @@ pub enum BeginUploadResponse {
         /// Durable session identity used by subsequent part-signing and
         /// completion calls.
         upload_id: UploadId,
-        /// The geometry the client cuts its payload to.
-        direct_multipart: DirectMultipartUpload,
+        /// Byte length of every part except the last. At most 10,000 parts
+        /// may be uploaded, so this bounds the object at 10,000 times the
+        /// part size.
+        part_size_bytes: u64,
+        /// Checksum algorithm for every part and for the complete payload.
+        checksum_algorithm: ChecksumAlgorithm,
     },
 }
 
@@ -416,8 +388,8 @@ impl UploadSessionResponse {
 mod tests {
     use super::{
         BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, ContentToken,
-        DirectMultipartUpload, DirectPutUpload, ObjectTransferAccess, UploadContentClaim,
-        UploadMode, UploadSessionResponse, UploadSessionStatus,
+        ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSessionResponse,
+        UploadSessionStatus,
     };
     use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
@@ -447,16 +419,47 @@ mod tests {
     #[test]
     fn a_begin_request_carrying_another_modes_fields_does_not_decode() {
         for body in [
-            r#"{"mode":"service_proxied","multipart":{"part_size_bytes":8388608}}"#,
+            r#"{"mode":"service_proxied","part_size_bytes":8388608}"#,
             r#"{"mode":"service_proxied","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
             r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
             r#"{"mode":"direct_put","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
+            r#"{"mode":"direct_put","part_size_bytes":8388608}"#,
+            r#"{"mode":"direct_multipart","size_bytes":5}"#,
         ] {
             assert!(
                 serde_json::from_str::<BeginUploadRequest>(body).is_err(),
                 "decoded a begin request that mixes modes: {body}"
             );
         }
+    }
+
+    /// Multipart options are fields beside `mode`; an omitted part size uses
+    /// the server default.
+    #[test]
+    fn a_multipart_begin_names_its_part_size_beside_the_mode() {
+        assert_eq!(
+            serde_json::from_str::<BeginUploadRequest>(
+                r#"{"mode":"direct_multipart","part_size_bytes":8388608}"#
+            )
+            .expect("decode multipart begin request"),
+            BeginUploadRequest::DirectMultipart {
+                part_size_bytes: Some(8 * 1024 * 1024),
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<BeginUploadRequest>(r#"{"mode":"direct_multipart"}"#)
+                .expect("decode multipart begin without a part size"),
+            BeginUploadRequest::DirectMultipart {
+                part_size_bytes: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(BeginUploadRequest::DirectMultipart {
+                part_size_bytes: None,
+            })
+            .expect("serialize multipart begin request"),
+            serde_json::json!({ "mode": "direct_multipart" })
+        );
     }
 
     /// Each completion request includes only the fields for its upload mode.
@@ -527,14 +530,12 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             upload_id: UploadId::parse("upl_00000000000000000000000000000001")
                 .expect("valid upload id"),
-            direct_put: DirectPutUpload {
-                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-                access: ObjectTransferAccess::PresignedUrl {
-                    method: "PUT".to_owned(),
-                    url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
-                    headers: BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]),
-                    expires_at_ms: 1,
-                },
+            checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
+            access: ObjectTransferAccess::PresignedUrl {
+                method: "PUT".to_owned(),
+                url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
+                headers: BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]),
+                expires_at_ms: 1,
             },
         };
 
@@ -543,11 +544,9 @@ mod tests {
         assert!(!json.contains("object_key"));
     }
 
-    /// The bytes each transport answers with, pinned. A response names its
-    /// transport in `mode` and carries that transport's field and no other's,
-    /// which is the same wire the flat shape spelled by convention.
+    /// Pins the response shape for each upload mode.
     #[test]
-    fn a_begin_response_carries_only_its_transports_field() {
+    fn a_begin_response_carries_only_its_transports_fields() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let upload_id =
             UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id");
@@ -568,14 +567,12 @@ mod tests {
             serde_json::to_value(BeginUploadResponse::DirectPut {
                 namespace_id: namespace_id.clone(),
                 upload_id: upload_id.clone(),
-                direct_put: DirectPutUpload {
-                    checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-                    access: ObjectTransferAccess::PresignedUrl {
-                        method: "PUT".to_owned(),
-                        url: "https://bucket.example/object".to_owned(),
-                        headers: BTreeMap::new(),
-                        expires_at_ms: 1,
-                    },
+                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
+                access: ObjectTransferAccess::PresignedUrl {
+                    method: "PUT".to_owned(),
+                    url: "https://bucket.example/object".to_owned(),
+                    headers: BTreeMap::new(),
+                    expires_at_ms: 1,
                 },
             })
             .expect("serialize direct-put response"),
@@ -583,14 +580,12 @@ mod tests {
                 "mode": "direct_put",
                 "namespace_id": "demo",
                 "upload_id": "upl_00000000000000000000000000000001",
-                "direct_put": {
-                    "checksum_algorithm": "crc64nvme",
-                    "access": {
-                        "kind": "presigned_url",
-                        "method": "PUT",
-                        "url": "https://bucket.example/object",
-                        "expires_at_ms": 1
-                    }
+                "checksum_algorithm": "crc64nvme",
+                "access": {
+                    "kind": "presigned_url",
+                    "method": "PUT",
+                    "url": "https://bucket.example/object",
+                    "expires_at_ms": 1
                 }
             })
         );
@@ -599,20 +594,16 @@ mod tests {
             serde_json::to_value(BeginUploadResponse::DirectMultipart {
                 namespace_id,
                 upload_id,
-                direct_multipart: DirectMultipartUpload {
-                    part_size_bytes: 8 * 1024 * 1024,
-                    checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-                },
+                part_size_bytes: 8 * 1024 * 1024,
+                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             })
             .expect("serialize multipart response"),
             serde_json::json!({
                 "mode": "direct_multipart",
                 "namespace_id": "demo",
                 "upload_id": "upl_00000000000000000000000000000001",
-                "direct_multipart": {
-                    "part_size_bytes": 8 * 1024 * 1024,
-                    "checksum_algorithm": "crc64nvme"
-                }
+                "part_size_bytes": 8 * 1024 * 1024,
+                "checksum_algorithm": "crc64nvme"
             })
         );
     }

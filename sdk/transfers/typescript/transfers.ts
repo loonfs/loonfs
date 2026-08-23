@@ -248,12 +248,12 @@ async function stageDirectPut(
 ): Promise<StagedContent> {
     let upload: DirectPutBody;
     try {
-        requirePresignedMethod(begin.direct_put.access, "PUT", "direct PUT");
-        upload = await directPutBody(begin.direct_put.checksum_algorithm, bytes);
-        const response = await fetch(begin.direct_put.access.url, {
+        requirePresignedMethod(begin.access, "PUT", "direct PUT");
+        upload = await directPutBody(begin.checksum_algorithm, bytes);
+        const response = await fetch(begin.access.url, {
             redirect: "error",
-            method: begin.direct_put.access.method,
-            headers: begin.direct_put.access.headers,
+            method: begin.access.method,
+            headers: begin.access.headers,
             body: upload.body,
         });
         requireSuccessfulResponse(response, "direct PUT");
@@ -276,7 +276,7 @@ async function stageMultipart(
     bytes: Uint8Array,
     begin: LoonFS.BeginUploadResponse.DirectMultipart,
 ): Promise<StagedContent> {
-    const { checksum_algorithm: algorithm, part_size_bytes: partSize } = begin.direct_multipart;
+    const { checksum_algorithm: algorithm, part_size_bytes: partSize } = begin;
     if (!Number.isSafeInteger(partSize) || partSize <= 0) {
         throw new Error(`invalid multipart part size ${partSize}`);
     }

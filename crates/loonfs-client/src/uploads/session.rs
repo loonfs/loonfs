@@ -41,7 +41,7 @@ impl Client {
         self.begin_upload(
             namespace_id,
             &BeginUploadRequest::DirectMultipart {
-                multipart: Some(options),
+                part_size_bytes: options.part_size_bytes,
             },
         )
         .await

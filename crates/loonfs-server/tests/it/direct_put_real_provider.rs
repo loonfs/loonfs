@@ -6,10 +6,11 @@ use crate::common::{start_server, test_config};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
+    options::DirectMultipartUploadOptions,
     v0::{
         BeginUploadResponse, CompleteMultipartUploadRequest, CompleteUploadRequest,
-        DirectMultipartUpload, DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess,
-        UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
+        ObjectTransferAccess, UploadContentClaim, UploadMode, UploadPartChecksumClaim,
+        UploadSessionStatus,
     },
     ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse,
     DestinationBehavior, FilesystemOperation, NamespaceId,
@@ -60,20 +61,26 @@ fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> UploadContent
     }
 }
 
-/// Returns the direct PUT details from a begin response.
-fn direct_put_of(begin: &BeginUploadResponse) -> &DirectPutUpload {
+/// Extracts the checksum algorithm and write access from a direct PUT response.
+fn direct_put_of(begin: &BeginUploadResponse) -> (ChecksumAlgorithm, &ObjectTransferAccess) {
     match begin {
-        BeginUploadResponse::DirectPut { direct_put, .. } => direct_put,
+        BeginUploadResponse::DirectPut {
+            checksum_algorithm,
+            access,
+            ..
+        } => (*checksum_algorithm, access),
         other => panic!("a direct_put begin answered as {:?}", other.mode()),
     }
 }
 
 /// The part geometry a `direct_multipart` begin answered with.
-fn direct_multipart_of(begin: &BeginUploadResponse) -> DirectMultipartUpload {
+fn direct_multipart_of(begin: &BeginUploadResponse) -> (u64, ChecksumAlgorithm) {
     match begin {
         BeginUploadResponse::DirectMultipart {
-            direct_multipart, ..
-        } => *direct_multipart,
+            part_size_bytes,
+            checksum_algorithm,
+            ..
+        } => (*part_size_bytes, *checksum_algorithm),
         other => panic!("a direct_multipart begin answered as {:?}", other.mode()),
     }
 }
@@ -163,15 +170,12 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         .begin_direct_put(&namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
-    let direct_put = direct_put_of(&begin);
-    assert_eq!(
-        direct_put.checksum_algorithm,
-        signed_write.checksum_algorithm
-    );
+    let (checksum_algorithm, access) = direct_put_of(&begin);
+    assert_eq!(checksum_algorithm, signed_write.checksum_algorithm);
 
     harness
         .client
-        .upload_via_presigned_url(&direct_put.access, bytes)
+        .upload_via_presigned_url(access, bytes)
         .await
         .expect("upload bytes through presigned provider URL");
 
@@ -181,7 +185,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
             &namespace_id,
             begin.upload_id(),
             &CompleteUploadRequest::DirectPut {
-                content: direct_put_claim(bytes, direct_put.checksum_algorithm),
+                content: direct_put_claim(bytes, checksum_algorithm),
             },
         )
         .await
@@ -321,14 +325,11 @@ async fn assert_wrong_direct_put_bytes_rejected(
         .begin_direct_put(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin wrong-bytes direct put");
-    let direct_put = direct_put_of(&begin);
-    assert_eq!(
-        direct_put.checksum_algorithm,
-        signed_write.checksum_algorithm
-    );
+    let (checksum_algorithm, access) = direct_put_of(&begin);
+    assert_eq!(checksum_algorithm, signed_write.checksum_algorithm);
 
     client
-        .upload_via_presigned_url(&direct_put.access, wrong_bytes)
+        .upload_via_presigned_url(access, wrong_bytes)
         .await
         .expect("the provider accepts a checksum-less direct PUT");
     expect_client_rejection(
@@ -337,7 +338,7 @@ async fn assert_wrong_direct_put_bytes_rejected(
                 namespace_id,
                 begin.upload_id(),
                 &CompleteUploadRequest::DirectPut {
-                    content: direct_put_claim(bytes, direct_put.checksum_algorithm),
+                    content: direct_put_claim(bytes, checksum_algorithm),
                 },
             )
             .await,
@@ -366,11 +367,11 @@ async fn assert_direct_put_requires_its_signed_headers(
             .begin_direct_put(namespace_id, Some(bytes.len() as u64))
             .await
             .expect("begin meddled direct put");
-        let direct_put = direct_put_of(&begin);
+        let (checksum_algorithm, access) = direct_put_of(&begin);
 
         expect_client_rejection(
             client
-                .upload_via_presigned_url(&meddle.apply(&direct_put.access), bytes)
+                .upload_via_presigned_url(&meddle.apply(access), bytes)
                 .await,
             label,
         );
@@ -382,7 +383,7 @@ async fn assert_direct_put_requires_its_signed_headers(
                     namespace_id,
                     begin.upload_id(),
                     &CompleteUploadRequest::DirectPut {
-                        content: direct_put_claim(bytes, direct_put.checksum_algorithm),
+                        content: direct_put_claim(bytes, checksum_algorithm),
                     },
                 )
                 .await,
@@ -403,20 +404,15 @@ async fn assert_direct_put_is_no_replace(
         .begin_direct_put(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin duplicate direct put");
-    let direct_put = direct_put_of(&begin);
-    assert_eq!(
-        direct_put.checksum_algorithm,
-        signed_write.checksum_algorithm
-    );
+    let (checksum_algorithm, access) = direct_put_of(&begin);
+    assert_eq!(checksum_algorithm, signed_write.checksum_algorithm);
 
     client
-        .upload_via_presigned_url(&direct_put.access, bytes)
+        .upload_via_presigned_url(access, bytes)
         .await
         .expect("first direct put succeeds");
     expect_client_rejection(
-        client
-            .upload_via_presigned_url(&direct_put.access, bytes)
-            .await,
+        client.upload_via_presigned_url(access, bytes).await,
         "duplicate direct put",
     );
 
@@ -425,7 +421,7 @@ async fn assert_direct_put_is_no_replace(
             namespace_id,
             begin.upload_id(),
             &CompleteUploadRequest::DirectPut {
-                content: direct_put_claim(bytes, direct_put.checksum_algorithm),
+                content: direct_put_claim(bytes, checksum_algorithm),
             },
         )
         .await
@@ -708,10 +704,10 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
         .begin_direct_put(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
-    let direct_put = direct_put_of(&begin);
-    assert_eq!(direct_put.checksum_algorithm, ChecksumAlgorithm::Crc32c);
+    let (checksum_algorithm, access) = direct_put_of(&begin);
+    assert_eq!(checksum_algorithm, ChecksumAlgorithm::Crc32c);
     client
-        .upload_via_presigned_url(&direct_put.access, bytes)
+        .upload_via_presigned_url(access, bytes)
         .await
         .expect("upload the promised bytes");
 
@@ -720,7 +716,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
             namespace_id,
             begin.upload_id(),
             &CompleteUploadRequest::DirectPut {
-                content: direct_put_claim(bytes, direct_put.checksum_algorithm),
+                content: direct_put_claim(bytes, checksum_algorithm),
             },
         )
         .await
@@ -749,8 +745,8 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
         .begin_direct_put(&namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
-    let direct_put = direct_put_of(&begin);
-    let ObjectTransferAccess::PresignedUrl { url, .. } = &direct_put.access;
+    let (_, access) = direct_put_of(&begin);
+    let ObjectTransferAccess::PresignedUrl { url, .. } = access;
     let StoreConfig::GcpGcs {
         bucket, key_prefix, ..
     } = store_config
@@ -772,7 +768,7 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
 
     harness
         .client
-        .upload_via_presigned_url(&direct_put.access, bytes)
+        .upload_via_presigned_url(access, bytes)
         .await
         .expect("upload under the prefix");
 
@@ -854,8 +850,8 @@ async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id:
         .begin_direct_put(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
-    let direct_put = direct_put_of(&begin);
-    let ObjectTransferAccess::PresignedUrl { url, .. } = &direct_put.access;
+    let (_, access) = direct_put_of(&begin);
+    let ObjectTransferAccess::PresignedUrl { url, .. } = access;
 
     // Rewrite the capability's own lifetime to one already spent. The
     // signature covered the original, so this is refused twice over — which
@@ -1008,12 +1004,12 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .await
         .expect("begin direct multipart");
     let upload_id = begin.upload_id().clone();
-    let multipart = direct_multipart_of(&begin);
+    let (part_size_bytes, checksum_algorithm) = direct_multipart_of(&begin);
     assert_eq!(
-        multipart.part_size_bytes as usize, part_size,
+        part_size_bytes as usize, part_size,
         "the deployment's part geometry is the one this payload was cut to"
     );
-    assert_eq!(multipart.checksum_algorithm, ChecksumAlgorithm::Crc64nvme);
+    assert_eq!(checksum_algorithm, ChecksumAlgorithm::Crc64nvme);
 
     let chunks: Vec<&[u8]> = payload.chunks(part_size).collect();
     let claims: Vec<UploadPartChecksumClaim> = chunks
@@ -1021,7 +1017,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .enumerate()
         .map(|(index, chunk)| UploadPartChecksumClaim {
             part_number: index as u32 + 1,
-            checksum: Checksum::compute(multipart.checksum_algorithm, chunk),
+            checksum: Checksum::compute(checksum_algorithm, chunk),
         })
         .collect();
     let signed = harness
