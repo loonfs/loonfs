@@ -62,12 +62,8 @@ pub(super) enum LocalityGrouping {
     LeadingKeyComponents(usize),
 }
 
-/// The locality group a row key belongs to, as a slice of the key itself.
-///
-/// The family's own prefix is stripped, so two families of one cluster name
-/// the same group with the same string: a bind's `direntry-{parent}-{name}`
-/// and its unbind's `direntry-unbind-{parent}-{name}` both read as
-/// `{parent}-{name}`.
+/// Returns the row's locality group after removing the family prefix. Bind
+/// and unbind rows for the same parent and name therefore share a group.
 pub(super) fn locality_of(
     family: MetadataRowFamily,
     row_key: &str,

@@ -293,11 +293,11 @@ checksum only after completion verifies the provider's stored object.
 
 The metadata row families are canonical metadata families and validated
 derived families. The canonical families are `inodes`,
-`direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`,
-`commit-receipts`, and `attributes`. The `direntry-child-binds` family is a
+`direntry_binds`, `direntry_unbinds`, `revisions`, `tombstones`,
+`commit_receipts`, and `attributes`. The `direntry_child_binds` family is a
 secondary index over the same direntry bind rows, keyed by child inode, and
 must be present and verified before a namespace manifest is trusted. The
-`active-deletions` family is derived from the tombstone rows and holds current
+`active_deletions` family is derived from the tombstone rows and holds current
 state rather than events (section 2.5).
 
 The `attributes` family holds one row per attribute revision of one inode.
@@ -306,10 +306,10 @@ Each row carries `inode_id`, `attributes_revision_no`, `committed_seq`,
 key is
 
 ```text
-attributes-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}
+attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}
 ```
 
-and its bloom-filter lookup prefix is `attributes-{inode_id:020}`. The
+and its bloom-filter lookup prefix is `attribute-{inode_id:020}`. The
 revision, the sequence, and the delta index are all stored inverted, so an
 ascending scan of one inode's prefix reads its newest attribute state first
 and a read at a sequence takes the first row at or below it. The family
@@ -766,7 +766,7 @@ the generation as `tombstone_seq` and `tombstone_delta_index` beside
 independent optional `parent_inode_id`, `name_key`, and `display_name`
 fields does not decode.
 
-The `active-deletions` family tracks deletions that can still be restored. A
+The `active_deletions` family tracks deletions that can still be restored. A
 `set` tombstone creates a `listed` row keyed by `(deletion_seq,
 root_inode_id)`. The API exposes `root_inode_id` as `inode_id`. The row also
 stores the deletion time and `deleted_direntry`.
@@ -1933,6 +1933,33 @@ share a sequence, and two family groups routinely share one base run — they
 rebuild at the same manifest head — but within one run each family has
 exactly one producer.
 
+##### Row-key grammar
+
+A row key contains hyphen-separated components. The first component is the singular, kebab-case family name. Numeric components use fixed-width decimal encoding: 20 digits for `u64` and 10 for `u32`. This makes byte order match numeric order. String components such as `name_key` and `commit_id` use the lowercase hexadecimal encoding of their UTF-8 bytes.
+
+The row's `kind` and its family serve different purposes. A row kind may appear in multiple families, so their names do not need to match. For example, a `file_revision` row appears in both `revisions` and `revisions_by_inode_desc`.
+
+The ten families and their exact grammar:
+
+| Family | Row key | Filter key |
+| --- | --- | --- |
+| `inodes` | `inode-{inode_id:020}` | the row key |
+| `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{bind_seq:020}-{bind_delta_index:010}` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}` |
+| `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{bind_seq:020}-{bind_delta_index:010}-{parent_inode_id:020}-{name_key_hex}` | `direntry-child-bind-{child_inode_id:020}` |
+| `direntry_unbinds` | `direntry-unbind-{parent_inode_id:020}-{name_key_hex}-{bind_seq:020}-{bind_delta_index:010}-{unbind_seq:020}-{unbind_delta_index:010}` | `direntry-unbind-{parent_inode_id:020}-{name_key_hex}` |
+| `revisions` | `revision-{inode_id:020}-{revision_no:020}-{delta_index:010}` | `revision-{inode_id:020}` |
+| `revisions_by_inode_desc` | `revision-by-inode-desc-{inode_id:020}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` | `revision-by-inode-desc-{inode_id:020}` |
+| `tombstones` | `tombstone-{root_inode_id:020}-{generation.seq:020}-{generation.delta_index:010}` | `tombstone-{root_inode_id:020}` |
+| `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` | the row key |
+| `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` | `commit-receipt-{commit_id_hex}` |
+| `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` | `attribute-{inode_id:020}` |
+
+`direntry_binds` and `direntry_child_binds` store the same `direntry_bind` rows under different keys. The two revision families do the same for `file_revision` rows. A row key therefore depends on both the row and its family.
+
+The `inodes` and `active_deletions` families store the full row key in the filter. Inode lookups already know the full key, while active deletions are read only by range scans.
+
+The active-deletion rank is `0000000000` for a removal marker and `0000000001` for a listed deletion. This order lets a scan process the removal first. Components written as `MAX - x` are inverted so ascending scans return the largest values first.
+
 #### 4.2.2 Grep roots, manifests, and gram-index segments
 
 `loonfs-grep` owns all grep durability under the namespace extension prefix:
@@ -2177,7 +2204,7 @@ complete. Tombstone rows — set and revoke events alike — and inode rows are
 always retained for now; reachability-based dropping for them is future
 work.
 
-The `active-deletions` family holds current state rather than history, so the
+The `active_deletions` family holds current state rather than history, so the
 retention floor has no say over it at all: a `listed` row is never dropped
 however far the floor advances, because a deletion stays recoverable
 indefinitely and dropping the row would silently retire it. The only rows a

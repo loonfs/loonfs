@@ -247,14 +247,9 @@ impl ActiveDeletionRetention {
     }
 }
 
-/// Forward bind rows and the unbinds that retire them, one binding generation
-/// at a time.
-///
-/// A bind's row key *is* its generation — `direntry-{parent}-{name}-{bind_seq}
-/// -{bind_delta}` — and an unbind's key leads with the generation it retires,
-/// so a locality group of four key components holds one bind and the unbinds
-/// of that one bind. The bind arrives first, because its family sorts first,
-/// and the verdict on it is delivered when the group closes.
+/// Processes one binding generation at a time. Each locality group contains
+/// one bind and the unbind rows that can retire it. The bind sorts first and
+/// is retained or removed when the group ends.
 ///
 /// The one thing that outlives a generation is the slot invariant below: at
 /// or below the floor only the latest bind in a slot may stand un-retired, and

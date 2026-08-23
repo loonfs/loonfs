@@ -60,7 +60,7 @@ pub(super) async fn rewrite_manifest_segment(
 fn assert_child_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
     match result {
         Err(ManifestLoadError::SegmentDescriptorMismatch { message, .. }) => {
-            assert!(message.contains("direntry-child-binds index"));
+            assert!(message.contains("direntry_child_binds index"));
         }
         Err(other) => panic!("expected child index mismatch, got {other:?}"),
         Ok(_) => panic!("expected child index mismatch"),
@@ -636,11 +636,11 @@ async fn base_rebuild_retains_revisions_superseded_below_floor() {
     let checksum_two = Checksum::sha256(b"two\n");
     assert!(revisions.iter().any(|row| matches!(
         row,
-        MetadataRow::Revision { content_ref, .. } if content_ref.checksum == checksum_one
+        MetadataRow::FileRevision { content_ref, .. } if content_ref.checksum == checksum_one
     )));
     assert!(revisions.iter().any(|row| matches!(
         row,
-        MetadataRow::Revision { content_ref, .. } if content_ref.checksum == checksum_two
+        MetadataRow::FileRevision { content_ref, .. } if content_ref.checksum == checksum_two
     )));
     let index_rows = manifest_rows_for_family(
         &materialized.metadata_state,
@@ -756,7 +756,7 @@ async fn bounded_subset_rebuild_rejects_divergent_revision_index() {
     let (_, mut manifest, mut revision_index_rows) =
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     let first = revision_index_rows.first_mut().expect("revision index row");
-    if let MetadataRow::Revision { content_ref, .. } = first {
+    if let MetadataRow::FileRevision { content_ref, .. } = first {
         content_ref.content_id = ContentId::generate();
     }
     rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
@@ -1069,7 +1069,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     let child_segment = child_binds.segments.first().expect("child bind segment");
     assert!(child_segment
         .min_key
-        .starts_with("direntry-child-000000000000000000"));
+        .starts_with("direntry-child-bind-000000000000000000"));
 
     let deleted_key = child_segment.object_key.clone();
     store
@@ -1280,23 +1280,23 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
         .expect("revision index row")
         .clone();
     revision_index_rows.push(match extra_row {
-        MetadataRow::Revision {
+        MetadataRow::FileRevision {
             inode_id,
             revision_no,
             committed_seq,
             commit_id,
             committed_at_ms,
             actor,
-            revision_delta_index,
+            delta_index,
             content_ref,
-        } => MetadataRow::Revision {
+        } => MetadataRow::FileRevision {
             inode_id,
             revision_no: loonfs_api::RevisionNo(revision_no.0 + 100),
             committed_seq,
             commit_id,
             committed_at_ms,
             actor,
-            revision_delta_index,
+            delta_index,
             content_ref,
         },
         other => other,
@@ -1332,7 +1332,7 @@ async fn manifest_rejects_revision_desc_index_changed_content_ref() {
     let (manifest_no, mut manifest, mut revision_index_rows) =
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     let first = revision_index_rows.first_mut().expect("revision index row");
-    if let MetadataRow::Revision { content_ref, .. } = first {
+    if let MetadataRow::FileRevision { content_ref, .. } = first {
         content_ref.content_id = ContentId::generate();
     }
     rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;

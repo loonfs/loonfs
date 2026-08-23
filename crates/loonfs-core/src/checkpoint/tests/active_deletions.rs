@@ -89,7 +89,7 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
     assert_eq!(
         active_deletion_rows(&deleted),
         vec![(
-            "active-deletion-00000000000000000005-00000000000000000007-1".to_owned(),
+            "active-deletion-00000000000000000005-00000000000000000007-0000000001".to_owned(),
             "listed"
         )],
         "a delete adds exactly one listed row, keyed by its own generation"
@@ -103,11 +103,11 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
         active_deletion_rows(&undeleted),
         vec![
             (
-                "active-deletion-00000000000000000005-00000000000000000007-0".to_owned(),
+                "active-deletion-00000000000000000005-00000000000000000007-0000000000".to_owned(),
                 "removed"
             ),
             (
-                "active-deletion-00000000000000000005-00000000000000000007-1".to_owned(),
+                "active-deletion-00000000000000000005-00000000000000000007-0000000001".to_owned(),
                 "listed"
             ),
         ],
@@ -126,8 +126,8 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
             .map(|(row_key, _)| row_key)
             .collect::<Vec<_>>(),
         vec![
-            "active-deletion-00000000000000000005-00000000000000000007-1".to_owned(),
-            "active-deletion-00000000000000000012-00000000000000000007-1".to_owned(),
+            "active-deletion-00000000000000000005-00000000000000000007-0000000001".to_owned(),
+            "active-deletion-00000000000000000012-00000000000000000007-0000000001".to_owned(),
         ],
         "a re-delete lands at a new sequence and adds a new row"
     );
@@ -191,8 +191,8 @@ fn the_fold_drops_cancelled_pairs_and_keeps_every_live_deletion() {
     assert_eq!(
         kept,
         vec![
-            "active-deletion-00000000000000000011-00000000000000000008-1".to_owned(),
-            "active-deletion-00000000000000000012-00000000000000000007-1".to_owned(),
+            "active-deletion-00000000000000000011-00000000000000000008-0000000001".to_owned(),
+            "active-deletion-00000000000000000012-00000000000000000007-0000000001".to_owned(),
         ],
         "the cancelled pair goes and both live deletions stay, however far the floor advanced"
     );

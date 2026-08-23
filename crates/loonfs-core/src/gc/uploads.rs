@@ -389,7 +389,7 @@ pub(super) async fn collect_referenced_content<S: ObjectStore + ?Sized>(
                 None => break,
             }
             for (_, row) in rows {
-                if let MetadataRow::Revision { content_ref, .. } = row {
+                if let MetadataRow::FileRevision { content_ref, .. } = row {
                     referenced.insert(content_ref.content_id);
                 }
             }

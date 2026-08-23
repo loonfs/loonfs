@@ -167,7 +167,7 @@ pub(super) fn validate_direntry_child_bind_index(
     if direntry_bind_rows != direntry_child_bind_rows {
         return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: object_key.to_owned(),
-            message: "direntry-child-binds index does not match canonical direntry-binds"
+            message: "direntry_child_binds index does not match canonical direntry_binds"
                 .to_owned(),
         });
     }
