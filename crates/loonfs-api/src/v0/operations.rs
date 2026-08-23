@@ -593,12 +593,12 @@ pub enum FlushWalOutcome {
     AlreadyCurrent,
     /// This call published a new manifest and advanced the root to it.
     Published,
-    /// This call published a manifest, but a newer root already covered
-    /// the attempted sequence.
-    Superseded,
+    /// Another publisher updated the root first, so this call's manifest is
+    /// not referenced by the root.
+    RootAdvanced,
 }
 
-/// Result of one WAL flush: how the metadata root covers the head.
+/// Result of one WAL flush: what the metadata root references afterward.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FlushWalResponse {
@@ -610,7 +610,7 @@ pub struct FlushWalResponse {
     pub manifest_no: ManifestNo,
     /// Sequence covered by that manifest.
     pub manifest_head_seq: ChangeSeq,
-    /// How the root came to cover the head.
+    /// What this call did to the metadata root.
     pub outcome: FlushWalOutcome,
 }
 
@@ -973,17 +973,18 @@ pub enum WalFlushStepOutcome {
         /// Sequence covered by the published manifest.
         manifest_head_seq: ChangeSeq,
     },
-    /// The root already covered the attempted sequence — another publisher
-    /// got there first.
-    Superseded {
+    /// The step did not update the root because it already referenced a
+    /// different manifest.
+    AlreadyPublished {
         /// Sequence this step attempted to flush through.
         attempted_seq: ChangeSeq,
         /// Manifest the root currently references.
         current_manifest_no: ManifestNo,
     },
-    /// A concurrent head update won the race.
-    RaceLost {
-        /// Head sequence observed before the advance attempt.
+    /// Concurrent updates prevented every attempt from publishing. Nothing
+    /// was flushed, and a later step can try again.
+    RetriesExhausted {
+        /// Head sequence observed before the step ran.
         observed_head_seq: ChangeSeq,
     },
 }
@@ -1016,8 +1017,9 @@ pub enum ReorganizeStepOutcome {
     /// background work, so nothing will run one until an operator does. The
     /// self-hosting guide names the call.
     CompactionRequired,
-    /// Another publisher advanced the root first; a later step retries.
-    Superseded,
+    /// Another publisher updated the metadata root first. This step's
+    /// manifest is unreferenced, and a later step can retry the merge.
+    RootAdvanced,
 }
 
 /// Result of one explicit maintenance step.

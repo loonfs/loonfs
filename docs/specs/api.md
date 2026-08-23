@@ -797,10 +797,14 @@ This request selects all three actions:
 
 Each selected action reports under the same field that selected it. `metadata_maintenance` contains `wal_flush` and `reorganize`, `retention` contains `retention_floor_seq`, and `gc` contains the collection result. An absent field means the action was not selected. Compare `retention.retention_floor_seq` with `status_before.retention_floor_seq` to see whether the floor moved. Races and supersessions are outcomes, not errors.
 
+Outcome names describe what the step observed. The same name has the same meaning in every maintenance response.
+
 A deleted namespace accepts a step that names `gc` alone, which is how its
 reclaimable state is collected; naming anything else is refused with
 `namespace_deleted`, because a tombstone has nothing to flush, reorganize,
 or retain.
+
+`wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold. `flushed` means this step published a manifest and updated the root. `already_published` means the root already referenced a different manifest, so this step did not update it. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
 
 Four reorganize outcomes describe work the step did not do itself. A family
 group that has outgrown one step is rebuilt by a background streaming
@@ -816,6 +820,8 @@ none and a later step plans the group again. `compaction_required` means the
 group needs a job and the handle serving the request has no background work
 behind it at all, so nothing will run one until an operator does; the
 self-hosting guide names the call.
+
+`root_advanced` means another publisher updated the metadata root first. The manifest written by this step remains unreferenced, and a later GC pass can delete it. A later maintenance step retries the reorganization.
 
 Inside `metadata_maintenance`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request includes `retention`. Inside `gc`, `grace_window_ms` overrides the grace window, `max_objects` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
 `max_objects` bounds the whole pass, from its first read to its last, and

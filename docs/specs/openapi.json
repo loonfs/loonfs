@@ -5189,7 +5189,7 @@
             "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired"
           },
           {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeSuperseded"
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeRootAdvanced"
           }
         ],
         "description": "What the metadata-reorganization part of a maintenance step did.\n\nDeliberately coarse: the run counts and byte budgets a reorganization\nconsumes are engine policy, not a wire contract.",
@@ -5202,7 +5202,7 @@
             "compaction_running": "#/components/schemas/ReorganizeStepOutcomeCompactionRunning",
             "compaction_at_capacity": "#/components/schemas/ReorganizeStepOutcomeCompactionAtCapacity",
             "compaction_required": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired",
-            "superseded": "#/components/schemas/ReorganizeStepOutcomeSuperseded"
+            "root_advanced": "#/components/schemas/ReorganizeStepOutcomeRootAdvanced"
           }
         }
       },
@@ -5558,10 +5558,10 @@
             "$ref": "#/components/schemas/WalFlushStepOutcomeFlushed"
           },
           {
-            "$ref": "#/components/schemas/WalFlushStepOutcomeSuperseded"
+            "$ref": "#/components/schemas/WalFlushStepOutcomeAlreadyPublished"
           },
           {
-            "$ref": "#/components/schemas/WalFlushStepOutcomeRaceLost"
+            "$ref": "#/components/schemas/WalFlushStepOutcomeRetriesExhausted"
           }
         ],
         "description": "What the WAL-flush part of a maintenance step did.",
@@ -5570,8 +5570,8 @@
           "mapping": {
             "not_needed": "#/components/schemas/WalFlushStepOutcomeNotNeeded",
             "flushed": "#/components/schemas/WalFlushStepOutcomeFlushed",
-            "superseded": "#/components/schemas/WalFlushStepOutcomeSuperseded",
-            "race_lost": "#/components/schemas/WalFlushStepOutcomeRaceLost"
+            "already_published": "#/components/schemas/WalFlushStepOutcomeAlreadyPublished",
+            "retries_exhausted": "#/components/schemas/WalFlushStepOutcomeRetriesExhausted"
           }
         }
       },
@@ -6772,7 +6772,7 @@
           }
         }
       },
-      "ReorganizeStepOutcomeSuperseded": {
+      "ReorganizeStepOutcomeRootAdvanced": {
         "type": "object",
         "required": [
           "outcome"
@@ -6781,7 +6781,7 @@
           "outcome": {
             "type": "string",
             "enum": [
-              "superseded"
+              "root_advanced"
             ]
           }
         }
@@ -6941,9 +6941,9 @@
           }
         }
       },
-      "WalFlushStepOutcomeSuperseded": {
+      "WalFlushStepOutcomeAlreadyPublished": {
         "type": "object",
-        "description": "The root already covered the attempted sequence — another publisher\ngot there first.",
+        "description": "The step did not update the root because it already referenced a\ndifferent manifest.",
         "required": [
           "attempted_seq",
           "current_manifest_no",
@@ -6961,14 +6961,14 @@
           "outcome": {
             "type": "string",
             "enum": [
-              "superseded"
+              "already_published"
             ]
           }
         }
       },
-      "WalFlushStepOutcomeRaceLost": {
+      "WalFlushStepOutcomeRetriesExhausted": {
         "type": "object",
-        "description": "A concurrent head update won the race.",
+        "description": "Concurrent updates prevented every attempt from publishing. Nothing\nwas flushed, and a later step can try again.",
         "required": [
           "observed_head_seq",
           "outcome"
@@ -6976,12 +6976,12 @@
         "properties": {
           "observed_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Head sequence observed before the advance attempt."
+            "description": "Head sequence observed before the step ran."
           },
           "outcome": {
             "type": "string",
             "enum": [
-              "race_lost"
+              "retries_exhausted"
             ]
           }
         }

@@ -271,7 +271,8 @@ fn metadata_has_nothing_to_maintain(error: &RuntimeError) -> bool {
 fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceStepConclusion {
     let flush = match step.wal_flush {
         WalFlushStepOutcome::Flushed { .. } => Some(MaintenanceStepConclusion::Progressed),
-        WalFlushStepOutcome::Superseded { .. } | WalFlushStepOutcome::RaceLost { .. } => {
+        WalFlushStepOutcome::AlreadyPublished { .. }
+        | WalFlushStepOutcome::RetriesExhausted { .. } => {
             Some(MaintenanceStepConclusion::Superseded)
         }
         WalFlushStepOutcome::NotNeeded => None,
@@ -282,7 +283,7 @@ fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceStepCon
         | ReorganizeStepOutcome::CompactionAtCapacity => {
             Some(MaintenanceStepConclusion::Progressed)
         }
-        ReorganizeStepOutcome::Superseded => Some(MaintenanceStepConclusion::Superseded),
+        ReorganizeStepOutcome::RootAdvanced => Some(MaintenanceStepConclusion::Superseded),
         ReorganizeStepOutcome::CompactionRunning | ReorganizeStepOutcome::CompactionRequired => {
             Some(MaintenanceStepConclusion::Blocked)
         }
@@ -405,26 +406,26 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_race_is_superseded_and_an_unfittable_unit_is_blocked() {
-        let raced = step_response(
-            WalFlushStepOutcome::RaceLost {
+    fn exhausted_retries_are_superseded_and_an_unfittable_unit_is_blocked() {
+        let exhausted = step_response(
+            WalFlushStepOutcome::RetriesExhausted {
                 observed_head_seq: ChangeSeq(3),
             },
             ReorganizeStepOutcome::NotNeeded,
         );
         assert_eq!(
-            metadata_conclusion(&raced),
+            metadata_conclusion(&exhausted),
             MaintenanceStepConclusion::Superseded
         );
-        let superseded = step_response(
-            WalFlushStepOutcome::Superseded {
+        let already_published = step_response(
+            WalFlushStepOutcome::AlreadyPublished {
                 attempted_seq: ChangeSeq(3),
                 current_manifest_no: ManifestNo(9),
             },
             ReorganizeStepOutcome::NotNeeded,
         );
         assert_eq!(
-            metadata_conclusion(&superseded),
+            metadata_conclusion(&already_published),
             MaintenanceStepConclusion::Superseded
         );
         let blocked = step_response(
