@@ -53,7 +53,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/changes": {
@@ -152,7 +152,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/commits": {
@@ -249,7 +249,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "replay"
+        "x-loonfs-retry": "replayable"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/content": {
@@ -359,7 +359,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/downloads": {
@@ -456,7 +456,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/entries": {
@@ -574,7 +574,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe",
+        "x-loonfs-retry": "idempotent",
         "x-fern-pagination": {
           "cursor": "$request.cursor",
           "next_cursor": "$response.next_cursor",
@@ -675,7 +675,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/revisions": {
@@ -783,7 +783,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe",
+        "x-loonfs-retry": "idempotent",
         "x-fern-pagination": {
           "cursor": "$request.cursor",
           "next_cursor": "$response.next_cursor",
@@ -887,7 +887,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe",
+        "x-loonfs-retry": "idempotent",
         "x-fern-pagination": {
           "cursor": "$request.cursor",
           "next_cursor": "$response.next_cursor",
@@ -1059,7 +1059,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe",
+        "x-loonfs-retry": "idempotent",
         "x-fern-pagination": {
           "cursor": "$request.cursor",
           "next_cursor": "$response.next_cursor",
@@ -1171,7 +1171,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "new_attempt"
+        "x-loonfs-retry": "not_idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}": {
@@ -1257,7 +1257,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort": {
@@ -1353,7 +1353,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/complete": {
@@ -1470,7 +1470,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "replay"
+        "x-loonfs-retry": "replayable"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/content": {
@@ -1591,7 +1591,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/parts": {
@@ -1717,7 +1717,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "idempotent"
       }
     }
   },

@@ -38,9 +38,9 @@ pub(crate) const PROXY_OPERATIONS: &[&str] = &[
 /// Retry behavior for generated SDKs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RetryClass {
-    Safe,
-    Replay,
-    NewAttempt,
+    Idempotent,
+    Replayable,
+    NotIdempotent,
 }
 
 /// Cursor list operations supported by generated SDK pagination. Keep this table sorted.
@@ -60,9 +60,9 @@ pub(crate) const PAGINATION_OPERATIONS: &[&str] = &[
 impl RetryClass {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::Safe => "safe",
-            Self::Replay => "replay",
-            Self::NewAttempt => "new_attempt",
+            Self::Idempotent => "idempotent",
+            Self::Replayable => "replayable",
+            Self::NotIdempotent => "not_idempotent",
         }
     }
 }
@@ -128,43 +128,43 @@ pub(crate) enum OpenapiPostprocessError {
 
 /// Retry class for each public operation.
 pub(crate) const OPERATION_RETRY_CLASSES: &[(&str, RetryClass)] = &[
-    ("abort_upload", RetryClass::Safe),
-    ("complete_upload", RetryClass::Replay),
-    ("create_checkpoint", RetryClass::NewAttempt),
-    ("create_commit", RetryClass::Replay),
-    ("create_download", RetryClass::Safe),
-    ("create_download_by_inode", RetryClass::Safe),
-    ("create_namespace", RetryClass::NewAttempt),
-    ("create_upload", RetryClass::NewAttempt),
-    ("delete_namespace", RetryClass::NewAttempt),
-    ("disable_grep_index", RetryClass::Safe),
-    ("enable_grep_index", RetryClass::Safe),
-    ("fork_namespace", RetryClass::NewAttempt),
-    ("gc_grep_index", RetryClass::NewAttempt),
-    ("get_capabilities", RetryClass::Safe),
-    ("get_file_bytes", RetryClass::Safe),
-    ("get_file_revision_bytes_by_inode", RetryClass::Safe),
-    ("get_grep_index", RetryClass::Safe),
-    ("get_health", RetryClass::Safe),
-    ("get_inode", RetryClass::Safe),
-    ("get_metrics", RetryClass::Safe),
-    ("get_namespace", RetryClass::Safe),
-    ("get_namespace_diagnostics", RetryClass::Safe),
-    ("get_path_entry", RetryClass::Safe),
-    ("get_readiness", RetryClass::Safe),
-    ("get_upload", RetryClass::Safe),
-    ("grep", RetryClass::Safe),
-    ("list_changes", RetryClass::Safe),
-    ("list_checkpoints", RetryClass::Safe),
-    ("list_file_revisions", RetryClass::Safe),
-    ("list_file_revisions_by_inode", RetryClass::Safe),
-    ("list_path_entries", RetryClass::Safe),
-    ("list_trash", RetryClass::Safe),
-    ("probe_store", RetryClass::NewAttempt),
-    ("put_upload_content", RetryClass::Safe),
-    ("release_checkpoint", RetryClass::Safe),
-    ("run_maintenance", RetryClass::NewAttempt),
-    ("sign_upload_parts", RetryClass::Safe),
+    ("abort_upload", RetryClass::Idempotent),
+    ("complete_upload", RetryClass::Replayable),
+    ("create_checkpoint", RetryClass::NotIdempotent),
+    ("create_commit", RetryClass::Replayable),
+    ("create_download", RetryClass::Idempotent),
+    ("create_download_by_inode", RetryClass::Idempotent),
+    ("create_namespace", RetryClass::NotIdempotent),
+    ("create_upload", RetryClass::NotIdempotent),
+    ("delete_namespace", RetryClass::NotIdempotent),
+    ("disable_grep_index", RetryClass::Idempotent),
+    ("enable_grep_index", RetryClass::Idempotent),
+    ("fork_namespace", RetryClass::NotIdempotent),
+    ("gc_grep_index", RetryClass::NotIdempotent),
+    ("get_capabilities", RetryClass::Idempotent),
+    ("get_file_bytes", RetryClass::Idempotent),
+    ("get_file_revision_bytes_by_inode", RetryClass::Idempotent),
+    ("get_grep_index", RetryClass::Idempotent),
+    ("get_health", RetryClass::Idempotent),
+    ("get_inode", RetryClass::Idempotent),
+    ("get_metrics", RetryClass::Idempotent),
+    ("get_namespace", RetryClass::Idempotent),
+    ("get_namespace_diagnostics", RetryClass::Idempotent),
+    ("get_path_entry", RetryClass::Idempotent),
+    ("get_readiness", RetryClass::Idempotent),
+    ("get_upload", RetryClass::Idempotent),
+    ("grep", RetryClass::Idempotent),
+    ("list_changes", RetryClass::Idempotent),
+    ("list_checkpoints", RetryClass::Idempotent),
+    ("list_file_revisions", RetryClass::Idempotent),
+    ("list_file_revisions_by_inode", RetryClass::Idempotent),
+    ("list_path_entries", RetryClass::Idempotent),
+    ("list_trash", RetryClass::Idempotent),
+    ("probe_store", RetryClass::NotIdempotent),
+    ("put_upload_content", RetryClass::Idempotent),
+    ("release_checkpoint", RetryClass::Idempotent),
+    ("run_maintenance", RetryClass::NotIdempotent),
+    ("sign_upload_parts", RetryClass::Idempotent),
 ];
 
 impl Value {
