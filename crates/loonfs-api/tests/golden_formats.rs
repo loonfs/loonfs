@@ -234,7 +234,7 @@ fn sample_attributes() -> Attributes {
 
 fn sample_wal_pointer() -> WalSegmentPointer {
     WalSegmentPointer {
-        segment_id: WalSegmentId::parse("00000000000000000002-fedcba9876543210")
+        segment_id: WalSegmentId::parse("00000000000000000001-fedcba9876543210")
             .expect("valid segment id"),
         start_seq: ChangeSeq(1),
         end_seq: ChangeSeq(1),
@@ -309,7 +309,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
     ];
     WalSegmentEnvelope::from_payload(WalSegmentPayload {
         namespace_id: namespace_id(),
-        segment_id: WalSegmentId::parse("00000000000000000001-0123456789abcdef")
+        segment_id: WalSegmentId::parse("00000000000000000002-0123456789abcdef")
             .expect("valid segment id"),
         writer_epoch: WriterEpoch(3),
         prev_visible_segment: Some(sample_wal_pointer()),
@@ -452,6 +452,53 @@ fn wal_segment_golden_decodes_to_sample() {
     let decoded = decode_wal_segment_envelope_zstd(&rezstd(&read_golden("wal_segment.v1.cbor")))
         .expect("decode golden wal segment");
     assert_eq!(decoded, sample_wal_envelope());
+}
+
+/// The segment id's 20-digit prefix is the segment's start sequence, and
+/// reclamation reads it back out of the object key. A stored segment whose
+/// id disagrees with the sequence beside it does not decode, and neither
+/// does one carrying a chain link that disagrees with itself.
+#[test]
+fn wal_segments_reject_an_id_that_disagrees_with_its_start_seq() {
+    let agreeing = encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("encode wal");
+    decode_wal_segment_envelope_zstd(&agreeing)
+        .expect("a segment whose id encodes its start seq decodes");
+
+    let mut payload = sample_wal_envelope().payload;
+    payload.segment_id =
+        WalSegmentId::parse("00000000000000000009-0123456789abcdef").expect("valid segment id");
+    let message = assert_wal_segment_is_corrupt(payload);
+    assert!(
+        message.contains("`00000000000000000009-0123456789abcdef`")
+            && message.contains("start seq `2`"),
+        "the rejection should name both values: {message}"
+    );
+
+    let mut payload = sample_wal_envelope().payload;
+    let mut link = sample_wal_pointer();
+    link.segment_id =
+        WalSegmentId::parse("00000000000000000004-fedcba9876543210").expect("valid segment id");
+    payload.prev_visible_segment = Some(link);
+    let message = assert_wal_segment_is_corrupt(payload);
+    assert!(
+        message.contains("`00000000000000000004-fedcba9876543210`")
+            && message.contains("start seq `1`"),
+        "the rejection should name both values: {message}"
+    );
+}
+
+/// Stores `payload` through the real codec and returns why decoding refused
+/// it.
+fn assert_wal_segment_is_corrupt(payload: WalSegmentPayload) -> String {
+    let envelope = WalSegmentEnvelope::from_payload(payload).expect("rebuild the wal envelope");
+    let encoded = encode_wal_segment_envelope_zstd(&envelope).expect("encode wal");
+    let error =
+        decode_wal_segment_envelope_zstd(&encoded).expect_err("the stored segment is corrupt");
+    assert!(
+        matches!(error, EnvelopeCodecError::PayloadDecode(_)),
+        "unexpected refusal: {error}"
+    );
+    error.to_string()
 }
 
 #[test]

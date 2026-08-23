@@ -264,8 +264,9 @@ mod tests {
                 }
             })
             .collect();
-        let segment_id =
-            WalSegmentId::parse("00000000000000000001-aaaaaaaaaaaaaaaa").expect("valid segment id");
+        // Encode the start sequence in the segment id.
+        let segment_id = WalSegmentId::parse(format!("{:020}-aaaaaaaaaaaaaaaa", start_seq.0))
+            .expect("valid segment id");
         let payload = WalSegmentPayload {
             namespace_id: namespace_id.clone(),
             segment_id: segment_id.clone(),

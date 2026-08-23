@@ -243,9 +243,11 @@ The metadata log has six rules.
    incarnation. It is a stream-positioned id (section 1.3): the ordered
    prefix is the segment's `start_seq` so listings and reclamation scans
    sort by history position, and the collision-resistant suffix keeps
-   competing proposals for the same position distinct. The order in a
-   listing is never recovery authority — recovery follows the head and the
-   chain (rule 4) exclusively.
+   competing proposals for the same position distinct. A WAL pointer or
+   segment payload is invalid when the id prefix differs from its
+   `start_seq`. The order in a listing is
+   never recovery authority — recovery follows the head and the chain
+   (rule 4) exclusively.
 6. Orphan WAL segments are permitted and harmless when a writer loses the head
    compare-and-swap.
 
