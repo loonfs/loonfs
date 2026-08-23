@@ -273,7 +273,7 @@ func getFileProxied(ctx context.Context, c *client.Client, in GetFileInput) (*Ge
 }
 
 // fileProjection reads the file half of a path entry union.
-func fileProjection(entry *loonfs.AuthoritativePathEntry) (*loonfs.AuthoritativePathEntryFile, error) {
+func fileProjection(entry *loonfs.PathEntry) (*loonfs.PathEntryFile, error) {
 	if entry == nil {
 		return nil, fmt.Errorf("transfers: path entry is nil")
 	}
@@ -326,7 +326,7 @@ func transferAndComplete(
 	namespaceID loonfs.NamespaceID,
 	payload []byte,
 	begin *loonfs.BeginUploadResponse,
-) (*loonfs.UploadSessionResponse, error) {
+) (*loonfs.UploadSession, error) {
 	if begin == nil {
 		return nil, fmt.Errorf("transfers: begin upload response is nil")
 	}
@@ -348,7 +348,7 @@ func transferDirectPut(
 	namespaceID loonfs.NamespaceID,
 	payload []byte,
 	begin *loonfs.BeginUploadResponseDirectPut,
-) (*loonfs.UploadSessionResponse, error) {
+) (*loonfs.UploadSession, error) {
 	checksum, err := computeChecksum(begin.ChecksumAlgorithm, payload)
 	if err != nil {
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
@@ -381,7 +381,7 @@ func transferDirectMultipart(
 	namespaceID loonfs.NamespaceID,
 	payload []byte,
 	begin *loonfs.BeginUploadResponseDirectMultipart,
-) (*loonfs.UploadSessionResponse, error) {
+) (*loonfs.UploadSession, error) {
 	partSizeBytes := begin.PartSizeBytes
 	partSize := int(partSizeBytes)
 	if partSizeBytes <= 0 || int64(partSize) != partSizeBytes {
@@ -475,7 +475,7 @@ func transferServiceProxied(
 	namespaceID loonfs.NamespaceID,
 	payload []byte,
 	begin *loonfs.BeginUploadResponseServiceProxied,
-) (*loonfs.UploadSessionResponse, error) {
+) (*loonfs.UploadSession, error) {
 	if _, err := c.Uploads.PutUploadContent(
 		ctx,
 		string(namespaceID),
@@ -506,7 +506,7 @@ func abortUpload(ctx context.Context, c *client.Client, namespaceID loonfs.Names
 	})
 }
 
-func completedUploadStatus(response *loonfs.UploadSessionResponse) (*loonfs.UploadSessionStatusCompleted, error) {
+func completedUploadStatus(response *loonfs.UploadSession) (*loonfs.UploadSessionStatusCompleted, error) {
 	if response == nil {
 		return nil, fmt.Errorf("transfers: upload session response is nil")
 	}

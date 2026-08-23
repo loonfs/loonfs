@@ -820,7 +820,7 @@ mod tests {
         let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
             .expect("valid upload id");
         let content_ref = test_content_ref(b"content");
-        let response = UploadSessionResponse {
+        let response = UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             mode: loonfs_api::v0::UploadMode::ServiceProxied,
@@ -868,7 +868,7 @@ mod tests {
         ];
 
         for (status_name, status) in statuses {
-            let response = UploadSessionResponse {
+            let response = UploadSession {
                 namespace_id: namespace_id.clone(),
                 upload_id: upload_id.clone(),
                 mode: loonfs_api::v0::UploadMode::ServiceProxied,

@@ -766,7 +766,7 @@ impl Client {
         Self::staged_from_completion(response)
     }
 
-    pub(crate) fn staged_from_completion(response: UploadSessionResponse) -> Result<StagedContent> {
+    pub(crate) fn staged_from_completion(response: UploadSession) -> Result<StagedContent> {
         let status = match response.status {
             UploadSessionStatus::Completed {
                 content_ref,

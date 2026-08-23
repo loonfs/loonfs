@@ -25,7 +25,7 @@ use loonfs_api::ApiError;
 // are one type. The alias keeps the two request names readable side by side.
 use loonfs_api::{
     decode_cursor,
-    v0::{ChangesResponse, CommitResponse as ApiCommitResponse},
+    v0::{CommitResponse as ApiCommitResponse, ListChangesResponse},
     CommitRequest as ApiCommitRequest, FilesystemOperation, LimitError, ListFileRevisionsResponse,
     ListTrashResponse, PageCursorError, PageRequest, PaginationPolicy, PublicOrdinalRangeError,
     RevisionNo,
@@ -247,7 +247,7 @@ pub(super) async fn list_path_entries(
             ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.")
         ),
         responses(
-            (status = 200, description = "Authoritative path entry", body = loonfs_api::AuthoritativePathEntry),
+            (status = 200, description = "Authoritative path entry", body = loonfs_api::PathEntry),
             (status = 400, description = "Invalid path or include_attributes", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
@@ -261,7 +261,7 @@ pub(super) async fn get_path_entry(
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<PathQuery>,
-) -> Result<Json<loonfs_api::AuthoritativePathEntry>, ApiResponseError> {
+) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
@@ -576,7 +576,7 @@ pub(super) async fn create_commit(
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size")
         ),
         responses(
-            (status = 200, description = "Committed changes", body = ChangesResponse),
+            (status = 200, description = "Committed changes", body = ListChangesResponse),
             (status = 400, description = "Invalid change cursor or limit", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -590,7 +590,7 @@ pub(super) async fn list_changes(
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<ChangesQuery>,
-) -> Result<Json<ChangesResponse>, ApiResponseError> {
+) -> Result<Json<ListChangesResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;

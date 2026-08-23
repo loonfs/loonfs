@@ -19,7 +19,7 @@ use crate::time::{MonotonicTimer, StdMonotonicTimer};
 #[cfg(test)]
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
-use loonfs_api::{CheckpointId, CreateCheckpointResponse, NamespaceId};
+use loonfs_api::{Checkpoint, CheckpointId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 #[cfg(test)]
@@ -38,7 +38,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     owner: CheckpointOwner,
     context: &MutationContext,
-) -> Result<CreateCheckpointResponse> {
+) -> Result<Checkpoint> {
     // Checkpoint creation pins a manifest version as a first-class record
     // under `checkpoints/`, write-then-verify (format spec, "Checkpoints"):
     //
@@ -100,10 +100,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
             <= CHECKPOINT_VERIFY_BUDGET_MS;
         if verification == CheckpointBasisVerification::Verified && within_budget {
-            return Ok(CreateCheckpointResponse {
-                namespace_id: namespace_id.clone(),
-                checkpoint: super::checkpoint_summary(record),
-            });
+            return Ok(super::checkpoint_summary(record));
         }
 
         // Overrunning the budget counts as verification failure: the record

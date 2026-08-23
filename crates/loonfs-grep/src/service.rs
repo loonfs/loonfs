@@ -23,9 +23,9 @@ use loonfs_api::wire::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, string_prefix_upper_bound, BlockHandle,
 };
 use loonfs_api::{
-    decode_cursor, encode_cursor, AbsolutePath, AuthoritativePathEntry, ChangeSeq, ErrorCode,
-    GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId,
-    PaginationPolicy, RevisionNo,
+    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, ErrorCode, GrepMatch, GrepPageCursor,
+    GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId, PaginationPolicy, PathEntry,
+    RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -973,7 +973,7 @@ impl GrepService {
 /// binding cycle from running forever.
 async fn scan_candidate_inodes(
     reads: &NamespaceReads<'_>,
-    scope: Option<&AuthoritativePathEntry>,
+    scope: Option<&PathEntry>,
 ) -> Result<BTreeSet<InodeId>> {
     let mut inodes = BTreeSet::new();
     let root = match scope {

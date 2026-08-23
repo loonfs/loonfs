@@ -8,9 +8,9 @@ use crate::common::{namespace_engine, read_context};
 use loonfs_api::{
     v0::FilesystemChange,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
-    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, DeleteDirectoryBehavior,
-    DestinationBehavior, DirectoryPageCursor, InodeId, InodeKind, NameKey, NamespaceId, Page,
-    PageRequest, RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    DirectoryPageCursor, InodeId, InodeKind, NameKey, NamespaceId, Page, PageRequest, PathEntry,
+    RevisionNo,
 };
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
@@ -21,7 +21,7 @@ use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::OperationClass;
 use tempfile::tempdir;
 
-fn named_entry(entry: &AuthoritativePathEntry) -> &str {
+fn named_entry(entry: &PathEntry) -> &str {
     entry
         .display_name
         .as_ref()
@@ -140,7 +140,7 @@ async fn list_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
+) -> Result<Vec<loonfs_api::PathEntry>, CoreError> {
     let context = read_context(store, namespace_id).await;
     let engine = namespace_engine(store, namespace_id, &mutation_context());
     let mut entries = Vec::new();
@@ -171,7 +171,7 @@ async fn list_path_page<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     limit: u32,
     cursor: Option<DirectoryPageCursor>,
-) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
+) -> Result<Page<PathEntry, DirectoryPageCursor>, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
         .list_path_page(
@@ -237,7 +237,7 @@ async fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     revision_no: RevisionNo,
-) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
+) -> Result<loonfs_api::FileBytes, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
         .get_file_revision(absolute_path, revision_no, &context, None)
@@ -260,7 +260,7 @@ async fn resolve_path_latest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
+) -> Result<loonfs_api::PathEntry, CoreError> {
     resolve_path(store, namespace_id, absolute_path).await
 }
 
@@ -268,7 +268,7 @@ async fn list_path_latest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
+) -> Result<Vec<loonfs_api::PathEntry>, CoreError> {
     list_path(store, namespace_id, absolute_path).await
 }
 

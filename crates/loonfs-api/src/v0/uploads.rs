@@ -353,7 +353,7 @@ pub enum UploadSessionStatus {
 /// Current view of one upload session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct UploadSessionResponse {
+pub struct UploadSession {
     /// Namespace that owns the session.
     pub namespace_id: NamespaceId,
     /// Session represented by this view.
@@ -366,7 +366,7 @@ pub struct UploadSessionResponse {
     pub status: UploadSessionStatus,
 }
 
-impl UploadSessionResponse {
+impl UploadSession {
     /// Returns the completed content reference, or `None` before completion.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match &self.status {
@@ -388,8 +388,7 @@ impl UploadSessionResponse {
 mod tests {
     use super::{
         BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, ContentToken,
-        ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSessionResponse,
-        UploadSessionStatus,
+        ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
     };
     use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
@@ -664,10 +663,10 @@ mod tests {
     }
 
     #[test]
-    fn upload_session_response_is_flat_and_uses_one_status_vocabulary() {
+    fn an_upload_session_is_flat_and_uses_one_status_vocabulary() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
-        let open = serde_json::to_value(UploadSessionResponse {
+        let open = serde_json::to_value(UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             mode: UploadMode::DirectMultipart,
@@ -687,7 +686,7 @@ mod tests {
             })
         );
 
-        let aborted = serde_json::to_value(UploadSessionResponse {
+        let aborted = serde_json::to_value(UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             mode: UploadMode::ServiceProxied,
@@ -701,7 +700,7 @@ mod tests {
         assert_eq!(aborted["aborted_at_ms"], 2_000);
         assert!(aborted.get("state").is_none());
 
-        let completed = serde_json::to_value(UploadSessionResponse {
+        let completed = serde_json::to_value(UploadSession {
             namespace_id,
             upload_id,
             mode: UploadMode::DirectPut,
@@ -734,7 +733,7 @@ mod tests {
             content_ref: content_ref.clone(),
             token: "opaque-server-token".to_owned(),
         };
-        let completion = serde_json::to_value(UploadSessionResponse {
+        let completion = serde_json::to_value(UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id,
             mode: UploadMode::ServiceProxied,

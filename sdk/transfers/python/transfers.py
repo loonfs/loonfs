@@ -28,7 +28,7 @@ from .types import (
     RevisionNo,
     UploadContentClaim,
     UploadPartChecksumClaim,
-    UploadSessionResponse,
+    UploadSession,
 )
 
 __all__ = ["GetFileResult", "PutFileResult", "get_file", "put_file"]
@@ -408,7 +408,7 @@ def _send_presigned(
     return response
 
 
-def _completed_content(response: UploadSessionResponse) -> _StagedContent:
+def _completed_content(response: UploadSession) -> _StagedContent:
     if response.status != "completed":
         raise RuntimeError(
             f"upload {response.upload_id!r} completed with status "

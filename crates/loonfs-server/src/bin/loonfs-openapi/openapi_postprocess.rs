@@ -1792,20 +1792,20 @@ mod tests {
         let mut document = ordered(serde_json::json!({
             "components": {
                 "schemas": {
-                    "CreateCheckpointResponse": {
+                    "ItemEnvelope": {
                         "allOf": [
-                            {"$ref": "#/components/schemas/Checkpoint"},
+                            {"$ref": "#/components/schemas/Item"},
                             {
                                 "type": "object",
-                                "required": ["namespace_id"],
-                                "properties": {"namespace_id": {"type": "string"}}
+                                "required": ["owner_id"],
+                                "properties": {"owner_id": {"type": "string"}}
                             }
                         ]
                     },
-                    "Checkpoint": {
+                    "Item": {
                         "type": "object",
-                        "required": ["checkpoint_id"],
-                        "properties": {"checkpoint_id": {"type": "string"}}
+                        "required": ["item_id"],
+                        "properties": {"item_id": {"type": "string"}}
                     }
                 }
             }

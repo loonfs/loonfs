@@ -23,10 +23,10 @@ use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainL
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::{
-    AbsolutePath, AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,
-    AuthoritativePathEntryKind, ChangeSeq, ContentRef, ContentStoreId, DirectoryPageCursor,
-    DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo,
-    NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
+    AbsolutePath, AttributesProjection, ChangeSeq, ContentRef, ContentStoreId, DirectoryPageCursor,
+    DisplayName, FileBytes, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo,
+    NamespaceId, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo, TrashEntry,
+    TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -301,7 +301,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
         attributes: AttributeInclusion,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         // One session serves the resolution and the entry build: the walk's
         // preloaded probes (including the leaf's head revision) are exactly
@@ -320,7 +320,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         inode_id: InodeId,
         attributes: AttributeInclusion,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let mut session = self.metadata_view().session();
         let mut ancestor_paths = HashMap::new();
         let resolved = resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
@@ -335,11 +335,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &S,
         absolute_path: &str,
         max_content_bytes: Option<u64>,
-    ) -> Result<AuthoritativeFileBytes> {
+    ) -> Result<FileBytes> {
         let (entry, content_ref) = self.resolve_file_content(absolute_path).await?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         let bytes = get_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
-        Ok(AuthoritativeFileBytes { entry, bytes })
+        Ok(FileBytes { entry, bytes })
     }
 
     /// Resolves a path to the file it names and the content reference its
@@ -349,13 +349,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) async fn resolve_file_content(
         &self,
         absolute_path: &str,
-    ) -> Result<(AuthoritativePathEntry, ContentRef)> {
+    ) -> Result<(PathEntry, ContentRef)> {
         let entry = self
             .resolve_path(absolute_path, AttributeInclusion::Omit)
             .await?;
         let content_ref = match &entry.kind {
-            AuthoritativePathEntryKind::File { content_ref, .. } => content_ref.clone(),
-            AuthoritativePathEntryKind::Directory {} => {
+            PathEntryKind::File { content_ref, .. } => content_ref.clone(),
+            PathEntryKind::Directory {} => {
                 return Err(CoreError::ExpectedFile {
                     path: entry.path.to_string(),
                     kind: InodeKind::Directory,
@@ -388,12 +388,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .resolve_path(absolute_path, AttributeInclusion::Omit)
             .await?;
         let current_revision = match &entry.kind {
-            AuthoritativePathEntryKind::File {
+            PathEntryKind::File {
                 revision_no,
                 content_ref,
                 ..
             } => (*revision_no, content_ref.clone()),
-            AuthoritativePathEntryKind::Directory {} => {
+            PathEntryKind::Directory {} => {
                 return Err(CoreError::ExpectedFile {
                     path: entry.path.to_string(),
                     kind: InodeKind::Directory,
@@ -441,7 +441,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let entry = self
             .resolve_path(absolute_path, AttributeInclusion::Omit)
             .await?;
-        if matches!(entry.kind, AuthoritativePathEntryKind::Directory {}) {
+        if matches!(entry.kind, PathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
                 path: entry.path.to_string(),
                 kind: InodeKind::Directory,
@@ -578,18 +578,18 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         revision_no: RevisionNo,
         max_content_bytes: Option<u64>,
-    ) -> Result<AuthoritativeFileBytes> {
+    ) -> Result<FileBytes> {
         let mut entry = self
             .resolve_path(absolute_path, AttributeInclusion::Omit)
             .await?;
-        if matches!(entry.kind, AuthoritativePathEntryKind::Directory {}) {
+        if matches!(entry.kind, PathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
                 path: entry.path.to_string(),
                 kind: InodeKind::Directory,
             });
         }
         let revision = self.revision_for_inode(entry.inode_id, revision_no).await?;
-        entry.kind = AuthoritativePathEntryKind::File {
+        entry.kind = PathEntryKind::File {
             revision_no: revision.revision_no,
             size_bytes: revision.content_ref.size_bytes,
             content_ref: revision.content_ref.clone(),
@@ -599,7 +599,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         let bytes =
             get_durable_content_bytes(store, &self.content_store_id, &revision.content_ref).await?;
-        Ok(AuthoritativeFileBytes { entry, bytes })
+        Ok(FileBytes { entry, bytes })
     }
 
     pub(crate) async fn get_file_revision_bytes_for_inode(
@@ -631,7 +631,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
         attributes: AttributeInclusion,
-    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
 
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
@@ -755,15 +755,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         session: &mut MetadataViewSession<'_, '_, S>,
         resolved: &ResolvedVisiblePath,
         attributes: AttributeInclusion,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let kind = match resolved.inode_kind {
-            InodeKind::Directory => AuthoritativePathEntryKind::Directory {},
+            InodeKind::Directory => PathEntryKind::Directory {},
             InodeKind::File => {
                 let revision = session
                     .latest_revision_head_of_visible(resolved.inode_id)
                     .await?
                     .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.clone()))?;
-                AuthoritativePathEntryKind::File {
+                PathEntryKind::File {
                     revision_no: revision.revision_no,
                     size_bytes: revision.content_ref.size_bytes,
                     content_ref: revision.content_ref,
@@ -804,7 +804,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 })
             })
             .transpose()?;
-        Ok(AuthoritativePathEntry {
+        Ok(PathEntry {
             namespace_id: self.namespace_id.clone(),
             path: absolute_path,
             inode_id: resolved.inode_id,
@@ -824,7 +824,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         resolved_dir: &ResolvedVisiblePath,
         child: VisibleChildEntry,
         attributes: AttributeInclusion,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let child_path = AbsolutePath::parse(&resolved_dir.absolute_path)
             .map_err(map_path_error_to_core)?
             .join(&child.binding.display_name);

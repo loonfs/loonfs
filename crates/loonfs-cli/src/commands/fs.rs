@@ -80,7 +80,7 @@ async fn follow_path_entry_pages(
     spec: &NamespacePath,
     pagination: &PaginationArgs,
     cursor: Option<&str>,
-    mut visit: impl FnMut(Vec<loonfs_api::AuthoritativePathEntry>) -> Result<(), CliError>,
+    mut visit: impl FnMut(Vec<loonfs_api::PathEntry>) -> Result<(), CliError>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut plan = PagePlan::new(pagination);
     let mut cursor = cursor.map(ToOwned::to_owned);
@@ -666,7 +666,7 @@ pub(super) async fn stream_download_to_file(
 /// Writes one listing page and makes it visible before the next fetch.
 fn write_path_entries_page(
     stdout: &mut impl Write,
-    entries: &[loonfs_api::AuthoritativePathEntry],
+    entries: &[loonfs_api::PathEntry],
     jsonl: bool,
 ) -> io::Result<()> {
     for entry in entries {

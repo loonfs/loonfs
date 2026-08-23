@@ -545,8 +545,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     let first =
         super::create::create_checkpoint(&store, &namespace_id, owner(Some(10_000)), &context)
             .await
-            .expect("create checkpoint")
-            .checkpoint;
+            .expect("create checkpoint");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
     let mut later_context = test_context();
@@ -556,8 +555,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         let next =
             super::create::create_checkpoint(&store, &namespace_id, owner(expiry), &later_context)
                 .await
-                .expect("create checkpoint")
-                .checkpoint;
+                .expect("create checkpoint");
         assert!(
             minted.insert(next.checkpoint_id.clone()),
             "each pin gets an id of its own"
@@ -624,8 +622,7 @@ async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
         &context,
     )
     .await
-    .expect("create checkpoint whose expiry has already passed")
-    .checkpoint;
+    .expect("create checkpoint whose expiry has already passed");
     assert_eq!(
         load_checkpoint_record(&store, &namespace_id, &already_expired.checkpoint_id)
             .await

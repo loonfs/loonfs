@@ -10,15 +10,14 @@ use crate::uploads::UploadJournal;
 use loonfs::MaintenanceJobId;
 use loonfs_api::{
     v0::{
-        ChangesResponse, GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, StoreProbeRequest,
-        StoreProbeResponse, UploadSessionResponse,
+        GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse, StoreProbeRequest,
+        StoreProbeResponse, UploadSession,
     },
-    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
-    CommitResponse, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
-    DeleteNamespaceResponse, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, Namespace, NamespaceId, ReleaseCheckpointResponse, RevisionNo,
-    UploadId,
+    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, CommitResponse,
+    ContentRef, CreateCheckpointRequest, DeleteNamespaceResponse, GrepRequest, GrepResponse,
+    InodeId, ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse,
+    ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse, Namespace, NamespaceId,
+    PathEntry, ReleaseCheckpointResponse, RevisionNo, UploadId,
 };
 use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions,
@@ -219,10 +218,7 @@ impl ResolvedTarget {
     }
 
     /// Describes a single path entry, attributes included.
-    pub(crate) async fn stat_path(
-        &self,
-        spec: &NamespacePath,
-    ) -> Result<AuthoritativePathEntry, BackendError> {
+    pub(crate) async fn stat_path(&self, spec: &NamespacePath) -> Result<PathEntry, BackendError> {
         self.stat_path_projected(spec, &StatPathOptions::default())
             .await
     }
@@ -232,7 +228,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-    ) -> Result<AuthoritativePathEntry, BackendError> {
+    ) -> Result<PathEntry, BackendError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -251,7 +247,7 @@ impl ResolvedTarget {
     pub(crate) async fn stat_path_without_attributes(
         &self,
         spec: &NamespacePath,
-    ) -> Result<AuthoritativePathEntry, BackendError> {
+    ) -> Result<PathEntry, BackendError> {
         self.stat_path_projected(
             spec,
             &StatPathOptions {
@@ -265,7 +261,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
-    ) -> Result<AuthoritativePathEntry, BackendError> {
+    ) -> Result<PathEntry, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.stat_path(spec, options).await,
             Self::Remote(target) => Ok(target.client.stat_path(spec, options).await?),
@@ -346,7 +342,7 @@ impl ResolvedTarget {
     pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse, BackendError> {
+    ) -> Result<GrepIndex, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.enable_grep_index(namespace_id).await,
             Self::Remote(target) => Ok(target.client.enable_grep_index(namespace_id).await?),
@@ -357,7 +353,7 @@ impl ResolvedTarget {
     pub(crate) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse, BackendError> {
+    ) -> Result<GrepIndex, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.disable_grep_index(namespace_id).await,
             Self::Remote(target) => Ok(target.client.disable_grep_index(namespace_id).await?),
@@ -368,7 +364,7 @@ impl ResolvedTarget {
     pub(crate) async fn get_grep_index_status(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse, BackendError> {
+    ) -> Result<GrepIndex, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.get_grep_index_status(namespace_id).await,
             Self::Remote(target) => Ok(target.client.get_grep_index_status(namespace_id).await?),
@@ -538,7 +534,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<UploadSessionResponse, BackendError> {
+    ) -> Result<UploadSession, BackendError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
             Self::Remote(target) => Ok(target
@@ -682,7 +678,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
-    ) -> Result<CreateCheckpointResponse, BackendError> {
+    ) -> Result<Checkpoint, BackendError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -817,7 +813,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
-    ) -> Result<ChangesResponse, BackendError> {
+    ) -> Result<ListChangesResponse, BackendError> {
         match self {
             Self::Embedded(target) => {
                 target

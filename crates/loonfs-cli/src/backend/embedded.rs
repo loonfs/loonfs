@@ -8,24 +8,24 @@ use crate::backend_error::{
 };
 use crate::render::write_stderr_warning;
 use loonfs::{
-    ByteStream, ChangesResponse, CheckpointPageCursor, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, DeleteOptions, FileContentStream, FsAdmin, FsReader, FsWriter,
-    ListChangesOptions, ListPathEntriesOptions, MaintenanceHandle, MaintenanceJob,
-    MaintenanceJobId, MaintenancePlan, MaintenanceStepConclusion, MoveOptions, PutFileOptions,
-    ReadFileStreamOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore,
-    StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
+    ByteStream, CheckpointPageCursor, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
+    FileContentStream, FsAdmin, FsReader, FsWriter, ListChangesOptions, ListChangesResponse,
+    ListPathEntriesOptions, MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenancePlan,
+    MaintenanceStepConclusion, MoveOptions, PutFileOptions, ReadFileStreamOptions,
+    RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 use loonfs_api::{
     v0::{
-        GrepGcRequest, GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse,
-        StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
+        GrepGcRequest, GrepGcResponse, GrepIndex, GrepIndexLifecycle, StoreProbeCheckOutcome,
+        StoreProbeCheckResult, StoreProbeResponse,
     },
-    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse,
-    CreateCheckpointRequest, CreateCheckpointResponse, EffectiveLimit, ErrorCode, GrepRequest,
-    GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    Namespace, NamespaceId, PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
+    AbsolutePath, ChangeSeq, Checkpoint, CheckpointId, CommitResponse, CreateCheckpointRequest,
+    EffectiveLimit, ErrorCode, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, Namespace, NamespaceId, PaginationPolicy, PathEntry,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::NamespacePath;
 use loonfs_grep::{
@@ -223,7 +223,7 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
-    ) -> Result<AuthoritativePathEntry, BackendError> {
+    ) -> Result<PathEntry, BackendError> {
         self.reader
             .stat_path(
                 spec.namespace(),
@@ -239,7 +239,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         options: &StatPathOptions,
-    ) -> Result<AuthoritativePathEntry, BackendError> {
+    ) -> Result<PathEntry, BackendError> {
         self.reader
             .stat_inode(namespace_id, inode_id, options.clone())
             .await
@@ -298,7 +298,7 @@ impl EmbeddedBackend {
     pub(super) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse, BackendError> {
+    ) -> Result<GrepIndex, BackendError> {
         let grep_error = |error| map_namespace_scoped_grep_error(namespace_id, error);
         match self
             .grep_worker()
@@ -323,7 +323,7 @@ impl EmbeddedBackend {
     pub(super) async fn get_grep_index_status(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse, BackendError> {
+    ) -> Result<GrepIndex, BackendError> {
         self.grep_worker()
             .get_grep_index_status(namespace_id)
             .await
@@ -525,7 +525,7 @@ impl EmbeddedBackend {
     pub(super) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse, BackendError> {
+    ) -> Result<GrepIndex, BackendError> {
         let grep_error = |error| map_namespace_scoped_grep_error(namespace_id, error);
         match self
             .grep_worker()
@@ -751,7 +751,7 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
-    ) -> Result<CreateCheckpointResponse, BackendError> {
+    ) -> Result<Checkpoint, BackendError> {
         self.admin
             .create_checkpoint(namespace_id, CreateCheckpointOptions::from_request(request))
             .await
@@ -827,7 +827,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
-    ) -> Result<ChangesResponse, BackendError> {
+    ) -> Result<ListChangesResponse, BackendError> {
         let limit = resolve_cli_page_limit(limit)?;
         self.reader
             .list_changes(

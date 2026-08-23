@@ -239,9 +239,9 @@ interface RunningRecordingServer extends RunningProxy {
 
 type StreamingRequestInit = RequestInit & { duplex?: "half" };
 
-type CompletedUpload = Extract<LoonFS.UploadSessionResponse, { status: "completed" }>;
-type AbortedUpload = Extract<LoonFS.UploadSessionResponse, { status: "aborted" }>;
-type FileEntry = Extract<LoonFS.AuthoritativePathEntry, { inode_kind: "file" }>;
+type CompletedUpload = Extract<LoonFS.UploadSession, { status: "completed" }>;
+type AbortedUpload = Extract<LoonFS.UploadSession, { status: "aborted" }>;
+type FileEntry = Extract<LoonFS.PathEntry, { inode_kind: "file" }>;
 
 
 function jsonObject(value: unknown, label: string): JsonObject {
@@ -705,21 +705,21 @@ async function assertBrowserTransfer(
     }
 }
 
-function completedUpload(response: LoonFS.UploadSessionResponse): CompletedUpload {
+function completedUpload(response: LoonFS.UploadSession): CompletedUpload {
     if (response.status !== "completed") {
         throw new Error(`upload ${response.upload_id} is ${response.status}, not completed`);
     }
     return response;
 }
 
-function abortedUpload(response: LoonFS.UploadSessionResponse): AbortedUpload {
+function abortedUpload(response: LoonFS.UploadSession): AbortedUpload {
     if (response.status !== "aborted") {
         throw new Error(`upload ${response.upload_id} is ${response.status}, not aborted`);
     }
     return response;
 }
 
-function fileEntry(entry: LoonFS.AuthoritativePathEntry): FileEntry {
+function fileEntry(entry: LoonFS.PathEntry): FileEntry {
     if (entry.inode_kind !== "file") {
         throw new Error(`path ${entry.path} is a ${entry.inode_kind}, not a file`);
     }
@@ -783,7 +783,7 @@ function crc64Nvme(bytes: Uint8Array): bigint {
     return (value ^ CRC64_MASK) & CRC64_MASK;
 }
 
-function listedNames(entries: LoonFS.AuthoritativePathEntry[]): string[] {
+function listedNames(entries: LoonFS.PathEntry[]): string[] {
     return entries.map((entry) => {
         const name = entry.display_name;
         assert.ok(name != null, "listed entry has no display_name");
@@ -1118,7 +1118,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const uploadedContent = (await contentResponse.json()) as LoonFS.UploadContentResponse;
     assert.equal(uploadedContent.content_ref.size_bytes, payload.byteLength);
     const proxiedCompleted = completedUpload(
-        await proxyJson<LoonFS.UploadSessionResponse>(
+        await proxyJson<LoonFS.UploadSession>(
             `${namespaceAliasBase}/uploads/${encodeURIComponent(proxiedBegin.upload_id)}/complete`,
             {
                 method: "POST",
@@ -1163,7 +1163,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         checksum: checksum(directBegin.checksum_algorithm, payload),
     };
     const directCompleted = completedUpload(
-        await proxyJson<LoonFS.UploadSessionResponse>(
+        await proxyJson<LoonFS.UploadSession>(
             `${namespaceAliasBase}/uploads/${encodeURIComponent(directBegin.upload_id)}/complete`,
             {
                 method: "POST",

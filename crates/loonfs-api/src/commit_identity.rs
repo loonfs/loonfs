@@ -378,7 +378,7 @@ pub async fn reconcile_put_commit_id_reuse<E, ReadChange, ReadChangeFuture, Clas
 ) -> Result<crate::v0::CommitResponse, E>
 where
     ReadChange: FnOnce(ChangeSeq) -> ReadChangeFuture,
-    ReadChangeFuture: Future<Output = Result<crate::v0::ChangesResponse, E>>,
+    ReadChangeFuture: Future<Output = Result<crate::v0::ListChangesResponse, E>>,
     ClassifyError: Fn(&E) -> PutRetryErrorClassification,
 {
     let PutRetryErrorClassification::CommitIdReuseConflict(Some(receipt)) =
@@ -1117,7 +1117,7 @@ mod tests {
             )
             .expect("fingerprint"),
         };
-        let page = crate::v0::ChangesResponse {
+        let page = crate::v0::ListChangesResponse {
             namespace_id: namespace_id.clone(),
             after_seq: ChangeSeq(6),
             through_seq: committed_seq,

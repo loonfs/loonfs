@@ -563,7 +563,7 @@ pub(crate) async fn run_admin_changes(
         .map_err(|error| context.fail(kind, error))?;
     let mut plan = PagePlan::new(&args.pagination);
     let mut cursor = after_seq;
-    let mut response: Option<loonfs_api::v0::ChangesResponse> = None;
+    let mut response: Option<loonfs_api::v0::ListChangesResponse> = None;
     let stdout = io::stdout();
     let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
     loop {

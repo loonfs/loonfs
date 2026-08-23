@@ -228,11 +228,11 @@
         },
         "responses": {
           "200": {
-            "description": "Namespace envelope containing the created checkpoint",
+            "description": "The created checkpoint",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreateCheckpointResponse"
+                  "$ref": "#/components/schemas/Checkpoint"
                 }
               }
             }
@@ -462,7 +462,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GrepIndexStatusResponse"
+                  "$ref": "#/components/schemas/GrepIndex"
                 }
               }
             }
@@ -539,7 +539,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GrepIndexStatusResponse"
+                  "$ref": "#/components/schemas/GrepIndex"
                 }
               }
             }
@@ -636,7 +636,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GrepIndexStatusResponse"
+                  "$ref": "#/components/schemas/GrepIndex"
                 }
               }
             }
@@ -1279,7 +1279,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ChangesResponse"
+                  "$ref": "#/components/schemas/ListChangesResponse"
                 }
               }
             }
@@ -1802,7 +1802,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AuthoritativePathEntry"
+                  "$ref": "#/components/schemas/PathEntry"
                 }
               }
             }
@@ -2386,7 +2386,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AuthoritativePathEntry"
+                  "$ref": "#/components/schemas/PathEntry"
                 }
               }
             }
@@ -2953,7 +2953,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UploadSessionResponse"
+                  "$ref": "#/components/schemas/UploadSession"
                 }
               }
             }
@@ -3039,7 +3039,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UploadSessionResponse"
+                  "$ref": "#/components/schemas/UploadSession"
                 }
               }
             }
@@ -3146,7 +3146,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UploadSessionResponse"
+                  "$ref": "#/components/schemas/UploadSession"
                 }
               }
             }
@@ -3585,24 +3585,6 @@
           "type": "string"
         }
       },
-      "AuthoritativePathEntry": {
-        "description": "Metadata for one path returned by stat and directory-listing operations.\n\nFile entries include the current revision and content details. Directory\nentries do not. Attribute fields are included only when requested and are\nserialized at the top level of the entry. Callers can pass\n`attributes_revision_no` as `expected_attributes_revision_no` when updating\nattributes.",
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/AuthoritativePathEntryDirectory"
-          },
-          {
-            "$ref": "#/components/schemas/AuthoritativePathEntryFile"
-          }
-        ],
-        "discriminator": {
-          "propertyName": "inode_kind",
-          "mapping": {
-            "dir": "#/components/schemas/AuthoritativePathEntryDirectory",
-            "file": "#/components/schemas/AuthoritativePathEntryFile"
-          }
-        }
-      },
       "BeginDownloadByInodeRequest": {
         "type": "object",
         "description": "Empty request for an inode-addressed download.",
@@ -3788,45 +3770,11 @@
         "maximum": 9007199254740991,
         "minimum": 0
       },
-      "ChangesResponse": {
-        "type": "object",
-        "description": "Change-feed response after a cursor.",
-        "required": [
-          "namespace_id",
-          "after_seq",
-          "through_seq",
-          "changes"
-        ],
-        "properties": {
-          "after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Exclusive cursor supplied by the caller, or the endpoint's initial position."
-          },
-          "changes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CommittedChange"
-            },
-            "description": "Logical commits after `after_seq`, ordered by ascending namespace sequence."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace whose ordered commit stream was read."
-          },
-          "next_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Cursor to request when another page remains, or `None` at `through_seq`."
-          },
-          "through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Snapshot head through which this page was evaluated."
-          }
-        }
-      },
       "Checkpoint": {
         "type": "object",
         "description": "One checkpoint resource, reported from what its durable record carries.",
         "required": [
+          "namespace_id",
           "checkpoint_id",
           "owner",
           "created_at_ms",
@@ -3857,6 +3805,10 @@
           "manifest_no": {
             "$ref": "#/components/schemas/ManifestNo",
             "description": "Manifest pinned by the checkpoint."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that owns the checkpoint."
           },
           "owner": {
             "$ref": "#/components/schemas/CheckpointOwnerSummary",
@@ -4177,27 +4129,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "CreateCheckpointResponse": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/Checkpoint",
-            "description": "Checkpoint that was created."
-          },
-          {
-            "type": "object",
-            "required": [
-              "namespace_id"
-            ],
-            "properties": {
-              "namespace_id": {
-                "$ref": "#/components/schemas/NamespaceId",
-                "description": "Namespace that was checkpointed."
-              }
-            }
-          }
-        ],
-        "description": "Result of creating a checkpoint."
       },
       "CreateNamespaceRequest": {
         "type": "object",
@@ -4719,7 +4650,7 @@
           }
         }
       },
-      "GrepIndexStatusResponse": {
+      "GrepIndex": {
         "description": "The namespace's grep-index lifecycle and its cheap bookkeeping (admin\nplane).",
         "oneOf": [
           {
@@ -4838,6 +4769,41 @@
           "dir"
         ]
       },
+      "ListChangesResponse": {
+        "type": "object",
+        "description": "Change-feed response after a cursor.",
+        "required": [
+          "namespace_id",
+          "after_seq",
+          "through_seq",
+          "changes"
+        ],
+        "properties": {
+          "after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Exclusive cursor supplied by the caller, or the endpoint's initial position."
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommittedChange"
+            },
+            "description": "Logical commits after `after_seq`, ordered by ascending namespace sequence."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose ordered commit stream was read."
+          },
+          "next_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Cursor to request when another page remains, or `None` at `through_seq`."
+          },
+          "through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Snapshot head through which this page was evaluated."
+          }
+        }
+      },
       "ListCheckpointsResponse": {
         "type": "object",
         "description": "One page of active checkpoint records.",
@@ -4913,7 +4879,7 @@
           "entries": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/AuthoritativePathEntry"
+              "$ref": "#/components/schemas/PathEntry"
             },
             "description": "Directory entries for this page.\n\nEntries are returned in canonical name-key order. Higher-level display\nsurfaces may sort entries separately for presentation."
           },
@@ -5134,6 +5100,24 @@
           "propertyName": "kind",
           "mapping": {
             "presigned_url": "#/components/schemas/ObjectTransferAccessPresignedUrl"
+          }
+        }
+      },
+      "PathEntry": {
+        "description": "Metadata for one path returned by stat and directory-listing operations.\n\nFile entries include the current revision and content details. Directory\nentries do not. Attribute fields are included only when requested and are\nserialized at the top level of the entry. Callers can pass\n`attributes_revision_no` as `expected_attributes_revision_no` when updating\nattributes.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PathEntryDirectory"
+          },
+          {
+            "$ref": "#/components/schemas/PathEntryFile"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "inode_kind",
+          "mapping": {
+            "dir": "#/components/schemas/PathEntryDirectory",
+            "file": "#/components/schemas/PathEntryFile"
           }
         }
       },
@@ -5543,7 +5527,7 @@
         },
         "additionalProperties": false
       },
-      "UploadSessionResponse": {
+      "UploadSession": {
         "description": "Current view of one upload session.",
         "oneOf": [
           {
@@ -5597,189 +5581,6 @@
         "description": "Counter used to reject writes from an older writer.",
         "maximum": 9007199254740991,
         "minimum": 0
-      },
-      "AuthoritativePathEntryDirectory": {
-        "type": "object",
-        "description": "A directory, which has no revision payload in v0.\n\nThe entry tag reuses [`InodeKind`]'s wire vocabulary.",
-        "required": [
-          "inode_kind",
-          "namespace_id",
-          "path",
-          "inode_id",
-          "created_by",
-          "created_at_ms",
-          "head_seq"
-        ],
-        "properties": {
-          "inode_kind": {
-            "type": "string",
-            "enum": [
-              "dir"
-            ]
-          },
-          "attributes": {
-            "$ref": "#/components/schemas/Attributes",
-            "description": "The complete attribute map at `attributes_revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
-          },
-          "attributes_revision_no": {
-            "$ref": "#/components/schemas/AttributeRevisionNo",
-            "description": "The attribute revision this projection represents."
-          },
-          "attributes_updated_at_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
-            "minimum": 0
-          },
-          "attributes_updated_by": {
-            "$ref": "#/components/schemas/ActorRef",
-            "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
-          },
-          "created_at_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Time the inode was created, in Unix milliseconds. Sequence numbers\ndetermine order.",
-            "minimum": 0
-          },
-          "created_by": {
-            "$ref": "#/components/schemas/ActorRef",
-            "description": "Actor that created this inode, as supplied by the application."
-          },
-          "display_name": {
-            "$ref": "#/components/schemas/DisplayName",
-            "description": "Stored display name for this path component, absent for the nameless root."
-          },
-          "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Namespace head sequence this answer was read from."
-          },
-          "inode_id": {
-            "type": "string",
-            "description": "Stable inode ID within a namespace",
-            "example": "ino_123",
-            "pattern": "^ino_[1-9][0-9]*$"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that was read."
-          },
-          "parent_inode_id": {
-            "type": "string",
-            "description": "Stable inode ID within a namespace",
-            "example": "ino_123",
-            "pattern": "^ino_[1-9][0-9]*$"
-          },
-          "path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute path as rendered from stored display names."
-          }
-        }
-      },
-      "AuthoritativePathEntryFile": {
-        "type": "object",
-        "description": "A file and its current revision summary.",
-        "required": [
-          "revision_no",
-          "size_bytes",
-          "content_ref",
-          "revision_committed_by",
-          "revision_committed_at_ms",
-          "inode_kind",
-          "namespace_id",
-          "path",
-          "inode_id",
-          "created_by",
-          "created_at_ms",
-          "head_seq"
-        ],
-        "properties": {
-          "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "Current content reference."
-          },
-          "inode_kind": {
-            "type": "string",
-            "enum": [
-              "file"
-            ]
-          },
-          "revision_committed_at_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
-            "minimum": 0
-          },
-          "revision_committed_by": {
-            "$ref": "#/components/schemas/ActorRef",
-            "description": "Actor responsible for the current revision."
-          },
-          "revision_no": {
-            "$ref": "#/components/schemas/RevisionNo",
-            "description": "Current file revision number."
-          },
-          "size_bytes": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Current file size in bytes.\n\nThis remains explicit even though `content_ref` also carries the\nlength because callers sort directory listings by this field.",
-            "minimum": 0
-          },
-          "attributes": {
-            "$ref": "#/components/schemas/Attributes",
-            "description": "The complete attribute map at `attributes_revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
-          },
-          "attributes_revision_no": {
-            "$ref": "#/components/schemas/AttributeRevisionNo",
-            "description": "The attribute revision this projection represents."
-          },
-          "attributes_updated_at_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
-            "minimum": 0
-          },
-          "attributes_updated_by": {
-            "$ref": "#/components/schemas/ActorRef",
-            "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
-          },
-          "created_at_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Time the inode was created, in Unix milliseconds. Sequence numbers\ndetermine order.",
-            "minimum": 0
-          },
-          "created_by": {
-            "$ref": "#/components/schemas/ActorRef",
-            "description": "Actor that created this inode, as supplied by the application."
-          },
-          "display_name": {
-            "$ref": "#/components/schemas/DisplayName",
-            "description": "Stored display name for this path component, absent for the nameless root."
-          },
-          "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Namespace head sequence this answer was read from."
-          },
-          "inode_id": {
-            "type": "string",
-            "description": "Stable inode ID within a namespace",
-            "example": "ino_123",
-            "pattern": "^ino_[1-9][0-9]*$"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that was read."
-          },
-          "parent_inode_id": {
-            "type": "string",
-            "description": "Stable inode ID within a namespace",
-            "example": "ino_123",
-            "pattern": "^ino_[1-9][0-9]*$"
-          },
-          "path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute path as rendered from stored display names."
-          }
-        }
       },
       "BeginUploadServiceProxied": {
         "type": "object",
@@ -6701,6 +6502,189 @@
           "url": {
             "type": "string",
             "description": "Full presigned URL."
+          }
+        }
+      },
+      "PathEntryDirectory": {
+        "type": "object",
+        "description": "A directory, which has no revision payload in v0.\n\nThe entry tag reuses [`InodeKind`]'s wire vocabulary.",
+        "required": [
+          "inode_kind",
+          "namespace_id",
+          "path",
+          "inode_id",
+          "created_by",
+          "created_at_ms",
+          "head_seq"
+        ],
+        "properties": {
+          "inode_kind": {
+            "type": "string",
+            "enum": [
+              "dir"
+            ]
+          },
+          "attributes": {
+            "$ref": "#/components/schemas/Attributes",
+            "description": "The complete attribute map at `attributes_revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
+          },
+          "attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "The attribute revision this projection represents."
+          },
+          "attributes_updated_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
+            "minimum": 0
+          },
+          "attributes_updated_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time the inode was created, in Unix milliseconds. Sequence numbers\ndetermine order.",
+            "minimum": 0
+          },
+          "created_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor that created this inode, as supplied by the application."
+          },
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Stored display name for this path component, absent for the nameless root."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence this answer was read from."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path as rendered from stored display names."
+          }
+        }
+      },
+      "PathEntryFile": {
+        "type": "object",
+        "description": "A file and its current revision summary.",
+        "required": [
+          "revision_no",
+          "size_bytes",
+          "content_ref",
+          "revision_committed_by",
+          "revision_committed_at_ms",
+          "inode_kind",
+          "namespace_id",
+          "path",
+          "inode_id",
+          "created_by",
+          "created_at_ms",
+          "head_seq"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Current content reference."
+          },
+          "inode_kind": {
+            "type": "string",
+            "enum": [
+              "file"
+            ]
+          },
+          "revision_committed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
+            "minimum": 0
+          },
+          "revision_committed_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the current revision."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Current file revision number."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current file size in bytes.\n\nThis remains explicit even though `content_ref` also carries the\nlength because callers sort directory listings by this field.",
+            "minimum": 0
+          },
+          "attributes": {
+            "$ref": "#/components/schemas/Attributes",
+            "description": "The complete attribute map at `attributes_revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
+          },
+          "attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "The attribute revision this projection represents."
+          },
+          "attributes_updated_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
+            "minimum": 0
+          },
+          "attributes_updated_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time the inode was created, in Unix milliseconds. Sequence numbers\ndetermine order.",
+            "minimum": 0
+          },
+          "created_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor that created this inode, as supplied by the application."
+          },
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Stored display name for this path component, absent for the nameless root."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence this answer was read from."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path as rendered from stored display names."
           }
         }
       },

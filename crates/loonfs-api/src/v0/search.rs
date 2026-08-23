@@ -180,7 +180,7 @@ fn is_zero(value: &u32) -> bool {
 /// plane).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct GrepIndexStatusResponse {
+pub struct GrepIndex {
     /// Namespace the status describes.
     pub namespace_id: NamespaceId,
     /// Where the index is in its lifecycle.
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn grep_index_status_flattens_active_lifecycle() {
-        let response = GrepIndexStatusResponse {
+        let response = GrepIndex {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             lifecycle: GrepIndexLifecycle::Active {
                 built_through_seq: ChangeSeq(12),
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn grep_index_status_flattens_backfilling_lifecycle() {
-        let response = GrepIndexStatusResponse {
+        let response = GrepIndex {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             lifecycle: GrepIndexLifecycle::Backfilling {
                 target_seq: ChangeSeq(12),

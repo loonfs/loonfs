@@ -18,7 +18,7 @@ use crate::FsWriter;
 use crate::Result;
 use crate::{
     BeginUploadRequest, BeginUploadResponse, ChecksumAlgorithm, CompleteMultipartUploadRequest,
-    MaintenanceJobId, NamespaceId, UploadContentResponse, UploadMode, UploadSessionResponse,
+    MaintenanceJobId, NamespaceId, UploadContentResponse, UploadMode, UploadSession,
 };
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::UploadPartChecksumClaim;
@@ -240,7 +240,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<UploadSessionResponse> {
+    ) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .complete_upload_prepared_inner(
@@ -271,7 +271,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
-    ) -> Result<UploadSessionResponse> {
+    ) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .complete_upload_prepared_inner(
@@ -414,7 +414,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<UploadSessionResponse> {
+    ) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self.engine(namespace_id).abort_upload(upload_id).await?)
     }
@@ -436,7 +436,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
+    ) -> Result<(UploadSession, Option<CompletedUploadReceipt>)> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)

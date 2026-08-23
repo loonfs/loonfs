@@ -34,8 +34,8 @@ use bytes::Bytes;
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompletedUploadPart,
-    UploadContentClaim, UploadContentResponse, UploadMode, UploadPartChecksumClaim,
-    UploadSessionResponse, UploadSessionStatus,
+    UploadContentClaim, UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
+    UploadSessionStatus,
 };
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, NamespaceStatus, ProxiedStaging, UploadSessionMode,
@@ -1093,7 +1093,7 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     context: &MutationContext,
-) -> Result<UploadSessionResponse> {
+) -> Result<UploadSession> {
     let now_ms = context.now_ms;
     let (response, abandoned) = update_upload_session(
         store,
@@ -1106,7 +1106,7 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
             async move {
                 let mode = upload_mode(&state.mode);
                 let abandoned = AbandonedUpload::of(&state);
-                let aborted = |aborted_at_ms| UploadSessionResponse {
+                let aborted = |aborted_at_ms| UploadSession {
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.clone(),
                     mode,
@@ -1195,7 +1195,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     now_ms: u64,
-) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
+) -> Result<(UploadSession, Option<CompletedUploadReceipt>)> {
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
     let mode = upload_mode(&loaded.mode);
     let (status, receipt) = match loaded.status {
@@ -1220,7 +1220,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
         ),
     };
     Ok((
-        UploadSessionResponse {
+        UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             mode,
@@ -1236,7 +1236,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedUpload {
     /// Wire response for the completion or its idempotent replay.
-    pub response: UploadSessionResponse,
+    pub response: UploadSession,
     /// Admission for a publication in this process, which needs no token.
     pub prepared: PreparedContent,
     /// Receipt for a publication elsewhere, or `None` once the session has
@@ -1254,7 +1254,7 @@ fn completed_upload(
     now_ms: u64,
 ) -> CompletedUpload {
     CompletedUpload {
-        response: UploadSessionResponse {
+        response: UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             mode,

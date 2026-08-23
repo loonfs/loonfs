@@ -27,7 +27,7 @@ use loonfs::{
     FsReader, PassBudget, RuntimeError, StoreFailureClass, DEFAULT_GC_MAX_OBJECTS,
     GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
 };
-use loonfs_api::v0::{GrepIndexLifecycle, GrepIndexStatusResponse};
+use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
@@ -474,10 +474,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     /// Returns the grep index's state and maintenance progress.
-    pub async fn get_grep_index_status(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse> {
+    pub async fn get_grep_index_status(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let root = self.root_state(namespace_id).await?;
         let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
             Some(root) => (
@@ -488,7 +485,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             // A missing root means indexing has not been enabled.
             None => (GrepIndexLifecycle::Disabled, 0, false),
         };
-        Ok(GrepIndexStatusResponse {
+        Ok(GrepIndex {
             namespace_id: namespace_id.clone(),
             lifecycle,
             next_run_ordinal,
@@ -524,8 +521,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     ttl_ms: Some(GREP_BACKFILL_CHECKPOINT_TTL_MS),
                 },
             )
-            .await?
-            .checkpoint)
+            .await?)
     }
 
     async fn release_checkpoint(

@@ -960,7 +960,7 @@ func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 }
 
-func listedNames(t *testing.T, entries []*loonfs.AuthoritativePathEntry) []string {
+func listedNames(t *testing.T, entries []*loonfs.PathEntry) []string {
 	t.Helper()
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -1218,9 +1218,9 @@ func proxyCompleteUpload(
 	namespaceAliasBaseURL string,
 	uploadID string,
 	request *loonfs.CompleteUploadRequest,
-) *loonfs.UploadSessionResponse {
+) *loonfs.UploadSession {
 	t.Helper()
-	return proxyJSONRequest[loonfs.UploadSessionResponse](
+	return proxyJSONRequest[loonfs.UploadSession](
 		t,
 		httpClient,
 		http.MethodPost,
@@ -1596,7 +1596,7 @@ func assertSuccessfulTransfer(t *testing.T, response *http.Response) {
 
 func requireCompletedStatus(
 	t *testing.T,
-	response *loonfs.UploadSessionResponse,
+	response *loonfs.UploadSession,
 ) *loonfs.UploadSessionStatusCompleted {
 	t.Helper()
 	if response == nil {
@@ -1610,7 +1610,7 @@ func requireCompletedStatus(
 
 func requireAbortedStatus(
 	t *testing.T,
-	response *loonfs.UploadSessionResponse,
+	response *loonfs.UploadSession,
 ) *loonfs.UploadSessionStatusAborted {
 	t.Helper()
 	if response == nil {
@@ -1622,7 +1622,7 @@ func requireAbortedStatus(
 	return response.Aborted
 }
 
-func requireFileProjection(t *testing.T, entry *loonfs.AuthoritativePathEntry) *loonfs.AuthoritativePathEntryFile {
+func requireFileProjection(t *testing.T, entry *loonfs.PathEntry) *loonfs.PathEntryFile {
 	t.Helper()
 	if entry == nil {
 		t.Fatal("path entry is nil")
@@ -1640,7 +1640,7 @@ type pathEntryIdentity struct {
 	displayName string
 }
 
-func identityOf(entry *loonfs.AuthoritativePathEntry) pathEntryIdentity {
+func identityOf(entry *loonfs.PathEntry) pathEntryIdentity {
 	if entry == nil {
 		return pathEntryIdentity{}
 	}
@@ -1711,7 +1711,7 @@ func applyCommit(t *testing.T, sdk *client.Client, request *loonfs.CommitRequest
 	return response
 }
 
-func statPath(t *testing.T, sdk *client.Client, namespaceID, path string) *loonfs.AuthoritativePathEntry {
+func statPath(t *testing.T, sdk *client.Client, namespaceID, path string) *loonfs.PathEntry {
 	t.Helper()
 	entry, err := sdk.Filesystem.GetPathEntry(context.Background(), &loonfs.GetPathEntryRequest{
 		NamespaceID: namespaceID,
@@ -1740,7 +1740,7 @@ func listPathEntries(
 	sdk *client.Client,
 	namespaceID string,
 	path string,
-) []*loonfs.AuthoritativePathEntry {
+) []*loonfs.PathEntry {
 	t.Helper()
 	page, err := sdk.Filesystem.ListPathEntries(context.Background(), &loonfs.ListPathEntriesRequest{
 		NamespaceID: namespaceID,
@@ -1752,7 +1752,7 @@ func listPathEntries(
 	return page.Results
 }
 
-func listingContainsPath(entries []*loonfs.AuthoritativePathEntry, path string) bool {
+func listingContainsPath(entries []*loonfs.PathEntry, path string) bool {
 	for _, entry := range entries {
 		if identityOf(entry).path == path {
 			return true
@@ -1761,7 +1761,7 @@ func listingContainsPath(entries []*loonfs.AuthoritativePathEntry, path string) 
 	return false
 }
 
-func listChanges(t *testing.T, sdk *client.Client, namespaceID string) *loonfs.ChangesResponse {
+func listChanges(t *testing.T, sdk *client.Client, namespaceID string) *loonfs.ListChangesResponse {
 	t.Helper()
 	changes, err := sdk.Filesystem.ListChanges(context.Background(), &loonfs.ListChangesRequest{
 		NamespaceID: namespaceID,

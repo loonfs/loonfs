@@ -211,13 +211,13 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<UploadSessionResponse> {
+    ) -> Result<UploadSession> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
             self.base_url
         );
         // Aborting is idempotent: a repeat reports the abort that stands.
-        self.request_json::<(), UploadSessionResponse>(self.post(&url), None)
+        self.request_json::<(), UploadSession>(self.post(&url), None)
             .await
     }
 
@@ -230,12 +230,12 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<UploadSessionResponse> {
+    ) -> Result<UploadSession> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}",
             self.base_url
         );
-        self.request_json::<(), UploadSessionResponse>(self.get(&url), None)
+        self.request_json::<(), UploadSession>(self.get(&url), None)
             .await
     }
 
@@ -247,13 +247,13 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
-    ) -> Result<UploadSessionResponse> {
+    ) -> Result<UploadSession> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             self.base_url
         );
         // The durable completed-session record replays an identical completion without new effect.
-        self.request_json::<_, UploadSessionResponse>(self.post(&url), Some(request))
+        self.request_json::<_, UploadSession>(self.post(&url), Some(request))
             .await
     }
 
@@ -263,12 +263,12 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
-    ) -> Result<UploadSessionResponse> {
+    ) -> Result<UploadSession> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             self.base_url
         );
-        self.request_json::<_, UploadSessionResponse>(
+        self.request_json::<_, UploadSession>(
             self.post(&url),
             Some(&CompleteUploadRequest::DirectMultipart {
                 content: request.content.clone(),

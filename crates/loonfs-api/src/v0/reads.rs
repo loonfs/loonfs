@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// attributes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct AuthoritativePathEntry {
+pub struct PathEntry {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
     /// Absolute path as rendered from stored display names.
@@ -37,7 +37,7 @@ pub struct AuthoritativePathEntry {
     pub created_at_ms: u64,
     /// File-or-directory classification and its kind-specific payload.
     #[serde(flatten)]
-    pub kind: AuthoritativePathEntryKind,
+    pub kind: PathEntryKind,
     /// Namespace head sequence this answer was read from.
     pub head_seq: ChangeSeq,
     /// Parent directory inode, or `None` for the root.
@@ -61,7 +61,7 @@ pub struct AuthoritativePathEntry {
     pub attributes: Option<AttributesProjection>,
 }
 
-impl AuthoritativePathEntry {
+impl PathEntry {
     /// Returns whether this entry is a file or directory.
     pub const fn inode_kind(&self) -> InodeKind {
         self.kind.inode_kind()
@@ -70,32 +70,32 @@ impl AuthoritativePathEntry {
     /// Returns the current revision number for a file entry.
     pub const fn revision_no(&self) -> Option<RevisionNo> {
         match &self.kind {
-            AuthoritativePathEntryKind::Directory {} => None,
-            AuthoritativePathEntryKind::File { revision_no, .. } => Some(*revision_no),
+            PathEntryKind::Directory {} => None,
+            PathEntryKind::File { revision_no, .. } => Some(*revision_no),
         }
     }
 
     /// Returns the current byte length for a file entry.
     pub const fn size_bytes(&self) -> Option<u64> {
         match &self.kind {
-            AuthoritativePathEntryKind::Directory {} => None,
-            AuthoritativePathEntryKind::File { size_bytes, .. } => Some(*size_bytes),
+            PathEntryKind::Directory {} => None,
+            PathEntryKind::File { size_bytes, .. } => Some(*size_bytes),
         }
     }
 
     /// Returns the current content reference for a file entry.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match &self.kind {
-            AuthoritativePathEntryKind::Directory {} => None,
-            AuthoritativePathEntryKind::File { content_ref, .. } => Some(content_ref),
+            PathEntryKind::Directory {} => None,
+            PathEntryKind::File { content_ref, .. } => Some(content_ref),
         }
     }
 
     /// Returns the current revision's commit stamp for a file entry.
     pub const fn revision_committed_at_ms(&self) -> Option<u64> {
         match &self.kind {
-            AuthoritativePathEntryKind::Directory {} => None,
-            AuthoritativePathEntryKind::File {
+            PathEntryKind::Directory {} => None,
+            PathEntryKind::File {
                 revision_committed_at_ms,
                 ..
             } => Some(*revision_committed_at_ms),
@@ -103,19 +103,19 @@ impl AuthoritativePathEntry {
     }
 }
 
-/// Kind-specific metadata for an authoritative path entry.
+/// Kind-specific metadata for a path entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "inode_kind", rename_all = "snake_case")]
-pub enum AuthoritativePathEntryKind {
+pub enum PathEntryKind {
     /// A directory, which has no revision payload in v0.
     ///
     /// The entry tag reuses [`InodeKind`]'s wire vocabulary.
     #[serde(rename = "dir")]
-    #[cfg_attr(feature = "openapi", schema(title = "AuthoritativePathEntryDirectory"))]
+    #[cfg_attr(feature = "openapi", schema(title = "PathEntryDirectory"))]
     Directory {},
     /// A file and its current revision summary.
-    #[cfg_attr(feature = "openapi", schema(title = "AuthoritativePathEntryFile"))]
+    #[cfg_attr(feature = "openapi", schema(title = "PathEntryFile"))]
     File {
         /// Current file revision number.
         revision_no: RevisionNo,
@@ -134,7 +134,7 @@ pub enum AuthoritativePathEntryKind {
     },
 }
 
-impl AuthoritativePathEntryKind {
+impl PathEntryKind {
     /// Returns the stable inode classification represented by this payload.
     pub const fn inode_kind(&self) -> InodeKind {
         match self {
@@ -202,7 +202,7 @@ pub struct ListPathEntriesResponse {
     ///
     /// Entries are returned in canonical name-key order. Higher-level display
     /// surfaces may sort entries separately for presentation.
-    pub entries: Vec<AuthoritativePathEntry>,
+    pub entries: Vec<PathEntry>,
     /// Cursor for the next page, if more entries remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -211,9 +211,9 @@ pub struct ListPathEntriesResponse {
 /// File bytes plus the metadata entry they came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct AuthoritativeFileBytes {
+pub struct FileBytes {
     /// Authoritative metadata for the file that was read.
-    pub entry: AuthoritativePathEntry,
+    pub entry: PathEntry,
     /// Validated file bytes.
     pub bytes: Vec<u8>,
 }
@@ -268,14 +268,14 @@ mod tests {
         path: &str,
         parent_inode_id: Option<InodeId>,
         display_name: Option<&str>,
-    ) -> AuthoritativePathEntry {
-        AuthoritativePathEntry {
+    ) -> PathEntry {
+        PathEntry {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if parent_inode_id.is_some() { 2 } else { 1 }),
             created_by: ActorRef::loonfs_system(),
             created_at_ms: 1_752_624_000_000,
-            kind: AuthoritativePathEntryKind::Directory {},
+            kind: PathEntryKind::Directory {},
             head_seq: ChangeSeq(3),
             parent_inode_id,
             display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_entry_paths_keep_the_plain_string_wire_shape() {
+    fn path_entries_keep_the_plain_string_wire_shape() {
         let named = entry("/docs", Some(InodeId(1)), Some("docs"));
         assert_eq!(
             serde_json::to_value(&named).expect("serialize named entry"),
@@ -333,7 +333,7 @@ mod tests {
     fn a_file_entry_serializes_its_required_payload_with_the_kind() {
         let content_ref = ContentRef::blob_v1(crate::ContentId::generate(), b"hello");
         let mut file = entry("/report.txt", Some(InodeId(1)), Some("report.txt"));
-        file.kind = AuthoritativePathEntryKind::File {
+        file.kind = PathEntryKind::File {
             revision_no: RevisionNo(7),
             size_bytes: 5,
             content_ref: content_ref.clone(),
@@ -368,7 +368,7 @@ mod tests {
         assert!(root_json.get("parent_inode_id").is_none());
         assert!(root_json.get("display_name").is_none());
 
-        let decoded: AuthoritativePathEntry =
+        let decoded: PathEntry =
             serde_json::from_value(root_json).expect("decode root without optional fields");
         assert_eq!(decoded.parent_inode_id, None);
         assert_eq!(decoded.display_name, None);
@@ -380,15 +380,15 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_entry_kinds_share_inode_kind_wire_values() {
-        let directory = AuthoritativePathEntryKind::Directory {};
+    fn path_entry_kinds_share_inode_kind_wire_values() {
+        let directory = PathEntryKind::Directory {};
         assert_eq!(
             serde_json::to_value(directory).expect("serialize directory entry kind")["inode_kind"],
             serde_json::to_value(InodeKind::Directory).expect("serialize directory inode kind")
         );
 
         let content_ref = ContentRef::blob_v1(crate::ContentId::generate(), b"hello");
-        let file = AuthoritativePathEntryKind::File {
+        let file = PathEntryKind::File {
             revision_no: RevisionNo(1),
             size_bytes: 5,
             content_ref,
@@ -430,7 +430,7 @@ mod tests {
             1_752_624_000_000_u64
         );
 
-        let decoded: AuthoritativePathEntry =
+        let decoded: PathEntry =
             serde_json::from_value(projected_json).expect("decode projected entry");
         let projection = decoded.attributes.expect("projected attributes");
         assert_eq!(
@@ -447,7 +447,7 @@ mod tests {
         assert!(unprojected_json.get("attributes").is_none());
         assert!(unprojected_json.get("attributes_revision_no").is_none());
 
-        let decoded: AuthoritativePathEntry =
+        let decoded: PathEntry =
             serde_json::from_value(unprojected_json).expect("decode unprojected entry");
         assert!(decoded.attributes.is_none());
     }

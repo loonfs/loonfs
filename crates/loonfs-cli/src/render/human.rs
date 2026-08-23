@@ -63,17 +63,17 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             "deleted {} (head_seq {})",
             response.namespace_id, response.head_seq.0
         ),
-        CommandData::CheckpointCreated(response) => {
-            let expiry = match response.checkpoint.expires_at_ms {
+        CommandData::CheckpointCreated(checkpoint) => {
+            let expiry = match checkpoint.expires_at_ms {
                 Some(expires_at_ms) => format!(", expires at {expires_at_ms}"),
                 None => String::new(),
             };
             format!(
                 "checkpointed {} @ seq {} (checkpoint {}, manifest {}{expiry})",
-                response.namespace_id,
-                response.checkpoint.checkpoint_seq.0,
-                response.checkpoint.checkpoint_id,
-                response.checkpoint.manifest_no
+                checkpoint.namespace_id,
+                checkpoint.checkpoint_seq.0,
+                checkpoint.checkpoint_id,
+                checkpoint.manifest_no
             )
         }
         CommandData::CheckpointsListed(response) => {
@@ -359,7 +359,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 format!("created_by: {}", render_actor(&entry.created_by)),
                 format!("created: {}", format_utc_ms(entry.created_at_ms)),
             ]);
-            if let loonfs_api::AuthoritativePathEntryKind::File {
+            if let loonfs_api::PathEntryKind::File {
                 revision_no,
                 size_bytes,
                 content_ref,
@@ -629,7 +629,7 @@ fn single_line(message: &str) -> String {
     message.lines().collect::<Vec<_>>().join(" | ")
 }
 
-pub(crate) fn human_path_entry(entry: &loonfs_api::AuthoritativePathEntry) -> String {
+pub(crate) fn human_path_entry(entry: &loonfs_api::PathEntry) -> String {
     let size = entry
         .size_bytes()
         .map(|value: u64| value.to_string())

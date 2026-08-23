@@ -6,8 +6,8 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{
     v0::{
-        BeginUploadRequest, CompleteUploadRequest, FilesystemChange, UploadMode,
-        UploadSessionResponse, UploadSessionStatus,
+        BeginUploadRequest, CompleteUploadRequest, FilesystemChange, UploadMode, UploadSession,
+        UploadSessionStatus,
     },
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
     DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
@@ -628,7 +628,7 @@ async fn complete_upload_session(
     (begin.upload_id().clone(), content_ref, completed_at_ms)
 }
 
-fn get_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSessionResponse {
+fn get_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSession {
     let response = raw_agent()
         .get(&format!(
             "{server_url}/v0/namespaces/demo/uploads/{upload_id}"
@@ -642,7 +642,7 @@ fn get_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> Uplo
 fn abort_upload(
     server_url: &str,
     upload_id: &loonfs_api::UploadId,
-) -> Result<UploadSessionResponse, Box<ureq::Error>> {
+) -> Result<UploadSession, Box<ureq::Error>> {
     let response = raw_agent()
         .post(&format!(
             "{server_url}/v0/namespaces/demo/uploads/{upload_id}/abort"

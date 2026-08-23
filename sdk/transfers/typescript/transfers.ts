@@ -352,7 +352,7 @@ function splitBytes(bytes: Uint8Array, partSize: number): Uint8Array[] {
     return parts;
 }
 
-function stagedContent(response: LoonFS.UploadSessionResponse): StagedContent {
+function stagedContent(response: LoonFS.UploadSession): StagedContent {
     if (response.status !== "completed") {
         throw new Error(`upload ${response.upload_id} completed with status ${response.status}`);
     }

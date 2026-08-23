@@ -267,7 +267,7 @@ pub struct CommittedChange {
 /// Change-feed response after a cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ChangesResponse {
+pub struct ListChangesResponse {
     /// Namespace whose ordered commit stream was read.
     pub namespace_id: NamespaceId,
     /// Exclusive cursor supplied by the caller, or the endpoint's initial position.

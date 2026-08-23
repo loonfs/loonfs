@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use loonfs::{FsAdmin, FsReader, MaintenanceJob, MaintenanceStepConclusion, SharedObjectStore};
-use loonfs_api::v0::{GrepIndexLifecycle, GrepIndexStatusResponse};
+use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId};
 use loonfs_grep::root::GrepIndexStatus;
 use loonfs_grep::{
@@ -80,7 +80,7 @@ impl GrepHost {
     pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse, GrepError> {
+    ) -> Result<GrepIndex, GrepError> {
         let lifecycle = match self.worker.enable(namespace_id).await? {
             GrepEnableOutcome::Enabled { state } | GrepEnableOutcome::AlreadyEnabled { state } => {
                 state
@@ -136,7 +136,7 @@ impl GrepHost {
     pub(crate) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse, GrepError> {
+    ) -> Result<GrepIndex, GrepError> {
         match self.worker.disable(namespace_id).await? {
             GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
                 self.get_grep_index_status(namespace_id).await
@@ -150,7 +150,7 @@ impl GrepHost {
     pub(crate) async fn get_grep_index_status(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse, GrepError> {
+    ) -> Result<GrepIndex, GrepError> {
         let root = self.worker.root_state(namespace_id).await?;
         let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
             Some(root) => (
@@ -160,7 +160,7 @@ impl GrepHost {
             ),
             None => (GrepIndexLifecycle::Disabled, 0, false),
         };
-        Ok(GrepIndexStatusResponse {
+        Ok(GrepIndex {
             namespace_id: namespace_id.clone(),
             lifecycle,
             next_run_ordinal,

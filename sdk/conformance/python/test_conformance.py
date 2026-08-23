@@ -21,8 +21,6 @@ import pytest
 import uvicorn
 from loonfs_sdk import (
     ActorRef,
-    AuthoritativePathEntry,
-    AuthoritativePathEntry_File,
     BeginUploadRequest_DirectMultipart,
     BeginUploadRequest_DirectPut,
     BeginUploadRequest_ServiceProxied,
@@ -39,13 +37,15 @@ from loonfs_sdk import (
     FilesystemOperation_PutFile,
     ListPathEntriesResponse,
     LoonFS,
+    PathEntry,
+    PathEntry_File,
     UnauthorizedError,
     UploadContentResponse,
     UploadContentClaim,
     UploadPartChecksumClaim,
-    UploadSessionResponse,
-    UploadSessionResponse_Aborted,
-    UploadSessionResponse_Completed,
+    UploadSession,
+    UploadSession_Aborted,
+    UploadSession_Completed,
 )
 from loonfs_sdk.proxy import LoonFSProxy
 from loonfs_sdk.transfers import get_file, put_file
@@ -470,23 +470,23 @@ def _put_presigned(access: Any, content: bytes) -> httpx.Response:
     return response
 
 
-def _completed_upload(response: UploadSessionResponse) -> UploadSessionResponse_Completed:
+def _completed_upload(response: UploadSession) -> UploadSession_Completed:
     assert isinstance(
-        response, UploadSessionResponse_Completed
+        response, UploadSession_Completed
     ), f"upload {response.upload_id} is {response.status}, not completed"
     return response
 
 
-def _aborted_upload(response: UploadSessionResponse) -> UploadSessionResponse_Aborted:
+def _aborted_upload(response: UploadSession) -> UploadSession_Aborted:
     assert isinstance(
-        response, UploadSessionResponse_Aborted
+        response, UploadSession_Aborted
     ), f"upload {response.upload_id} is {response.status}, not aborted"
     return response
 
 
-def _file_entry(entry: AuthoritativePathEntry) -> AuthoritativePathEntry_File:
+def _file_entry(entry: PathEntry) -> PathEntry_File:
     assert isinstance(
-        entry, AuthoritativePathEntry_File
+        entry, PathEntry_File
     ), f"path {entry.path} is a {entry.inode_kind}, not a file"
     return entry
 
@@ -719,7 +719,7 @@ def test_proxy(
             proxied_complete_response,
             "proxy service-proxied complete response",
         )
-        proxied_complete = UploadSessionResponse_Completed(**proxied_complete_data)
+        proxied_complete = UploadSession_Completed(**proxied_complete_data)
         assert proxied_complete.content_ref == uploaded.content_ref
         assert proxied_complete.content_token is not None
         proxied_commit = _proxy_create_commit(
@@ -775,7 +775,7 @@ def test_proxy(
             direct_complete_response,
             "proxy direct-PUT complete response",
         )
-        direct_complete = UploadSessionResponse_Completed(**direct_complete_data)
+        direct_complete = UploadSession_Completed(**direct_complete_data)
         assert direct_complete.content_ref.size_bytes == len(payload)
         assert direct_complete.content_token is not None
         direct_commit = _proxy_create_commit(
