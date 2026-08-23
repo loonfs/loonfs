@@ -1917,24 +1917,24 @@ fn sample_inode_rows() -> [MetadataRow; 2] {
 
 fn sample_revision_rows() -> [MetadataRow; 2] {
     [
-        MetadataRow::Revision {
+        MetadataRow::FileRevision {
             inode_id: InodeId(2),
             revision_no: RevisionNo(1),
             committed_seq: ChangeSeq(3),
             commit_id: commit_id(),
             committed_at_ms: 3_000,
             actor: actor(),
-            revision_delta_index: 0,
+            delta_index: 0,
             content_ref: sample_content_ref(),
         },
-        MetadataRow::Revision {
+        MetadataRow::FileRevision {
             inode_id: InodeId(2),
             revision_no: RevisionNo(2),
             committed_seq: ChangeSeq(4),
             commit_id: commit_id(),
             committed_at_ms: 4_000,
             actor: actor(),
-            revision_delta_index: 0,
+            delta_index: 0,
             content_ref: sample_crc_content_ref(),
         },
     ]
@@ -2424,14 +2424,14 @@ fn provenance_rows_reject_every_missing_required_field() {
             &["commit_id", "created_by", "created_at_ms"][..],
         ),
         (
-            MetadataRow::Revision {
+            MetadataRow::FileRevision {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(3),
                 commit_id: commit_id(),
                 committed_at_ms: 3_000,
                 actor: actor(),
-                revision_delta_index: 0,
+                delta_index: 0,
                 content_ref: sample_content_ref(),
             },
             &["commit_id", "actor"][..],

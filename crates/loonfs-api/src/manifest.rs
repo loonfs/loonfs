@@ -166,7 +166,7 @@ pub enum MetadataRow {
         unbind_delta_index: u32,
     },
     /// Publishes one immutable content revision for a file inode.
-    Revision {
+    FileRevision {
         /// File inode whose history contains the revision.
         inode_id: InodeId,
         /// Monotonic revision number within that file's history.
@@ -182,7 +182,7 @@ pub enum MetadataRow {
         /// Actor responsible for this revision, as supplied by the application.
         actor: crate::ActorRef,
         /// Delta position that disambiguates the revision within `committed_seq`.
-        revision_delta_index: u32,
+        delta_index: u32,
         /// Immutable bytes published by the revision.
         content_ref: ContentRef,
     },
@@ -370,7 +370,7 @@ pub enum ActiveDeletionRowAction {
 impl ActiveDeletionRowAction {
     /// The row-key component that orders a removal ahead of the row it
     /// removes.
-    fn sort_rank(&self) -> u8 {
+    fn sort_rank(&self) -> u32 {
         match self {
             Self::Removed { .. } => lookup_keys::ACTIVE_DELETION_RANK_REMOVED,
             Self::Listed { .. } => lookup_keys::ACTIVE_DELETION_RANK_LISTED,
@@ -385,15 +385,15 @@ impl MetadataRowFamily {
     pub const fn row_key_prefix(self) -> &'static str {
         match self {
             Self::Inodes => "inode-",
-            Self::DirentryBinds => "direntry-",
-            Self::DirentryChildBinds => "direntry-child-",
+            Self::DirentryBinds => "direntry-bind-",
+            Self::DirentryChildBinds => "direntry-child-bind-",
             Self::DirentryUnbinds => "direntry-unbind-",
             Self::Revisions => "revision-",
             Self::RevisionsByInodeDesc => "revision-by-inode-desc-",
             Self::Tombstones => "tombstone-",
             Self::ActiveDeletions => "active-deletion-",
             Self::CommitReceipts => "commit-receipt-",
-            Self::Attributes => "attributes-",
+            Self::Attributes => "attribute-",
         }
     }
 }
@@ -407,7 +407,7 @@ impl MetadataRow {
             Self::Inode { .. } => MetadataRowFamily::Inodes,
             Self::DirentryBind { .. } => MetadataRowFamily::DirentryBinds,
             Self::DirentryUnbind { .. } => MetadataRowFamily::DirentryUnbinds,
-            Self::Revision { .. } => MetadataRowFamily::Revisions,
+            Self::FileRevision { .. } => MetadataRowFamily::Revisions,
             Self::Tombstone { .. } => MetadataRowFamily::Tombstones,
             Self::ActiveDeletion { .. } => MetadataRowFamily::ActiveDeletions,
             Self::CommitReceipt { .. } => MetadataRowFamily::CommitReceipts,
@@ -433,13 +433,13 @@ impl MetadataRow {
                 match family {
                     MetadataRowFamily::DirentryChildBinds => {
                         format!(
-                            "direntry-child-{:020}-{:020}-{:010}-{:020}-{name_key}",
+                            "direntry-child-bind-{:020}-{:020}-{:010}-{:020}-{name_key}",
                             child_inode_id.0, bind_seq.0, bind_delta_index, parent_inode_id.0
                         )
                     }
                     _ => {
                         format!(
-                            "direntry-{:020}-{name_key}-{:020}-{:010}",
+                            "direntry-bind-{:020}-{name_key}-{:020}-{:010}",
                             parent_inode_id.0, bind_seq.0, bind_delta_index
                         )
                     }
@@ -464,17 +464,17 @@ impl MetadataRow {
                     unbind_delta_index
                 )
             }
-            Self::Revision {
+            Self::FileRevision {
                 inode_id,
                 revision_no,
                 committed_seq,
-                revision_delta_index,
+                delta_index,
                 ..
             } => match family {
                 MetadataRowFamily::RevisionsByInodeDesc => {
                     let reverse_revision_no = u64::MAX - revision_no.0;
                     let reverse_committed_seq = u64::MAX - committed_seq.0;
-                    let reverse_delta_index = u32::MAX - revision_delta_index;
+                    let reverse_delta_index = u32::MAX - delta_index;
                     format!(
                         "revision-by-inode-desc-{:020}-{:020}-{:020}-{:010}",
                         inode_id.0, reverse_revision_no, reverse_committed_seq, reverse_delta_index
@@ -483,7 +483,7 @@ impl MetadataRow {
                 _ => {
                     format!(
                         "revision-{:020}-{:020}-{:010}",
-                        inode_id.0, revision_no.0, revision_delta_index
+                        inode_id.0, revision_no.0, delta_index
                     )
                 }
             },
@@ -548,11 +548,11 @@ impl MetadataRow {
                 ..
             } => match family {
                 MetadataRowFamily::DirentryChildBinds => {
-                    format!("direntry-child-{:020}", child_inode_id.0)
+                    format!("direntry-child-bind-{:020}", child_inode_id.0)
                 }
                 _ => {
                     let name_key = hex_encode_row_key_component(name_key.as_str());
-                    format!("direntry-{:020}-{name_key}", parent_inode_id.0)
+                    format!("direntry-bind-{:020}-{name_key}", parent_inode_id.0)
                 }
             },
             Self::DirentryUnbind {
@@ -563,7 +563,7 @@ impl MetadataRow {
                 let name_key = hex_encode_row_key_component(name_key.as_str());
                 format!("direntry-unbind-{:020}-{name_key}", parent_inode_id.0)
             }
-            Self::Revision { inode_id, .. } => match family {
+            Self::FileRevision { inode_id, .. } => match family {
                 MetadataRowFamily::RevisionsByInodeDesc => {
                     format!("revision-by-inode-desc-{:020}", inode_id.0)
                 }
@@ -634,7 +634,7 @@ pub mod lookup_keys {
     ///
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_parent_prefix(parent_inode_id: InodeId) -> String {
-        format!("direntry-{:020}-", parent_inode_id.0)
+        format!("direntry-bind-{:020}-", parent_inode_id.0)
     }
 
     /// Builds the bloom-filter probe shared by all generations of one parent/name binding.
@@ -642,7 +642,7 @@ pub mod lookup_keys {
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_bind_probe(parent_inode_id: InodeId, name_key: &str) -> String {
         format!(
-            "direntry-{:020}-{}",
+            "direntry-bind-{:020}-{}",
             parent_inode_id.0,
             hex_encode_row_key_component(name_key)
         )
@@ -659,7 +659,7 @@ pub mod lookup_keys {
     ///
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_child_probe(child_inode_id: InodeId) -> String {
-        format!("direntry-child-{:020}", child_inode_id.0)
+        format!("direntry-child-bind-{:020}", child_inode_id.0)
     }
 
     /// Builds the reverse-index range prefix selecting bindings to one child inode.
@@ -741,11 +741,11 @@ pub mod lookup_keys {
     /// It is the lowest rank on purpose: an ascending scan sees the removal
     /// before the row it removes, so a page never lists a deletion whose
     /// marker was going to arrive one page later.
-    pub const ACTIVE_DELETION_RANK_REMOVED: u8 = 0;
+    pub const ACTIVE_DELETION_RANK_REMOVED: u32 = 0;
 
     /// Rank of the listed row within one deletion generation, and the highest
     /// rank the family defines.
-    pub const ACTIVE_DELETION_RANK_LISTED: u8 = 1;
+    pub const ACTIVE_DELETION_RANK_LISTED: u32 = 1;
 
     /// Builds an active-deletion row key from its generation and rank.
     ///
@@ -753,10 +753,10 @@ pub mod lookup_keys {
     pub fn active_deletion_row_key(
         deletion_seq: ChangeSeq,
         root_inode_id: InodeId,
-        sort_rank: u8,
+        sort_rank: u32,
     ) -> String {
         format!(
-            "{ACTIVE_DELETION_ROW_PREFIX}{:020}-{:020}-{sort_rank}",
+            "{ACTIVE_DELETION_ROW_PREFIX}{:020}-{:020}-{sort_rank:010}",
             deletion_seq.0, root_inode_id.0
         )
     }
@@ -824,14 +824,14 @@ pub mod lookup_keys {
         inode_id: InodeId,
         revision_no: RevisionNo,
         committed_seq: ChangeSeq,
-        revision_delta_index: u32,
+        delta_index: u32,
     ) -> String {
         format!(
             "{}{:020}-{:020}-{:010}",
             revision_by_inode_desc_prefix(inode_id),
             u64::MAX - revision_no.0,
             u64::MAX - committed_seq.0,
-            u32::MAX - revision_delta_index
+            u32::MAX - delta_index
         )
     }
 
@@ -840,7 +840,7 @@ pub mod lookup_keys {
     ///
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn attributes_probe(inode_id: InodeId) -> String {
-        format!("attributes-{:020}", inode_id.0)
+        format!("attribute-{:020}", inode_id.0)
     }
 
     /// Builds the range prefix selecting one inode's attribute revisions,
@@ -1129,11 +1129,11 @@ mod tests {
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
-            "direntry-00000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
+            "direntry-bind-00000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
         );
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryChildBinds),
-            "direntry-child-00000000000000000042-00000000000000000017-0000000003-00000000000000000009-7265706f72742e747874"
+            "direntry-child-bind-00000000000000000042-00000000000000000017-0000000003-00000000000000000009-7265706f72742e747874"
         );
     }
 
@@ -1150,20 +1150,20 @@ mod tests {
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
-            "direntry-00000000000000000009-7265706f72742d32303234-00000000000000000017-0000000003"
+            "direntry-bind-00000000000000000009-7265706f72742d32303234-00000000000000000017-0000000003"
         );
     }
 
     #[test]
     fn revision_row_key_supports_newest_first_inode_index() {
-        let row = super::MetadataRow::Revision {
+        let row = super::MetadataRow::FileRevision {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
             committed_seq: ChangeSeq(12),
             commit_id: row_commit_id(),
             committed_at_ms: 12_000,
             actor: crate::ActorRef::loonfs_system(),
-            revision_delta_index: 3,
+            delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("valid content id"),
@@ -1202,7 +1202,7 @@ mod tests {
 
         assert_eq!(
             newest.row_key_for_family(MetadataRowFamily::Attributes),
-            "attributes-00000000000000000042-18446744073709551612-18446744073709551603-4294967294"
+            "attribute-00000000000000000042-18446744073709551612-18446744073709551603-4294967294"
         );
         assert_eq!(
             newest.row_key(),
@@ -1241,14 +1241,14 @@ mod tests {
             bind_seq: ChangeSeq(17),
             bind_delta_index: 3,
         };
-        let revision = super::MetadataRow::Revision {
+        let revision = super::MetadataRow::FileRevision {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
             committed_seq: ChangeSeq(12),
             commit_id: row_commit_id(),
             committed_at_ms: 12_000,
             actor: crate::ActorRef::loonfs_system(),
-            revision_delta_index: 3,
+            delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("valid content id"),
@@ -1368,14 +1368,14 @@ mod tests {
                 ),
                 (
                     MetadataRowFamily::RevisionsByInodeDesc,
-                    super::MetadataRow::Revision {
+                    super::MetadataRow::FileRevision {
                         inode_id: InodeId(42),
                         revision_no: crate::RevisionNo(7),
                         committed_seq: ChangeSeq(12),
                         commit_id: row_commit_id(),
                         committed_at_ms: 12_000,
                         actor: actor.clone(),
-                        revision_delta_index: 3,
+                        delta_index: 3,
                         content_ref: crate::ContentRef::blob_v1(
                             crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                                 .expect("content id"),

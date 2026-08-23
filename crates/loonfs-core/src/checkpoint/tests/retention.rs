@@ -146,23 +146,23 @@ fn metadata_states_equivalent_ignoring_content_identity(
                 let rows = manifest_rows_for_family(state, family)
                     .into_iter()
                     .map(|row| match row {
-                        MetadataRow::Revision {
+                        MetadataRow::FileRevision {
                             inode_id,
                             revision_no,
                             committed_seq,
                             commit_id,
                             committed_at_ms,
                             actor,
-                            revision_delta_index,
+                            delta_index,
                             content_ref,
-                        } => MetadataRow::Revision {
+                        } => MetadataRow::FileRevision {
                             inode_id,
                             revision_no,
                             committed_seq,
                             commit_id,
                             committed_at_ms,
                             actor,
-                            revision_delta_index,
+                            delta_index,
                             content_ref: loonfs_api::ContentRef {
                                 content_id: loonfs_api::ContentId::parse(
                                     "con_00000000000000000000000000000000",

@@ -94,14 +94,14 @@ pub(crate) fn direntry_unbind_from_manifest_row(
 
 pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRecord, CoreError> {
     match row {
-        MetadataRow::Revision {
+        MetadataRow::FileRevision {
             inode_id,
             revision_no,
             committed_seq,
             commit_id,
             committed_at_ms,
             actor,
-            revision_delta_index,
+            delta_index,
             content_ref,
         } => Ok(RevisionRecord {
             inode_id,
@@ -110,10 +110,10 @@ pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRec
             commit_id,
             committed_at_ms,
             actor,
-            revision_delta_index,
+            revision_delta_index: delta_index,
             content_ref,
         }),
-        other => Err(foreign_row("revision", &other)),
+        other => Err(foreign_row("file_revision", &other)),
     }
 }
 

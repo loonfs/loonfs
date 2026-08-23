@@ -252,7 +252,7 @@ async fn segment_range_page_merges_base_and_l0_in_row_key_order() {
     .expect("load segments");
 
     let docs_inode_id = InodeId(2);
-    let lower_bound = format!("direntry-{:020}-", docs_inode_id.0);
+    let lower_bound = format!("direntry-bind-{:020}-", docs_inode_id.0);
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
     let page = segments
         .scan_range_page(
@@ -311,7 +311,7 @@ async fn byte_budgeted_cache_admits_large_range_scans() {
     // The list preload path: one page-shaped range scan over a directory
     // whose bind rows span more segments than the small-scan limit.
     let docs_inode_id = InodeId(2);
-    let lower_bound = format!("direntry-{:020}-", docs_inode_id.0);
+    let lower_bound = format!("direntry-bind-{:020}-", docs_inode_id.0);
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
     let page = segments
         .scan_range_page(
@@ -456,7 +456,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     let docs_binds = segments
         .scan_prefix(
             ApiMetadataRowFamily::DirentryBinds,
-            "direntry-00000000000000000001-",
+            "direntry-bind-00000000000000000001-",
         )
         .await
         .expect("scan root binds");
@@ -468,7 +468,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         })
         .expect("docs directory bind");
     let encoded_name = loonfs_api::wire::manifest::hex_encode_row_key_component("beta.txt");
-    let filter_probe = format!("direntry-{:020}-{encoded_name}", docs_inode.0);
+    let filter_probe = format!("direntry-bind-{:020}-{encoded_name}", docs_inode.0);
     let prefix = format!("{filter_probe}-");
     let rows = segments
         .scan_prefix_for_lookup(

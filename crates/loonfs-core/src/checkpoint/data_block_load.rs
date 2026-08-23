@@ -300,7 +300,7 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
         MetadataRow::DirentryUnbind { name_key, .. } => {
             ALLOCATED_ROW_OVERHEAD + name_key.as_str().len()
         }
-        MetadataRow::Revision {
+        MetadataRow::FileRevision {
             commit_id,
             content_ref,
             ..

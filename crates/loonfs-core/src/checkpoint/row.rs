@@ -98,14 +98,14 @@ pub(super) fn manifest_rows_for_family(
         MetadataRowFamily::Revisions | MetadataRowFamily::RevisionsByInodeDesc => metadata_state
             .revisions()
             .iter()
-            .map(|revision| MetadataRow::Revision {
+            .map(|revision| MetadataRow::FileRevision {
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
                 commit_id: revision.commit_id.clone(),
                 committed_at_ms: revision.committed_at_ms,
                 actor: revision.actor.clone(),
-                revision_delta_index: revision.revision_delta_index,
+                delta_index: revision.revision_delta_index,
                 content_ref: revision.content_ref.clone(),
             })
             .collect::<Vec<_>>(),
@@ -173,7 +173,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         MetadataRow::Inode { created_seq, .. } => *created_seq,
         MetadataRow::DirentryBind { bind_seq, .. } => *bind_seq,
         MetadataRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq,
-        MetadataRow::Revision { committed_seq, .. } => *committed_seq,
+        MetadataRow::FileRevision { committed_seq, .. } => *committed_seq,
         MetadataRow::Tombstone { generation, .. } => generation.seq,
         // A removal marker belongs to the run of the undelete that produced
         // it, not to the run of the deletion whose key it repeats.
@@ -196,7 +196,7 @@ pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::Inode { .. } => "inode",
         MetadataRow::DirentryBind { .. } => "direntry_bind",
         MetadataRow::DirentryUnbind { .. } => "direntry_unbind",
-        MetadataRow::Revision { .. } => "revision",
+        MetadataRow::FileRevision { .. } => "file_revision",
         MetadataRow::Tombstone { .. } => "tombstone",
         MetadataRow::ActiveDeletion { .. } => "active_deletion",
         MetadataRow::CommitReceipt { .. } => "commit_receipt",
