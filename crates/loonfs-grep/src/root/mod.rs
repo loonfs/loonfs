@@ -2,7 +2,7 @@
 //!
 //! One immutable manifest pairs the query-visible segment set with its
 //! `(built_through_seq, next_event_index)` cursor, lifecycle, in-progress
-//! reorganization, and run ordinal allocation. Publication writes that manifest
+//! reorganization, and run number allocation. Publication writes that manifest
 //! create-if-absent, then updates its pointer with one object-store
 //! compare-and-swap. Readers therefore see the cursor and its segments
 //! together.

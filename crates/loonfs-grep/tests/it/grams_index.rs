@@ -388,7 +388,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         max_files_per_step: nonzero_usize(FILES),
         max_content_bytes_per_step: NonZeroU64::new(max_content_bytes_per_step)
             .expect("content budget should be nonzero"),
-        max_l0_runs: nonzero_usize(usize::MAX),
+        max_delta_runs: nonzero_usize(usize::MAX),
         ..GramIndexBuildPolicy::default()
     };
     let mut operations = Vec::with_capacity(FILES);

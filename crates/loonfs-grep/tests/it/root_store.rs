@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use loonfs::StoreFailureClass;
-use loonfs_api::{ChangeSeq, NamespaceId};
+use loonfs_api::{ChangeSeq, NamespaceId, RunNo};
 use loonfs_grep::keyspace::{manifest_key, manifests_prefix, root_key};
 use loonfs_grep::root::{
     advance_grep_root, encode_grep_manifest, encode_grep_root, load_grep_root, seed_grep_root,
@@ -241,7 +241,7 @@ fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepManifest
             built_through_seq,
             next_event_index: 0,
         },
-        GrepIndexState::new(None, 0),
+        GrepIndexState::new(None, RunNo(0)),
         Vec::new(),
     )
     .expect("valid root")

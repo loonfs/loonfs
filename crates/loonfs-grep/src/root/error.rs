@@ -2,7 +2,7 @@
 
 use loonfs::StoreFailureClass;
 use loonfs_api::wire::envelope::EnvelopeCodecError;
-use loonfs_api::{IndexSegmentId, NamespaceId};
+use loonfs_api::{IndexSegmentId, NamespaceId, RunNo};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -19,21 +19,16 @@ pub enum GrepManifestStateError {
     #[error("grep segment `{segment_id}` has a minimum row key after its maximum")]
     InvalidSegmentRange { segment_id: IndexSegmentId },
     #[error(
-        "grep segment `{segment_id}` uses run ordinal `{run_ordinal}` but the next ordinal is \
-         `{next_run_ordinal}`"
+        "grep segment `{segment_id}` uses run `{run_no}` but the next run number is \
+         `{next_run_no}`"
     )]
-    UnallocatedSegmentRunOrdinal {
+    UnallocatedSegmentRunNo {
         segment_id: IndexSegmentId,
-        run_ordinal: u64,
-        next_run_ordinal: u64,
+        run_no: RunNo,
+        next_run_no: RunNo,
     },
-    #[error(
-        "grep reorganization uses run ordinal `{run_ordinal}` but the next ordinal is `{next_run_ordinal}`"
-    )]
-    UnallocatedReorganizeRunOrdinal {
-        run_ordinal: u64,
-        next_run_ordinal: u64,
-    },
+    #[error("grep reorganization uses run `{run_no}` but the next run number is `{next_run_no}`")]
+    UnallocatedReorganizeRunNo { run_no: RunNo, next_run_no: RunNo },
     #[error("grep reorganization repeats segment id `{segment_id}`")]
     DuplicateReorganizeSegmentId { segment_id: IndexSegmentId },
     #[error("grep reorganization snapshot references missing segment `{segment_id}`")]
@@ -41,7 +36,8 @@ pub enum GrepManifestStateError {
     #[error("grep reorganization output references missing segment `{segment_id}`")]
     MissingReorganizeOutputSegment { segment_id: IndexSegmentId },
     #[error(
-        "grep reorganization output `{segment_id}` does not carry the reorganization's level and run ordinal"
+        "grep reorganization output `{segment_id}` does not carry the reorganization's level and \
+         run number"
     )]
     ReorganizeOutputDescriptorMismatch { segment_id: IndexSegmentId },
 }

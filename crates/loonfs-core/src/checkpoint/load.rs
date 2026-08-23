@@ -13,10 +13,13 @@ use super::cache::{
 use super::error::ManifestLoadError;
 use super::runs::{
     runs_in_materialization_order, runs_in_scan_order, MetadataRunManifest,
-    CHECKPOINT_L0_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
+    CHECKPOINT_DELTA_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
 };
 use super::scan::{ordered_manifest_segments, VerifiedMetadataSegments};
-use super::validate::{validate_manifest_materialization_ranges, validate_namespace_manifest};
+use super::validate::{
+    validate_manifest_materialization_ranges, validate_manifest_run_identity,
+    validate_namespace_manifest,
+};
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{genesis_next_inode_id, MetadataBasis, MetadataBasisIdentity};
@@ -27,7 +30,7 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestKind, NamespaceManifestPayload,
     NAMESPACE_MANIFEST_FORMAT_VERSION,
 };
-use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, WriterEpoch};
+use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, RunNo, WriterEpoch};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -84,6 +87,7 @@ pub(super) fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceMan
             base_seq: ChangeSeq(0),
             writer_epoch: WriterEpoch(0),
             next_inode_id: genesis_next_inode_id(),
+            next_run_no: RunNo(0),
             retention_floor_seq: ChangeSeq(0),
             segments: Vec::new(),
         },
@@ -224,6 +228,7 @@ pub(crate) async fn load_verified_manifest_segments_with_cache<'a, S: ObjectStor
             &manifest_key,
             &manifest,
         )?;
+        validate_manifest_run_identity(&manifest_key, &manifest.payload)?;
         validate_manifest_materialization_ranges(&manifest_key, &manifest.payload)?;
         validate_manifest_segment_descriptors(&manifest_key, &manifest)?;
         let scan_runs = Arc::new(runs_in_scan_order(&manifest.payload));
@@ -383,16 +388,16 @@ fn validate_manifest_segment_descriptors(
                 // row the segment holds, so a manifest that carries one is
                 // rejected here rather than answering "not found".
                 if descriptor.row_count > 0
-                    && (descriptor.min_key.is_empty()
-                        || descriptor.max_key.is_empty()
-                        || descriptor.min_key > descriptor.max_key)
+                    && (descriptor.min_row_key.is_empty()
+                        || descriptor.max_row_key.is_empty()
+                        || descriptor.min_row_key > descriptor.max_row_key)
                 {
                     return Err(ManifestLoadError::SegmentDescriptorMismatch {
                         object_key: metadata_segment_object_key(descriptor),
                         message: format!(
                             "segment holds {} rows with key range `{}`..=`{}`; a segment with \
                              rows must carry a non-empty ascending key range",
-                            descriptor.row_count, descriptor.min_key, descriptor.max_key
+                            descriptor.row_count, descriptor.min_row_key, descriptor.max_row_key
                         ),
                     });
                 }
@@ -422,7 +427,7 @@ fn validate_manifest_segment_descriptors(
                 object_key: manifest_object_key.to_owned(),
                 message: format!(
                     "metadata run `{}` has {direntry_bind_rows} direntry bind rows but {direntry_child_bind_rows} child-bind index rows",
-                    run.run_seq
+                    run.run_no
                 ),
             });
         }
@@ -431,7 +436,7 @@ fn validate_manifest_segment_descriptors(
                 object_key: manifest_object_key.to_owned(),
                 message: format!(
                     "metadata run `{}` has {revision_rows} revision rows but {revision_by_inode_desc_rows} revision index rows",
-                    run.run_seq
+                    run.run_no
                 ),
             });
         }
@@ -449,13 +454,10 @@ fn validate_segment_numbering(descriptors: &[MetadataSegmentRef]) -> Result<(), 
             return Err(ManifestLoadError::SegmentDescriptorMismatch {
                 object_key: metadata_segment_object_key(descriptor),
                 message: format!(
-                    "segment carries index {} at position {position} of family `{:?}` in run seq \
-                     `{}` level {}; a family's segments within one run are numbered from zero, \
-                     once each, in the order they were written",
-                    descriptor.segment_index,
-                    descriptor.family,
-                    descriptor.run_seq,
-                    descriptor.level
+                    "segment carries index {} at position {position} of family `{:?}` in run \
+                     `{}`; a family's segments within one run are numbered from zero, once each, \
+                     in the order they were written",
+                    descriptor.segment_index, descriptor.family, descriptor.run_no
                 ),
             });
         }
@@ -472,19 +474,17 @@ fn validate_segment_key_order(descriptors: &[MetadataSegmentRef]) -> Result<(), 
             continue;
         }
         if let Some(previous) = previous {
-            if descriptor.min_key <= previous.max_key {
+            if descriptor.min_row_key <= previous.max_row_key {
                 return Err(ManifestLoadError::SegmentDescriptorMismatch {
                     object_key: metadata_segment_object_key(descriptor),
                     message: format!(
-                        "segment starts at `{}`, at or below the preceding segment's last key \
-                         `{}`, in family `{:?}` of run seq `{}` level {}; one producer writes a \
-                         family's segments in ascending key order, so consecutive ranges never \
-                         touch",
-                        descriptor.min_key,
-                        previous.max_key,
+                        "segment starts at `{}`, at or below the preceding segment's last row key \
+                         `{}`, in family `{:?}` of run `{}`; one producer writes a family's \
+                         segments in ascending key order, so consecutive ranges never touch",
+                        descriptor.min_row_key,
+                        previous.max_row_key,
                         descriptor.family,
-                        descriptor.run_seq,
-                        descriptor.level
+                        descriptor.run_no
                     ),
                 });
             }
@@ -503,7 +503,7 @@ fn validate_one_base_run_per_family_group(
 ) -> Result<(), ManifestLoadError> {
     for group in REORGANIZE_FAMILY_GROUPS {
         let mut base_runs = runs.iter().filter(|run| {
-            run.level != CHECKPOINT_L0_RUN_LEVEL
+            run.level != CHECKPOINT_DELTA_RUN_LEVEL
                 && run.segments.iter().any(|family_segments| {
                     group.contains(family_segments.family) && !family_segments.segments.is_empty()
                 })
@@ -514,14 +514,12 @@ fn validate_one_base_run_per_family_group(
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: manifest_object_key.to_owned(),
             message: format!(
-                "family group {:?} holds base-tier runs at seq `{}` level {} and seq `{}` \
-                 level {}; a group holds at most one base run, because a merge writes one only \
-                 when it starts at the group's oldest run and then replaces it",
+                "family group {:?} holds base-tier runs `{}` and `{}`; a group holds at most one \
+                 base run, because a merge writes one only when it starts at the group's oldest \
+                 run and then replaces it",
                 group.families(),
-                first.run_seq,
-                first.level,
-                second.run_seq,
-                second.level
+                first.run_no,
+                second.run_no
             ),
         });
     }

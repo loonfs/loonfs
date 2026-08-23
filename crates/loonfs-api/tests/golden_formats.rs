@@ -42,7 +42,7 @@ use loonfs_api::{
     sha256_digest, ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue,
     Attributes, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId,
     ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo, ManifestObjectId,
-    MetadataCompactionId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, UploadId,
+    MetadataCompactionId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo, UploadId,
     WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
@@ -341,19 +341,21 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
         base_seq: ChangeSeq(2),
         writer_epoch: WriterEpoch(3),
         next_inode_id: InodeId(10),
+        next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
         segments: vec![MetadataSegmentRef {
             owner_namespace_id: namespace_id(),
             segment_id: segment_id(),
             // WAL flush segments use the standard metadata segment prefix.
             compaction_job_id: None,
+            run_no: RunNo(0),
             run_seq: ChangeSeq(2),
             level: 0,
             family: MetadataRowFamily::Inodes,
             segment_index: 0,
             row_count: 6,
-            min_key: "commit-receipt".to_owned(),
-            max_key: "tombstone".to_owned(),
+            min_row_key: "commit-receipt".to_owned(),
+            max_row_key: "tombstone".to_owned(),
             index_block: loonfs_api::wire::sst_blocks::BlockHandle {
                 offset: 4_000,
                 stored_len: 200,
@@ -2630,7 +2632,7 @@ fn sst_block_index_entry_schema_matches_golden_bytes() {
     // Fixed handle values: this fixture pins the index entry schema (field
     // names, order, integer widths) without coupling to zstd output.
     let entries = vec![SegmentIndexEntry {
-        last_key: "inode-00000000000000000042".to_owned(),
+        last_row_key: "inode-00000000000000000042".to_owned(),
         block: BlockHandle {
             offset: 7,
             stored_len: 512,

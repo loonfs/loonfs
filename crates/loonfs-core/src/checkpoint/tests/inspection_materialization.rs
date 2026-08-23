@@ -251,7 +251,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         });
     }
     if let (Some(first), Some(last)) = (row_set.row_keys().next(), row_set.row_keys().last()) {
-        if descriptor.min_key != *first || descriptor.max_key != *last {
+        if descriptor.min_row_key != *first || descriptor.max_row_key != *last {
             return Err(ManifestLoadError::SegmentDescriptorMismatch {
                 object_key: metadata_segment_object_key(descriptor),
                 message: "descriptor min/max key mismatch".to_owned(),

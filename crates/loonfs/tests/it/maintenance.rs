@@ -497,9 +497,9 @@ fn the_typed_wrappers_are_single_action_steps() {
 }
 
 #[test]
-fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
+fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "step-l0-run-publish-test");
+    let fs = runtime(temp_dir.path(), "step-delta-run-publish-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -533,7 +533,7 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
 
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
-        .expect("status after l0 wal flush");
+        .expect("status after delta wal flush");
     assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
     assert_eq!(status.wal_tail_segments, 0);
 
@@ -552,14 +552,14 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
     // A WAL flush only appends: the base marker stays where the first
     // published manifest put it until reorganization folds the delta runs.
     assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
-    let l0_files = manifest
+    let delta_files = manifest
         .payload
         .segments
         .iter()
         .filter(|descriptor| descriptor.level == 0)
         .collect::<Vec<_>>();
-    assert!(!l0_files.is_empty());
-    assert!(l0_files
+    assert!(!delta_files.is_empty());
+    assert!(delta_files
         .iter()
         .any(|descriptor| descriptor.run_seq == ChangeSeq(2)));
 }
@@ -585,7 +585,7 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
         MetadataCompactionOutcome::NoWork
     );
 
-    // Enough flushes to put the manifest's L0 run count over the fold
+    // Enough flushes to put the manifest's delta run count over the fold
     // trigger, which is what makes the planner select a group at all.
     for index in 0..9 {
         fs.put_file_bytes_blocking(

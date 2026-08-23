@@ -8,7 +8,7 @@ use crate::WriterEpoch;
 use crate::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
     InodeKind, ManifestNo, ManifestObjectId, MetadataCompactionId, MetadataSegmentId, NameKey,
-    NamespaceId, RevisionNo,
+    NamespaceId, RevisionNo, RunNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +81,9 @@ pub struct MetadataSegmentRef {
     /// The owner, segment id, and optional job id determine the object key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_job_id: Option<MetadataCompactionId>,
+    /// Run this segment belongs to. Every segment one producer wrote
+    /// together carries the same run number, and no two runs share one.
+    pub run_no: RunNo,
     /// Namespace sequence at which this run was produced.
     pub run_seq: ChangeSeq,
     /// Compaction tier used to order overlapping runs during reads and reorganization.
@@ -92,9 +95,9 @@ pub struct MetadataSegmentRef {
     /// Number of row payloads in the segment, used for validation and planning.
     pub row_count: u64,
     /// Inclusive least durable row key; the segment is corrupt if decoded rows disagree.
-    pub min_key: String,
+    pub min_row_key: String,
     /// Inclusive greatest durable row key; range planning skips disjoint segments.
-    pub max_key: String,
+    pub max_row_key: String,
     /// Location and verification data for the segment index block.
     ///
     /// Segments have no footer, so readers begin with this handle.
@@ -897,6 +900,9 @@ pub struct NamespaceManifestPayload {
     pub writer_epoch: WriterEpoch,
     /// First inode identity available after replaying the manifest snapshot.
     pub next_inode_id: InodeId,
+    /// Run number the next producer allocates. Every segment's `run_no` is
+    /// below it.
+    pub next_run_no: RunNo,
     /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: ChangeSeq,
     /// Complete ordered set of metadata segments required to reconstruct the snapshot.
@@ -988,7 +994,7 @@ mod tests {
     };
     use crate::{
         ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
-        MetadataSegmentId, NameKey, NamespaceId, WriterEpoch,
+        MetadataSegmentId, NameKey, NamespaceId, RunNo, WriterEpoch,
     };
 
     fn row_commit_id() -> CommitId {
@@ -1047,10 +1053,12 @@ mod tests {
             base_seq: ChangeSeq(10),
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
+            next_run_no: RunNo(1),
             retention_floor_seq: ChangeSeq(0),
             segments: vec![metadata_segment_ref(
                 "demo",
                 "seg_00000000000000000000000000000001",
+                RunNo(0),
                 ChangeSeq(10),
                 1,
             )],
@@ -1082,17 +1090,20 @@ mod tests {
             base_seq: ChangeSeq(10),
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
+            next_run_no: RunNo(2),
             retention_floor_seq: ChangeSeq(0),
             segments: vec![
                 metadata_segment_ref(
                     "source",
                     "seg_00000000000000000000000000000001",
+                    RunNo(0),
                     ChangeSeq(10),
                     1,
                 ),
                 metadata_segment_ref(
                     "demo",
                     "seg_00000000000000000000000000000002",
+                    RunNo(1),
                     ChangeSeq(12),
                     0,
                 ),
@@ -1121,6 +1132,7 @@ mod tests {
         let mut staged = metadata_segment_ref(
             "demo",
             "seg_00000000000000000000000000000001",
+            RunNo(0),
             ChangeSeq(14),
             1,
         );
@@ -1128,6 +1140,7 @@ mod tests {
         let flushed = metadata_segment_ref(
             "demo",
             "seg_00000000000000000000000000000002",
+            RunNo(1),
             ChangeSeq(14),
             0,
         );
@@ -1142,6 +1155,7 @@ mod tests {
             base_seq: ChangeSeq(14),
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
+            next_run_no: RunNo(2),
             retention_floor_seq: ChangeSeq(0),
             segments: vec![staged, flushed],
         })
@@ -1502,6 +1516,7 @@ mod tests {
     fn metadata_segment_ref(
         owner_namespace_id: &str,
         segment_id: &str,
+        run_no: RunNo,
         run_seq: ChangeSeq,
         level: u32,
     ) -> MetadataSegmentRef {
@@ -1509,13 +1524,14 @@ mod tests {
             owner_namespace_id: NamespaceId::parse(owner_namespace_id).expect("valid namespace id"),
             segment_id: MetadataSegmentId::parse(segment_id).expect("valid segment id"),
             compaction_job_id: None,
+            run_no,
             run_seq,
             level,
             family: MetadataRowFamily::Inodes,
             segment_index: 0,
             row_count: 0,
-            min_key: String::new(),
-            max_key: String::new(),
+            min_row_key: String::new(),
+            max_row_key: String::new(),
             index_block: BlockHandle {
                 offset: 0,
                 stored_len: 0,

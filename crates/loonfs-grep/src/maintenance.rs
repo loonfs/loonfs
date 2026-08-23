@@ -302,7 +302,7 @@ mod tests {
         );
         assert_eq!(
             reorganize_conclusion(&GrepReorganizeOutcome::NotNeeded {
-                l0_runs: 1,
+                delta_runs: 1,
                 mid_runs: 0
             }),
             MaintenanceStepConclusion::Idle

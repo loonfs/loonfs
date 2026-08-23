@@ -804,7 +804,7 @@ fn metadata_maintenance_offers_nothing_to_the_local_block_cache() {
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
 
-    // Each step folds the tail into one more L0 run, and the default policy
+    // Each step folds the tail into one more delta run, and the default policy
     // admits a reorganization unit once enough of them have piled up. Reads
     // the writes make on the way are outside every measured window.
     let mut reorganized = false;

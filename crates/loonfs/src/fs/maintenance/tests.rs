@@ -29,7 +29,7 @@ use tempfile::tempdir;
 const BASE_RUN_LEVEL: u32 = 1;
 
 /// The group these tests watch, because it is the one the planner selects:
-/// selection takes the group holding the most L0 rows, and every write and
+/// selection takes the group holding the most delta rows, and every write and
 /// every rename puts more rows there than anywhere else. Manifest
 /// descriptors are per family, so its families are what they are filtered by.
 const BINDINGS: MetadataFamilyGroup = MetadataFamilyGroup::Bindings;
@@ -160,7 +160,7 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
     }
 }
 
-/// Writes one file and folds the tail, so each call leaves one more L0 run.
+/// Writes one file and folds the tail, so each call leaves one more delta run.
 async fn write_and_flush(
     writer: &FsWriter,
     admin: &FsAdmin,

@@ -13,7 +13,7 @@ use loonfs::{
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
 use loonfs_api::{
     sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId, PageRequest,
-    PaginationPolicy, MAX_PUBLIC_INTEGER,
+    PaginationPolicy, RunNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_grep::keyspace::{
     grep_prefix, manifest_key, manifests_prefix, root_key, segment_key, segments_prefix,
@@ -253,13 +253,13 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
 }
 
 #[tokio::test]
-async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root() {
+async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("run-ordinal-limit").expect("namespace id");
+    let namespace_id = NamespaceId::parse("run-number-limit").expect("namespace id");
     let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("run-ordinal-limit-writer")
+        .writer_id("run-number-limit-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -272,7 +272,7 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
         .put_file_bytes(
             &namespace_id,
             "/initial.txt",
-            b"initial ordinal boundary needle\n",
+            b"initial run number boundary needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
@@ -290,7 +290,10 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
     let maximum_state = GrepManifestState::new(
         namespace_id.clone(),
         current_state.status().clone(),
-        GrepIndexState::new(current_state.index().reorganize.clone(), MAX_PUBLIC_INTEGER),
+        GrepIndexState::new(
+            current_state.index().reorganize.clone(),
+            RunNo(MAX_PUBLIC_INTEGER),
+        ),
         current_state.segments().to_vec(),
     )
     .expect("valid root at the public maximum");
@@ -302,7 +305,7 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
         .put_file_bytes(
             &namespace_id,
             "/incremental.txt",
-            b"incremental ordinal boundary needle\n",
+            b"incremental run number boundary needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
@@ -330,7 +333,7 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
             .reorganize_step(
                 &namespace_id,
                 GramIndexBuildPolicy {
-                    max_l0_runs: NonZeroUsize::MIN,
+                    max_delta_runs: NonZeroUsize::MIN,
                     ..GramIndexBuildPolicy::default()
                 },
             )
@@ -341,7 +344,7 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
         assert!(matches!(
             error,
             GrepError::Runtime(RuntimeError::Core(CoreError::Internal(message)))
-                if message.contains("grep run ordinal cannot exceed")
+                if message.contains("grep run number cannot exceed")
         ));
     }
 
@@ -351,8 +354,8 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
         .expect("root remains");
     assert_eq!(after.manifest_object_id(), maximum.manifest_object_id());
     assert_eq!(
-        after.manifest_state().index().next_run_ordinal,
-        MAX_PUBLIC_INTEGER
+        after.manifest_state().index().next_run_no,
+        RunNo(MAX_PUBLIC_INTEGER)
     );
     assert_eq!(
         store
@@ -1454,7 +1457,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         .expect("create namespace");
     let worker = worker(&store).await;
     let policy = GramIndexBuildPolicy {
-        max_l0_runs: nonzero_usize(2),
+        max_delta_runs: nonzero_usize(2),
         max_mid_runs: nonzero_usize(2),
         ..GramIndexBuildPolicy::default()
     };
@@ -1792,7 +1795,7 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
         current_state.status().clone(),
         GrepIndexState::new(
             current_state.index().reorganize.clone(),
-            current_state.index().next_run_ordinal + 1,
+            RunNo(current_state.index().next_run_no.0 + 1),
         ),
         current_state.segments().to_vec(),
     )

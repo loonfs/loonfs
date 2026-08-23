@@ -9,7 +9,7 @@
 
 use loonfs::{FsAdmin, FsReader, MaintenanceJob, MaintenanceStepConclusion, SharedObjectStore};
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
-use loonfs_api::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId};
+use loonfs_api::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId, RunNo};
 use loonfs_grep::root::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
@@ -152,18 +152,18 @@ impl GrepHost {
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndex, GrepError> {
         let root = self.worker.root_state(namespace_id).await?;
-        let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
+        let (lifecycle, next_run_no, reorganize_pending) = match &root {
             Some(root) => (
                 GrepIndexLifecycle::from(root.status()),
-                root.index().next_run_ordinal,
+                root.index().next_run_no,
                 root.index().reorganize.is_some(),
             ),
-            None => (GrepIndexLifecycle::Disabled, 0, false),
+            None => (GrepIndexLifecycle::Disabled, RunNo(0), false),
         };
         Ok(GrepIndex {
             namespace_id: namespace_id.clone(),
             lifecycle,
-            next_run_ordinal,
+            next_run_no,
             reorganize_pending,
         })
     }

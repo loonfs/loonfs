@@ -272,7 +272,7 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     let data = json_data(&disabled);
     assert_eq!(data["status"], "disabled");
     assert!(data.get("built_through_seq").is_none());
-    assert!(data.get("next_run_ordinal").is_some());
+    assert!(data.get("next_run_no").is_some());
 
     let disabled_again = harness.run(&["--json", "admin", "index", "disable"]);
     assert_success(&disabled_again);

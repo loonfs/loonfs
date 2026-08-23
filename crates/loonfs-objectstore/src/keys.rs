@@ -200,7 +200,7 @@ mod tests {
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
         ChangeSeq, CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-        MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
+        MetadataSegmentId, NamespaceId, RunNo, UploadId, WalSegmentId,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -457,13 +457,14 @@ mod tests {
             owner_namespace_id: namespace_id(),
             segment_id: metadata_segment_id(),
             compaction_job_id,
+            run_no: RunNo(0),
             run_seq: ChangeSeq(1),
             level: 0,
             family: MetadataRowFamily::Inodes,
             segment_index: 0,
             row_count: 0,
-            min_key: String::new(),
-            max_key: String::new(),
+            min_row_key: String::new(),
+            max_row_key: String::new(),
             index_block: BlockHandle {
                 offset: 0,
                 stored_len: 0,

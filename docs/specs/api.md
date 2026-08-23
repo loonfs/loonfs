@@ -318,7 +318,7 @@ codebase.
 Generated SDKs use schema names as public type names. A resource body uses the resource name, such as `Checkpoint` or `UploadSession`. A response envelope uses `<Verb><Noun>Response`, such as `ListCheckpointsResponse`. Namespace-owned resources include `namespace_id`.
 
 Revision numbers, change sequences, attribute revisions, manifest numbers,
-writer epochs, and grep run ordinals are JSON integers from 0 through
+writer epochs, and grep run numbers are JSON integers from 0 through
 9007199254740991 (`2^53 - 1`). Implementations MUST reject larger input values
 and MUST NOT store a larger value. `inode_id` is not an ordinal and may use the
 full `u64` range.
@@ -752,7 +752,7 @@ The table below lists the retry class for every v0 operation.
 | Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 
 The status, enable, and disable routes all return one flat grep-index object:
-`namespace_id`, lifecycle fields tagged by `status`, `next_run_ordinal`, and
+`namespace_id`, lifecycle fields tagged by `status`, `next_run_no`, and
 `reorganize_pending`. Lifecycle statuses never share a sequence field:
 
 | `status` | Carries | Means |
@@ -764,16 +764,16 @@ The status, enable, and disable routes all return one flat grep-index object:
 For example:
 
 ```json
-{"namespace_id":"demo","status":"active","built_through_seq":12,"next_run_ordinal":3,"reorganize_pending":false}
+{"namespace_id":"demo","status":"active","built_through_seq":12,"next_run_no":3,"reorganize_pending":false}
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"chk_00000000000000000000000000000009","next_run_ordinal":1,"reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"chk_00000000000000000000000000000009","next_run_no":1,"reorganize_pending":false}
 ```
 
 A backfill therefore never reports a `built_through_seq`, and an active index
-never reports a `target_seq`. `next_run_ordinal` is the next logical run the
-index will allocate, while `reorganize_pending` reports whether a partitioned
+never reports a `target_seq`. `next_run_no` is the run number the index
+allocates next, while `reorganize_pending` reports whether a partitioned
 segment reorganization is in progress. A client waiting for the index to catch up
 captures one sequence before it starts waiting and stops there, rather than
 chasing a head that keeps moving.

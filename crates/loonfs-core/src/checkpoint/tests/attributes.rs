@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::metadata::{AttributesRevisionRecord, MetadataStateBuilder, MetadataView};
-use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, Attributes};
+use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, RunNo};
 use std::collections::BTreeMap;
 
 fn attributes(entries: &[(&str, &str)]) -> Attributes {
@@ -223,6 +223,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
     let segments = build_manifest_segments(
         &store,
         &namespace_id,
+        RunNo(0),
         ChangeSeq(9),
         CHECKPOINT_BASE_RUN_LEVEL,
         &state,
@@ -311,6 +312,7 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         base_seq: head_seq,
         writer_epoch: loonfs_api::WriterEpoch(1),
         next_inode_id: InodeId(64),
+        next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
         segments,
     })

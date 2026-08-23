@@ -375,7 +375,7 @@ impl FsAdmin {
             }
             loonfs_core::MetadataReorganizeOutcome::UnitPublished {
                 group,
-                merged_l0_rows,
+                merged_delta_rows,
                 input_runs,
                 decoded_input_rows,
                 decoded_input_bytes,
@@ -390,7 +390,7 @@ impl FsAdmin {
                 }
                 tracing::info!(
                     families = ?group.families(),
-                    merged_l0_rows,
+                    merged_delta_rows,
                     input_runs,
                     decoded_input_rows,
                     decoded_input_bytes,

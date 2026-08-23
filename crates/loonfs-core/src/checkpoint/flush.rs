@@ -7,7 +7,7 @@
 //! version for retention is a separate concern layered on top by
 //! [`create`](super::create).
 
-use super::build::{build_manifest_l0_run_segments, build_manifest_segments};
+use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::load::{head_from_manifest, load_basis_metadata_segments};
 use super::publish::{
     manifest_ref_for, manifest_write_failure, publish_metadata_root, write_namespace_manifest,
@@ -32,7 +32,7 @@ use loonfs_api::wire::control::{HeadState, ManifestRef, NamespaceStatus};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{
     next_public_ordinal, ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo,
-    ManifestObjectId, NamespaceId, MAX_PUBLIC_INTEGER,
+    ManifestObjectId, NamespaceId, RunNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
 use tracing::Instrument;
@@ -66,7 +66,7 @@ pub(super) enum TryFlushWal {
 /// Flushes the visible WAL tail into metadata segments and advances
 /// `metadata/root.json` to a manifest covering the current head.
 ///
-/// The WAL delta lands as one new L0 run when the root lags the head; the
+/// The WAL delta lands as one new delta run when the root lags the head; the
 /// manifest publishes and the root advances. No checkpoint record is
 /// created. Returns `StaleHead` when every attempt lost the root race.
 pub(crate) async fn flush_wal<S: ObjectStore + ?Sized>(
@@ -310,6 +310,14 @@ pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> 
         })
 }
 
+/// Advances the manifest's run allocator after a producer has taken
+/// `current`.
+pub(super) fn next_run_no_after(current: RunNo) -> Result<RunNo> {
+    next_public_ordinal(current.0).map(RunNo).ok_or_else(|| {
+        CoreError::Internal(format!("run number cannot exceed {MAX_PUBLIC_INTEGER}"))
+    })
+}
+
 /// Refuses to initiate a root compare-and-swap once the publication budget
 /// is spent (format spec, "Garbage collection", rule 1).
 pub(super) fn ensure_metadata_publication_budget(
@@ -345,20 +353,26 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     let head_seq = projection.head.seq;
     let previous_manifest = projection.manifest_segments.manifest();
 
-    // A WAL flush keeps existing runs and writes the WAL delta as one new L0
-    // run. Reorganization merges L0 runs into the base separately.
+    // The manifest that first names a run allocates its number. A flush writes
+    // at most one run, so it takes at most one number, and a flush that writes
+    // none leaves the allocator where the previous manifest left it.
+    let run_no = previous_manifest.payload.next_run_no;
+
+    // A WAL flush keeps existing runs and writes the WAL delta as one new delta
+    // run. Reorganization merges delta runs into the base separately.
     //
     // The genesis basis is the exception: it has no run to extend and its
     // one root-inode row sits at sequence zero, which no delta run above
     // that sequence would carry. The namespace's first manifest is
     // therefore one complete base run over the whole projected state.
-    let (base_seq, segments) = if matches!(projection.basis, MetadataBasis::Genesis) {
+    let (base_seq, segments, next_run_no) = if matches!(projection.basis, MetadataBasis::Genesis) {
         (
             head_seq,
             flatten_manifest_segments(
                 build_manifest_segments(
                     store,
                     namespace_id,
+                    run_no,
                     head_seq,
                     CHECKPOINT_BASE_RUN_LEVEL,
                     &projection.tail_state,
@@ -366,22 +380,26 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                 )
                 .await?,
             ),
+            next_run_no_after(run_no)?,
         )
     } else {
         let mut segments = previous_manifest.payload.segments.clone();
+        let mut next_run_no = run_no;
         if previous_manifest.payload.head_seq < head_seq {
             segments.extend(flatten_manifest_segments(
-                build_manifest_l0_run_segments(
+                build_manifest_delta_run_segments(
                     store,
                     namespace_id,
+                    run_no,
                     head_seq,
                     previous_manifest.payload.head_seq,
                     &projection.tail_state,
                 )
                 .await?,
             ));
+            next_run_no = next_run_no_after(run_no)?;
         }
-        (previous_manifest.payload.base_seq, segments)
+        (previous_manifest.payload.base_seq, segments, next_run_no)
     };
 
     NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
@@ -393,6 +411,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         base_seq,
         writer_epoch: projection.head.writer_epoch,
         next_inode_id: projection.head.next_inode_id,
+        next_run_no,
         retention_floor_seq: projection.floor_seq,
         segments,
     })

@@ -1038,7 +1038,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::new(2).expect("test run limit should be nonzero"),
+        max_delta_runs: NonZeroUsize::new(2).expect("test run limit should be nonzero"),
         ..MetadataLsmPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -1058,7 +1058,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     )
     .await
     .expect("load appended manifest");
-    assert_eq!(l0_runs(&appended.manifest).len(), 4);
+    assert_eq!(delta_runs(&appended.manifest).len(), 4);
     assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
 
     // Reorganization folds one family group per unit, each publishing its
@@ -1104,7 +1104,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert!(l0_runs(&drained.manifest).is_empty());
+    assert!(delta_runs(&drained.manifest).is_empty());
     assert_eq!(drained.manifest.payload.base_seq, ChangeSeq(4));
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
@@ -1140,7 +1140,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
 
     let root_before = current_manifest_no(&store, &namespace_id).await;
     let tiny_byte_policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
@@ -1170,7 +1170,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     );
 
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
         max_decoded_input_rows_per_step: NonZeroUsize::new(6)
             .expect("test row budget should be nonzero"),
@@ -1242,7 +1242,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         .expect("visible state before bounded reorganization");
     let unlimited = NonZeroUsize::new(usize::MAX).expect("usize max should be nonzero");
     let bounded_policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
+        max_delta_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
         max_decoded_input_rows_per_step: unlimited,
         max_decoded_input_bytes_per_step: unlimited,
@@ -1273,7 +1273,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         drain_reorganization_with_count(&bounded_store, &namespace_id, &context, bounded_policy)
             .await;
     let unbounded_policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
+        max_delta_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
         max_input_runs_per_step: unlimited,
         max_decoded_input_rows_per_step: unlimited,
         max_decoded_input_bytes_per_step: unlimited,
@@ -1310,7 +1310,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         manifest_run_shape(&bounded.manifest),
         manifest_run_shape(&unbounded.manifest)
     );
-    assert!(l0_runs(&bounded.manifest).is_empty());
+    assert!(delta_runs(&bounded.manifest).is_empty());
 
     let later_commit = CommitId::parse("bounded-convergence-later").expect("commit id");
     write_file_bytes(
@@ -1337,7 +1337,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     .expect("below-trigger step");
     assert!(matches!(
         below_trigger.outcome,
-        super::MetadataReorganizeOutcome::NotNeeded { l0_runs: 1 }
+        super::MetadataReorganizeOutcome::NotNeeded { delta_runs: 1 }
     ));
 }
 
@@ -1348,7 +1348,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_rows_per_segment: NonZeroUsize::new(2)
             .expect("test segment row budget should be nonzero"),
         ..MetadataLsmPolicy::default()
@@ -1388,13 +1388,13 @@ async fn whole_run_compaction_rewrites_base_segments() {
     write_file_bytes(
         &store,
         &namespace_id,
-        "/hot/after-l0.txt",
+        "/hot/after-delta.txt",
         b"hot 2\n",
         &context,
         None,
     )
     .await
-    .expect("write hot l0");
+    .expect("write hot delta");
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     write_file_bytes(
         &store,
@@ -1427,11 +1427,16 @@ async fn whole_run_compaction_rewrites_base_segments() {
         compacted_materialized.manifest.payload.base_seq,
         compacted.checkpoint_seq
     );
-    assert!(l0_runs(&compacted_materialized.manifest).is_empty());
-    assert_eq!(
-        runs_from_segments(&compacted_materialized.manifest.payload).len(),
-        1
-    );
+    assert!(delta_runs(&compacted_materialized.manifest).is_empty());
+    // Every family group rebuilds on its own and takes a run number of its
+    // own, so a fully folded manifest holds one base run per group that has
+    // rows, and nothing else.
+    for (families, base_runs) in base_runs_per_family_group(&compacted_materialized.manifest) {
+        assert!(
+            base_runs.len() <= 1,
+            "{families:?} holds base runs {base_runs:?} after a full fold"
+        );
+    }
     assert!(!compacted_run_keys.is_empty());
     assert!(compacted_run_keys
         .iter()
@@ -1447,13 +1452,13 @@ async fn whole_run_compaction_rewrites_base_segments() {
 }
 
 #[tokio::test]
-async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
+async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_rows_per_segment: NonZeroUsize::new(2)
             .expect("test segment row budget should be nonzero"),
         ..MetadataLsmPolicy::default()
@@ -1484,12 +1489,12 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
         &store,
         &namespace_id,
         "/docs/file-0.txt",
-        b"l0\n",
+        b"delta\n",
         &context,
         None,
     )
     .await
-    .expect("write l0 revision");
+    .expect("write delta revision");
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     write_file_bytes(
         &store,
@@ -1517,7 +1522,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
         .await
         .expect("materialization");
 
-    assert!(l0_runs(&compacted_materialized.manifest).is_empty());
+    assert!(delta_runs(&compacted_materialized.manifest).is_empty());
     // Groups untouched since the first fold keep their older base run, so
     // several base runs may coexist; what matters is that no delta remains.
     assert!(runs_from_segments(&compacted_materialized.manifest.payload)
@@ -1540,7 +1545,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -1609,7 +1614,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert!(l0_runs(&drained.manifest).is_empty());
+    assert!(delta_runs(&drained.manifest).is_empty());
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
         &drained.metadata_state
@@ -1617,7 +1622,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
 }
 
 #[tokio::test]
-async fn checkpoints_chain_l0_runs_past_the_default_cap() {
+async fn checkpoints_chain_delta_runs_past_the_default_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1638,7 +1643,7 @@ async fn checkpoints_chain_l0_runs_past_the_default_cap() {
     )
     .await
     .expect("load appended manifest");
-    assert!(l0_runs(&appended.manifest).len() > DEFAULT_MAX_CHECKPOINT_L0_RUNS);
+    assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_CHECKPOINT_DELTA_RUNS);
     assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
 }
 
@@ -1759,14 +1764,14 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     .expect("seed file");
     super::flush::flush_wal(&store, &namespace_id, &context)
         .await
-        .expect("publish an L0 run to fold");
+        .expect("publish a delta run to fold");
     let root_before = load_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
         .state;
 
     let fold_everything = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
     let overrun = SteppingTimer::new(20 * 60 * 1000);
@@ -1821,7 +1826,7 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
         .await
         .expect("load manifest segments");
     let group = super::reorganize::select_family_group(&segments.manifest().payload, None)
-        .expect("a family group with L0 rows to fold");
+        .expect("a family group with delta rows to fold");
     let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
     let selection = super::reorganize::select_reorganization_input(
         &segments,
@@ -1848,8 +1853,8 @@ fn bounded_merge(
 
 /// Rows one run holds in one family group: the quantity the per-step row
 /// budget is measured against.
-fn group_run_rows(run: &MetadataRunManifest, group: &[ApiMetadataRowFamily]) -> u64 {
-    run.segments
+fn group_run_rows(segments: &[MetadataFamilySegments], group: &[ApiMetadataRowFamily]) -> u64 {
+    segments
         .iter()
         .filter(|family_segments| group.contains(&family_segments.family))
         .flat_map(|family_segments| &family_segments.segments)
@@ -1858,10 +1863,10 @@ fn group_run_rows(run: &MetadataRunManifest, group: &[ApiMetadataRowFamily]) -> 
 }
 
 fn group_segment_object_keys(
-    run: &MetadataRunManifest,
+    segments: &[MetadataFamilySegments],
     group: &[ApiMetadataRowFamily],
 ) -> Vec<String> {
-    run.segments
+    segments
         .iter()
         .filter(|family_segments| group.contains(&family_segments.family))
         .flat_map(|family_segments| &family_segments.segments)
@@ -1874,7 +1879,7 @@ fn group_segment_object_keys(
 fn policy_that_cannot_fold_the_base(base_rows: u64) -> MetadataLsmPolicy {
     let row_budget = usize::try_from(base_rows).expect("test row counts are small") - 1;
     MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(row_budget)
             .expect("test row budget should be nonzero"),
         ..MetadataLsmPolicy::default()
@@ -1931,7 +1936,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     .expect("load the parked manifest");
     let (group, _) =
         select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
-    let base = base_run(&before.manifest);
+    let base = base_tier(&before.manifest);
     let base_rows = group_run_rows(&base, group.families());
     let base_segments = group_segment_object_keys(&base, group.families());
     assert!(base_rows > 1, "the base run must hold rows in this group");
@@ -1955,7 +1960,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
         input
             .runs
             .iter()
-            .all(|run| run.level == CHECKPOINT_L0_RUN_LEVEL),
+            .all(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL),
         "skipping the base leaves a delta-only merge, got {:?}",
         input
             .runs
@@ -1967,7 +1972,12 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
         input.runs.len() > 1,
         "a merge must consume more than one run to reduce the count"
     );
-    assert_eq!(bottom.run_seq, base.run_seq);
+    let base_before = group_base_runs(&before.manifest, group.families());
+    let [group_base] = &base_before[..] else {
+        panic!("the group must hold exactly one base run");
+    };
+    assert_eq!(bottom.run_no, group_base.run_no);
+    assert_eq!(bottom.run_seq, group_base.run_seq);
     assert_eq!(bottom.level, CHECKPOINT_BASE_RUN_LEVEL);
     assert_eq!(bottom.rows, base_rows);
 
@@ -2165,7 +2175,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         group.contains(ApiMetadataRowFamily::DirentryUnbinds),
         "this test is about the binding families, got {group:?}"
     );
-    let base_rows = group_run_rows(&base_run(&before.manifest), group.families());
+    let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
     let policy = policy_that_cannot_fold_the_base(base_rows);
 
     let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
@@ -2219,10 +2229,14 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         base_before,
         "a merge above the base must not mint a base run"
     );
+    let merged_delta_runs = group_delta_runs(&after.manifest, group.families());
+    let [merged_delta] = &merged_delta_runs[..] else {
+        panic!("the merged delta runs must leave exactly one delta run");
+    };
     assert_eq!(
-        group_delta_runs(&after.manifest, group.families()),
-        vec![(newest_input, CHECKPOINT_L0_RUN_LEVEL)],
-        "the merged delta runs must leave one delta run at the newest input's identity"
+        (merged_delta.run_seq, merged_delta.level),
+        (newest_input, CHECKPOINT_DELTA_RUN_LEVEL),
+        "the merged delta run must stand where the newest input run stood"
     );
     // A merge that skipped older runs drops nothing, so the row set is
     // exactly what it was: the cancelling row still shadows the base's
@@ -2296,10 +2310,10 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     .expect("load the manifest");
     let (group, _) =
         select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
-    let base_rows = group_run_rows(&base_run(&before.manifest), group.families());
-    let mut delta_rows = l0_runs(&before.manifest)
+    let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
+    let mut delta_rows = delta_runs(&before.manifest)
         .iter()
-        .map(|run| group_run_rows(run, group.families()))
+        .map(|run| group_run_rows(&run.segments, group.families()))
         .collect::<Vec<_>>();
     delta_rows.sort_unstable();
     let (narrow, wide) = (delta_rows[0], delta_rows[1]);
@@ -2313,7 +2327,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         "budget {row_budget} must exclude the wide run ({wide}) alone and beside the base ({base_rows})"
     );
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(
             usize::try_from(row_budget).expect("test row counts are small"),
         )
@@ -2390,7 +2404,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
     // Small segments so the folded base is many segments rather than one, and
     // a row budget the groups outgrow within a couple of cycles.
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(24).expect("nonzero"),
         max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
         ..MetadataLsmPolicy::default()

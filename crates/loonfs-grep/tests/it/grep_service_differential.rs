@@ -373,7 +373,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         .await
         .expect("build writer");
     let policy = GramIndexBuildPolicy {
-        max_l0_runs: nonzero_usize(2),
+        max_delta_runs: nonzero_usize(2),
         max_mid_runs: nonzero_usize(2),
         ..GramIndexBuildPolicy::default()
     };

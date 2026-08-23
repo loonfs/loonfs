@@ -268,9 +268,9 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             .filter_admitted_descriptors(candidates, filter_probe)
             .await?;
         matching_descriptors.sort_by(|left, right| {
-            left.min_key
-                .cmp(&right.min_key)
-                .then(left.max_key.cmp(&right.max_key))
+            left.min_row_key
+                .cmp(&right.min_row_key)
+                .then(left.max_row_key.cmp(&right.max_row_key))
                 // Segment ids are unique and provide the final tie-breaker.
                 .then(left.segment_id.cmp(&right.segment_id))
         });
@@ -282,7 +282,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 true
             } else {
                 let boundary_key = &rows[limit - 1].0;
-                matching_descriptors[next_descriptor_index].min_key <= *boundary_key
+                matching_descriptors[next_descriptor_index].min_row_key <= *boundary_key
             };
             if !should_load_next {
                 break;
@@ -426,10 +426,10 @@ pub(super) fn descriptor_may_intersect_range(
     if descriptor.row_count == 0 {
         return false;
     }
-    if descriptor.max_key.as_str() < lower_bound {
+    if descriptor.max_row_key.as_str() < lower_bound {
         return false;
     }
-    if upper_bound.is_some_and(|upper_bound| descriptor.min_key.as_str() >= upper_bound) {
+    if upper_bound.is_some_and(|upper_bound| descriptor.min_row_key.as_str() >= upper_bound) {
         return false;
     }
     true

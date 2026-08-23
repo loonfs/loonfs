@@ -14,6 +14,7 @@ use super::reorganize::MergePlacement;
 use super::runs::MetadataLsmPolicy;
 use crate::error::Result;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
+use loonfs_api::RunNo;
 use loonfs_objectstore::ObjectStore;
 
 /// Accumulates one family's surviving rows and uploads a segment every time
@@ -21,6 +22,7 @@ use loonfs_objectstore::ObjectStore;
 pub(super) struct MergeSegmentWriter<'a> {
     family: MetadataRowFamily,
     destination: MetadataSegmentDestination<'a>,
+    run_no: RunNo,
     placement: MergePlacement,
     rows: Vec<MetadataRow>,
     next_segment_index: u32,
@@ -31,11 +33,13 @@ impl<'a> MergeSegmentWriter<'a> {
     pub(super) fn new(
         family: MetadataRowFamily,
         destination: MetadataSegmentDestination<'a>,
+        run_no: RunNo,
         placement: MergePlacement,
     ) -> Self {
         Self {
             family,
             destination,
+            run_no,
             placement,
             rows: Vec::new(),
             next_segment_index: 0,
@@ -80,6 +84,7 @@ impl<'a> MergeSegmentWriter<'a> {
         let descriptor = write_manifest_segment(
             store,
             self.destination.write_request(
+                self.run_no,
                 self.placement.output_seq(),
                 self.placement.output_level(),
                 self.family,

@@ -1080,7 +1080,7 @@ const UNION_COMPOSITE_ENVELOPES: &[(&str, &[&str])] = &[
     ("UploadSession", &["mode", "namespace_id", "upload_id"]),
     (
         "GrepIndex",
-        &["namespace_id", "next_run_ordinal", "reorganize_pending"],
+        &["namespace_id", "next_run_no", "reorganize_pending"],
     ),
 ];
 
@@ -1199,6 +1199,7 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
         "ChangeSeq",
         "AttributeRevisionNo",
         "ManifestNo",
+        "RunNo",
         "WriterEpoch",
     ] {
         let schema = schemas.get(name).unwrap_or_else(|| panic!("{name} schema"));
@@ -1217,16 +1218,17 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
         "public inode fields use inline string schemas"
     );
 
+    // Each flattened status variant must use the capped run number schema.
     for variant in one_of_schema_names(schemas, "GrepIndex") {
         let schema = schemas
             .get(variant)
             .unwrap_or_else(|| panic!("{variant} schema"));
         assert_eq!(
             schema
-                .pointer("/properties/next_run_ordinal/maximum")
-                .and_then(Value::as_u64),
-            Some(loonfs_api::MAX_PUBLIC_INTEGER),
-            "next_run_ordinal must use the public maximum in {variant}"
+                .pointer("/properties/next_run_no/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/RunNo"),
+            "next_run_no must use the capped run number schema in {variant}"
         );
     }
 }

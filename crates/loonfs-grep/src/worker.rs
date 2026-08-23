@@ -31,13 +31,13 @@ use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
-    DEFAULT_INLINE_FILTER_MAX_BYTES, DEFAULT_MAX_L0_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_ROWS,
+    DEFAULT_INLINE_FILTER_MAX_BYTES, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_ROWS,
     DEFAULT_MAX_REORGANIZATION_INPUT_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_api::{
     decode_namespace_cursor, encode_cursor, next_public_ordinal, sha256_digest, ChangeSeq,
     CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId, NamespaceCursor,
-    NamespaceCursorError, NamespaceId, PageCursor, RevisionNo, MAX_PUBLIC_INTEGER,
+    NamespaceCursorError, NamespaceId, PageCursor, RevisionNo, RunNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
@@ -92,7 +92,7 @@ pub struct GramIndexBuildPolicy {
     /// Rows per written grep segment.
     pub max_rows_per_segment: NonZeroUsize,
     /// Delta-level runs that trigger a reorganization into a fresh mid run.
-    pub max_l0_runs: NonZeroUsize,
+    pub max_delta_runs: NonZeroUsize,
     /// Mid-level runs that trigger a reorganization into a fresh base run.
     pub max_mid_runs: NonZeroUsize,
     /// Rows one reorganize step merges before publishing and yielding.
@@ -107,7 +107,7 @@ impl Default for GramIndexBuildPolicy {
                 NonZeroU64::new(GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP).unwrap()
             },
             max_rows_per_segment: const { NonZeroUsize::new(DEFAULT_MAX_ROWS_PER_SEGMENT).unwrap() },
-            max_l0_runs: const { NonZeroUsize::new(DEFAULT_MAX_L0_RUNS).unwrap() },
+            max_delta_runs: const { NonZeroUsize::new(DEFAULT_MAX_DELTA_RUNS).unwrap() },
             max_mid_runs: const { NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_RUNS).unwrap() },
             max_decoded_input_rows_per_step: const {
                 NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_ROWS).unwrap()
@@ -176,7 +176,7 @@ pub struct GrepReorganizeReport {
 pub enum GrepReorganizeOutcome {
     NotEnabled,
     NotNeeded {
-        l0_runs: usize,
+        delta_runs: usize,
         mid_runs: usize,
     },
     UnitPublished {
@@ -308,14 +308,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 });
             }
         }
-        let next_run_ordinal = current
+        let next_run_no = current
             .as_ref()
-            .map_or(0, |root| root.manifest_state().index().next_run_ordinal);
+            .map_or(RunNo(0), |root| root.manifest_state().index().next_run_no);
         let next = match backfilling_root(
             namespace_id,
             checkpoint.checkpoint_seq,
             checkpoint.checkpoint_id.clone(),
-            next_run_ordinal,
+            next_run_no,
         ) {
             Ok(next) => next,
             Err(error) => {
@@ -364,7 +364,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next = GrepManifestState::new(
             namespace_id.clone(),
             GrepIndexStatus::Disabled {},
-            GrepIndexState::new(None, current.manifest_state().index().next_run_ordinal),
+            GrepIndexState::new(None, current.manifest_state().index().next_run_no),
             Vec::new(),
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
@@ -476,19 +476,19 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Returns the grep index's state and maintenance progress.
     pub async fn get_grep_index_status(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let root = self.root_state(namespace_id).await?;
-        let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
+        let (lifecycle, next_run_no, reorganize_pending) = match &root {
             Some(root) => (
                 GrepIndexLifecycle::from(root.status()),
-                root.index().next_run_ordinal,
+                root.index().next_run_no,
                 root.index().reorganize.is_some(),
             ),
             // A missing root means indexing has not been enabled.
-            None => (GrepIndexLifecycle::Disabled, 0, false),
+            None => (GrepIndexLifecycle::Disabled, RunNo(0), false),
         };
         Ok(GrepIndex {
             namespace_id: namespace_id.clone(),
             lifecycle,
-            next_run_ordinal,
+            next_run_no,
             reorganize_pending,
         })
     }
@@ -549,7 +549,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             namespace_id,
             checkpoint.checkpoint_seq,
             checkpoint.checkpoint_id.clone(),
-            current.manifest_state().index().next_run_ordinal,
+            current.manifest_state().index().next_run_no,
         ) {
             Ok(next) => next,
             Err(error) => {
@@ -597,11 +597,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         } = unit;
         let run_seq = progress.run_seq();
         let rows = gram_postings_rows(postings)?;
-        let current_run_ordinal = current.manifest_state().index().next_run_ordinal;
-        let next_run_ordinal = if rows.is_empty() {
-            current_run_ordinal
+        let current_run_no = current.manifest_state().index().next_run_no;
+        let next_run_no = if rows.is_empty() {
+            current_run_no
         } else {
-            next_grep_run_ordinal(current_run_ordinal)?
+            next_grep_run_no(current_run_no)?
         };
         let timer = StdMonotonicTimer::default();
         let publication_started_ms = timer.monotonic_now_ms();
@@ -609,7 +609,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             &self.store,
             namespace_id,
             run_seq,
-            current_run_ordinal,
+            current_run_no,
             rows,
             policy.max_rows_per_segment,
             INDEX_GRAMS_DELTA_LEVEL,
@@ -663,7 +663,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             status,
             GrepIndexState::new(
                 current.manifest_state().index().reorganize.clone(),
-                next_run_ordinal,
+                next_run_no,
             ),
             segments,
         )
@@ -705,7 +705,7 @@ fn backfilling_root(
     namespace_id: &NamespaceId,
     target_seq: ChangeSeq,
     checkpoint_id: CheckpointId,
-    next_run_ordinal: u64,
+    next_run_no: RunNo,
 ) -> Result<GrepManifestState> {
     GrepManifestState::new(
         namespace_id.clone(),
@@ -714,7 +714,7 @@ fn backfilling_root(
             cursor_inode_id: None,
             checkpoint_id,
         },
-        GrepIndexState::new(None, next_run_ordinal),
+        GrepIndexState::new(None, next_run_no),
         Vec::new(),
     )
     .map_err(|error| core_state_error(namespace_id, error))
@@ -1014,7 +1014,7 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
-    run_ordinal: u64,
+    run_no: RunNo,
     rows: Vec<IndexRow>,
     max_rows_per_segment: NonZeroUsize,
     level: u32,
@@ -1044,7 +1044,7 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
                     store,
                     namespace_id,
                     run_seq,
-                    run_ordinal,
+                    run_no,
                     segment_index,
                     segment_rows,
                     level,
@@ -1060,7 +1060,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
-    run_ordinal: u64,
+    run_no: RunNo,
     segment_index: u32,
     rows: Vec<IndexRow>,
     level: u32,
@@ -1093,11 +1093,11 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
     Ok(GrepSegmentRef {
         segment_id,
         run_seq,
-        run_ordinal,
+        run_no,
         level,
         segment_index,
-        min_row_key: built.min_key,
-        max_row_key: built.max_key,
+        min_row_key: built.min_row_key,
+        max_row_key: built.max_row_key,
         index_block: built.index,
         filter_block: built.filter,
         filter_inline,
@@ -1127,63 +1127,62 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 GrepReorganizeOutcome::NotEnabled,
             ));
         }
-        let (reorganize, next_run_ordinal) =
-            match current.manifest_state().index().reorganize.clone() {
-                Some(reorganize) => (
-                    reorganize,
-                    current.manifest_state().index().next_run_ordinal,
-                ),
-                None => {
-                    let current_run_ordinal = current.manifest_state().index().next_run_ordinal;
-                    let l0_runs = distinct_run_ordinals_at_level(
-                        current.manifest_state().segments(),
-                        INDEX_GRAMS_DELTA_LEVEL,
-                    );
-                    let mid_runs = distinct_run_ordinals_at_level(
-                        current.manifest_state().segments(),
-                        INDEX_GRAMS_MID_LEVEL,
-                    );
-                    let (snapshot_segment_ids, output_level) =
-                        if l0_runs >= policy.max_l0_runs.get() {
-                            (
-                                current
-                                    .manifest_state()
-                                    .segments()
-                                    .iter()
-                                    .filter(|segment| segment.level == INDEX_GRAMS_DELTA_LEVEL)
-                                    .map(|segment| segment.segment_id.clone())
-                                    .collect(),
-                                INDEX_GRAMS_MID_LEVEL,
-                            )
-                        } else if mid_runs >= policy.max_mid_runs.get() {
-                            (
-                                current
-                                    .manifest_state()
-                                    .segments()
-                                    .iter()
-                                    .filter(|segment| segment.level != INDEX_GRAMS_DELTA_LEVEL)
-                                    .map(|segment| segment.segment_id.clone())
-                                    .collect(),
-                                INDEX_GRAMS_BASE_LEVEL,
-                            )
-                        } else {
-                            return Ok(reorganize_report(
-                                namespace_id,
-                                GrepReorganizeOutcome::NotNeeded { l0_runs, mid_runs },
-                            ));
-                        };
-                    (
-                        GrepReorganizeState {
-                            snapshot_segment_ids,
-                            output_segment_ids: Vec::new(),
-                            row_key_cursor: String::new(),
-                            output_level,
-                            run_ordinal: current_run_ordinal,
-                        },
-                        next_grep_run_ordinal(current_run_ordinal)?,
-                    )
-                }
-            };
+        let (reorganize, next_run_no) = match current.manifest_state().index().reorganize.clone() {
+            Some(reorganize) => (reorganize, current.manifest_state().index().next_run_no),
+            None => {
+                let current_run_no = current.manifest_state().index().next_run_no;
+                let delta_runs = distinct_run_nos_at_level(
+                    current.manifest_state().segments(),
+                    INDEX_GRAMS_DELTA_LEVEL,
+                );
+                let mid_runs = distinct_run_nos_at_level(
+                    current.manifest_state().segments(),
+                    INDEX_GRAMS_MID_LEVEL,
+                );
+                let (snapshot_segment_ids, output_level) =
+                    if delta_runs >= policy.max_delta_runs.get() {
+                        (
+                            current
+                                .manifest_state()
+                                .segments()
+                                .iter()
+                                .filter(|segment| segment.level == INDEX_GRAMS_DELTA_LEVEL)
+                                .map(|segment| segment.segment_id.clone())
+                                .collect(),
+                            INDEX_GRAMS_MID_LEVEL,
+                        )
+                    } else if mid_runs >= policy.max_mid_runs.get() {
+                        (
+                            current
+                                .manifest_state()
+                                .segments()
+                                .iter()
+                                .filter(|segment| segment.level != INDEX_GRAMS_DELTA_LEVEL)
+                                .map(|segment| segment.segment_id.clone())
+                                .collect(),
+                            INDEX_GRAMS_BASE_LEVEL,
+                        )
+                    } else {
+                        return Ok(reorganize_report(
+                            namespace_id,
+                            GrepReorganizeOutcome::NotNeeded {
+                                delta_runs,
+                                mid_runs,
+                            },
+                        ));
+                    };
+                (
+                    GrepReorganizeState {
+                        snapshot_segment_ids,
+                        output_segment_ids: Vec::new(),
+                        row_key_cursor: String::new(),
+                        output_level,
+                        run_no: current_run_no,
+                    },
+                    next_grep_run_no(current_run_no)?,
+                )
+            }
+        };
         let snapshot = reorganize
             .snapshot_segment_ids
             .iter()
@@ -1224,7 +1223,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             &self.store,
             namespace_id,
             run_seq,
-            reorganize.run_ordinal,
+            reorganize.run_no,
             rows,
             policy.max_rows_per_segment,
             reorganize.output_level,
@@ -1252,7 +1251,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next = GrepManifestState::new(
             namespace_id.clone(),
             current.manifest_state().status().clone(),
-            GrepIndexState::new(reorganize, next_run_ordinal),
+            GrepIndexState::new(reorganize, next_run_no),
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
@@ -1530,11 +1529,11 @@ fn reorganize_report(
     }
 }
 
-fn distinct_run_ordinals_at_level(segments: &[GrepSegmentRef], level: u32) -> usize {
+fn distinct_run_nos_at_level(segments: &[GrepSegmentRef], level: u32) -> usize {
     segments
         .iter()
         .filter(|segment| segment.level == level)
-        .map(|segment| segment.run_ordinal)
+        .map(|segment| segment.run_no)
         .collect::<BTreeSet<_>>()
         .len()
 }
@@ -1819,10 +1818,10 @@ fn core_state_error(
     .into()
 }
 
-fn next_grep_run_ordinal(current: u64) -> Result<u64> {
-    next_public_ordinal(current).ok_or_else(|| {
+fn next_grep_run_no(current: RunNo) -> Result<RunNo> {
+    next_public_ordinal(current.0).map(RunNo).ok_or_else(|| {
         CoreError::Internal(format!(
-            "grep run ordinal cannot exceed {MAX_PUBLIC_INTEGER}"
+            "grep run number cannot exceed {MAX_PUBLIC_INTEGER}"
         ))
         .into()
     })

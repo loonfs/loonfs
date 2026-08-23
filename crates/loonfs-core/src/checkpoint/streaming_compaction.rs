@@ -51,7 +51,7 @@ use super::compaction_merge::{
 use super::compaction_output::MergeSegmentWriter;
 use super::compaction_retention::{KeptRow, RetentionRule};
 use super::error::ManifestLoadError;
-use super::flush::ensure_metadata_publication_budget;
+use super::flush::{ensure_metadata_publication_budget, next_run_no_after};
 use super::frozen_floor::{
     bind_survives_frozen_floor, unbinding_at_or_below_floor, unbindings_at_or_below_floor,
     BindingGeneration,
@@ -70,7 +70,7 @@ use crate::time::current_time_ms;
 use crate::time::StdMonotonicTimer;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use sha2::{Digest, Sha256};
@@ -121,11 +121,11 @@ pub struct MetadataCompactionSpec {
     /// into each other's prefix.
     job_id: MetadataCompactionId,
     group: MetadataFamilyGroup,
-    /// Every run the group held when the plan was made, by sequence and
-    /// level. That is bottom-anchored by construction — a run the group holds
-    /// cannot sort below the whole of itself — which is what makes the job's
-    /// drops visibility-preserving.
-    inputs: Vec<(ChangeSeq, u32)>,
+    /// Every run the group held when the plan was made, by run number. That
+    /// is bottom-anchored by construction — a run the group holds cannot sort
+    /// below the whole of itself — which is what makes the job's drops
+    /// visibility-preserving.
+    inputs: Vec<RunNo>,
     /// Rows those runs hold for the group, from their descriptors. What the
     /// job reports it is about to read; the rows it writes are fewer by
     /// whatever the floor lets go.
@@ -137,7 +137,7 @@ pub struct MetadataCompactionSpec {
 impl MetadataCompactionSpec {
     pub(super) fn new(
         group: MetadataFamilyGroup,
-        inputs: Vec<(ChangeSeq, u32)>,
+        inputs: Vec<RunNo>,
         input_rows: u64,
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
@@ -178,7 +178,7 @@ impl MetadataCompactionSpec {
         self.input_rows
     }
 
-    pub(super) fn inputs(&self) -> &[(ChangeSeq, u32)] {
+    pub(super) fn inputs(&self) -> &[RunNo] {
         &self.inputs
     }
 
@@ -313,14 +313,20 @@ pub(super) struct MetadataMergeResult {
 /// no registry entry, and no admission, and the segments are written at
 /// ordinary segment keys because the step publishes them itself a moment later.
 ///
-/// `runs` is the window the step's budgets chose, and `placement` is where its
-/// output stands in the group — which is also what decides whether rows may be
-/// dropped.
+/// `runs` is the window the step's budgets chose, `run_no` is the number the
+/// step's manifest allocated for the output, and `placement` is where that
+/// output stands in the group — which is also what decides whether rows may
+/// be dropped.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one merge's inputs, named rather than grouped into a second shape"
+)]
 pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
     runs: &[MetadataRunManifest],
+    run_no: RunNo,
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
     policy: MetadataLsmPolicy,
@@ -329,6 +335,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         group,
+        run_no,
         placement,
         frozen_floor_seq,
         MetadataSegmentDestination::Published { namespace_id },
@@ -359,6 +366,11 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
         segments.store,
         namespace_id,
         spec.group,
+        // The manifest this job reads allocates the number its output is
+        // written under. Finalization stamps the number again from the
+        // manifest it actually rebases onto, so a flush that lands while the
+        // job runs cannot leave two runs sharing one number.
+        segments.manifest().payload.next_run_no,
         spec.placement,
         spec.frozen_floor_seq,
         MetadataSegmentDestination::CompactionStaging {
@@ -670,7 +682,24 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             .filter(|descriptor| !snapshot_keys.contains(&metadata_segment_object_key(descriptor)))
             .cloned()
             .collect();
-        next_segments.extend(result.output_segments.iter().cloned());
+        // The manifest that first names a run allocates its number, and this
+        // attempt may be rebasing onto a manifest published after the job
+        // started. So the number is taken here, from the manifest this
+        // attempt replaces, and stamped onto the output the job wrote.
+        let run_no = previous.payload.next_run_no;
+        next_segments.extend(result.output_segments.iter().cloned().map(|descriptor| {
+            MetadataSegmentRef {
+                run_no,
+                ..descriptor
+            }
+        }));
+        // A job whose rows all fell to retention writes no segment, and a run
+        // nothing names takes no number.
+        let next_run_no = if result.output_segments.is_empty() {
+            previous.payload.next_run_no
+        } else {
+            next_run_no_after(run_no)?
+        };
         let base_seq = next_segments
             .iter()
             .map(|descriptor| descriptor.run_seq)
@@ -682,6 +711,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             previous,
             next_segments,
             base_seq,
+            next_run_no,
             previous
                 .payload
                 .retention_floor_seq
@@ -761,11 +791,11 @@ pub(super) fn snapshot_segment_keys<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
 ) -> Option<BTreeSet<String>> {
     let mut keys = BTreeSet::new();
-    for (run_seq, level) in spec.inputs() {
+    for run_no in spec.inputs() {
         let run = segments
             .scan_runs
             .iter()
-            .find(|run| run.run_seq == *run_seq && run.level == *level)?;
+            .find(|run| run.run_no == *run_no)?;
         keys.extend(group_run_descriptors(run, spec.group()).map(metadata_segment_object_key));
     }
     Some(keys)
@@ -897,6 +927,9 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     namespace_id: &'a NamespaceId,
     group: MetadataFamilyGroup,
+    /// The number every output segment carries, so all of them read back as
+    /// one run.
+    run_no: RunNo,
     /// Where the output stands in the group, which decides the level and
     /// sequence every segment carries and whether rows may be dropped at all.
     placement: MergePlacement,
@@ -1005,6 +1038,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         store: &'a S,
         namespace_id: &'a NamespaceId,
         group: MetadataFamilyGroup,
+        run_no: RunNo,
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
         destination: MetadataSegmentDestination<'a>,
@@ -1022,6 +1056,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             store,
             namespace_id,
             group,
+            run_no,
             placement,
             frozen_floor_seq,
             destination,
@@ -1152,7 +1187,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .map(|family| {
                 (
                     *family,
-                    MergeSegmentWriter::new(*family, self.destination, self.placement),
+                    MergeSegmentWriter::new(*family, self.destination, self.run_no, self.placement),
                 )
             })
             .collect();
@@ -1526,16 +1561,16 @@ fn resolve_snapshot_runs<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<MetadataRunManifest>> {
     spec.inputs
         .iter()
-        .map(|(run_seq, level)| {
+        .map(|run_no| {
             segments
                 .scan_runs
                 .iter()
-                .find(|run| run.run_seq == *run_seq && run.level == *level)
+                .find(|run| run.run_no == *run_no)
                 .cloned()
                 .ok_or_else(|| {
                     CoreError::NamespaceCorrupt(format!(
-                        "a streaming compaction names input run seq `{run_seq}` level {level}, \
-                         which the manifest does not reference"
+                        "a streaming compaction names input run `{run_no}`, which the manifest \
+                         does not reference"
                     ))
                 })
         })

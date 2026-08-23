@@ -3,7 +3,7 @@
 use super::error::GrepManifestStateError;
 use loonfs_api::wire::sst_blocks::BlockHandle;
 pub use loonfs_api::GrepManifestObjectId;
-use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, NamespaceId};
+use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, NamespaceId, RunNo};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -147,8 +147,8 @@ pub struct GrepReorganizeState {
     pub row_key_cursor: String,
     /// Level stamped on every output segment of this reorganize.
     pub output_level: u32,
-    /// Logical run identity stamped on every output segment of this reorganize.
-    pub run_ordinal: u64,
+    /// Run number stamped on every output segment of this reorganize.
+    pub run_no: RunNo,
 }
 
 /// Durable index bookkeeping paired with the visible segment set.
@@ -163,8 +163,9 @@ pub struct GrepIndexState {
     /// One in-progress partitioned reorganize, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reorganize: Option<GrepReorganizeState>,
-    /// Next logical run ordinal to allocate atomically with a root update.
-    pub next_run_ordinal: u64,
+    /// Run number the next producer allocates, atomically with a root
+    /// update. Every segment's `run_no` is below it.
+    pub next_run_no: RunNo,
 }
 
 /// Change-feed resume point derived from the grep watermark pair.
@@ -213,11 +214,11 @@ impl ChangeFeedResume {
 
 impl GrepIndexState {
     /// Creates index bookkeeping in the current grep-owned format.
-    pub fn new(reorganize: Option<GrepReorganizeState>, next_run_ordinal: u64) -> Self {
+    pub fn new(reorganize: Option<GrepReorganizeState>, next_run_no: RunNo) -> Self {
         Self {
             format_version: GREP_INDEX_FORMAT_VERSION,
             reorganize,
-            next_run_ordinal,
+            next_run_no,
         }
     }
 }
@@ -230,8 +231,8 @@ fn is_zero(value: &u32) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepSegmentRef {
     pub segment_id: IndexSegmentId,
+    pub run_no: RunNo,
     pub run_seq: ChangeSeq,
-    pub run_ordinal: u64,
     pub level: u32,
     pub segment_index: u32,
     pub min_row_key: String,
@@ -318,11 +319,11 @@ impl GrepManifestState {
                     segment_id: segment.segment_id.clone(),
                 });
             }
-            if segment.run_ordinal >= self.index.next_run_ordinal {
-                return Err(GrepManifestStateError::UnallocatedSegmentRunOrdinal {
+            if segment.run_no >= self.index.next_run_no {
+                return Err(GrepManifestStateError::UnallocatedSegmentRunNo {
                     segment_id: segment.segment_id.clone(),
-                    run_ordinal: segment.run_ordinal,
-                    next_run_ordinal: self.index.next_run_ordinal,
+                    run_no: segment.run_no,
+                    next_run_no: self.index.next_run_no,
                 });
             }
             if by_id.insert(&segment.segment_id, segment).is_some() {
@@ -333,7 +334,7 @@ impl GrepManifestState {
         }
 
         if let Some(reorganize) = &self.index.reorganize {
-            validate_reorganize(reorganize, self.index.next_run_ordinal, &by_id)?;
+            validate_reorganize(reorganize, self.index.next_run_no, &by_id)?;
         }
         Ok(())
     }
@@ -341,13 +342,13 @@ impl GrepManifestState {
 
 fn validate_reorganize(
     reorganize: &GrepReorganizeState,
-    next_run_ordinal: u64,
+    next_run_no: RunNo,
     segments: &BTreeMap<&IndexSegmentId, &GrepSegmentRef>,
 ) -> Result<(), GrepManifestStateError> {
-    if reorganize.run_ordinal >= next_run_ordinal {
-        return Err(GrepManifestStateError::UnallocatedReorganizeRunOrdinal {
-            run_ordinal: reorganize.run_ordinal,
-            next_run_ordinal,
+    if reorganize.run_no >= next_run_no {
+        return Err(GrepManifestStateError::UnallocatedReorganizeRunNo {
+            run_no: reorganize.run_no,
+            next_run_no,
         });
     }
 
@@ -377,8 +378,7 @@ fn validate_reorganize(
                 segment_id: segment_id.clone(),
             });
         };
-        if segment.level != reorganize.output_level || segment.run_ordinal != reorganize.run_ordinal
-        {
+        if segment.level != reorganize.output_level || segment.run_no != reorganize.run_no {
             return Err(GrepManifestStateError::ReorganizeOutputDescriptorMismatch {
                 segment_id: segment_id.clone(),
             });

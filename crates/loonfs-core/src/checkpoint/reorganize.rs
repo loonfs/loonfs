@@ -1,6 +1,6 @@
 //! Plans and publishes bounded metadata merges.
 //!
-//! Checkpoint publication appends L0 delta runs. Each maintenance step selects
+//! Checkpoint publication appends delta runs. Each maintenance step selects
 //! one metadata family group and either merges a budgeted, contiguous set of
 //! complete runs or returns a plan for a background compaction of the entire
 //! group. Bounded steps and background jobs use the same merge engine.
@@ -26,15 +26,15 @@
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::error::ManifestLoadError;
-use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after};
+use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after, next_run_no_after};
 use super::load::load_verified_manifest_segments;
 use super::publish::{
     manifest_write_failure, publish_metadata_root, write_namespace_manifest,
     ManifestPublicationOutcome,
 };
 use super::runs::{
-    l0_run_count, MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest,
-    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
+    delta_run_count, MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest,
+    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_DELTA_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
 };
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
@@ -46,7 +46,7 @@ use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
     MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -140,9 +140,9 @@ pub struct MetadataCompactionView<'a> {
 /// What one reorganization step did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataReorganizeOutcome {
-    /// The manifest's L0 run count is below the policy trigger; nothing to
+    /// The manifest's delta run count is below the policy trigger; nothing to
     /// fold yet.
-    NotNeeded { l0_runs: usize },
+    NotNeeded { delta_runs: usize },
     /// One bounded complete-run subset for a family group merged into one
     /// new run and the manifest advanced. The new run is the group's base
     /// when the subset started at the group's oldest run, and a bigger delta
@@ -152,13 +152,13 @@ pub enum MetadataReorganizeOutcome {
         /// per-group bookkeeping by. Its families are
         /// [`MetadataFamilyGroup::families`].
         group: MetadataFamilyGroup,
-        merged_l0_rows: u64,
+        merged_delta_rows: u64,
         input_runs: usize,
         decoded_input_rows: u64,
         decoded_input_bytes: u64,
         manifest_no: ManifestNo,
         /// True when the window starting at the group's oldest run could not
-        /// reach an L0 run, so this merge ran above a frozen base and the
+        /// reach a delta run, so this merge ran above a frozen base and the
         /// group's retention is still stopped. A runtime that amortizes counts
         /// these per group and hands the count back in
         /// [`FrozenBasePolicy::Amortized`], which is what decides when the
@@ -243,7 +243,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     else {
         return Ok(report(
             namespace_id,
-            MetadataReorganizeOutcome::NotNeeded { l0_runs: 0 },
+            MetadataReorganizeOutcome::NotNeeded { delta_runs: 0 },
         ));
     };
     let segments =
@@ -254,24 +254,24 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             })?;
     let previous = segments.manifest();
 
-    let l0_runs = l0_run_count(&previous.payload);
-    if l0_runs < policy.max_l0_runs.get()
+    let delta_runs = delta_run_count(&previous.payload);
+    if delta_runs < policy.max_delta_runs.get()
         && !manifest_has_partial_reorganization(segments.scan_runs.as_ref())
     {
         return Ok(report(
             namespace_id,
-            MetadataReorganizeOutcome::NotNeeded { l0_runs },
+            MetadataReorganizeOutcome::NotNeeded { delta_runs },
         ));
     }
     let Some(group) = select_family_group(
         &previous.payload,
         compactions.active.map(MetadataCompactionSpec::group),
     ) else {
-        // L0 runs exist but hold no rows (empty families), or the only group
+        // Delta runs exist but hold no rows (empty families), or the only group
         // with rows is the one a job is rebuilding; nothing to fold here.
         return Ok(report(
             namespace_id,
-            MetadataReorganizeOutcome::NotNeeded { l0_runs },
+            MetadataReorganizeOutcome::NotNeeded { delta_runs },
         ));
     };
     // The floor is read before the plan rather than after it, because a plan
@@ -308,12 +308,12 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
                 MetadataReorganizeOutcome::CompactionPlanned { group, spec },
             ))
         }
-        // A selected group holds L0 rows, so it holds runs, so the planner
+        // A selected group holds delta rows, so it holds runs, so the planner
         // always answers with one of the two plans above.
         None => {
             return Ok(report(
                 namespace_id,
-                MetadataReorganizeOutcome::NotNeeded { l0_runs },
+                MetadataReorganizeOutcome::NotNeeded { delta_runs },
             ))
         }
     };
@@ -324,11 +324,15 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // descriptors remain in the replacement manifest unchanged. Whether it
     // drops rows follows from the placement, and its segments go to ordinary
     // segment keys because this step publishes them below.
+    // The manifest that first names a run allocates its number, and this
+    // step publishes the manifest that names this merge's output.
+    let run_no = previous.payload.next_run_no;
     let merged = merge_group_in_step(
         store,
         namespace_id,
         group,
         &input.runs,
+        run_no,
         input.placement,
         floor_seq,
         policy,
@@ -340,16 +344,20 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         .segments
         .iter()
         .filter(|descriptor| {
-            !group.contains(descriptor.family)
-                || !input
-                    .run_ids
-                    .contains(&(descriptor.run_seq, descriptor.level))
+            !group.contains(descriptor.family) || !input.run_nos.contains(&descriptor.run_no)
         })
         .cloned()
         .collect();
+    // A merge whose rows all fell to retention writes no segment, and a run
+    // nothing names takes no number.
+    let next_run_no = if merged.output_segments.is_empty() {
+        previous.payload.next_run_no
+    } else {
+        next_run_no_after(run_no)?
+    };
     next_segments.extend(merged.output_segments);
     // `base_seq` is the manifest's oldest-run marker: every referenced run
-    // must sit at or above it, including L0 runs other groups have not
+    // must sit at or above it, including delta runs other groups have not
     // folded yet.
     let base_seq = next_segments
         .iter()
@@ -363,6 +371,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         previous,
         next_segments,
         base_seq,
+        next_run_no,
         previous.payload.retention_floor_seq.max(floor_seq),
     )
     .await?;
@@ -381,7 +390,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             namespace_id,
             MetadataReorganizeOutcome::UnitPublished {
                 group,
-                merged_l0_rows: input.merged_l0_rows,
+                merged_delta_rows: input.merged_delta_rows,
                 input_runs: input.runs.len(),
                 decoded_input_rows: input.decoded_rows,
                 decoded_input_bytes: input.decoded_bytes,
@@ -413,8 +422,8 @@ pub(super) enum ReorganizationPlan {
 
 pub(super) struct ReorganizationInput {
     pub(super) runs: Vec<MetadataRunManifest>,
-    run_ids: BTreeSet<(ChangeSeq, u32)>,
-    merged_l0_rows: u64,
+    run_nos: BTreeSet<RunNo>,
+    merged_delta_rows: u64,
     decoded_rows: u64,
     decoded_bytes: u64,
     /// Where this merge's output stands in the group, which decides both the
@@ -454,7 +463,7 @@ impl MergePlacement {
     pub(super) fn output_level(self) -> u32 {
         match self {
             Self::Base { .. } => CHECKPOINT_BASE_RUN_LEVEL,
-            Self::Delta { .. } => CHECKPOINT_L0_RUN_LEVEL,
+            Self::Delta { .. } => CHECKPOINT_DELTA_RUN_LEVEL,
         }
     }
 
@@ -492,7 +501,7 @@ pub(super) struct ReorganizationSelection {
     pub(super) plan: Option<ReorganizationPlan>,
     pub(super) group_bottom_over_budget: Option<OverBudgetRun>,
     /// True when the window starting at the group's oldest run could not
-    /// reach an L0 run inside the budgets. The group's base is frozen while
+    /// reach a delta run inside the budgets. The group's base is frozen while
     /// that holds, and only a streaming compaction unfreezes it, so this is
     /// what the runtime counts to decide when to stop merging deltas over it.
     pub(super) bottom_anchored_merge_blocked: bool,
@@ -501,6 +510,7 @@ pub(super) struct ReorganizationSelection {
 /// A run that does not fit one step's budgets on its own.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OverBudgetRun {
+    pub(super) run_no: RunNo,
     pub(super) run_seq: ChangeSeq,
     pub(super) level: u32,
     pub(super) rows: u64,
@@ -514,6 +524,7 @@ fn over_budget_run(
     decoded_bytes: Option<u64>,
 ) -> OverBudgetRun {
     OverBudgetRun {
+        run_no: run.run_no,
         run_seq: run.run_seq,
         level: run.level,
         rows,
@@ -552,10 +563,10 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         .filter(|run| run_has_group_rows(run, group))
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
-        let left_is_l0 = left.level == CHECKPOINT_L0_RUN_LEVEL;
-        let right_is_l0 = right.level == CHECKPOINT_L0_RUN_LEVEL;
-        left_is_l0
-            .cmp(&right_is_l0)
+        let left_is_delta = left.level == CHECKPOINT_DELTA_RUN_LEVEL;
+        let right_is_delta = right.level == CHECKPOINT_DELTA_RUN_LEVEL;
+        left_is_delta
+            .cmp(&right_is_delta)
             .then(left.run_seq.cmp(&right.run_seq))
             .then(right.level.cmp(&left.level))
     });
@@ -566,13 +577,13 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     let byte_budget =
         u64::try_from(policy.max_decoded_input_bytes_per_step.get()).unwrap_or(u64::MAX);
     let max_runs = policy.max_input_runs_per_step.get();
-    // Base-tier runs sort first, so this is the index of the oldest L0
+    // Base-tier runs sort first, so this is the index of the oldest delta
     // candidate, and starting there is what skips a base run the budgets
     // cannot admit. A group has at most one base run, so this is one place
     // and the only alternative to the bottom.
     let first_delta_candidate = candidates
         .iter()
-        .take_while(|run| run.level != CHECKPOINT_L0_RUN_LEVEL)
+        .take_while(|run| run.level != CHECKPOINT_DELTA_RUN_LEVEL)
         .count();
     let delta_only_start = (first_delta_candidate > 0 && first_delta_candidate < candidate_count)
         .then_some(first_delta_candidate);
@@ -596,7 +607,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         let mut runs = Vec::new();
         let mut decoded_rows = 0u64;
         let mut decoded_bytes = 0u64;
-        let mut merged_l0_rows = 0u64;
+        let mut merged_delta_rows = 0u64;
         for index in window_start..candidate_count.min(window_start + max_runs) {
             let run = candidates[index];
             let run_rows = group_run_descriptors(run, group)
@@ -626,8 +637,8 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
                 }
                 break;
             }
-            if run.level == CHECKPOINT_L0_RUN_LEVEL {
-                merged_l0_rows = merged_l0_rows.saturating_add(run_rows);
+            if run.level == CHECKPOINT_DELTA_RUN_LEVEL {
+                merged_delta_rows = merged_delta_rows.saturating_add(run_rows);
             }
             decoded_rows = decoded_rows.saturating_add(run_rows);
             decoded_bytes = decoded_bytes.saturating_add(run_bytes);
@@ -635,11 +646,12 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         }
 
         // A bottom-anchored merge makes progress when it moves at least one
-        // L0 run into the base tier. A delta-only merge must combine at least
+        // delta run into the base tier. A delta-only merge must combine at least
         // two runs; rewriting one delta run would not reduce pending work.
         let bottom_anchored = window_start == 0;
         let makes_progress = if bottom_anchored {
-            runs.iter().any(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
+            runs.iter()
+                .any(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
         } else {
             runs.len() > 1
         };
@@ -647,13 +659,13 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
             bottom_anchored_merge_blocked |= bottom_anchored;
             continue;
         }
-        let run_ids = runs.iter().map(|run| (run.run_seq, run.level)).collect();
+        let run_nos = runs.iter().map(|run| run.run_no).collect();
         let placement = merge_placement(bottom_anchored, &runs, head_seq);
         return Ok(ReorganizationSelection {
             plan: Some(ReorganizationPlan::BoundedMerge(ReorganizationInput {
                 runs,
-                run_ids,
-                merged_l0_rows,
+                run_nos,
+                merged_delta_rows,
                 decoded_rows,
                 decoded_bytes,
                 placement,
@@ -664,7 +676,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     }
 
     // Nothing above got taken. Either no window makes progress inside the
-    // budgets — the bottom-anchored window cannot reach an L0 run, so
+    // budgets — the bottom-anchored window cannot reach a delta run, so
     // retention for the group has stopped, and the delta runs above the bottom
     // are down to one or blocked as well — or the delta merge was available
     // and the runtime said this group has taken enough of them. Both end the
@@ -675,10 +687,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     let spec = (!candidates.is_empty()).then(|| {
         MetadataCompactionSpec::new(
             group,
-            candidates
-                .iter()
-                .map(|run| (run.run_seq, run.level))
-                .collect(),
+            candidates.iter().map(|run| run.run_no).collect(),
             candidates
                 .iter()
                 .flat_map(|run| group_run_descriptors(run, group))
@@ -714,6 +723,7 @@ fn report_group_bottom_over_budget(
     tracing::debug!(
         namespace_id = namespace_id.as_str(),
         families = ?group.families(),
+        run_no = bottom.run_no.0,
         run_seq = bottom.run_seq.0,
         run_level = bottom.level,
         run_rows = bottom.rows,
@@ -728,8 +738,8 @@ fn report_group_bottom_over_budget(
 }
 
 /// A bottom-anchored fold stamps its base run at the manifest head, which is
-/// at or above every L0 run's sequence. So a base run sitting at or above the
-/// oldest L0 run says one group folded here and L0 runs remain — usually
+/// at or above every delta run's sequence. So a base run sitting at or above the
+/// oldest delta run says one group folded here and delta runs remain — usually
 /// other groups' rows in the very runs it just took its own rows out of. The
 /// step keeps going on that evidence rather than stopping at the trigger,
 /// which is what makes a run of bounded steps end in the same manifest shape
@@ -737,20 +747,20 @@ fn report_group_bottom_over_budget(
 ///
 /// A merge above the base writes a delta run at its newest input's sequence
 /// ([`MergePlacement`]), so it never puts a base run here and its inputs stay
-/// counted as L0 pressure. A fresh L0 appended after a completed fold is
+/// counted as delta pressure. A fresh delta run appended after a completed fold is
 /// strictly newer than every base-tier run and therefore does not bypass the
 /// normal trigger.
 fn manifest_has_partial_reorganization(runs: &[MetadataRunManifest]) -> bool {
-    let Some(oldest_l0_seq) = runs
+    let Some(oldest_delta_seq) = runs
         .iter()
-        .filter(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
+        .filter(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
         .map(|run| run.run_seq)
         .min()
     else {
         return false;
     };
     runs.iter()
-        .any(|run| run.level != CHECKPOINT_L0_RUN_LEVEL && run.run_seq >= oldest_l0_seq)
+        .any(|run| run.level != CHECKPOINT_DELTA_RUN_LEVEL && run.run_seq >= oldest_delta_seq)
 }
 
 fn run_has_group_rows(run: &MetadataRunManifest, group: MetadataFamilyGroup) -> bool {
@@ -788,8 +798,8 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
     Ok(decoded_bytes)
 }
 
-/// The family group with the most L0 rows to fold; ties resolve in group
-/// order. `None` when no group has L0 rows.
+/// The family group with the most delta rows to fold; ties resolve in group
+/// order. `None` when no group has delta rows.
 ///
 /// `rebuilding` is the group a streaming compaction is rebuilding right now,
 /// and it is skipped. That one exclusion is the whole of the input-exclusion
@@ -800,7 +810,7 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
 /// referenced and unchanged whatever else folds meanwhile.
 ///
 /// Without it the excluded group would win every step for as long as the job
-/// ran — its L0 rows are frozen in the job's snapshot, so its count never
+/// ran — its delta rows are frozen in the job's snapshot, so its count never
 /// falls, while every other group's falls the moment it folds — and the step
 /// would spend itself re-planning a job that is already running.
 pub(super) fn select_family_group(
@@ -810,7 +820,7 @@ pub(super) fn select_family_group(
     REORGANIZE_FAMILY_GROUPS
         .into_iter()
         .filter(|group| Some(*group) != rebuilding)
-        .map(|group| (group_l0_rows(payload, group), group))
+        .map(|group| (group_delta_rows(payload, group), group))
         .filter(|(rows, _)| *rows > 0)
         .max_by(|(left_rows, left), (right_rows, right)| {
             // On ties the EARLIER group must win, and group order is the
@@ -821,12 +831,12 @@ pub(super) fn select_family_group(
         .map(|(_, group)| group)
 }
 
-fn group_l0_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGroup) -> u64 {
+fn group_delta_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGroup) -> u64 {
     payload
         .segments
         .iter()
         .filter(|descriptor| {
-            descriptor.level == CHECKPOINT_L0_RUN_LEVEL && group.contains(descriptor.family)
+            descriptor.level == CHECKPOINT_DELTA_RUN_LEVEL && group.contains(descriptor.family)
         })
         .map(|descriptor| descriptor.row_count)
         .sum()
@@ -838,6 +848,7 @@ pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
     previous: &NamespaceManifestEnvelope,
     segments: Vec<MetadataSegmentRef>,
     base_seq: ChangeSeq,
+    next_run_no: RunNo,
     retention_floor_seq: ChangeSeq,
 ) -> Result<NamespaceManifestEnvelope> {
     // One generated object id, one write. The generated id ends in 16 random
@@ -855,6 +866,7 @@ pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
         base_seq,
         writer_epoch: previous.payload.writer_epoch,
         next_inode_id: previous.payload.next_inode_id,
+        next_run_no,
         retention_floor_seq,
         segments,
     })

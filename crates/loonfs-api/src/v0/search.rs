@@ -1,7 +1,7 @@
 //! Content search (grep) request and response shapes: the `query/v0`
 //! plane's first operation (API spec, "Content search").
 
-use crate::{AbsolutePath, ChangeSeq, CheckpointId, InodeId, NamespaceId, RevisionNo};
+use crate::{AbsolutePath, ChangeSeq, CheckpointId, InodeId, NamespaceId, RevisionNo, RunNo};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
@@ -186,9 +186,8 @@ pub struct GrepIndex {
     /// Where the index is in its lifecycle.
     #[serde(flatten)]
     pub lifecycle: GrepIndexLifecycle,
-    /// Next logical run ordinal the index will allocate.
-    #[cfg_attr(feature = "openapi", schema(maximum = 9007199254740991_u64))]
-    pub next_run_ordinal: u64,
+    /// Run number the index allocates next.
+    pub next_run_no: RunNo,
     /// True while a partitioned segment reorganization is in progress.
     pub reorganize_pending: bool,
 }
@@ -329,13 +328,13 @@ mod tests {
                 built_through_seq: ChangeSeq(12),
                 next_event_index: 0,
             },
-            next_run_ordinal: 3,
+            next_run_no: RunNo(3),
             reorganize_pending: false,
         };
 
         assert_eq!(
             serde_json::to_string(&response).expect("serialize active status"),
-            r#"{"namespace_id":"demo","status":"active","built_through_seq":12,"next_run_ordinal":3,"reorganize_pending":false}"#
+            r#"{"namespace_id":"demo","status":"active","built_through_seq":12,"next_run_no":3,"reorganize_pending":false}"#
         );
     }
 
@@ -349,13 +348,13 @@ mod tests {
                 checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
                     .expect("checkpoint id"),
             },
-            next_run_ordinal: 1,
+            next_run_no: RunNo(1),
             reorganize_pending: false,
         };
 
         assert_eq!(
             serde_json::to_string(&response).expect("serialize backfilling status"),
-            r#"{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"chk_00000000000000000000000000000009","next_run_ordinal":1,"reorganize_pending":false}"#
+            r#"{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"chk_00000000000000000000000000000009","next_run_no":1,"reorganize_pending":false}"#
         );
     }
 
