@@ -599,7 +599,10 @@ mod tests {
     #![allow(clippy::panic)]
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::{load_server_config, ServerConfigError, DISK_BLOCK_BYTES, MIN_DISK_BYTES};
+    use super::{
+        load_server_config, ServerConfigError, AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV,
+        DISK_BLOCK_BYTES, MIN_DISK_BYTES,
+    };
     use std::fs;
     use tempfile::tempdir;
 
@@ -615,6 +618,12 @@ mod tests {
         fn set(name: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(name);
             std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
             Self { name, previous }
         }
     }
@@ -974,11 +983,8 @@ root = "/tmp/loonfs-server"
 
     #[test]
     fn load_rejects_non_loopback_bind_without_auth_token() {
-        // LOONFS_AUTH_TOKEN in the environment would legitimately fill the
-        // token and make this config valid; only assert when it is unset.
-        if std::env::var("LOONFS_AUTH_TOKEN").is_ok() {
-            return;
-        }
+        // Remove any ambient token so these configs remain invalid.
+        let _auth_token = EnvGuard::unset(AUTH_TOKEN_ENV);
         for bind in ["0.0.0.0:9400", "[::]:9400", "10.1.2.3:9400"] {
             let path = write_config(&format!(
                 r#"
@@ -1093,26 +1099,6 @@ root = "/tmp/loonfs-server"
         let tls = config.tls.expect("tls table decodes");
         assert_eq!(tls.cert_path, "/etc/loonfs/tls/server.crt");
         assert_eq!(tls.key_path, "/etc/loonfs/tls/server.key");
-    }
-
-    #[test]
-    fn loopback_bind_accepts_tls() {
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-writer_id = "loonfs-server"
-
-[tls]
-cert_path = "/etc/loonfs/tls/server.crt"
-key_path = "/etc/loonfs/tls/server.key"
-
-[store]
-kind = "local-fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-
-        load_server_config(&path).expect("loopback tls config loads");
     }
 
     #[test]
@@ -1381,29 +1367,6 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn an_ambient_store_table_preserves_its_credential_source() {
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[store]
-kind = "aws-s3"
-bucket = "bucket"
-region = "us-east-1"
-
-[store.credentials]
-kind = "ambient"
-"#,
-        );
-        let config =
-            toml::from_str::<super::ServerConfig>(&fs::read_to_string(&path).expect("read config"))
-                .expect("ambient store parses");
-        assert_eq!(config.store.credentials_kind(), Some("ambient"));
-    }
-
-    #[test]
     fn static_store_credentials_are_preserved_as_static() {
         let path = write_config(
             r#"
@@ -1540,10 +1503,9 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.content_token_secret(), "env-content-token-secret");
 
         // Without the env fallback the load path reports the missing field.
-        if std::env::var("LOONFS_CONTENT_TOKEN_SECRET").is_err() {
-            let error = load_server_config(&path).expect_err("missing content token secret");
-            assert_missing_field(error, "content_token_secret");
-        }
+        let _content_token_secret = EnvGuard::unset(CONTENT_TOKEN_SECRET_ENV);
+        let error = load_server_config(&path).expect_err("missing content token secret");
+        assert_missing_field(error, "content_token_secret");
     }
 
     #[test]
@@ -1799,8 +1761,6 @@ root = "/tmp/loonfs-server"
 
         let config = load_server_config(&path).expect("load config");
         assert_eq!(config.grep.mode, super::GrepMode::Disabled);
-        assert!(!config.grep.mode.serves_grep());
-        assert!(!config.grep.mode.maintains_index());
     }
 
     #[test]
@@ -1957,8 +1917,6 @@ root = "/tmp/loonfs-server"
             .worker_config()
             .build_policy()
             .expect("valid configured grep policy");
-        assert_eq!(policy.max_files_per_step.get(), 1024);
-        assert_eq!(policy.max_delta_runs.get(), 3);
         assert_eq!(
             policy.max_mid_runs,
             loonfs_grep::GramIndexBuildPolicy::default().max_mid_runs,

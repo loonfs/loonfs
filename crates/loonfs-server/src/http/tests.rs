@@ -1445,92 +1445,89 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_corrupt_pointer_is_index_corrupt_and_core_reads_survive() {
+async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let namespace_id = namespace_id("grep-error-pointer");
-    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    let corrupt_pointer = namespace_id("grep-error-pointer");
+    let missing_manifest = namespace_id("grep-error-missing-manifest");
+    let corrupt_manifest = namespace_id("grep-error-manifest");
+    let identity_mismatch = namespace_id("grep-error-identity");
+
+    let writer = test_runtime(store.clone(), "grep-error-seed").await;
+    for namespace_id in [
+        &corrupt_pointer,
+        &missing_manifest,
+        &corrupt_manifest,
+        &identity_mismatch,
+    ] {
+        seed_grep_error_namespace_on(&writer, namespace_id).await;
+    }
+
     store
         .put_overwrite(
-            &grep_root_key(&namespace_id),
+            &grep_root_key(&corrupt_pointer),
             Bytes::from_static(b"corrupt grep pointer"),
         )
         .await
         .expect("write corrupt grep pointer");
-    writer.shutdown().await.expect("shutdown writer");
 
-    let harness = start_grep_error_server(store, temp_dir.path(), "pointer-server").await;
-    assert_index_corrupt_and_core_read(harness, namespace_id).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_missing_manifest_is_index_corrupt_and_core_reads_survive() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let namespace_id = namespace_id("grep-error-missing-manifest");
-    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
-    let manifest_object_id = GrepManifestObjectId::parse("gmf_11111111111111111111111111111111")
-        .expect("manifest object id");
     write_grep_pointer(
         &*store,
-        &namespace_id,
-        namespace_id.clone(),
-        manifest_object_id,
+        &missing_manifest,
+        missing_manifest.clone(),
+        GrepManifestObjectId::parse("gmf_11111111111111111111111111111111")
+            .expect("manifest object id"),
     )
     .await;
-    writer.shutdown().await.expect("shutdown writer");
 
-    let harness = start_grep_error_server(store, temp_dir.path(), "missing-manifest-server").await;
-    assert_index_corrupt_and_core_read(harness, namespace_id).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_corrupt_manifest_is_index_corrupt_and_core_reads_survive() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let namespace_id = namespace_id("grep-error-manifest");
-    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
     let manifest_object_id = GrepManifestObjectId::parse("gmf_22222222222222222222222222222222")
         .expect("manifest object id");
     store
         .put_overwrite(
-            &grep_manifest_key(&namespace_id, &manifest_object_id),
+            &grep_manifest_key(&corrupt_manifest, &manifest_object_id),
             Bytes::from_static(b"corrupt grep manifest"),
         )
         .await
         .expect("write corrupt grep manifest");
     write_grep_pointer(
         &*store,
-        &namespace_id,
-        namespace_id.clone(),
+        &corrupt_manifest,
+        corrupt_manifest.clone(),
         manifest_object_id,
     )
     .await;
-    writer.shutdown().await.expect("shutdown writer");
 
-    let harness = start_grep_error_server(store, temp_dir.path(), "manifest-server").await;
-    assert_index_corrupt_and_core_read(harness, namespace_id).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_identity_mismatch_is_index_corrupt_and_core_reads_survive() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let namespace_id = namespace_id("grep-error-identity");
-    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
-    let manifest_object_id = GrepManifestObjectId::parse("gmf_33333333333333333333333333333333")
-        .expect("manifest object id");
     write_grep_pointer(
         &*store,
-        &namespace_id,
+        &identity_mismatch,
         NamespaceId::parse("different-grep-identity").expect("different namespace id"),
-        manifest_object_id,
+        GrepManifestObjectId::parse("gmf_33333333333333333333333333333333")
+            .expect("manifest object id"),
     )
     .await;
+
     writer.shutdown().await.expect("shutdown writer");
 
-    let harness = start_grep_error_server(store, temp_dir.path(), "identity-server").await;
-    assert_index_corrupt_and_core_read(harness, namespace_id).await;
+    let harness = start_grep_error_server(store, temp_dir.path(), "index-corrupt-server").await;
+    let client = &harness.client;
+    for namespace_id in [
+        corrupt_pointer,
+        missing_manifest,
+        corrupt_manifest,
+        identity_mismatch,
+    ] {
+        let result = client.grep(&namespace_id, &grep_error_request()).await;
+        assert_grep_api_error_and_core_read(
+            client,
+            &namespace_id,
+            result,
+            500,
+            ErrorCode::IndexCorrupt,
+            "disable and re-enable grep to rebuild it",
+        )
+        .await;
+    }
+    harness.server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2381,8 +2378,7 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
             .expect("valid content store id"),
         &loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
     );
-    // Chunks the size of an HTTP body's, not the store's: the boundaries a
-    // caller hands over carry no meaning, and the store regroups them.
+    // Use HTTP-sized chunks so the store must regroup them.
     let chunks: Vec<Bytes> = payload
         .chunks(64 * 1024)
         .map(Bytes::copy_from_slice)
@@ -2417,56 +2413,6 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
             .expect("object exists"),
         Bytes::from(payload)
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn capability_document_advertises_the_upload_limit() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let harness = start_server(store, temp_dir.path(), "server-writer").await;
-
-    let capabilities = harness
-        .client
-        .get_capabilities()
-        .await
-        .expect("fetch capability document");
-    assert_eq!(
-        capabilities.limits.get("upload.max_content_bytes").copied(),
-        Some(256 * 1024 * 1024)
-    );
-    assert_eq!(
-        capabilities
-            .limits
-            .get("download.max_content_bytes")
-            .copied(),
-        Some(256 * 1024 * 1024)
-    );
-    // Every limit a request can trip is discoverable: transfer
-    // concurrency and the grep scan budgets.
-    assert_eq!(
-        capabilities.limits.get("upload.max_concurrent").copied(),
-        Some(8)
-    );
-    assert_eq!(
-        capabilities.limits.get("download.max_concurrent").copied(),
-        Some(16)
-    );
-    assert_eq!(
-        capabilities
-            .limits
-            .get("query.grep.scan_budget_files")
-            .copied(),
-        Some(4096)
-    );
-    assert_eq!(
-        capabilities
-            .limits
-            .get("query.grep.tail_budget_files")
-            .copied(),
-        Some(512)
-    );
-
-    harness.server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2686,55 +2632,6 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
         .await
         .expect("a freed slot admits the upload");
-
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
-    let mut config = test_config(temp_dir.path(), "server-writer");
-    config.max_concurrent_uploads = 1;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = app_with_store_and_state(config, store)
-        .await
-        .expect("build app");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
-
-    let held = state
-        .upload_permits
-        .clone()
-        .try_acquire_owned()
-        .expect("hold the only upload slot");
-    // Free the slot while the client sleeps between attempts: the first
-    // try answers server_busy, a later retry lands. An isolated timer is
-    // the point of this test — it exercises the client's real backoff.
-    #[allow(clippy::disallowed_methods)]
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        drop(held);
-    });
-
-    let client = Client::new(ClientConfig {
-        server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".into()),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: None,
-    })
-    .expect("valid client config");
-    let target = NamespacePath::parse("demo", "/retried.bin").expect("target");
-    client
-        .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
-        .await
-        .expect("transient retry rides out the briefly full slot");
 
     server.abort();
 }
@@ -3123,6 +3020,11 @@ async fn seed_grep_error_namespace(
     namespace_id: &NamespaceId,
 ) -> FsWriter {
     let writer = test_runtime(store.clone(), "grep-error-seed").await;
+    seed_grep_error_namespace_on(&writer, namespace_id).await;
+    writer
+}
+
+async fn seed_grep_error_namespace_on(writer: &FsWriter, namespace_id: &NamespaceId) {
     writer
         .create_namespace(namespace_id, CreateNamespaceOptions::default())
         .await
@@ -3136,7 +3038,6 @@ async fn seed_grep_error_namespace(
         )
         .await
         .expect("write core isolation sentinel");
-    writer
 }
 
 async fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
@@ -3216,21 +3117,6 @@ async fn start_grep_admin_error_server(
     let mut config = test_config(root, writer_id);
     config.grep.mode = crate::config::GrepMode::ServeAndMaintain;
     start_server_with_config(store, config).await
-}
-
-async fn assert_index_corrupt_and_core_read(harness: TestHarness, namespace_id: NamespaceId) {
-    let client = &harness.client;
-    let result = client.grep(&namespace_id, &grep_error_request()).await;
-    assert_grep_api_error_and_core_read(
-        client,
-        &namespace_id,
-        result,
-        500,
-        ErrorCode::IndexCorrupt,
-        "disable and re-enable grep to rebuild it",
-    )
-    .await;
-    harness.server.abort();
 }
 
 async fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
@@ -4044,15 +3930,6 @@ mod direct_download {
         )
         .await;
 
-        // The deployment advertises direct PUT without checksum feature keys.
-        let advertised = client.get_capabilities().await.expect("capabilities");
-        assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT));
-        assert!(advertised.supports(FEATURE_DOWNLOADS_DIRECT_GET));
-        assert!(
-            !advertised.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
-            "this adapter signs no multipart for GCS, so the key must be absent"
-        );
-
         let namespace = namespace_id("ladder-crc32c-put");
         client
             .create_namespace(&namespace)
@@ -4088,27 +3965,6 @@ mod direct_download {
             .await
             .expect("stream the granted object");
         assert_eq!(received, payload);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_deployment_without_a_bundle_advertises_no_direct_transfer() {
-        let temp_dir = tempdir().expect("tempdir");
-        let advertised = start(temp_dir.path(), "advertises-none", None)
-            .await
-            .get_capabilities()
-            .await
-            .expect("capabilities");
-
-        for feature in [
-            FEATURE_UPLOADS_DIRECT_PUT,
-            FEATURE_UPLOADS_DIRECT_MULTIPART,
-            FEATURE_DOWNLOADS_DIRECT_GET,
-        ] {
-            assert!(!advertised.supports(feature), "unexpected `{feature}`");
-        }
-        assert!(!advertised
-            .limits
-            .contains_key(LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

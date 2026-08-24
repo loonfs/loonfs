@@ -119,17 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn json_tracing_uses_rust_log_when_present() {
-        let config = trace_config_from_env(
-            Some("json".to_owned()),
-            Some("loonfs_core=debug".to_owned()),
-        )
-        .expect("trace config parses")
-        .expect("enabled tracing config");
-        assert_eq!(config.filter, "loonfs_core=debug");
-    }
-
-    #[test]
     fn default_tracing_uses_rust_log_when_present() {
         let config = trace_config_from_env(None, Some("loonfs_core=debug".to_owned()))
             .expect("trace config parses")

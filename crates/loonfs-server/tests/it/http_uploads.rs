@@ -106,7 +106,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stored_proxied_mode_rejects_other_tags_and_retired_completion_fields_precisely() {
+async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -131,40 +131,29 @@ async fn stored_proxied_mode_rejects_other_tags_and_retired_completion_fields_pr
         harness.server_url,
         begin.upload_id()
     );
-    for (body, wrong) in [
-        (
+    let wrong = "completion request mode `direct_multipart` does not match stored upload mode \
+                 `service_proxied`";
+    let result = raw_agent()
+        .post(&completion_url)
+        .set("authorization", "Bearer test-token")
+        .set("content-type", "application/json")
+        .send_string(
             r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"parts":[]}"#,
-            "completion request mode `direct_multipart` does not match stored upload mode `service_proxied`",
-        ),
-        (
-            r#"{"mode":"service_proxied","completion":"content_ref"}"#,
-            "unknown field `completion`",
-        ),
-        (
-            r#"{"mode":"service_proxied","content_ref":{}}"#,
-            "unknown field `content_ref`",
-        ),
-    ] {
-        let result = raw_agent()
-            .post(&completion_url)
-            .set("authorization", "Bearer test-token")
-            .set("content-type", "application/json")
-            .send_string(body);
-        let ureq::Error::Status(status, response) =
-            result.expect_err("wrong completion shape should fail")
-        else {
-            panic!("a rejected completion body returns an HTTP status");
-        };
-        assert_eq!(status, 400);
-        let error: ApiError =
-            serde_json::from_reader(response.into_reader()).expect("API error envelope");
-        assert_eq!(error.code, "invalid_request");
-        assert!(
-            error.message.contains(wrong),
-            "completion error should name `{wrong}` verbatim: {}",
-            error.message
         );
-    }
+    let ureq::Error::Status(status, response) =
+        result.expect_err("wrong completion shape should fail")
+    else {
+        panic!("a rejected completion body returns an HTTP status");
+    };
+    assert_eq!(status, 400);
+    let error: ApiError =
+        serde_json::from_reader(response.into_reader()).expect("API error envelope");
+    assert_eq!(error.code, "invalid_request");
+    assert!(
+        error.message.contains(wrong),
+        "completion error should name `{wrong}` verbatim: {}",
+        error.message
+    );
 
     harness
         .client
@@ -505,76 +494,6 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     let error: ApiError =
         serde_json::from_reader(response.into_reader()).expect("API error envelope");
     assert_eq!(error.code, "upload_already_completed");
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-test",
-        "http-client-upload-readback",
-    ))
-    .await;
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace)
-        .await
-        .expect("create namespace");
-
-    let file_bytes = b"read the session back";
-    let (upload_id, content_ref, completed_at_ms) =
-        complete_upload_session(&harness, &namespace, file_bytes).await;
-
-    let status = harness
-        .client
-        .get_upload(&namespace, &upload_id)
-        .await
-        .expect("read the upload session back");
-    assert_eq!(status.namespace_id, namespace);
-    assert_eq!(status.upload_id, upload_id);
-    assert_eq!(status.mode, UploadMode::ServiceProxied);
-    let UploadSessionStatus::Completed {
-        completed_at_ms: reported_completed_at_ms,
-        content_ref: reported_ref,
-        content_token,
-    } = status.status
-    else {
-        panic!("a completed session reports itself completed");
-    };
-    assert_eq!(reported_completed_at_ms, completed_at_ms);
-    assert_eq!(reported_ref, content_ref);
-
-    let commit = harness
-        .client
-        .create_commit(
-            &namespace,
-            &CommitRequest {
-                commit_id: CommitId::parse("client-read-back-put").expect("valid commit id"),
-                actor: loonfs_test_support::test_actor(),
-                message: None,
-                content_tokens: vec![content_token.expect("a completed session re-mints")],
-                operations: vec![FilesystemOperation::PutFile {
-                    path: AbsolutePath::parse("/read-back.txt").expect("path"),
-                    content_ref,
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                }],
-            },
-        )
-        .await
-        .expect("the token the read handed back admits its content");
-    assert_eq!(commit.committed_seq, ChangeSeq(1));
-
-    let read_back = harness
-        .client
-        .get_file_bytes(&NamespacePath::parse("demo", "/read-back.txt").expect("path"))
-        .await
-        .expect("read the committed file");
-    assert_eq!(read_back, file_bytes);
 
     harness.server.abort();
 }

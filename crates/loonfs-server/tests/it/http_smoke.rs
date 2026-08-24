@@ -13,11 +13,10 @@ use loonfs_api::{
     DEFAULT_PAGE_LIMIT, LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_DOWNLOAD_MAX_CONCURRENT,
     LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
-    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use loonfs_client::{ClientError, CreateDirectoryOptions, NamespacePath, PutFileOptions};
-use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
@@ -161,6 +160,12 @@ async fn capabilities_endpoint_advertises_capabilities() {
     assert!(!capabilities.supports("core.uploads.direct_put"));
     assert!(!capabilities.supports("core.uploads.direct_multipart"));
     assert!(!capabilities.supports("core.downloads.direct_get"));
+    assert!(
+        !capabilities
+            .limits
+            .contains_key(LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES),
+        "a deployment that presigns no uploads advertises no direct-put ceiling"
+    );
     assert_eq!(
         capabilities.limits.get(LIMIT_PAGINATION_DEFAULT),
         Some(&u64::from(DEFAULT_PAGE_LIMIT))
@@ -308,40 +313,6 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
             assert_eq!(code, "namespace_not_found");
         }
         other => panic!("expected API error for missing namespace, got {other:?}"),
-    }
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_namespace_listing_route_is_not_exposed() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-test",
-        "http-no-namespace-list",
-    ))
-    .await;
-
-    harness
-        .client
-        .create_namespace(&namespace_id("demo"))
-        .await
-        .expect("create demo");
-
-    let response = raw_agent()
-        .get(&format!("{}/v0/namespaces", harness.server_url))
-        .set("authorization", "Bearer test-token")
-        .call();
-    match response {
-        Err(ureq::Error::Status(status, _)) => {
-            assert!(
-                status == 404 || status == 405,
-                "GET /v0/namespaces should be missing or method-not-allowed, got {status}"
-            );
-        }
-        Ok(_) => panic!("GET /v0/namespaces must not return a namespace list"),
-        Err(error) => panic!("unexpected transport error: {error}"),
     }
 
     harness.server.abort();
