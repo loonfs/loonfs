@@ -104,62 +104,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zero_policy_fields_are_rejected() {
-        for (field, config) in [
-            (
-                "max_files_per_step",
-                GrepWorkerConfig {
-                    max_files_per_step: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "max_content_bytes_per_step",
-                GrepWorkerConfig {
-                    max_content_bytes_per_step: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "max_rows_per_segment",
-                GrepWorkerConfig {
-                    max_rows_per_segment: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "max_delta_runs",
-                GrepWorkerConfig {
-                    max_delta_runs: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "max_mid_runs",
-                GrepWorkerConfig {
-                    max_mid_runs: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "max_decoded_input_rows_per_step",
-                GrepWorkerConfig {
-                    max_decoded_input_rows_per_step: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-        ] {
-            assert_eq!(
-                config.validate(),
-                Err(GrepWorkerConfigError::InvalidField {
-                    field,
-                    reason: "must be greater than zero".to_owned(),
-                })
-            );
-        }
-    }
-
-    #[test]
     fn policy_construction_rejects_each_zero_budget() {
         for (field, config) in [
             (

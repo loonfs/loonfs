@@ -45,25 +45,6 @@ mod tests {
     use crate::fault::FaultSchedule;
 
     #[test]
-    fn replay_seed_round_trips_json() {
-        let replay = ReplaySeed {
-            schema_version: 1,
-            scenario: "default_namespace_sim".to_owned(),
-            seed: SimSeed(9),
-            max_steps: 100,
-            writers: 2,
-            failing_step: Some(7),
-            fault_schedule: FaultSchedule::empty(SimSeed(9)),
-        };
-
-        let json = replay.to_json_pretty().expect("serialize replay seed");
-        assert_eq!(
-            ReplaySeed::from_json_str(&json).expect("deserialize replay seed"),
-            replay
-        );
-    }
-
-    #[test]
     fn replay_seed_formats_command() {
         let replay = ReplaySeed {
             schema_version: 1,

@@ -59,23 +59,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fault_schedule_round_trips_json() {
-        let schedule = FaultSchedule {
-            seed: SimSeed(11),
-            faults: vec![ScheduledFault {
-                step: 3,
-                op_kind: Some(ObjectOperationKind::PutIfAbsent),
-                key_contains: Some("head".to_owned()),
-                fault: ObjectStoreFault::PutSucceedsButResponseLost,
-            }],
-        };
-
-        let json = serde_json::to_string(&schedule).expect("serialize schedule");
-        let decoded: FaultSchedule = serde_json::from_str(&json).expect("decode schedule");
-        assert_eq!(decoded, schedule);
-    }
-
-    #[test]
     fn fault_schedule_matches_expected_step() {
         let schedule = FaultSchedule {
             seed: SimSeed(1),

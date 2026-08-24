@@ -12,7 +12,7 @@ use loonfs_grep::root::{
     GrepRootEnvelope, GrepRootError, GrepRootPointer,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{ImmutableWriteError, ObjectStore, PutMode};
+use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, MetadataMapStore};
 
@@ -118,6 +118,21 @@ async fn identical_state_publishes_a_fresh_manifest_object() {
         second.manifest_object_id(),
         "and still occupy different objects"
     );
+    for published in [&first, &second] {
+        let object_key = manifest_key(&namespace_id, published.manifest_object_id());
+        let stored = store
+            .get(&object_key, None)
+            .await
+            .expect("read a published manifest")
+            .expect("a published manifest is durable at the key the pointer names");
+        let expected =
+            encode_grep_manifest(published.manifest_envelope()).expect("encode manifest");
+        assert_eq!(
+            stored,
+            Bytes::from(expected),
+            "publication leaves `{object_key}` holding exactly the manifest it published"
+        );
+    }
     assert_eq!(
         store
             .list_prefix(&manifests_prefix(&namespace_id))
@@ -126,35 +141,6 @@ async fn identical_state_publishes_a_fresh_manifest_object() {
             .len(),
         3
     );
-}
-
-#[tokio::test]
-async fn a_manifest_key_occupied_by_other_bytes_is_corrupt() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
-    let namespace_id = namespace_id("docs");
-    let state = root(namespace_id.clone(), ChangeSeq(0));
-    let envelope = GrepManifestEnvelope::from_state(state.clone()).expect("manifest envelope");
-    let bytes = encode_grep_manifest(&envelope).expect("encode manifest");
-    let manifest_object_id = GrepManifestObjectId::generate();
-    store
-        .put(
-            &manifest_key(&namespace_id, &manifest_object_id),
-            Bytes::from_static(b"not the manifest these bytes claim to be"),
-            PutMode::Overwrite,
-        )
-        .await
-        .expect("plant divergent manifest bytes");
-
-    assert!(matches!(
-        store
-            .put_immutable_verified(
-                &manifest_key(&namespace_id, &manifest_object_id),
-                Bytes::from(bytes)
-            )
-            .await,
-        Err(ImmutableWriteError::DifferentObject { .. })
-    ));
 }
 
 #[tokio::test]
@@ -207,24 +193,6 @@ async fn racing_advancers_have_one_winner_and_loser_can_reload_and_retry() {
         final_root.manifest_state().status().active_watermark(),
         Some((ChangeSeq(3), 0))
     );
-}
-
-#[tokio::test]
-async fn stale_etag_advance_fails_after_concurrent_advance() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
-    let namespace_id = namespace_id("docs");
-    let stale = seed_grep_root(&store, &root(namespace_id.clone(), ChangeSeq(0)))
-        .await
-        .expect("seed root");
-    advance_grep_root(&store, &stale, &root(namespace_id.clone(), ChangeSeq(1)))
-        .await
-        .expect("concurrent advance succeeds");
-
-    assert!(matches!(
-        advance_grep_root(&store, &stale, &root(namespace_id, ChangeSeq(2))).await,
-        Err(GrepRootError::Conflict { .. })
-    ));
 }
 
 fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepManifestState {

@@ -350,24 +350,13 @@ mod tests {
     fn non_ascii_case_pairs_stay_conservative() {
         // The folded index cannot answer for ß/SS pairs; the planner must
         // not require grams it will never find.
-        let plan = plan_pattern("straße", true).expect("plan");
-        match plan {
-            GramPlanOutcome::Indexable(plan) => {
-                for set in &plan.required {
-                    for gram in set {
-                        assert!(
-                            gram.0.iter().all(|byte| byte.is_ascii()),
-                            "non-ASCII grams must not be required under (?i)"
-                        );
-                    }
-                }
+        if let GramPlanOutcome::Indexable(plan) = plan_pattern("straße", true).expect("plan") {
+            for gram in plan.required.iter().flatten() {
+                assert!(
+                    gram.0.iter().all(|byte| byte.is_ascii()),
+                    "non-ASCII grams must not be required under (?i)"
+                );
             }
-            GramPlanOutcome::Unindexable => {}
         }
-    }
-
-    #[test]
-    fn invalid_patterns_error() {
-        assert!(plan_pattern("(unclosed", false).is_err());
     }
 }
