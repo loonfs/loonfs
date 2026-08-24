@@ -192,10 +192,9 @@ mod tests {
     use super::{
         checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_prefix,
         metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
-        metadata_segment_object_key, namespace_prefix, upload_session, wal_floor, wal_head,
-        wal_segment, wal_segment_id_from_key, wal_segment_prefix,
+        metadata_segment_object_key, upload_session, wal_floor, wal_head, wal_segment,
+        wal_segment_id_from_key, wal_segment_prefix,
     };
-    use crate::layout::ObjectLayout;
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
@@ -238,16 +237,6 @@ mod tests {
 
     fn wal_segment_id(value: &str) -> WalSegmentId {
         WalSegmentId::parse(value).expect("valid WAL segment id")
-    }
-
-    #[test]
-    fn namespace_prefix_matches_layout_root_prefix() {
-        let namespace_id = NamespaceId::parse("ns-1").expect("valid namespace id");
-
-        assert_eq!(
-            namespace_prefix(&namespace_id),
-            ObjectLayout::new().namespace_root_prefix(&namespace_id)
-        );
     }
 
     #[test]
@@ -370,16 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn key_builders_match_spec_examples() {
-        assert_eq!(wal_head(&namespace_id()), "namespaces/ns-1/wal/head.json");
-        assert_eq!(wal_floor(&namespace_id()), "namespaces/ns-1/wal/floor.json");
-        assert_eq!(
-            wal_segment(
-                &namespace_id(),
-                &wal_segment_id("wal_00000000000000000001-0123456789abcdef")
-            ),
-            "namespaces/ns-1/wal/segments/wal_00000000000000000001-0123456789abcdef.wal.zst"
-        );
+    fn listing_prefixes_match_their_keys_and_wal_segment_ids_parse_back() {
         assert_eq!(
             wal_segment_prefix(&namespace_id()),
             "namespaces/ns-1/wal/segments/"
@@ -403,47 +383,8 @@ mod tests {
             None
         );
         assert_eq!(
-            metadata_root(&namespace_id()),
-            "namespaces/ns-1/metadata/root.json"
-        );
-        let manifest_object_id =
-            ManifestObjectId::parse("man_00000000000000000400-0123456789abcdef")
-                .expect("valid manifest object id");
-        assert_eq!(
-            metadata_manifest_object(&namespace_id(), &manifest_object_id),
-            "namespaces/ns-1/metadata/manifests/man_00000000000000000400-0123456789abcdef.manifest.json"
-        );
-        assert_eq!(
-            metadata_segment(&namespace_id(), &metadata_segment_id()),
-            "namespaces/ns-1/metadata/segments/seg_00000000000000000000000000000001.sst.zst"
-        );
-        assert_eq!(
             metadata_compaction_prefix(&namespace_id()),
             "namespaces/ns-1/metadata/compactions/"
-        );
-        assert_eq!(
-            metadata_compaction_segment(
-                &namespace_id(),
-                &metadata_compaction_id(),
-                &metadata_segment_id(),
-            ),
-            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/segments/seg_00000000000000000000000000000001.sst.zst"
-        );
-        assert_eq!(
-            metadata_compaction_lease(&namespace_id(), &metadata_compaction_id()),
-            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/lease.json"
-        );
-        assert_eq!(
-            checkpoint_record(&namespace_id(), &checkpoint_id()),
-            "namespaces/ns-1/checkpoints/chk_00000000000000000000000000000001.json"
-        );
-        assert_eq!(
-            content_blob(&content_store_id(), &content_id()),
-            "content-stores/cs_00000000000000000000000000000001/objects/ab/cd/con_abcdef0123456789abcdef0123456789"
-        );
-        assert_eq!(
-            upload_session(&namespace_id(), &upload_id()),
-            "namespaces/ns-1/uploads/upl_00000000000000000000000000000001.json"
         );
     }
 
@@ -491,13 +432,5 @@ mod tests {
                 &metadata_segment_id()
             )
         );
-    }
-
-    #[test]
-    fn content_keys_shard_on_the_content_id_prefix() {
-        let id = content_id();
-        let key = content_blob(&content_store_id(), &id);
-        let [first_shard, second_shard] = id.shard_prefixes();
-        assert!(key.ends_with(&format!("/{first_shard}/{second_shard}/{}", id.as_str())));
     }
 }

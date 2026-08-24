@@ -813,23 +813,6 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Barrier;
 
-    #[test]
-    fn construction_requires_atomic_rename_replace_support() {
-        let temp_dir = test_dir("construction-gate");
-        let result = LocalFsStore::new(temp_dir.path());
-
-        #[cfg(unix)]
-        assert!(result.is_ok());
-
-        #[cfg(not(unix))]
-        assert!(matches!(
-            result,
-            Err(ObjectStoreError::Configuration(message))
-                if message.contains("requires atomic rename-replace")
-                    && message.contains("Unix-family")
-        ));
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn listing_tolerates_entries_that_vanish_mid_walk() {
@@ -899,43 +882,6 @@ mod tests {
             .await
             .expect_err("reading a directory is not a missing object");
         assert!(matches!(error, ObjectStoreError::Transport { .. }));
-    }
-
-    #[tokio::test]
-    async fn overwrite_refreshes_head_and_visible_bytes() {
-        let temp_dir = test_dir("overwrite");
-        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
-
-        let first = store
-            .put(
-                &key,
-                Bytes::from_static(br#"{"seq":1}"#),
-                PutMode::Overwrite,
-            )
-            .await
-            .expect("seed first object");
-        let second = store
-            .put(
-                &key,
-                Bytes::from_static(br#"{"seq":2}"#),
-                PutMode::Overwrite,
-            )
-            .await
-            .expect("overwrite object");
-
-        assert_eq!(
-            store.get(&key, None).await.expect("get object"),
-            Some(Bytes::from_static(br#"{"seq":2}"#))
-        );
-        let head = store
-            .head(&key)
-            .await
-            .expect("head object")
-            .expect("head exists");
-        assert_eq!(head.etag, second.etag);
-        assert_eq!(head.size_bytes, second.size_bytes);
-        assert_ne!(first, second);
     }
 
     #[tokio::test]

@@ -173,26 +173,22 @@ mod tests {
 
     #[test]
     fn http_endpoint_is_allowed_for_emulator() {
-        AzureAbsStore::new(AzureAbsStoreConfig {
-            account_name: "devstoreaccount1".to_owned(),
-            container_name: "container".to_owned(),
-            access_key: AZURITE_ACCOUNT_KEY.into(),
-            endpoint_url: Some("http://127.0.0.1:10000/devstoreaccount1".to_owned()),
-            key_prefix: None,
-        })
-        .expect("construct azure store with HTTP endpoint");
-    }
-
-    #[test]
-    fn http_endpoint_scheme_is_case_insensitive_for_emulator() {
-        AzureAbsStore::new(AzureAbsStoreConfig {
-            account_name: "devstoreaccount1".to_owned(),
-            container_name: "container".to_owned(),
-            access_key: AZURITE_ACCOUNT_KEY.into(),
-            endpoint_url: Some("HTTP://127.0.0.1:10000/devstoreaccount1".to_owned()),
-            key_prefix: None,
-        })
-        .expect("construct azure store with uppercase HTTP endpoint");
+        for endpoint_url in [
+            "http://127.0.0.1:10000/devstoreaccount1",
+            "HTTP://127.0.0.1:10000/devstoreaccount1",
+        ] {
+            let store = AzureAbsStore::new(AzureAbsStoreConfig {
+                account_name: "devstoreaccount1".to_owned(),
+                container_name: "container".to_owned(),
+                access_key: AZURITE_ACCOUNT_KEY.into(),
+                endpoint_url: Some(endpoint_url.to_owned()),
+                key_prefix: None,
+            });
+            assert!(
+                store.is_ok(),
+                "an emulator endpoint spelled {endpoint_url} should build a store"
+            );
+        }
     }
 
     #[tokio::test]

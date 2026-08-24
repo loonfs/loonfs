@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_key_prefix_trims_redundant_separators_by_segment_join() {
+    fn a_plain_key_prefix_survives_normalization_and_a_blank_one_becomes_none() {
         assert!(matches!(
             normalize_key_prefix(Some("tenant-a/reports")),
             Ok(Some(prefix)) if prefix == "tenant-a/reports"

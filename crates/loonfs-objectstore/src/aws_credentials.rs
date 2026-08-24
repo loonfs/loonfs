@@ -221,90 +221,14 @@ impl CredentialProvider for ObjectStoreAwsCredentialProvider {
 #[cfg(test)]
 mod tests {
     use super::aws_credentials_source;
+    use crate::test_support::{aws_environment_lock, isolated_aws_environment};
     use crate::{AwsS3Credentials, ObjectStoreError};
     use loonfs_api::SecretString;
-    use std::ffi::OsString;
     use std::fs;
-
-    static ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    struct EnvGuard {
-        name: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(name);
-            std::env::set_var(name, value);
-            Self { name, previous }
-        }
-
-        fn unset(name: &'static str) -> Self {
-            let previous = std::env::var_os(name);
-            std::env::remove_var(name);
-            Self { name, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
-
-    fn isolated_aws_environment(
-        tempdir: &tempfile::TempDir,
-        environment_credentials: Option<(&str, &str, Option<&str>)>,
-    ) -> Vec<EnvGuard> {
-        let credentials_file = tempdir.path().join("credentials");
-        let config_file = tempdir.path().join("config");
-        fs::write(&credentials_file, "").expect("write empty credentials file");
-        fs::write(&config_file, "").expect("write empty config file");
-
-        let mut environment = match environment_credentials {
-            Some((access_key_id, secret_access_key, session_token)) => vec![
-                EnvGuard::set("AWS_ACCESS_KEY_ID", access_key_id),
-                EnvGuard::set("AWS_SECRET_ACCESS_KEY", secret_access_key),
-                match session_token {
-                    Some(session_token) => EnvGuard::set("AWS_SESSION_TOKEN", session_token),
-                    None => EnvGuard::unset("AWS_SESSION_TOKEN"),
-                },
-            ],
-            None => vec![
-                EnvGuard::unset("AWS_ACCESS_KEY_ID"),
-                EnvGuard::unset("AWS_SECRET_ACCESS_KEY"),
-                EnvGuard::unset("AWS_SESSION_TOKEN"),
-            ],
-        };
-        environment.extend([
-            EnvGuard::set("AWS_SHARED_CREDENTIALS_FILE", credentials_file),
-            EnvGuard::set("AWS_CONFIG_FILE", config_file),
-            EnvGuard::set("AWS_PROFILE", "loonfs-test"),
-            EnvGuard::set("AWS_REGION", "us-east-1"),
-            EnvGuard::set("AWS_EC2_METADATA_DISABLED", "true"),
-            EnvGuard::unset("AWS_WEB_IDENTITY_TOKEN_FILE"),
-            EnvGuard::unset("AWS_ROLE_ARN"),
-            EnvGuard::unset("AWS_ROLE_SESSION_NAME"),
-            EnvGuard::unset("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"),
-            EnvGuard::unset("AWS_CONTAINER_CREDENTIALS_FULL_URI"),
-            EnvGuard::unset("AWS_CONTAINER_AUTHORIZATION_TOKEN"),
-            EnvGuard::unset("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"),
-        ]);
-        if std::env::var_os("SSL_CERT_FILE").is_none()
-            && std::path::Path::new("/etc/ssl/cert.pem").is_file()
-        {
-            environment.push(EnvGuard::set("SSL_CERT_FILE", "/etc/ssl/cert.pem"));
-        }
-        environment
-    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn environment_pair_resolves_through_the_ambient_source() {
-        let _lock = ENVIRONMENT.lock().await;
+        let _lock = aws_environment_lock().await;
         let tempdir = tempfile::tempdir().expect("create temporary AWS config directory");
         let _environment = isolated_aws_environment(
             &tempdir,
@@ -332,7 +256,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn shared_credentials_file_and_profile_resolve_through_the_ambient_source() {
-        let _lock = ENVIRONMENT.lock().await;
+        let _lock = aws_environment_lock().await;
         let tempdir = tempfile::tempdir().expect("create temporary AWS config directory");
         let environment = isolated_aws_environment(&tempdir, None);
         fs::write(
@@ -384,7 +308,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn an_empty_chain_reports_only_the_configuration_field() {
-        let _lock = ENVIRONMENT.lock().await;
+        let _lock = aws_environment_lock().await;
         let tempdir = tempfile::tempdir().expect("create temporary AWS config directory");
         let _environment = isolated_aws_environment(&tempdir, None);
         let source = aws_credentials_source(&AwsS3Credentials::Ambient {}, "us-east-1")

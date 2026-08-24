@@ -60,3 +60,87 @@ pub(crate) fn gcs_fixture_service_account_key_file(
         .expect("the fixture service account should be writable");
     (dir, path)
 }
+
+/// Serializes tests that modify AWS environment variables.
+static AWS_ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Locks AWS environment access for a test.
+pub(crate) async fn aws_environment_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    AWS_ENVIRONMENT.lock().await
+}
+
+/// Restores an environment variable when dropped.
+pub(crate) struct EnvGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    pub(crate) fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, previous }
+    }
+
+    pub(crate) fn unset(name: &'static str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::remove_var(name);
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
+/// Replaces ambient AWS credential sources for a test.
+pub(crate) fn isolated_aws_environment(
+    tempdir: &tempfile::TempDir,
+    environment_credentials: Option<(&str, &str, Option<&str>)>,
+) -> Vec<EnvGuard> {
+    let credentials_file = tempdir.path().join("credentials");
+    let config_file = tempdir.path().join("config");
+    std::fs::write(&credentials_file, "").expect("write empty credentials file");
+    std::fs::write(&config_file, "").expect("write empty config file");
+
+    let mut environment = match environment_credentials {
+        Some((access_key_id, secret_access_key, session_token)) => vec![
+            EnvGuard::set("AWS_ACCESS_KEY_ID", access_key_id),
+            EnvGuard::set("AWS_SECRET_ACCESS_KEY", secret_access_key),
+            match session_token {
+                Some(session_token) => EnvGuard::set("AWS_SESSION_TOKEN", session_token),
+                None => EnvGuard::unset("AWS_SESSION_TOKEN"),
+            },
+        ],
+        None => vec![
+            EnvGuard::unset("AWS_ACCESS_KEY_ID"),
+            EnvGuard::unset("AWS_SECRET_ACCESS_KEY"),
+            EnvGuard::unset("AWS_SESSION_TOKEN"),
+        ],
+    };
+    environment.extend([
+        EnvGuard::set("AWS_SHARED_CREDENTIALS_FILE", credentials_file),
+        EnvGuard::set("AWS_CONFIG_FILE", config_file),
+        EnvGuard::set("AWS_PROFILE", "loonfs-test"),
+        EnvGuard::set("AWS_REGION", "us-east-1"),
+        EnvGuard::set("AWS_EC2_METADATA_DISABLED", "true"),
+        EnvGuard::unset("AWS_WEB_IDENTITY_TOKEN_FILE"),
+        EnvGuard::unset("AWS_ROLE_ARN"),
+        EnvGuard::unset("AWS_ROLE_SESSION_NAME"),
+        EnvGuard::unset("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"),
+        EnvGuard::unset("AWS_CONTAINER_CREDENTIALS_FULL_URI"),
+        EnvGuard::unset("AWS_CONTAINER_AUTHORIZATION_TOKEN"),
+        EnvGuard::unset("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"),
+    ]);
+    if std::env::var_os("SSL_CERT_FILE").is_none()
+        && std::path::Path::new("/etc/ssl/cert.pem").is_file()
+    {
+        environment.push(EnvGuard::set("SSL_CERT_FILE", "/etc/ssl/cert.pem"));
+    }
+    environment
+}
