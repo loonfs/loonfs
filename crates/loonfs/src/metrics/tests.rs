@@ -165,7 +165,10 @@ fn a_snapshot_orders_entries_by_name_then_labels() {
 }
 
 #[test]
-fn the_noop_recorder_keeps_nothing() {
+fn registering_on_the_noop_recorder_does_not_panic() {
+    // The noop recorder exposes nothing to read back, so not panicking is
+    // the whole of its contract. This is the smoke test that keeps a
+    // `todo!()` out of the path a host takes when it installs no recorder.
     let recorder = NoopMetricsRecorder;
     recorder
         .register_counter("loonfs.test.calls", "Calls", &[])

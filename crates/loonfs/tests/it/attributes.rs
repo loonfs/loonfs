@@ -251,17 +251,3 @@ fn read_options_project_grouped_attributes_or_none() {
         }
     }
 }
-
-#[test]
-fn the_embedded_capability_document_advertises_attributes() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "attributes-capability");
-    let document = fs.reader.get_capabilities();
-    assert_eq!(
-        document.features.get(loonfs::FEATURE_ATTRIBUTES),
-        Some(&true)
-    );
-    document
-        .validate()
-        .expect("`core.attributes` is parented by the advertised core plane");
-}

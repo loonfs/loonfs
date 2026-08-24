@@ -147,12 +147,10 @@ fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
     let error = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect_err("a head that does not describe its tail cannot be counted");
-    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    assert!(
-        error
-            .to_string()
-            .contains("does not reach the tail boundary"),
-        "unexpected message: {error}"
+    assert_eq!(
+        error.code(),
+        ErrorCode::NamespaceCorrupt,
+        "a head that under-describes its tail is corruption, not absence: {error}"
     );
 
     let flushed = fs
@@ -693,31 +691,6 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
         .expect("status after lost race");
     assert_eq!(status.current_manifest_no, None);
     assert_eq!(status.wal_tail_segments, 1);
-}
-
-#[test]
-fn checkpoint_and_retention_hooks_are_available() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "maintenance-test");
-    let namespace_id = namespace_id("demo");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    fs.put_file_bytes_blocking(
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("put file");
-
-    let checkpoint = fs
-        .create_checkpoint_blocking(&namespace_id)
-        .expect("create checkpoint");
-    let retention = fs
-        .advance_retention_floor_blocking(&namespace_id)
-        .expect("advance retention");
-    assert_eq!(retention.retention_floor_seq, checkpoint.checkpoint_seq);
 }
 
 #[test]

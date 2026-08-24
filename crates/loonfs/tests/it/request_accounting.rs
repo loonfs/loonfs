@@ -119,6 +119,8 @@ async fn publish_candidates(
 #[allow(clippy::print_stdout)]
 #[tokio::test]
 #[ignore = "diagnostic: prints warm-phase request accounting"]
+// This is a diagnostic tool, not coverage: it prints a breakdown for a human
+// to read, and its one assertion only checks that the fixture was built.
 async fn warm_phase_request_accounting() {
     let temp_dir = tempdir().expect("tempdir");
     let log = Arc::new(RecordingStore::new(

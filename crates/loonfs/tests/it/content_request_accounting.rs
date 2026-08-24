@@ -613,101 +613,69 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
-#[tokio::test]
-async fn plain_path_put_fails_unprepared_without_content_io() {
-    let harness = TestHarness::new("plain-path-unprepared").await;
-    let content_ref = harness.stage_content(b"unprepared path content").await;
-    harness.recording.reset();
-
-    let error = harness
-        .writer
-        .publisher()
-        .submit_candidate(
-            harness.namespace_id.clone(),
-            CommitCandidate::new(put_request(
-                "plain-unprepared-put",
-                "/file.txt",
-                content_ref.clone(),
-            )),
-        )
-        .await
-        .expect_err("plain path put must require prepared content");
-
-    assert_content_not_prepared(error, &content_ref);
-    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+/// The two ways a caller hands an external content ref to publication.
+#[derive(Debug, Clone, Copy)]
+enum UnpreparedEntryPoint {
+    Publisher,
+    WriterCreateCommit,
 }
 
 #[tokio::test]
-async fn writer_mutate_with_external_ref_fails_typed_without_content_io() {
-    let harness = TestHarness::new("create-unprepared").await;
-    let content_ref = harness.stage_content(b"unprepared create content").await;
-    harness.recording.reset();
+async fn an_unprepared_external_ref_fails_typed_without_content_io() {
+    // Publication never rescues an unprepared ref by reading the blob. That
+    // holds at both entry points, and an existing destination file does not
+    // change the proof coverage a replacement needs.
+    for entry_point in [
+        UnpreparedEntryPoint::Publisher,
+        UnpreparedEntryPoint::WriterCreateCommit,
+    ] {
+        for behavior in [DestinationBehavior::NoReplace, DestinationBehavior::Replace] {
+            let harness = TestHarness::new("unprepared-ref").await;
+            if behavior == DestinationBehavior::Replace {
+                harness
+                    .writer
+                    .put_file_bytes(
+                        &harness.namespace_id,
+                        "/file.txt",
+                        b"first revision",
+                        PutFileOptions::new(loonfs_test_support::test_actor()),
+                    )
+                    .await
+                    .expect("seed file");
+            }
+            let content_ref = harness.stage_content(b"unprepared content").await;
+            harness.recording.reset();
 
-    // The writer surface wraps the same in-memory proof coverage the
-    // publisher applies; publication never rescues an unprepared ref with
-    // content I/O, and the caller still receives a typed core error.
-    let error = harness
-        .writer
-        .create_commit(
-            &harness.namespace_id,
-            put_request("mutate-create", "/file.txt", content_ref.clone()),
-        )
-        .await
-        .expect_err("unprepared create must fail");
-
-    assert!(
-        matches!(error, RuntimeError::Core(_)),
-        "expected typed core error, got {error:?}"
-    );
-    let RuntimeError::Core(error) = error else {
-        return;
-    };
-    assert_content_not_prepared(error, &content_ref);
-    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
-}
-
-#[tokio::test]
-async fn replacing_put_fails_unprepared_without_content_io() {
-    let harness = TestHarness::new("replace-unprepared").await;
-    harness
-        .writer
-        .put_file_bytes(
-            &harness.namespace_id,
-            "/file.txt",
-            b"first revision",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("seed file");
-    let content_ref = harness
-        .stage_content(b"unprepared replacement content")
-        .await;
-    harness.recording.reset();
-
-    // The existing file does not change proof coverage: a replacement's
-    // external ref must already be prepared before publication.
-    let error = harness
-        .writer
-        .publisher()
-        .submit_candidate(
-            harness.namespace_id.clone(),
-            CommitCandidate::new(CommitRequest::single(
-                CommitId::parse("unprepared-replace").expect("valid commit id"),
+            let request = CommitRequest::single(
+                CommitId::parse("unprepared-put").expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::PutFile {
                     path: parse_mutation_path("/file.txt").expect("valid mutation path"),
                     content_ref: content_ref.clone(),
-                    behavior: DestinationBehavior::Replace,
+                    behavior,
                     expected_revision_no: None,
                 },
-            )),
-        )
-        .await
-        .expect_err("unprepared replacement must fail");
+            );
+            // Both entry points answer with the crate's typed error.
+            let error: RuntimeError = match entry_point {
+                UnpreparedEntryPoint::Publisher => harness
+                    .writer
+                    .publisher()
+                    .submit_candidate(harness.namespace_id.clone(), CommitCandidate::new(request))
+                    .await
+                    .expect_err("an unprepared ref must not publish"),
+                UnpreparedEntryPoint::WriterCreateCommit => harness
+                    .writer
+                    .create_commit(&harness.namespace_id, request)
+                    .await
+                    .expect_err("an unprepared ref must not publish"),
+            };
 
-    assert_content_not_prepared(error, &content_ref);
-    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+            assert_content_not_prepared(error, &content_ref);
+            assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

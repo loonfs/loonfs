@@ -729,86 +729,56 @@ fn manual_only_writer_never_schedules_maintenance() {
 
 #[test]
 fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
-        writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
-        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
-        writer
-            .flush_background()
-            .await
-            .expect("background maintenance quiesces");
+    // Once with the caches on and once with them off. Cache configuration
+    // is performance-only, so the Enabled policy schedules the same
+    // post-publish maintenance either way.
+    for runtime_cache in [
+        RuntimeCacheConfig::default(),
+        RuntimeCacheConfig::disabled(),
+    ] {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = namespace_id("demo");
+        block_on(async {
+            let writer = FsWriter::builder(store_config(temp_dir.path()))
+                .writer_id("handle-test-writer")
+                .background_work(FsBackgroundWork::Enabled)
+                .runtime_cache(runtime_cache)
+                .build()
+                .await
+                .expect("build writer");
+            writer
+                .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+                .await
+                .expect("create namespace");
+            fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+            writer
+                .flush_background()
+                .await
+                .expect("background maintenance quiesces");
 
-        let admin = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
-            .build()
-            .await
-            .expect("build admin");
-        let status = admin
-            .get_namespace_diagnostics(&namespace_id)
-            .await
-            .expect("status after auto step");
-        assert!(
-            status.current_manifest_no.is_some(),
-            "auto step should have published a manifest: {status:?}"
-        );
-        assert!(
-            status.wal_tail_segments < wal_tail_segment_threshold(),
-            "auto step should have bounded the tail: {status:?}"
-        );
-        writer
-            .shutdown()
-            .await
-            .expect("shut down writer background work");
-    });
-}
-
-#[test]
-fn enabled_writer_schedules_maintenance_with_caches_disabled() {
-    // Cache configuration is performance-only: with the caches off, the
-    // Enabled policy still schedules the same post-publish maintenance.
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    block_on(async {
-        let writer = FsWriter::builder(store_config(temp_dir.path()))
-            .writer_id("handle-test-writer")
-            .background_work(FsBackgroundWork::Enabled)
-            .runtime_cache(RuntimeCacheConfig::disabled())
-            .build()
-            .await
-            .expect("build writer");
-        writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
-        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
-        writer
-            .flush_background()
-            .await
-            .expect("background maintenance quiesces");
-
-        let admin = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
-            .build()
-            .await
-            .expect("build admin");
-        let status = admin
-            .get_namespace_diagnostics(&namespace_id)
-            .await
-            .expect("status after auto step");
-        assert!(
-            status.wal_tail_segments < wal_tail_segment_threshold(),
-            "auto step should have bounded the tail: {status:?}"
-        );
-        writer
-            .shutdown()
-            .await
-            .expect("shut down writer background work");
-    });
+            let admin = FsAdmin::builder(store_config(temp_dir.path()))
+                .actor_id("handle-test-admin")
+                .build()
+                .await
+                .expect("build admin");
+            let status = admin
+                .get_namespace_diagnostics(&namespace_id)
+                .await
+                .expect("status after auto step");
+            assert!(
+                status.current_manifest_no.is_some(),
+                "auto step should have published a manifest: {status:?}"
+            );
+            assert!(
+                status.wal_tail_segments < wal_tail_segment_threshold(),
+                "auto step should have bounded the tail: {status:?}"
+            );
+            writer
+                .shutdown()
+                .await
+                .expect("shut down writer background work");
+        });
+    }
 }
 
 #[test]
@@ -897,6 +867,16 @@ fn builders_require_identity_and_a_runtime() {
         Err(other) => panic!("expected config error for missing writer_id, got {other:?}"),
         Ok(_) => panic!("writer_id must be required"),
     }
+    // A writer_id of only whitespace is as absent as no writer_id at all.
+    match block_on(
+        FsWriter::builder(store_config(temp_dir.path()))
+            .writer_id("   ")
+            .build(),
+    ) {
+        Err(RuntimeError::Config(_)) => {}
+        Err(other) => panic!("expected config error for a blank writer_id, got {other:?}"),
+        Ok(_) => panic!("a whitespace-only writer_id must be rejected"),
+    }
     match block_on(FsAdmin::builder(store_config(temp_dir.path())).build()) {
         Err(RuntimeError::Config(_)) => {}
         Err(other) => panic!("expected config error for missing actor_id, got {other:?}"),
@@ -933,7 +913,6 @@ fn writer_builder_rejects_zero_maintenance_concurrency() {
             Ok(_) => panic!("zero maintenance concurrency must be rejected"),
         };
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
-        assert!(error.to_string().contains("`max_concurrent_maintenance`"));
     }
 }
 

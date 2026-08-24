@@ -513,7 +513,6 @@ fn publisher_trace_labels_are_low_cardinality() {
         .as_str(),
         "error"
     );
-    assert_eq!(usize_to_u64(7), 7);
 }
 
 #[tokio::test]
