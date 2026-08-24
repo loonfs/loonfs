@@ -70,7 +70,7 @@ pub(super) fn ensure_root_matches_manifest(
 /// flush replay the WAL over this synthesized state. The object id is a
 /// sentinel that no generator produces and that nothing ever writes; it
 /// exists because the manifest payload shape requires one.
-const GENESIS_MANIFEST_OBJECT_ID: &str = "00000000000000000000-0000000000000000";
+const GENESIS_MANIFEST_OBJECT_ID: &str = "man_00000000000000000000-0000000000000000";
 
 pub(super) fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceManifestEnvelope {
     NamespaceManifestEnvelope {

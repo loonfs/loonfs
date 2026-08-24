@@ -517,7 +517,7 @@ async fn current_manifest_key<S: ObjectStore + ?Sized>(
 }
 
 fn manifest_object_id(manifest_no: ManifestNo) -> ManifestObjectId {
-    ManifestObjectId::parse(format!("{:020}-0123456789abcdef", manifest_no.0))
+    ManifestObjectId::parse(format!("man_{:020}-0123456789abcdef", manifest_no.0))
         .expect("valid manifest object id")
 }
 

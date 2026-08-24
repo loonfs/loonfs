@@ -115,8 +115,9 @@ impl ObjectLayout {
     /// nothing else: `wal/head.json` and `wal/floor.json` live outside it,
     /// so a GC listing yields only segment keys.
     ///
-    /// Segment file names start with the segment's 20-digit `start_seq` as
-    /// an operator/GC convenience; no protocol depends on listing order.
+    /// Every segment file name starts with `wal_` and the segment's 20-digit
+    /// `start_seq`, so a listing comes back in history order as an
+    /// operator/GC convenience; no protocol depends on listing order.
     pub(crate) fn wal_segment_prefix(&self, namespace_id: &NamespaceId) -> String {
         format!("namespaces/{namespace_id}/wal/segments/")
     }
@@ -368,20 +369,21 @@ mod tests {
         assert_eq!(
             layout.wal_segment(
                 &namespace_id(),
-                &wal_segment_id("00000000000000000001-0123456789abcdef")
+                &wal_segment_id("wal_00000000000000000001-0123456789abcdef")
             ),
-            "namespaces/ns-1/wal/segments/00000000000000000001-0123456789abcdef.wal.zst"
+            "namespaces/ns-1/wal/segments/wal_00000000000000000001-0123456789abcdef.wal.zst"
         );
         assert_eq!(
             layout.metadata_root(&namespace_id()),
             "namespaces/ns-1/metadata/root.json"
         );
-        let manifest_object_id = ManifestObjectId::parse("00000000000000000400-0123456789abcdef")
-            .expect("valid manifest object id");
+        let manifest_object_id =
+            ManifestObjectId::parse("man_00000000000000000400-0123456789abcdef")
+                .expect("valid manifest object id");
         assert_eq!(
             layout
                 .metadata_manifest_object(&namespace_id(), &manifest_object_id),
-            "namespaces/ns-1/metadata/manifests/00000000000000000400-0123456789abcdef.manifest.json"
+            "namespaces/ns-1/metadata/manifests/man_00000000000000000400-0123456789abcdef.manifest.json"
         );
         assert_eq!(
             layout.metadata_segment(&namespace_id(), &metadata_segment_id()),
@@ -431,7 +433,7 @@ mod tests {
         assert!(layout
             .wal_segment(
                 &namespace_id(),
-                &wal_segment_id("00000000000000000002-0123456789abcdef")
+                &wal_segment_id("wal_00000000000000000002-0123456789abcdef")
             )
             .as_str()
             .starts_with(&prefix));
@@ -529,7 +531,7 @@ mod tests {
             (
                 layout.wal_segment(
                     &namespace_id(),
-                    &wal_segment_id("00000000000000000001-0123456789abcdef"),
+                    &wal_segment_id("wal_00000000000000000001-0123456789abcdef"),
                 ),
                 DurableObjectFamily::WalSegment,
             ),
@@ -540,7 +542,7 @@ mod tests {
             (
                 layout.metadata_manifest_object(
                     &namespace_id(),
-                    &ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
+                    &ManifestObjectId::parse("man_00000000000000000001-0123456789abcdef")
                         .expect("valid manifest object id"),
                 ),
                 DurableObjectFamily::MetadataManifest,
@@ -584,7 +586,7 @@ mod tests {
             "namespaces/ns-1/descriptor.json",
             "namespaces/ns-1/control/head.json",
             "namespaces/ns-1/control/lease.json",
-            "namespaces/ns-1/wal/00000000000000000001-0123456789abcdef.wal.zst",
+            "namespaces/ns-1/wal/wal_00000000000000000001-0123456789abcdef.wal.zst",
             "namespaces/ns-1/manifest/00000000000000000400.manifest.json",
             "namespaces/ns-1/segments/metadata/seg_00000000000000000000000000000001.sst.zst",
             "namespaces/ns-1/gc/manifest.boundary.json",
@@ -602,14 +604,14 @@ mod tests {
     #[test]
     fn parse_wal_segment_requires_current_wal_suffix() {
         let parsed = parse_object_key(
-            "namespaces/ns-1/wal/segments/00000000000000000001-0123456789abcdef.wal.zst",
+            "namespaces/ns-1/wal/segments/wal_00000000000000000001-0123456789abcdef.wal.zst",
         )
         .expect("current WAL key parses");
         assert_eq!(parsed.family(), DurableObjectFamily::WalSegment);
         assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
 
         assert!(parse_object_key(
-            "namespaces/ns-1/wal/segments/00000000000000000001-0123456789abcdef.sst"
+            "namespaces/ns-1/wal/segments/wal_00000000000000000001-0123456789abcdef.sst"
         )
         .is_none());
         assert!(parse_object_key("namespaces/ns-1/wal/segments/random.tmp").is_none());

@@ -363,7 +363,8 @@ async fn validated_wal_chain_rejects_corrupt_visible_segments() {
     .await;
     assert_wal_chain_corruption_rejected(|envelope, _pointer| {
         envelope.payload.segment_id =
-            WalSegmentId::parse("00000000000000000001-bbbbbbbbbbbbbbbb").expect("valid segment id");
+            WalSegmentId::parse("wal_00000000000000000001-bbbbbbbbbbbbbbbb")
+                .expect("valid segment id");
         rewrap_envelope(envelope);
     })
     .await;
@@ -399,7 +400,8 @@ async fn validated_wal_chain_rejects_corrupt_visible_segments() {
         envelope.payload.records[0].seq = ChangeSeq(2);
         // Keep the id consistent so this test reaches the chain validation.
         envelope.payload.segment_id =
-            WalSegmentId::parse("00000000000000000002-cccccccccccccccc").expect("valid segment id");
+            WalSegmentId::parse("wal_00000000000000000002-cccccccccccccccc")
+                .expect("valid segment id");
         rewrap_envelope(envelope);
         *pointer = envelope.pointer();
     })
@@ -544,7 +546,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
     let mut lying_tip = second.envelope.pointer();
     lying_tip.end_seq = ChangeSeq(999);
     let missing_segment_id =
-        WalSegmentId::parse("00000000000000000001-00000000deadbeef").expect("valid segment id");
+        WalSegmentId::parse("wal_00000000000000000001-00000000deadbeef").expect("valid segment id");
     let garbage = [
         WalSegmentPointer {
             segment_id: missing_segment_id,

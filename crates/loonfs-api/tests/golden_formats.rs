@@ -126,7 +126,7 @@ fn checkpoint_id(value: &str) -> CheckpointId {
 }
 
 fn manifest_object_id(manifest_no: u64, suffix: &str) -> ManifestObjectId {
-    ManifestObjectId::parse(format!("{manifest_no:020}-{suffix}"))
+    ManifestObjectId::parse(format!("man_{manifest_no:020}-{suffix}"))
         .expect("valid manifest object id")
 }
 
@@ -234,7 +234,7 @@ fn sample_attributes() -> Attributes {
 
 fn sample_wal_pointer() -> WalSegmentPointer {
     WalSegmentPointer {
-        segment_id: WalSegmentId::parse("00000000000000000001-fedcba9876543210")
+        segment_id: WalSegmentId::parse("wal_00000000000000000001-fedcba9876543210")
             .expect("valid segment id"),
         start_seq: ChangeSeq(1),
         end_seq: ChangeSeq(1),
@@ -309,7 +309,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
     ];
     WalSegmentEnvelope::from_payload(WalSegmentPayload {
         namespace_id: namespace_id(),
-        segment_id: WalSegmentId::parse("00000000000000000002-0123456789abcdef")
+        segment_id: WalSegmentId::parse("wal_00000000000000000002-0123456789abcdef")
             .expect("valid segment id"),
         writer_epoch: WriterEpoch(3),
         prev_visible_segment: Some(sample_wal_pointer()),
@@ -455,10 +455,10 @@ fn wal_segment_golden_decodes_to_sample() {
     assert_eq!(decoded, sample_wal_envelope());
 }
 
-/// The segment id's 20-digit prefix is the segment's start sequence, and
-/// reclamation reads it back out of the object key. A stored segment whose
-/// id disagrees with the sequence beside it does not decode, and neither
-/// does one carrying a chain link that disagrees with itself.
+/// The 20 digits after `wal_` in a segment id are the segment's start
+/// sequence, and reclamation reads them back out of the object key. A stored
+/// segment whose id disagrees with the sequence beside it does not decode,
+/// and neither does one carrying a chain link that disagrees with itself.
 #[test]
 fn wal_segments_reject_an_id_that_disagrees_with_its_start_seq() {
     let agreeing = encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("encode wal");
@@ -467,10 +467,10 @@ fn wal_segments_reject_an_id_that_disagrees_with_its_start_seq() {
 
     let mut payload = sample_wal_envelope().payload;
     payload.segment_id =
-        WalSegmentId::parse("00000000000000000009-0123456789abcdef").expect("valid segment id");
+        WalSegmentId::parse("wal_00000000000000000009-0123456789abcdef").expect("valid segment id");
     let message = assert_wal_segment_is_corrupt(payload);
     assert!(
-        message.contains("`00000000000000000009-0123456789abcdef`")
+        message.contains("`wal_00000000000000000009-0123456789abcdef`")
             && message.contains("start seq `2`"),
         "the rejection should name both values: {message}"
     );
@@ -478,11 +478,11 @@ fn wal_segments_reject_an_id_that_disagrees_with_its_start_seq() {
     let mut payload = sample_wal_envelope().payload;
     let mut link = sample_wal_pointer();
     link.segment_id =
-        WalSegmentId::parse("00000000000000000004-fedcba9876543210").expect("valid segment id");
+        WalSegmentId::parse("wal_00000000000000000004-fedcba9876543210").expect("valid segment id");
     payload.prev_visible_segment = Some(link);
     let message = assert_wal_segment_is_corrupt(payload);
     assert!(
-        message.contains("`00000000000000000004-fedcba9876543210`")
+        message.contains("`wal_00000000000000000004-fedcba9876543210`")
             && message.contains("start seq `1`"),
         "the rejection should name both values: {message}"
     );

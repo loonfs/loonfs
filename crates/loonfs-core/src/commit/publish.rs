@@ -265,7 +265,7 @@ mod tests {
             })
             .collect();
         // Encode the start sequence in the segment id.
-        let segment_id = WalSegmentId::parse(format!("{:020}-aaaaaaaaaaaaaaaa", start_seq.0))
+        let segment_id = WalSegmentId::parse(format!("wal_{:020}-aaaaaaaaaaaaaaaa", start_seq.0))
             .expect("valid segment id");
         let payload = WalSegmentPayload {
             namespace_id: namespace_id.clone(),
@@ -547,7 +547,7 @@ mod tests {
             .map(|index| {
                 let offset = u64::try_from(index).expect("test index");
                 let seq = ChangeSeq(newest_seq - offset);
-                let segment_id = WalSegmentId::parse(format!("{:020}-{offset:016x}", seq.0))
+                let segment_id = WalSegmentId::parse(format!("wal_{:020}-{offset:016x}", seq.0))
                     .expect("valid segment id");
                 WalSegmentPointer {
                     segment_id,

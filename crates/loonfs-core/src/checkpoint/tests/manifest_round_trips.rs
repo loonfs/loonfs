@@ -184,7 +184,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let manifest_key = format!("{}{:020}-", metadata_manifest_prefix(&namespace_id), 2);
+    let manifest_key = format!("{}man_{:020}-", metadata_manifest_prefix(&namespace_id), 2);
     let store = ConflictOnManifestCreateStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         manifest_key,
@@ -280,7 +280,7 @@ async fn maintenance_and_status_do_not_make_orphan_wal_visible() {
 
     let orphan_key = wal_segment(
         &namespace_id,
-        &loonfs_api::WalSegmentId::parse("00000000000000000002-deadbeefdeadbeef")
+        &loonfs_api::WalSegmentId::parse("wal_00000000000000000002-deadbeefdeadbeef")
             .expect("valid WAL segment id"),
     );
     store

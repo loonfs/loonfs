@@ -299,7 +299,7 @@ mod tests {
                 .replace("{suffix}", "0123456789abcdef")
                 .replace(
                     "{manifest_object_id}",
-                    "00000000000000000400-0123456789abcdef",
+                    "man_00000000000000000400-0123456789abcdef",
                 )
                 .replace("{checkpoint_id}", "chk_00000000000000000000000000000001")
                 .replace("{job_id}", "cmp_00000000000000000000000000000001")
@@ -316,7 +316,7 @@ mod tests {
                 "WAL segments",
                 wal_segment(
                     &namespace_id(),
-                    &WalSegmentId::parse(format!("{:020}-{}", 42, "0123456789abcdef"))
+                    &WalSegmentId::parse(format!("wal_{:020}-{}", 42, "0123456789abcdef"))
                         .expect("valid WAL segment id"),
                 ),
             ),
@@ -324,7 +324,7 @@ mod tests {
                 "Namespace manifests",
                 metadata_manifest_object(
                     &namespace_id(),
-                    &ManifestObjectId::parse("00000000000000000400-0123456789abcdef")
+                    &ManifestObjectId::parse("man_00000000000000000400-0123456789abcdef")
                         .expect("valid manifest object id"),
                 ),
             ),
@@ -382,9 +382,9 @@ mod tests {
         assert_eq!(
             wal_segment(
                 &namespace_id(),
-                &wal_segment_id("00000000000000000001-0123456789abcdef")
+                &wal_segment_id("wal_00000000000000000001-0123456789abcdef")
             ),
-            "namespaces/ns-1/wal/segments/00000000000000000001-0123456789abcdef.wal.zst"
+            "namespaces/ns-1/wal/segments/wal_00000000000000000001-0123456789abcdef.wal.zst"
         );
         assert_eq!(
             wal_segment_prefix(&namespace_id()),
@@ -392,7 +392,7 @@ mod tests {
         );
         assert!(wal_segment(
             &namespace_id(),
-            &wal_segment_id("00000000000000000042-0123456789abcdef")
+            &wal_segment_id("wal_00000000000000000042-0123456789abcdef")
         )
         .starts_with(&wal_segment_prefix(&namespace_id())));
         assert!(!wal_head(&namespace_id()).starts_with(&wal_segment_prefix(&namespace_id())));
@@ -400,9 +400,9 @@ mod tests {
         assert_eq!(
             wal_segment_id_from_key(&wal_segment(
                 &namespace_id(),
-                &wal_segment_id("00000000000000000042-0123456789abcdef")
+                &wal_segment_id("wal_00000000000000000042-0123456789abcdef")
             )),
-            Some("00000000000000000042-0123456789abcdef")
+            Some("wal_00000000000000000042-0123456789abcdef")
         );
         assert_eq!(
             wal_segment_id_from_key("namespaces/ns-1/wal/segments/random.tmp"),
@@ -412,11 +412,12 @@ mod tests {
             metadata_root(&namespace_id()),
             "namespaces/ns-1/metadata/root.json"
         );
-        let manifest_object_id = ManifestObjectId::parse("00000000000000000400-0123456789abcdef")
-            .expect("valid manifest object id");
+        let manifest_object_id =
+            ManifestObjectId::parse("man_00000000000000000400-0123456789abcdef")
+                .expect("valid manifest object id");
         assert_eq!(
             metadata_manifest_object(&namespace_id(), &manifest_object_id),
-            "namespaces/ns-1/metadata/manifests/00000000000000000400-0123456789abcdef.manifest.json"
+            "namespaces/ns-1/metadata/manifests/man_00000000000000000400-0123456789abcdef.manifest.json"
         );
         assert_eq!(
             metadata_segment(&namespace_id(), &metadata_segment_id()),

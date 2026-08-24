@@ -284,7 +284,7 @@ mod tests {
                 owner_namespace_id: namespace_id,
                 manifest_no: ManifestNo(1),
                 manifest_object_id: ManifestObjectId::parse(
-                    "00000000000000000001-0123456789abcdef",
+                    "man_00000000000000000001-0123456789abcdef",
                 )
                 .expect("manifest object id"),
                 manifest_head_seq: ChangeSeq(1),

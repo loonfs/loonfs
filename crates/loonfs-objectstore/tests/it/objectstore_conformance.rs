@@ -38,18 +38,18 @@ fn key_builders_cover_locked_object_families() {
     assert_eq!(
         wal_segment(
             &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &loonfs_api::WalSegmentId::parse("00000000000000000001-644e4d336fd4ee33")
+            &loonfs_api::WalSegmentId::parse("wal_00000000000000000001-644e4d336fd4ee33")
                 .expect("valid WAL segment id")
         ),
-        "namespaces/ns-1/wal/segments/00000000000000000001-644e4d336fd4ee33.wal.zst"
+        "namespaces/ns-1/wal/segments/wal_00000000000000000001-644e4d336fd4ee33.wal.zst"
     );
     assert_eq!(
         metadata_manifest_object(
             &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &ManifestObjectId::parse("00000000000000000420-0123456789abcdef")
+            &ManifestObjectId::parse("man_00000000000000000420-0123456789abcdef")
                 .expect("valid manifest object id"),
         ),
-        "namespaces/ns-1/metadata/manifests/00000000000000000420-0123456789abcdef.manifest.json"
+        "namespaces/ns-1/metadata/manifests/man_00000000000000000420-0123456789abcdef.manifest.json"
     );
     assert_eq!(
         metadata_segment(
