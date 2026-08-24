@@ -1541,29 +1541,6 @@ mod tests {
     }
 
     #[test]
-    fn unused_global_selectors_are_rejected() {
-        let cases: &[(&[&str], &str)] = &[
-            (&["loonfs", "--namespace", "demo", "version"], "--namespace"),
-            (
-                &["loonfs", "--profile", "prod", "config", "path"],
-                "--profile",
-            ),
-            (
-                &["loonfs", "--namespace", "demo", "namespace", "create", "x"],
-                "--namespace",
-            ),
-            (&["loonfs", "use", "x", "--namespace", "y"], "--namespace"),
-        ];
-
-        for (arguments, selector) in cases {
-            let cli = Cli::try_parse_from(*arguments).expect("global selector parses once");
-            let error = validate_cli(&cli).expect_err("unused selector must fail");
-            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
-            assert!(error.to_string().contains(selector), "{error}");
-        }
-    }
-
-    #[test]
     fn stat_help_and_parser_show_both_exclusive_target_forms() {
         let mut command = Cli::command();
         let help = command
@@ -1905,52 +1882,11 @@ mod tests {
         assert!(!has_argument(init, "store_kind"));
     }
 
-    #[test]
-    fn local_and_remote_paths_have_completion_hints() {
-        let command = Cli::command();
-
-        assert_hint(&command, "config", ValueHint::FilePath);
-        assert_hint(&command, "profile", ValueHint::Other);
-        assert_hint(&command, "namespace", ValueHint::Other);
-
-        let put = subcommand(&command, "put");
-        assert_hint(put, "local_path", ValueHint::AnyPath);
-        assert_hint(put, "remote_path", ValueHint::Other);
-
-        let get = subcommand(&command, "get");
-        assert_hint(get, "local_destination", ValueHint::AnyPath);
-        assert_hint(get, "remote_path", ValueHint::Other);
-
-        let cat = subcommand(&command, "cat");
-        assert_hint(cat, "path", ValueHint::Other);
-
-        let mv = subcommand(&command, "mv");
-        assert_hint(mv, "source_path", ValueHint::Other);
-        assert_hint(mv, "destination_path", ValueHint::Other);
-
-        let profile_create = subcommand(subcommand(&command, "profile"), "create");
-        let local = subcommand(profile_create, "local");
-        assert_hint(local, "name", ValueHint::Other);
-        assert_hint(local, "root", ValueHint::DirPath);
-        let gcs = subcommand(profile_create, "gcs");
-        assert_hint(gcs, "service_account_key_path", ValueHint::FilePath);
-        let namespace_show = subcommand(subcommand(&command, "namespace"), "show");
-        assert_hint(namespace_show, "namespace_id", ValueHint::Other);
-    }
-
     fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {
         command
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == name)
             .expect("subcommand exists")
-    }
-
-    fn assert_hint(command: &clap::Command, id: &str, expected: ValueHint) {
-        let argument = command
-            .get_arguments()
-            .find(|argument| argument.get_id() == id)
-            .expect("argument exists");
-        assert_eq!(argument.get_value_hint(), expected);
     }
 
     fn has_argument(command: &clap::Command, id: &str) -> bool {

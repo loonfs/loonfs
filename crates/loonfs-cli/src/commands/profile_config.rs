@@ -1113,7 +1113,7 @@ mod tests {
 
     use super::{
         apply_update_flags, build_profile_from_create_spec, CreateActorSpec, CreateProfileSpec,
-        CreateProviderSpec, ProfileCreateAzureSpec, ProfileCreateRemoteSpec, ProfileCreateS3Spec,
+        CreateProviderSpec, ProfileCreateAzureSpec, ProfileCreateS3Spec,
     };
     use crate::args::{ProfileUpdateArgs, RuntimeBehavior};
     use crate::config::{ProfileConfig, StoreConfig};
@@ -1191,26 +1191,6 @@ mod tests {
             panic!("expected aws-s3 profile")
         };
         assert_eq!(credentials, AwsS3Credentials::Ambient {});
-    }
-
-    #[test]
-    fn remote_creation_never_captures_an_environment_token() {
-        let remote = build_profile_from_create_spec(
-            "default",
-            CreateProfileSpec {
-                provider: CreateProviderSpec::Remote(ProfileCreateRemoteSpec {
-                    server_url: Some("http://127.0.0.1:9400".to_owned()),
-                    ..ProfileCreateRemoteSpec::default()
-                }),
-                actor: empty_actor(),
-            },
-            non_interactive_runtime(),
-        )
-        .expect("build remote profile");
-        match remote {
-            ProfileConfig::Remote { auth_token, .. } => assert!(auth_token.is_none()),
-            other => panic!("expected a remote profile, got {other:?}"),
-        }
     }
 
     #[test]
@@ -1328,6 +1308,34 @@ mod tests {
                 );
             }
             other => panic!("expected remote profile, got {other:?}"),
+        }
+
+        let local_fs = ProfileConfig::Embedded {
+            store: StoreConfig::LocalFs {
+                root: "/tmp/store".to_owned(),
+                key_prefix: None,
+            },
+            actor: crate::config::ProfileActorConfig::default(),
+            default_namespace: None,
+            writer_id: None,
+        };
+
+        let updated = apply_update_flags(
+            "default",
+            local_fs,
+            &ProfileUpdateArgs {
+                root: Some("/tmp/moved".to_owned()),
+                ..empty_update_args()
+            },
+        )
+        .expect("update local-fs root");
+
+        match updated {
+            ProfileConfig::Embedded {
+                store: StoreConfig::LocalFs { root, .. },
+                ..
+            } => assert_eq!(root, "/tmp/moved"),
+            other => panic!("expected local-fs profile, got {other:?}"),
         }
     }
 

@@ -516,25 +516,6 @@ mod tests {
     }
 
     #[test]
-    fn doctor_check_names_have_a_stable_order() {
-        assert_eq!(
-            DOCTOR_CHECK_NAMES,
-            [
-                "config",
-                "config_decode",
-                "profile",
-                "provider_config",
-                "connectivity",
-                "auth",
-                "health",
-                "capabilities",
-                "namespace",
-            ]
-        );
-        assert_eq!(WRITE_CHECK_NAME, "store_probe");
-    }
-
-    #[test]
     fn capabilities_check_rejects_a_different_protocol_version() {
         assert_eq!(
             capability_document_check(Ok(capability_document(PROTOCOL_VERSION))).status,

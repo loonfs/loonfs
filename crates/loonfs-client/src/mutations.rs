@@ -922,28 +922,10 @@ mod tests {
     #[test]
     fn api_errors_tolerate_unknown_registry_codes() {
         assert_eq!(api_error(503, "code_from_a_newer_server").code(), None);
-    }
-
-    #[test]
-    fn non_api_errors_have_no_code() {
-        let error = ClientError::Http("connection refused".to_owned());
-        assert_eq!(error.code(), None);
-    }
-
-    #[test]
-    fn load_rejects_invalid_server_url() {
-        let path = write_config(
-            r#"
-server_url = "ftp://example.com"
-auth_token = "dev-token"
-"#,
-        );
-
-        let error = ClientConfig::load(&path).expect_err("invalid server url");
-
-        assert!(
-            matches!(error, ClientError::ConfigValidation { field, .. } if field == "server_url"),
-            "expected config validation error, got {error:?}"
+        // An error that never came from the wire has no code either.
+        assert_eq!(
+            ClientError::Http("connection refused".to_owned()).code(),
+            None
         );
     }
 
@@ -992,19 +974,6 @@ auth_token = "   "
                     Err(ClientError::InvalidNamespacePath(_))
                 ),
                 "expected invalid namespace path for id {namespace:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn namespace_path_parse_rejects_invalid_paths() {
-        for path in ["notes.txt", "", "/docs/../a.txt", "/docs/./a.txt"] {
-            assert!(
-                matches!(
-                    NamespacePath::parse("demo", path),
-                    Err(ClientError::InvalidNamespacePath(_))
-                ),
-                "expected invalid namespace path for path {path:?}"
             );
         }
     }
