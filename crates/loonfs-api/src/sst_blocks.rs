@@ -604,8 +604,7 @@ fn shared_prefix_len(previous: &str, current: &str) -> usize {
     len
 }
 
-/// Appends `value` to `bytes` in the LEB128 varint encoding the durable
-/// block grammar uses for its lengths and deltas.
+/// Appends `value` as an unsigned LEB128 integer.
 pub fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
     loop {
         let byte = (value & 0x7f) as u8;

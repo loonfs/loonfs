@@ -27,7 +27,7 @@ mod service;
 mod worker;
 
 pub use cache::{
-    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockCacheMetrics,
+    new_grep_block_cache, DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 pub use config::{GrepWorkerConfig, GrepWorkerConfigError};

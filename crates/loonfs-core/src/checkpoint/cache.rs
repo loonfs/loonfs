@@ -137,16 +137,12 @@ impl std::fmt::Debug for MetadataSegmentCache {
     }
 }
 
-/// The two counters the shared cache knows nothing about: a metadata scan
-/// records them from what the filter told it, not from a cache access.
 #[derive(Debug, Default)]
 struct MetadataSegmentFilterStatsInner {
     filter_skips: AtomicUsize,
     filter_false_positives: AtomicUsize,
 }
 
-/// Reports the shared cache's four events to a metadata observer that also
-/// takes the two filter events.
 struct MetadataSegmentCacheEvents(Arc<dyn MetadataSegmentCacheObserver>);
 
 impl DecodedBlockCacheObserver for MetadataSegmentCacheEvents {

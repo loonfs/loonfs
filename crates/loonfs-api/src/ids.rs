@@ -849,8 +849,7 @@ numeric_id! {
 }
 
 impl RunNo {
-    /// Returns the number the allocator hands out after this one, or the
-    /// range error when this run number is already the public maximum.
+    /// Returns the next run number, or an error at the public maximum.
     pub fn successor(self) -> Result<Self, PublicOrdinalRangeError> {
         next_public_ordinal(self.0)
             .map(Self)

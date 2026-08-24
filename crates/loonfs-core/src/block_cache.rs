@@ -1,5 +1,4 @@
-//! [`DecodedBlockCache`]: the byte-budgeted, single-flight cache of decoded
-//! immutable objects that metadata reads and derived projections share.
+//! Shared cache for decoded immutable objects.
 
 use crate::recency::Recency;
 use std::collections::HashMap;
@@ -8,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
-/// A decoded value the cache charges against its byte budget.
+/// A value whose decoded size counts against the cache budget.
 pub trait DecodedBlock: Clone {
     /// Bytes this value occupies in its decoded form.
     fn decoded_bytes(&self) -> usize;
@@ -22,7 +21,7 @@ pub trait DecodedBlockCacheObserver: Send + Sync + 'static {
     fn evict(&self);
 }
 
-/// Cumulative activity counters for one decoded-block cache.
+/// Cumulative cache activity.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodedBlockCacheStats {
     pub hits: usize,
@@ -31,16 +30,13 @@ pub struct DecodedBlockCacheStats {
     pub evictions: usize,
 }
 
-/// A process-shareable cache of decoded immutable objects, keyed by an
-/// identity that can never go stale, evicted in recency order once the
-/// decoded bytes it holds exceed its budget. A budget of zero disables it.
+/// A byte-bounded cache with recency eviction and one in-flight load per key.
+/// A budget of zero disables the cache.
 pub struct DecodedBlockCache<K, V> {
     max_decoded_bytes: usize,
     inner: Mutex<Inner<K, V>>,
     stats: StatsInner,
     observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-    /// One cell per in-flight fetch, keyed by the entry's cache key, so
-    /// concurrent readers share a single object-store read per entry.
     in_flight: Mutex<HashMap<K, Arc<OnceCell<V>>>>,
 }
 
@@ -66,8 +62,7 @@ struct Inner<K, V> {
 #[derive(Debug)]
 struct CacheSlot<V> {
     block: V,
-    /// Recency stamp assigned on the most recent access. Recency records with
-    /// an older stamp for this key are ignored.
+    /// The entry's current recency stamp.
     last_touch: u64,
 }
 
@@ -103,7 +98,7 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
         }
     }
 
-    /// Resolves one access through a per-key single-flight cell.
+    /// Loads a missing value once when callers request the same key concurrently.
     pub async fn get_or_load<E, F, Fut>(&self, cache_key: &K, fetch: F) -> Result<V, E>
     where
         F: FnOnce() -> Fut,
@@ -237,8 +232,6 @@ impl<K: Clone + Eq + Hash, V> Inner<K, V> {
     }
 }
 
-/// Returns `true` when `stamp` matches the key's most recent access.
-/// Replacing, evicting, or accessing an entry can leave older recency records.
 fn slot_is_live<K: Eq + Hash, V>(entries: &HashMap<K, CacheSlot<V>>, key: &K, stamp: u64) -> bool {
     entries
         .get(key)

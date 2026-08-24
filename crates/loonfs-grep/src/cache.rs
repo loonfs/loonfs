@@ -10,15 +10,9 @@ use loonfs_api::wire::sst_blocks::{
 use std::sync::Arc;
 
 /// Default decoded-byte budget for cached grep manifests and segment blocks.
-///
-/// This preserves the former 4,096-entry cache's intended capacity at the
-/// usual 64 KiB decoded data-block target while preventing unusually large
-/// decoded blocks from making the cache effectively unbounded. Zero disables
-/// the cache.
 pub const DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES: usize = 4_096 * DEFAULT_TARGET_BLOCK_BYTES;
 
-/// The runtime's decoded-block cache, holding grep's manifests and segment
-/// blocks.
+/// Grep's cache for decoded manifests and segment blocks.
 pub type GrepBlockCache = DecodedBlockCache<GrepBlockCacheKey, DecodedGrepBlock>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -29,8 +23,7 @@ pub(crate) enum GrepBlockKind {
     Data,
 }
 
-/// One cache entry's identity. Only grep mints these: the fields stay
-/// crate-private so no caller outside can name a block the cache holds.
+/// Identifies a cached grep block.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GrepBlockCacheKey {
     /// Immutable cache identity. Manifest entries use `payload_checksum`;
@@ -40,7 +33,7 @@ pub struct GrepBlockCacheKey {
     pub(crate) block_offset: u64,
 }
 
-/// One decoded, verified object the cache holds.
+/// A decoded grep block.
 #[derive(Debug, Clone)]
 pub enum DecodedGrepBlock {
     Manifest {
@@ -72,8 +65,7 @@ impl DecodedBlock for DecodedGrepBlock {
     }
 }
 
-/// Records grep block cache activity through a metrics recorder.
-pub struct GrepBlockCacheMetrics {
+struct GrepBlockCacheMetrics {
     hits: Arc<dyn CounterHandle>,
     misses: Arc<dyn CounterHandle>,
     inserts: Arc<dyn CounterHandle>,
@@ -81,8 +73,7 @@ pub struct GrepBlockCacheMetrics {
 }
 
 impl GrepBlockCacheMetrics {
-    /// Registers grep's block cache counters with `recorder`.
-    pub fn register(recorder: &dyn MetricsRecorder) -> Self {
+    fn register(recorder: &dyn MetricsRecorder) -> Self {
         let get = |result| {
             recorder.register_counter(
                 "loonfs.grep_block_cache.gets",
@@ -105,6 +96,17 @@ impl GrepBlockCacheMetrics {
             ),
         }
     }
+}
+
+/// Creates a grep block cache that reports metrics to `recorder`.
+pub fn new_grep_block_cache(
+    max_decoded_bytes: usize,
+    recorder: &dyn MetricsRecorder,
+) -> GrepBlockCache {
+    GrepBlockCache::with_observer(
+        max_decoded_bytes,
+        Some(Arc::new(GrepBlockCacheMetrics::register(recorder))),
+    )
 }
 
 impl DecodedBlockCacheObserver for GrepBlockCacheMetrics {
