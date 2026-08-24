@@ -13,6 +13,7 @@ use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::basis::{load_head_and_metadata_basis, MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::control::load_head_object;
+use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::{
     ensure_replayed_head_matches, load_validated_wal_chain, project_validated_wal_tail,
     WalChainLoadRequest,
@@ -158,9 +159,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
     let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::ControlObjectLoad)?;
     let head_etag = loaded.head.etag;
     let head = loaded.head.state;
     if head.status == (NamespaceStatus::Deleted {}) {
@@ -170,7 +169,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    ensure_publish_head_matches_acquired_writer(&head, &acquired_writer)?;
+    ensure_writer_not_fenced(&head, &acquired_writer)?;
     let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
     let loaded_basis = load_basis_metadata_segments(
         store,
@@ -212,21 +211,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         },
         projection,
     ))
-}
-
-fn ensure_publish_head_matches_acquired_writer(
-    head: &HeadState,
-    acquired_writer: &AcquiredWriter,
-) -> Result<()> {
-    if head.writer_epoch != acquired_writer.writer_epoch {
-        return Err(CoreError::WriterFenced(crate::error::WriterFence {
-            fenced_epoch: acquired_writer.writer_epoch,
-            active_epoch: head.writer_epoch,
-            active_writer: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
-            active_acquired_at_ms: head.writer.as_ref().map(|writer| writer.acquired_at_ms),
-        }));
-    }
-    Ok(())
 }
 
 async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
@@ -288,20 +272,16 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
         .head(&object_key)
         .await
         .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
-                ControlObjectLoadError::Store {
-                    object_key: object_key.clone(),
-                    message: error.public_message().into_owned(),
-                    class: StoreFailureClass::of(&error),
-                },
-            ))
+            CoreError::ControlObjectLoad(ControlObjectLoadError::Store {
+                object_key: object_key.clone(),
+                message: error.public_message().into_owned(),
+                class: StoreFailureClass::of(&error),
+            })
         })?
         .ok_or_else(|| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
-                ControlObjectLoadError::MissingObject {
-                    object_key: object_key.clone(),
-                },
-            ))
+            CoreError::ControlObjectLoad(ControlObjectLoadError::MissingObject {
+                object_key: object_key.clone(),
+            })
         })?;
     let current_head_etag = metadata.etag.ok_or_else(|| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::MissingHeadEtag {
@@ -311,11 +291,9 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
     if current_head_etag != loaded_head_etag {
         let moved_head = load_head_object(store, namespace_id)
             .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-            })?
+            .map_err(CoreError::ControlObjectLoad)?
             .state;
-        ensure_publish_head_matches_acquired_writer(&moved_head, acquired_writer)?;
+        ensure_writer_not_fenced(&moved_head, acquired_writer)?;
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::HeadChangedDuringLoad {
                 object_key,

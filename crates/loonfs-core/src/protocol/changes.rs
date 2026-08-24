@@ -20,9 +20,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
 ) -> Result<ListChangesResponse> {
     let head = load_namespace_head_control(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?
+        .map_err(CoreError::ControlObjectLoad)?
         .state;
     if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
@@ -32,9 +30,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
 
     let retention_floor_seq = resolve_retention_floor_seq(store, &head)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::ControlObjectLoad)?;
     if after_seq < retention_floor_seq {
         return Err(CoreError::RebootstrapRequired {
             after_seq,

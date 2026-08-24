@@ -529,9 +529,7 @@ async fn load_current_projection<S: ObjectStore + ?Sized>(
         load_checkpoint_projection_metadata_state(store, namespace_id).await?;
     let root = load_metadata_root_object(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?
+        .map_err(CoreError::ControlObjectLoad)?
         .state;
     Ok(CurrentProjection {
         head,

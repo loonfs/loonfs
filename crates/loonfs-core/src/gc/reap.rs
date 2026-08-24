@@ -4,7 +4,9 @@
 //! lifecycle timestamps stored in their records. The namespace sweep combines
 //! object age with the reference anchor from `gc/live_set.rs`.
 
-use crate::checkpoint::record::{encode_checkpoint_record, load_checkpoint_record_at_key};
+use crate::checkpoint::record::{
+    load_checkpoint_record_at_key, release_inspected_checkpoint_record, CheckpointRelease,
+};
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
@@ -57,7 +59,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(CheckpointSweep::Retain),
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
-    let record = loaded.state;
+    let record = &loaded.state;
     if let CheckpointStatus::Released { released_at_ms } = record.status {
         let aged = context.now_ms.saturating_sub(released_at_ms) >= grace_window_ms;
         return Ok(if aged {
@@ -76,20 +78,15 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     // for. On a tombstone every pin is dead weight, but a create still in
     // flight must not be raced, so that arm waits out the grace window from
     // the record's own creation stamp.
-    let releasable = lease_expired(&record, context.now_ms)
+    let releasable = lease_expired(record, context.now_ms)
         || (namespace_deleted
             && context.now_ms.saturating_sub(record.created_at_ms) >= grace_window_ms);
     if !releasable {
         return Ok(CheckpointSweep::Retain);
     }
-    let mut released = record;
-    released.status = CheckpointStatus::Released {
-        released_at_ms: context.now_ms,
-    };
-    let bytes = encode_checkpoint_record(&released)?;
-    match store.compare_and_swap(key, &loaded.etag, bytes).await {
-        Ok(_) => Ok(CheckpointSweep::Released),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => {
+    match release_inspected_checkpoint_record(store, key, loaded, context.now_ms).await? {
+        CheckpointRelease::Released => Ok(CheckpointSweep::Released),
+        CheckpointRelease::LostRace => {
             tracing::debug!(
                 namespace_id = %namespace_id,
                 object_key = key,
@@ -97,7 +94,6 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
             );
             Ok(CheckpointSweep::Retain)
         }
-        Err(error) => Err(CoreError::store(key, &error)),
     }
 }
 

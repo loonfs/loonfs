@@ -1,7 +1,8 @@
 //! Release rules for fork-owned and missing-basis checkpoint records.
 
 use crate::checkpoint::record::{
-    encode_checkpoint_record, load_checkpoint_record_at_key, release_checkpoint_record,
+    load_checkpoint_record_at_key, release_checkpoint_record, release_inspected_checkpoint_record,
+    CheckpointRelease,
 };
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
@@ -79,33 +80,24 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
-    let record = loaded.state;
-    if record.status != (CheckpointStatus::Active {}) {
+    if loaded.state.status != (CheckpointStatus::Active {}) {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     }
     let CheckpointOwner::Fork {
         target_namespace_id,
         expires_at_ms,
-    } = &record.owner
+    } = loaded.state.owner.clone()
     else {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     };
-    if !fork_target_proven_gone(store, target_namespace_id, *expires_at_ms, context).await? {
+    if !fork_target_proven_gone(store, &target_namespace_id, expires_at_ms, context).await? {
         return Ok(ForkCheckpointSweep::Retained);
     }
-    let mut released = record;
-    released.status = CheckpointStatus::Released {
-        released_at_ms: context.now_ms,
-    };
-    let encoded = encode_checkpoint_record(&released)?;
-    match store.compare_and_swap(key, &loaded.etag, encoded).await {
-        Ok(_) => Ok(ForkCheckpointSweep::Released),
+    match release_inspected_checkpoint_record(store, key, loaded, context.now_ms).await? {
+        CheckpointRelease::Released => Ok(ForkCheckpointSweep::Released),
         // Another pass won the record; retain and let a later pass re-decide
         // against the fresh state.
-        Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. }) => {
-            Ok(ForkCheckpointSweep::Retained)
-        }
-        Err(error) => Err(CoreError::store(key, &error)),
+        CheckpointRelease::LostRace => Ok(ForkCheckpointSweep::Retained),
     }
 }
 

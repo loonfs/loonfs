@@ -3,6 +3,15 @@
 use crate::error::{CoreError, Result};
 use loonfs_api::InodeId;
 
+/// The allocator position that follows `inode_id`, or `None` at the ceiling.
+///
+/// WAL replay re-derives the same position from the `CreateInode` deltas the
+/// write path emitted, and the two answers are compared on every projection
+/// load, so they have to advance by the same rule (`wal::replay`).
+pub(crate) fn next_inode_after(inode_id: InodeId) -> Option<InodeId> {
+    inode_id.0.checked_add(1).map(InodeId)
+}
+
 /// The one authoritative next-inode position for a tentative publish batch.
 #[derive(Debug)]
 pub(crate) struct InodeAllocator {
@@ -53,11 +62,7 @@ impl InodeAllocator {
 impl CandidateAllocation {
     pub(crate) fn allocate(&mut self) -> Result<InodeId> {
         let allocated = self.next;
-        self.next = self
-            .next
-            .0
-            .checked_add(1)
-            .map(InodeId)
+        self.next = next_inode_after(allocated)
             .ok_or_else(|| CoreError::Internal("next inode id counter overflow".to_owned()))?;
         Ok(allocated)
     }

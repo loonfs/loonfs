@@ -2,6 +2,7 @@
 
 pub(crate) use super::frame::WalReplayError;
 use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
+use crate::commit::next_inode_after;
 use crate::error::MetadataProjectionLoadError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use loonfs_api::wire::control::HeadState;
@@ -184,8 +185,11 @@ fn replay_next_inode_id_from_commit_deltas(
         .iter()
         .fold(current_next_inode_id, |next_inode_id, delta| {
             match &delta.delta {
+                // At the ceiling the allocator has already refused to hand
+                // out another id, so clamping here reconstructs exactly the
+                // position the write path stopped at.
                 WalDelta::CreateInode { inode_id, .. } => {
-                    InodeId(next_inode_id.0.max(inode_id.0.saturating_add(1)))
+                    next_inode_id.max(next_inode_after(*inode_id).unwrap_or(*inode_id))
                 }
                 // Other delta types reference existing inodes and do not
                 // allocate IDs.

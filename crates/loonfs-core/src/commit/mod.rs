@@ -18,7 +18,7 @@ mod validate;
 mod wal_payload;
 
 pub use self::identity::CommitFingerprint;
-pub(crate) use self::inode_allocator::{CandidateAllocation, InodeAllocator};
+pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation, InodeAllocator};
 pub use self::materialize::MaterializedCommitDelta;
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
 pub(crate) use self::ops::{CommitOp, CommitPrecondition, PlannedOp};

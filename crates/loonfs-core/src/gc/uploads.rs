@@ -14,7 +14,7 @@ use super::live_set::LiveSet;
 use crate::checkpoint::{load_verified_manifest_segments, ManifestLoadFailureClass};
 use crate::context::MutationContext;
 use crate::control_update::{
-    load_upload_session_state, try_update_upload_session, UploadSessionCas, UploadSessionUpdate,
+    load_upload_session_state, try_update_upload_session, CasAttempt, UploadSessionUpdate,
 };
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
@@ -200,12 +200,12 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     .await;
     match aborted {
         // Keep the newly aborted record until its post-abort grace period expires.
-        Ok(UploadSessionCas::Applied(Some(abandoned))) => {
+        Ok(CasAttempt::Settled(Some(abandoned))) => {
             abandoned.release(store, content_store_id).await;
             Ok(retain_until(context.now_ms.saturating_add(grace_window_ms)))
         }
-        Ok(UploadSessionCas::Applied(None)) => Ok(retain_undated()),
-        Ok(UploadSessionCas::Conflict) => {
+        Ok(CasAttempt::Settled(None)) => Ok(retain_undated()),
+        Ok(CasAttempt::Contended) => {
             tracing::debug!(
                 namespace_id = %namespace_id,
                 upload_id = %upload_id,
