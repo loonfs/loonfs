@@ -56,7 +56,7 @@ pub(crate) fn prepare_wal_segment(
         .map(ChangeSeq)
         .ok_or(WalBuildError::SeqOverflow)?;
     // WAL segments are proposals: racing writers may both write one for the
-    // same position before the head chooses. The id's ordered prefix makes
+    // same position before the head chooses. The id's 20-digit position makes
     // listings and reclamation scans sort by history position; its random
     // suffix keeps competing proposals (and losers' harmless orphans) from
     // ever colliding on a name.

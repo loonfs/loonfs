@@ -2876,7 +2876,7 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
     namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
     let orphan_key = wal_segment(
         &namespace_id,
-        &loonfs_api::WalSegmentId::parse("00000000000000000000-0123456789abcdef")
+        &loonfs_api::WalSegmentId::parse("wal_00000000000000000000-0123456789abcdef")
             .expect("valid WAL segment id"),
     );
     inner
@@ -4518,7 +4518,7 @@ async fn add_bounded_gc_fixture(
         for key in [
             wal_segment(
                 namespace_id,
-                &loonfs_api::WalSegmentId::parse(format!("{index:020}-0000000000000000"))
+                &loonfs_api::WalSegmentId::parse(format!("wal_{index:020}-0000000000000000"))
                     .expect("valid WAL segment id"),
             ),
             metadata_segment(
@@ -4672,7 +4672,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
         .map(|index| {
             wal_segment(
                 &namespace_id,
-                &loonfs_api::WalSegmentId::parse(format!("{index:020}-0000000000000000"))
+                &loonfs_api::WalSegmentId::parse(format!("wal_{index:020}-0000000000000000"))
                     .expect("valid WAL segment id"),
             )
         })
@@ -4765,7 +4765,7 @@ async fn stale_cursor_rebuilds_roots_before_resuming() {
     for index in 0..2 {
         let key = wal_segment(
             &namespace_id,
-            &loonfs_api::WalSegmentId::parse(format!("{index:020}-0000000000000000"))
+            &loonfs_api::WalSegmentId::parse(format!("wal_{index:020}-0000000000000000"))
                 .expect("valid WAL segment id"),
         );
         store

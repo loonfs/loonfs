@@ -518,7 +518,7 @@ async fn create_checkpoint_fails_when_its_manifest_key_holds_a_different_payload
     // so rather than generate another id.
     let store = ConflictOnManifestCreateStore::mutate_next_inode(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        format!("{}{:020}-", metadata_manifest_prefix(&namespace_id), 2),
+        format!("{}man_{:020}-", metadata_manifest_prefix(&namespace_id), 2),
     );
 
     let error = create_checkpoint(&store, &namespace_id, &context)

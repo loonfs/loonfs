@@ -363,7 +363,7 @@ mod tests {
             owner_namespace_id: namespace_id(owner),
             manifest_no: loonfs_api::ManifestNo(manifest_no),
             manifest_object_id: ManifestObjectId::parse(format!(
-                "{manifest_no:020}-{object_nonce}"
+                "man_{manifest_no:020}-{object_nonce}"
             ))
             .expect("valid manifest object id"),
             manifest_head_seq: ChangeSeq(manifest_no),

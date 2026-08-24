@@ -1045,8 +1045,10 @@ mod tests {
         let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
-            manifest_object_id: ManifestObjectId::parse("00000000000000000010-0123456789abcdef")
-                .expect("valid manifest object id"),
+            manifest_object_id: ManifestObjectId::parse(
+                "man_00000000000000000010-0123456789abcdef",
+            )
+            .expect("valid manifest object id"),
             head_seq: ChangeSeq(10),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
                 .expect("commit id"),
@@ -1082,8 +1084,10 @@ mod tests {
         let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),
-            manifest_object_id: ManifestObjectId::parse("00000000000000000012-0123456789abcdef")
-                .expect("valid manifest object id"),
+            manifest_object_id: ManifestObjectId::parse(
+                "man_00000000000000000012-0123456789abcdef",
+            )
+            .expect("valid manifest object id"),
             head_seq: ChangeSeq(12),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000002")
                 .expect("commit id"),
@@ -1147,8 +1151,10 @@ mod tests {
         let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(14),
-            manifest_object_id: ManifestObjectId::parse("00000000000000000014-0123456789abcdef")
-                .expect("valid manifest object id"),
+            manifest_object_id: ManifestObjectId::parse(
+                "man_00000000000000000014-0123456789abcdef",
+            )
+            .expect("valid manifest object id"),
             head_seq: ChangeSeq(14),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000003")
                 .expect("commit id"),

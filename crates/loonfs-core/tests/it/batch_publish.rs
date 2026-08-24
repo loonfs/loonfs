@@ -482,7 +482,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     }
     store
         .put_if_absent(
-            "namespaces/demo/wal/segments/00000000000000000099-9999999999999999.wal.zst",
+            "namespaces/demo/wal/segments/wal_00000000000000000099-9999999999999999.wal.zst",
             wal_bytes,
         )
         .await

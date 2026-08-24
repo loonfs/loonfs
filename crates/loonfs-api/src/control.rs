@@ -1181,7 +1181,7 @@ mod tests {
 
     #[test]
     fn head_decodes_with_a_tip_and_no_predecessor_hints() {
-        let tip = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+        let tip = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
 
         let head = serde_json::from_value::<HeadState>(head_json(Some(tip), Vec::new()))
             .expect("the first published segment has no predecessor hints");
@@ -1191,8 +1191,8 @@ mod tests {
 
     #[test]
     fn predecessor_hints_do_not_repeat_the_tip() {
-        let tip = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
-        let older = wal_pointer_json("00000000000000000001-0123456789abcdef", 1, 1);
+        let tip = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
+        let older = wal_pointer_json("wal_00000000000000000001-0123456789abcdef", 1, 1);
 
         let head = serde_json::from_value::<HeadState>(head_json(Some(tip), vec![older.clone()]))
             .expect("predecessor hints decode independently of the authoritative tip");
@@ -1206,15 +1206,15 @@ mod tests {
     /// a rewrite.
     #[test]
     fn head_rejects_a_pointer_field_it_does_not_define() {
-        let mut tip = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+        let mut tip = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
         tip["object_key"] = serde_json::json!(
-            "namespaces/demo/wal/segments/00000000000000000002-fedcba9876543210.wal.zst"
+            "namespaces/demo/wal/segments/wal_00000000000000000002-fedcba9876543210.wal.zst"
         );
 
         serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), Vec::new()))
             .expect_err("the head rejects a field its tip pointer does not define");
 
-        let older = wal_pointer_json("00000000000000000001-0123456789abcdef", 1, 1);
+        let older = wal_pointer_json("wal_00000000000000000001-0123456789abcdef", 1, 1);
         serde_json::from_value::<HeadState>(head_json(Some(older), vec![tip]))
             .expect_err("the head rejects a field a predecessor hint does not define");
     }
@@ -1222,16 +1222,16 @@ mod tests {
     /// WAL pointers reject ids that do not encode their start sequence.
     #[test]
     fn wal_pointers_reject_an_id_that_disagrees_with_its_start_seq() {
-        let agreeing = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+        let agreeing = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
         serde_json::from_value::<WalSegmentPointer>(agreeing)
             .expect("a pointer whose id encodes its start seq decodes");
 
-        let disagreeing = wal_pointer_json("00000000000000000003-fedcba9876543210", 2, 2);
+        let disagreeing = wal_pointer_json("wal_00000000000000000003-fedcba9876543210", 2, 2);
         let error = serde_json::from_value::<WalSegmentPointer>(disagreeing)
             .expect_err("a pointer whose id disagrees with its start seq is corruption");
         let message = error.to_string();
         assert!(
-            message.contains("`00000000000000000003-fedcba9876543210`")
+            message.contains("`wal_00000000000000000003-fedcba9876543210`")
                 && message.contains("start seq `2`"),
             "the rejection should name both values: {message}"
         );
@@ -1240,22 +1240,22 @@ mod tests {
     /// The strict head decoder applies the same check to its tip and hints.
     #[test]
     fn the_head_rejects_a_pointer_whose_id_disagrees_with_its_start_seq() {
-        let tip = wal_pointer_json("00000000000000000003-aaaaaaaaaaaaaaaa", 3, 3);
-        let older = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+        let tip = wal_pointer_json("wal_00000000000000000003-aaaaaaaaaaaaaaaa", 3, 3);
+        let older = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
         serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), vec![older.clone()]))
             .expect("pointers whose ids encode their start seqs decode");
 
-        let drifted_tip = wal_pointer_json("00000000000000000004-aaaaaaaaaaaaaaaa", 3, 3);
+        let drifted_tip = wal_pointer_json("wal_00000000000000000004-aaaaaaaaaaaaaaaa", 3, 3);
         let error = serde_json::from_value::<HeadState>(head_json(Some(drifted_tip), vec![older]))
             .expect_err("the head rejects a tip that disagrees with its start seq");
         let message = error.to_string();
         assert!(
-            message.contains("`00000000000000000004-aaaaaaaaaaaaaaaa`")
+            message.contains("`wal_00000000000000000004-aaaaaaaaaaaaaaaa`")
                 && message.contains("start seq `3`"),
             "the rejection should name both values: {message}"
         );
 
-        let drifted_hint = wal_pointer_json("00000000000000000001-fedcba9876543210", 2, 2);
+        let drifted_hint = wal_pointer_json("wal_00000000000000000001-fedcba9876543210", 2, 2);
         serde_json::from_value::<HeadState>(head_json(Some(tip), vec![drifted_hint]))
             .expect_err("the head rejects a hint that disagrees with its start seq");
     }
@@ -1326,7 +1326,7 @@ mod tests {
                 owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                 manifest_no: ManifestNo(7),
                 manifest_object_id: ManifestObjectId::parse(
-                    "00000000000000000007-0123456789abcdef",
+                    "man_00000000000000000007-0123456789abcdef",
                 )
                 .expect("valid manifest object id"),
                 manifest_head_seq: ChangeSeq(7),

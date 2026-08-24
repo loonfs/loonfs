@@ -109,7 +109,7 @@ mod tests {
             .put_overwrite(
                 &wal_segment(
                     &namespace_id,
-                    &loonfs_api::WalSegmentId::parse("00000000000000000001-644e4d336fd4ee33")
+                    &loonfs_api::WalSegmentId::parse("wal_00000000000000000001-644e4d336fd4ee33")
                         .expect("valid WAL segment id"),
                 ),
                 Bytes::from_static(b"wal"),

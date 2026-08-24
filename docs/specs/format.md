@@ -89,7 +89,7 @@ The required durable object families and standard key patterns are:
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
 | **WAL head** | Mutable | Defines the namespace's durable identity and current state: content store, fork provenance, visible sequence, writer epoch, writer metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
-| **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
+| **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/wal_{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata segment references and a head summary. Segment references carry their own owner, so a fork target's manifest names source-owned segments without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/segments/{segment_id}.sst.zst` |
@@ -112,9 +112,9 @@ namespaces/{namespace_id}/wal/
 └── segments/{segment_id}.wal.zst
 ```
 
-For example, segment `00000000000000000002-fedcba9876543210` in namespace
+For example, segment `wal_00000000000000000002-fedcba9876543210` in namespace
 `demo` is always stored at
-`namespaces/demo/wal/segments/00000000000000000002-fedcba9876543210.wal.zst`.
+`namespaces/demo/wal/segments/wal_00000000000000000002-fedcba9876543210.wal.zst`.
 Pointers never store this key; every store boundary derives it from the
 namespace and `segment_id`.
 
@@ -163,9 +163,11 @@ The namespace tree's lifecycle can be read off its grammar:
   `metadata/manifests/`, `metadata/segments/`, `uploads/`,
   `content-stores/.../objects/`). A record in a collection matters only when a
   pointer, chain link, or checkpoint reaches it — except to GC, which
-  lists collections to find garbage and roots. WAL segments and metadata
-  manifests use ordered prefixes plus random suffixes so listings stay useful
-  while concurrent writers avoid fighting for one immutable object name.
+  lists collections to find garbage and roots. WAL segment and namespace
+  manifest ids are a family prefix (`wal_`, `man_`), then a 20-digit
+  position, then a 16-character lowercase hex suffix, so listings stay
+  ordered while concurrent writers avoid fighting for one immutable object
+  name.
 - **Paths express ownership, not authority.** Envelopes and payloads still
   validate namespace id, object id, family, checksum, and sequence fields;
   the same fact is never encoded twice (the row family lives in the manifest
@@ -240,14 +242,13 @@ The metadata log has six rules.
    namespace and `segment_id`. The bounded `recent_segments` predecessor
    hints accelerate reads but never define chain history.
 5. `segment_id` must be unique and never reused within a namespace
-   incarnation. It is a stream-positioned id (section 1.3): the ordered
-   prefix is the segment's `start_seq` so listings and reclamation scans
-   sort by history position, and the collision-resistant suffix keeps
+   incarnation. It is a stream-positioned id (section 1.3): the 20 digits
+   after `wal_` are the segment's `start_seq` so listings and reclamation
+   scans sort by history position, and the collision-resistant suffix keeps
    competing proposals for the same position distinct. A WAL pointer or
-   segment payload is invalid when the id prefix differs from its
-   `start_seq`. The order in a listing is
-   never recovery authority — recovery follows the head and the chain
-   (rule 4) exclusively.
+   segment payload is invalid when those digits differ from its `start_seq`.
+   The order in a listing is never recovery authority — recovery follows the
+   head and the chain (rule 4) exclusively.
 6. Orphan WAL segments are permitted and harmless when a writer loses the head
    compare-and-swap.
 
@@ -357,7 +358,7 @@ A durable object that references a namespace manifest stores this shape under `m
 {
   "owner_namespace_id": "demo",
   "manifest_no": 2,
-  "manifest_object_id": "00000000000000000002-0123456789abcdef",
+  "manifest_object_id": "man_00000000000000000002-0123456789abcdef",
   "manifest_head_seq": 17,
   "manifest_payload_checksum": "sha256:<64 lowercase hex>"
 }
@@ -932,7 +933,7 @@ and segment predecessor links:
 
 ```json
 {
-  "segment_id": "00000000000000000002-fedcba9876543210",
+  "segment_id": "wal_00000000000000000002-fedcba9876543210",
   "start_seq": 2,
   "end_seq": 2,
   "payload_checksum": "sha256:<64 lowercase hex>"
@@ -949,14 +950,14 @@ predecessor hints. For example:
 ```json
 {
   "visible_wal_tip": {
-    "segment_id": "00000000000000000003-aaaaaaaaaaaaaaaa",
+    "segment_id": "wal_00000000000000000003-aaaaaaaaaaaaaaaa",
     "start_seq": 3,
     "end_seq": 3,
     "payload_checksum": "sha256:<64 lowercase hex>"
   },
   "recent_segments": [
     {
-      "segment_id": "00000000000000000002-fedcba9876543210",
+      "segment_id": "wal_00000000000000000002-fedcba9876543210",
       "start_seq": 2,
       "end_seq": 2,
       "payload_checksum": "sha256:<64 lowercase hex>"

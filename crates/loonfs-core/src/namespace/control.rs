@@ -210,8 +210,10 @@ mod tests {
         ManifestRef {
             owner_namespace_id: owner.clone(),
             manifest_no: ManifestNo(1),
-            manifest_object_id: ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
-                .expect("valid manifest object id"),
+            manifest_object_id: ManifestObjectId::parse(
+                "man_00000000000000000001-0123456789abcdef",
+            )
+            .expect("valid manifest object id"),
             manifest_head_seq: ChangeSeq(1),
             manifest_payload_checksum: "sha256:test".to_owned(),
         }

@@ -78,7 +78,7 @@ async fn manifest_object_id_for_manifest_no<S: ObjectStore + ?Sized>(
         }
     }
     Err(ManifestLoadError::MissingManifest {
-        object_key: format!("{prefix}{:020}-*.manifest.json", manifest_no.0),
+        object_key: format!("{prefix}man_{:020}-*.manifest.json", manifest_no.0),
     })
 }
 
