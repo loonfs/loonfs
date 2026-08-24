@@ -290,10 +290,10 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
     let maximum_state = GrepManifestState::new(
         namespace_id.clone(),
         current_state.status().clone(),
-        GrepIndexState::new(
-            current_state.index().reorganize.clone(),
-            RunNo(MAX_PUBLIC_INTEGER),
-        ),
+        GrepIndexState {
+            reorganize: current_state.index().reorganize.clone(),
+            next_run_no: RunNo(MAX_PUBLIC_INTEGER),
+        },
         current_state.segments().to_vec(),
     )
     .expect("valid root at the public maximum");
@@ -1793,10 +1793,10 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
     let next = GrepManifestState::new(
         namespace_id.clone(),
         current_state.status().clone(),
-        GrepIndexState::new(
-            current_state.index().reorganize.clone(),
-            RunNo(current_state.index().next_run_no.0 + 1),
-        ),
+        GrepIndexState {
+            reorganize: current_state.index().reorganize.clone(),
+            next_run_no: RunNo(current_state.index().next_run_no.0 + 1),
+        },
         current_state.segments().to_vec(),
     )
     .expect("valid successor state");

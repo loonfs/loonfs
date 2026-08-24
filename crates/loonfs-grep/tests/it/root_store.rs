@@ -241,7 +241,10 @@ fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepManifest
             built_through_seq,
             next_event_index: 0,
         },
-        GrepIndexState::new(None, RunNo(0)),
+        GrepIndexState {
+            reorganize: None,
+            next_run_no: RunNo(0),
+        },
         Vec::new(),
     )
     .expect("valid root")

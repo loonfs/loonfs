@@ -8,8 +8,6 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum GrepManifestStateError {
-    #[error("unsupported grep index format version `{found}`: this build supports `{supported}`")]
-    UnsupportedIndexFormatVersion { found: u32, supported: u32 },
     #[error("disabled grep root carries query-visible segments")]
     DisabledHasSegments,
     #[error("disabled grep root carries an in-progress reorganization")]

@@ -1381,7 +1381,8 @@ and commit receipt.
 
 A fingerprint value is `v1:sha256:<64 lowercase hex>`. The `v1` tag names the
 canonicalization rules below and `sha256` the digest algorithm, so either can
-change later without re-interpreting stored values.
+change later without re-interpreting stored values. The `v1` tag and the `v1`
+ending the preimage's `domain` string name the same version.
 
 The `v1` preimage is the compact JSON encoding (no whitespace, object keys in
 exactly the order shown) of:
@@ -2019,10 +2020,9 @@ over its namespace manifest. The mutable
 root-pointer decoder rejects unknown envelope and payload fields; the
 immutable manifest decoder tolerates additive fields.
 
-The nested `index` object carries its own `format_version`, currently `1`.
-It holds what every phase has — the in-progress `reorganize` state and the
-`next_run_no` allocator — while each phase's own position lives in the
-`status` tag beside it:
+The nested `index` object holds what every phase has — the in-progress
+`reorganize` state and the `next_run_no` allocator — while each phase's own
+position lives in the `status` tag beside it:
 
 - `backfilling`: `target_seq` (the namespace sequence the pinned checkpoint
   captured), optional `cursor_inode_id` (the inode the walk resumes strictly
@@ -2102,6 +2102,11 @@ and grep maintenance does not collect core-owned objects.
 
 ### 4.3 Evolution rules
 
+- **One version mechanism per object.** An object's version is the
+  `format_version` field in its envelope. That field governs the whole payload,
+  including nested objects, and no payload carries a `format_version` of its
+  own. A kind name that ends in a version, such as the `blob_v1` content-ref
+  kind, names one closed shape and is not a second version mechanism.
 - **Additive within a released version.** Readers ignore unknown payload and
   envelope fields, at every level of nesting, except inside the closed shapes
   named in the encoding conventions above. After the first stable release,
