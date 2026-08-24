@@ -862,7 +862,7 @@ pub enum InodeKind {
 }
 
 impl InodeKind {
-    /// Returns the frozen wire value for this kind.
+    /// Returns the serialized value.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",

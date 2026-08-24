@@ -38,8 +38,6 @@ fn nibble(byte: u8) -> Result<u8, HexDecodeError> {
     }
 }
 
-/// Reports whether `byte` is in the lowercase hexadecimal alphabet: it is
-/// exactly the set of bytes this module can decode.
 pub(crate) fn is_lower_hex_byte(byte: u8) -> bool {
     nibble(byte).is_ok()
 }

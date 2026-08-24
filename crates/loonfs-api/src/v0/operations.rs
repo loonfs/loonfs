@@ -710,7 +710,7 @@ pub struct DeletedObjectCounts {
 }
 
 impl DeletedObjectCounts {
-    /// Adds counts from another pass. Exhaustive so a new field cannot escape the sum.
+    /// Adds counts from another pass.
     pub fn add(&mut self, other: &Self) {
         let Self {
             wal_segments,
@@ -749,7 +749,7 @@ pub struct ReleasedCheckpointCounts {
 }
 
 impl ReleasedCheckpointCounts {
-    /// Adds counts from another pass. Exhaustive so a new field cannot escape the sum.
+    /// Adds counts from another pass.
     pub fn add(&mut self, other: &Self) {
         let Self {
             fork,
@@ -874,9 +874,7 @@ impl RetainedReason {
 }
 
 impl RetainedCandidates {
-    /// Every reason and its count, in a fixed order, for callers that
-    /// report the breakdown rather than read one field of it. The labels are the serialized field
-    /// names; exhaustive so a new field cannot escape the breakdown.
+    /// Returns every reason and count in a fixed order.
     pub fn by_reason(&self) -> [(&'static str, u64); 10] {
         let Self {
             referenced,
@@ -904,7 +902,7 @@ impl RetainedCandidates {
         ]
     }
 
-    /// Folds another pass's breakdown into this one. Exhaustive so a new field cannot escape the sum.
+    /// Adds counts from another pass.
     pub fn add(&mut self, other: &Self) {
         let Self {
             referenced,

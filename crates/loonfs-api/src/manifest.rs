@@ -517,12 +517,7 @@ impl MetadataRow {
         }
     }
 
-    /// The exact lookup prefix a point read probes for this row in `family`,
-    /// and therefore the key inserted into the segment's bloom filter. A
-    /// filter is an exact-match structure, so the probe a reader builds and
-    /// the key a writer stores both come from [`lookup_keys`]. Range scans
-    /// at coarser granularity (a whole directory, a wave of names) do not
-    /// consult filters.
+    /// Returns the Bloom filter key for this row in `family`.
     pub fn filter_key_for_family(&self, family: MetadataRowFamily) -> String {
         match self {
             Self::Inode { .. } => self.row_key_for_family(family),
@@ -567,33 +562,19 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
     crate::hex::hex_encode_bytes(value.as_bytes())
 }
 
-/// The metadata row-key grammar: every row key, bloom-filter probe, range
-/// prefix, and resume bound the families use. [`MetadataRow::row_key_for_family`]
-/// and [`MetadataRow::filter_key_for_family`] build their answers from here,
-/// so a probe cannot drift from the filter key the writer stored and a
-/// prefix cannot drift from the row keys it selects.
+/// Builders for metadata row keys, lookup prefixes, and Bloom filter probes.
+///
+/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 pub mod lookup_keys {
     use super::{hex_encode_row_key_component, TombstoneGeneration};
     use crate::{AttributeRevisionNo, ChangeSeq, InodeId, RevisionNo};
 
-    /// The prefix every inode row key starts with. Inode ids are
-    /// zero-padded to a fixed width after it, so a range scan over this
-    /// prefix walks the inode family in ascending inode-id order.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Prefix for inode row keys.
     pub const INODE_ROW_PREFIX: &str = "inode-";
 
-    /// The prefix every canonical revision row key starts with. A range scan
-    /// over it walks every revision the manifest records, superseded ones
-    /// included, which is what a reachability question about content needs.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Prefix for canonical revision row keys.
     pub const REVISION_ROW_PREFIX: &str = "revision-";
 
-    // The remaining family prefixes. No consumer outside this crate scans
-    // these families by prefix, so they stay internal;
-    // `MetadataRowFamily::row_key_prefix` is how the rest of the workspace
-    // asks for one.
     pub(super) const DIRENTRY_BIND_ROW_PREFIX: &str = "direntry-bind-";
     pub(super) const DIRENTRY_CHILD_BIND_ROW_PREFIX: &str = "direntry-child-bind-";
     pub(super) const DIRENTRY_UNBIND_ROW_PREFIX: &str = "direntry-unbind-";
@@ -602,31 +583,22 @@ pub mod lookup_keys {
     pub(super) const COMMIT_RECEIPT_ROW_PREFIX: &str = "commit-receipt-";
     pub(super) const ATTRIBUTE_ROW_PREFIX: &str = "attribute-";
 
-    /// Builds the exact point-lookup key for an inode row.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds an inode row key.
     pub fn inode_key(inode_id: InodeId) -> String {
         format!("{INODE_ROW_PREFIX}{:020}", inode_id.0)
     }
 
-    /// Builds the resume bound for a scan that must continue strictly after
-    /// `inode_id`'s row.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a scan bound immediately after an inode row.
     pub fn inode_key_after(inode_id: InodeId) -> String {
         format!("{}\0", inode_key(inode_id))
     }
 
-    /// Builds the range prefix selecting directory bindings under one parent.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the prefix for directory bindings under one parent.
     pub fn direntry_parent_prefix(parent_inode_id: InodeId) -> String {
         format!("{DIRENTRY_BIND_ROW_PREFIX}{:020}-", parent_inode_id.0)
     }
 
-    /// Builds the bloom-filter probe shared by all generations of one parent/name binding.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the Bloom filter probe for a parent/name binding.
     pub fn direntry_bind_probe(parent_inode_id: InodeId, name_key: &str) -> String {
         format!(
             "{}{}",
@@ -635,16 +607,12 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the range prefix selecting every generation of one parent/name binding.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the prefix for every generation of a parent/name binding.
     pub fn direntry_bind_prefix(parent_inode_id: InodeId, name_key: &str) -> String {
         format!("{}-", direntry_bind_probe(parent_inode_id, name_key))
     }
 
-    /// Builds the full row key for one generation of a parent/name binding.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a row key for one generation of a parent/name binding.
     pub fn direntry_bind_row_key(
         parent_inode_id: InodeId,
         name_key: &str,
@@ -658,24 +626,17 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the bloom-filter probe shared by bindings that target one child inode.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the Bloom filter probe for bindings to one child inode.
     pub fn direntry_child_probe(child_inode_id: InodeId) -> String {
         format!("{DIRENTRY_CHILD_BIND_ROW_PREFIX}{:020}", child_inode_id.0)
     }
 
-    /// Builds the reverse-index range prefix selecting bindings to one child inode.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the reverse-index prefix for bindings to one child inode.
     pub fn direntry_child_prefix(child_inode_id: InodeId) -> String {
         format!("{}-", direntry_child_probe(child_inode_id))
     }
 
-    /// Builds the full row key one binding generation takes in the by-child
-    /// re-index.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a reverse-index row key for one binding generation.
     pub fn direntry_child_bind_row_key(
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
@@ -692,9 +653,7 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the bloom-filter probe shared by unbinds for one parent/name pair.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the Bloom filter probe for unbinds of one parent/name pair.
     pub fn direntry_unbind_probe(parent_inode_id: InodeId, name_key: &str) -> String {
         format!(
             "{}{}",
@@ -703,9 +662,7 @@ pub mod lookup_keys {
         )
     }
 
-    /// Rows for one specific binding generation under the unbind probe.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the prefix for unbinds of one binding generation.
     pub fn direntry_unbind_binding_prefix(
         parent_inode_id: InodeId,
         name_key: &str,
@@ -719,9 +676,7 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the full row key for one unbind event.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a row key for one unbind event.
     pub fn direntry_unbind_row_key(
         parent_inode_id: InodeId,
         name_key: &str,
@@ -737,39 +692,30 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the range prefix selecting every unbind below one parent directory.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the prefix for unbinds below one parent directory.
     pub fn direntry_unbind_parent_prefix(parent_inode_id: InodeId) -> String {
         format!("{DIRENTRY_UNBIND_ROW_PREFIX}{:020}-", parent_inode_id.0)
     }
 
-    /// Builds the range prefix selecting unbinds for one parent/name pair.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the prefix for unbinds of one parent/name pair.
     pub fn direntry_unbind_name_prefix(parent_inode_id: InodeId, name_key: &str) -> String {
         format!("{}-", direntry_unbind_probe(parent_inode_id, name_key))
     }
 
-    /// Builds the bloom-filter probe shared by tombstone events for one root inode.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the Bloom filter probe for one tombstone root.
     pub fn tombstone_probe(root_inode_id: InodeId) -> String {
         format!("{TOMBSTONE_ROW_PREFIX}{:020}", root_inode_id.0)
     }
 
-    /// Builds the range prefix selecting the tombstone history of one root inode.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the prefix for a root inode's tombstone history.
     pub fn tombstone_prefix(root_inode_id: InodeId) -> String {
         format!("{}-", tombstone_probe(root_inode_id))
     }
 
-    /// Builds the full row key for one tombstone event. The event's action
-    /// stays in the value, so a revoke sorts exactly like the deletion it
-    /// cancels and a newest-per-root scan reads both in one prefix pass.
+    /// Builds a row key for one tombstone event.
     ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// The action is stored in the value, so delete and revoke rows for one
+    /// generation share a key.
     pub fn tombstone_row_key(root_inode_id: InodeId, generation: TombstoneGeneration) -> String {
         format!(
             "{}{:020}-{:010}",
@@ -779,12 +725,7 @@ pub mod lookup_keys {
         )
     }
 
-    /// The prefix every active-deletion row key starts with. Deletion
-    /// sequence and root inode are zero-padded to fixed widths after it, so a
-    /// range scan over this prefix walks the namespace's recoverable
-    /// deletions oldest deletion first — the trash listing's whole read.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Prefix for active-deletion row keys.
     pub const ACTIVE_DELETION_ROW_PREFIX: &str = "active-deletion-";
 
     /// Rank of an undelete's removal marker within one deletion generation.
@@ -797,9 +738,7 @@ pub mod lookup_keys {
     /// rank the family defines.
     pub const ACTIVE_DELETION_RANK_LISTED: u32 = 1;
 
-    /// Builds an active-deletion row key from its generation and rank.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds an active-deletion row key.
     pub fn active_deletion_row_key(
         deletion_seq: ChangeSeq,
         root_inode_id: InodeId,
@@ -811,12 +750,7 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the resume bound for a trash page that must continue strictly
-    /// after the deletion generation it last returned. The listed row is the
-    /// generation's highest-ranked row, so resuming past it skips the whole
-    /// generation and nothing else.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a trash scan bound after one deletion generation.
     pub fn active_deletion_key_after(deletion_seq: ChangeSeq, root_inode_id: InodeId) -> String {
         format!(
             "{}\0",
@@ -824,9 +758,7 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the bloom-filter probe shared by receipts for one commit id.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the Bloom filter probe for one commit ID.
     pub fn commit_receipt_probe(commit_id: &str) -> String {
         format!(
             "{COMMIT_RECEIPT_ROW_PREFIX}{}",
@@ -834,16 +766,12 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the range prefix selecting durable receipts for one commit id.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the prefix for receipts with one commit ID.
     pub fn commit_receipt_prefix(commit_id: &str) -> String {
         format!("{}-", commit_receipt_probe(commit_id))
     }
 
-    /// Builds the full row key for one commit receipt.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a commit receipt row key.
     pub fn commit_receipt_row_key(commit_id: &str, committed_seq: ChangeSeq) -> String {
         format!(
             "{}{:020}",
@@ -852,16 +780,12 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the bloom-filter probe shared by every canonical revision of one inode.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the Bloom filter probe for an inode's canonical revisions.
     pub fn revision_probe(inode_id: InodeId) -> String {
         format!("{REVISION_ROW_PREFIX}{:020}", inode_id.0)
     }
 
-    /// Builds the full canonical revision row key.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a canonical revision row key.
     pub fn revision_row_key(
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -874,23 +798,17 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the bloom-filter probe shared by newest-first revisions of one inode.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the Bloom filter probe for an inode's newest-first revisions.
     pub fn revision_by_inode_desc_probe(inode_id: InodeId) -> String {
         format!("{REVISION_BY_INODE_DESC_ROW_PREFIX}{:020}", inode_id.0)
     }
 
-    /// Builds the range prefix selecting newest-first revisions of one inode.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the prefix for an inode's newest-first revisions.
     pub fn revision_by_inode_desc_prefix(inode_id: InodeId) -> String {
         format!("{}-", revision_by_inode_desc_probe(inode_id))
     }
 
-    /// Revision numbers are stored inverted so newest sorts first.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a prefix for one revision in the newest-first index.
     pub fn revision_by_inode_desc_revision_prefix(
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -902,10 +820,7 @@ pub mod lookup_keys {
         )
     }
 
-    /// The full descending-index row key: revision number, commit seq, and
-    /// delta index all inverted so newest sorts first.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a row key for the newest-first revision index.
     pub fn revision_by_inode_desc_row_key(
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -920,27 +835,17 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the bloom-filter probe shared by every attribute revision of one
-    /// inode.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the Bloom filter probe for an inode's attribute revisions.
     pub fn attributes_probe(inode_id: InodeId) -> String {
         format!("{ATTRIBUTE_ROW_PREFIX}{:020}", inode_id.0)
     }
 
-    /// Builds the range prefix selecting one inode's attribute revisions,
-    /// newest first.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds the prefix for an inode's newest-first attribute revisions.
     pub fn attributes_prefix(inode_id: InodeId) -> String {
         format!("{}-", attributes_probe(inode_id))
     }
 
-    /// The full attribute row key: revision number, commit seq, and delta
-    /// index all inverted so an ascending scan of one inode's prefix reads
-    /// its newest attribute state first.
-    ///
-    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    /// Builds a row key for an attribute revision.
     pub fn attributes_row_key(
         inode_id: InodeId,
         attributes_revision_no: AttributeRevisionNo,
