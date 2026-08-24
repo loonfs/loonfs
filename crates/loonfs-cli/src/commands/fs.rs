@@ -604,10 +604,7 @@ pub(crate) async fn run_filesystem_get(
     })
 }
 
-/// Opens a download of `spec` at the point an interrupted run left off: the
-/// bytes named after `destination` count toward the start offset only while
-/// they still describe the content resolved just now. A file with no content
-/// reference to compare against starts over.
+/// Opens a download at the offset recorded in a matching partial file.
 pub(super) async fn open_resumable_download(
     context: &CommandContext,
     spec: &NamespacePath,

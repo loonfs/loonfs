@@ -78,7 +78,6 @@ fn human_error(error: &CliError) -> String {
     rendered
 }
 
-/// The one spelling of a server correlation id in human output.
 fn request_id_suffix(request_id: Option<&str>) -> String {
     request_id.map_or_else(String::new, |request_id| {
         format!(" (request id: {request_id})")

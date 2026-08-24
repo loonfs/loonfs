@@ -514,8 +514,6 @@ pub(crate) async fn run_copy_tree(
     ))
 }
 
-/// Parses a path assembled during a tree walk, blaming the argument that
-/// carried it through the same conversion single-file commands use.
 fn parse_remote(
     context: &CommandContext,
     path: &str,
