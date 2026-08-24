@@ -177,6 +177,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
+        limit: Option<u32>,
     ) -> Result<GrepResponse> {
         let mut url = format!("{}/v0/namespaces/{namespace_id}/grep", self.base_url);
         let mut has_query = false;
@@ -210,7 +211,7 @@ impl Client {
         append_optional_pagination_query(
             &mut url,
             &mut has_query,
-            request.limit,
+            limit,
             request.cursor.as_deref(),
         );
         self.request_json::<(), _>(self.get(&url), None).await

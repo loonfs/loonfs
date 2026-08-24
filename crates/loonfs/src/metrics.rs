@@ -22,6 +22,21 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// The closed vocabulary of the `result` label: an operation that completed.
+///
+/// Every instrument that labels an outcome `result` takes its value from one
+/// of these four constants, so one query counts every failure the runtime and
+/// its hosts report. The object store keeps its own richer classification for
+/// the same label: a store call reports which failure it hit, not only that
+/// it failed.
+pub const RESULT_OK: &str = "ok";
+/// `result` label for an operation that failed.
+pub const RESULT_ERROR: &str = "error";
+/// `result` label for a lookup served from the cache.
+pub const RESULT_HIT: &str = "hit";
+/// `result` label for a lookup the cache did not hold.
+pub const RESULT_MISS: &str = "miss";
+
 /// Bucket upper bounds for a latency histogram, in seconds.
 ///
 /// Covers latencies from one millisecond to two minutes.

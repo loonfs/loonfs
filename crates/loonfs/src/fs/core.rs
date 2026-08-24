@@ -12,9 +12,8 @@ use crate::{
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page, PageCursor,
-    PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
     PROTOCOL_VERSION,
@@ -188,7 +187,10 @@ impl ReadCore {
         self.inner.config.trace_store_kind.as_str()
     }
 
-    pub(super) fn record_trace_context(&self, span: &tracing::Span) {
+    /// Stamps the two standard context fields onto an operation span. The
+    /// one owner of what "standard context" means, so a new field lands here
+    /// rather than at each span.
+    pub(crate) fn record_trace_context(&self, span: &tracing::Span) {
         span.record("mode", self.trace_mode());
         span.record("store_kind", self.trace_store_kind());
     }
@@ -209,11 +211,9 @@ impl ReadCore {
                 (FEATURE_ATTRIBUTES.to_owned(), true),
                 // The three transfer keys are the host's to answer, not
                 // this runtime's: an embedded engine signs nothing and
-                // reads its own bytes. A serving host that can presign
-                // replaces all three together.
-                (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), false),
-                (FEATURE_UPLOADS_DIRECT_MULTIPART.to_owned(), false),
-                (FEATURE_DOWNLOADS_DIRECT_GET.to_owned(), false),
+                // reads its own bytes, so it leaves them absent, which is
+                // how the API spells unsupported. A serving host that can
+                // presign adds all three together.
             ]),
             limits: {
                 let mut limits = PaginationPolicy::default().capability_limits();

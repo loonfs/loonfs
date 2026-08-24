@@ -423,8 +423,6 @@ fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> Na
         Arc::downgrade(&runtime.bits),
         Weak::new(),
         TEST_STANDALONE_PACING,
-        runtime.core.trace_mode(),
-        runtime.core.trace_store_kind(),
     )
 }
 

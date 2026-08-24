@@ -6,6 +6,7 @@
 
 use crate::fs::{should_invalidate_after_result, ReadCore};
 use crate::metrics::RuntimeInstruments;
+use crate::trace::phase_span;
 use crate::{CommitResponse, CoreError, NamespaceId, Recency, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
@@ -440,16 +441,8 @@ impl ReadCore {
     /// state — a namespace publisher's WAL tail projection — is stale for
     /// exactly the same reasons, so a caller that owns a publication service
     /// drops that too; see `FsWriter::invalidate_namespace`.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.phase",
-        skip_all,
-        fields(
-            phase = "update_cache",
-            namespace_id = %namespace_id,
-        )
-    )]
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
+        let _span = phase_span!(self, "update_cache", namespace_id).entered();
         self.inner
             .control_cache()
             .invalidate_namespace(namespace_id);

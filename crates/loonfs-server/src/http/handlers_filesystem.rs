@@ -18,7 +18,7 @@ use futures::Stream;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
     payload_class, ErrorCode, ListChangesOptions, ListPathEntriesOptions, StatPathOptions,
-    TraceStoreKind,
+    TraceMode, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -522,7 +522,7 @@ pub(super) async fn create_commit(
         let span = tracing::debug_span!(
             "loonfs.put",
             operation = "put",
-            mode = "remote",
+            mode = TraceMode::Remote.as_str(),
             store_kind = TraceStoreKind::from(state.config.store.kind()).as_str(),
             payload_class,
         );
@@ -611,7 +611,6 @@ pub(super) fn required_query_param(
 ) -> Result<String, ApiResponseError> {
     value.ok_or_else(|| {
         ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
             &format!("missing required query parameter `{name}`"),
         )
@@ -628,7 +627,6 @@ pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool,
         "true" => Ok(true),
         "false" => Ok(false),
         other => Err(ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
             &format!("invalid {name} `{other}`: expected `true` or `false`"),
         )
@@ -638,6 +636,17 @@ pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool,
 
 pub(super) fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
     parse_public_ordinal("revision_no", value, RevisionNo::parse)
+}
+
+/// One template for a rejected path id: names the parameter, echoes the
+/// rejected input, and states the rule it broke. `Debug` on the value quotes
+/// and escapes it, so hostile path bytes cannot mangle a log line.
+pub(super) fn invalid_path_id_error(name: &str, value: &str, reason: &str) -> ApiResponseError {
+    ApiResponseError::new(
+        ErrorCode::InvalidRequest,
+        &format!("invalid {name} {value:?}: {reason}"),
+    )
+    .with_param(name)
 }
 
 pub(super) fn parse_public_ordinal<T>(
@@ -657,7 +666,6 @@ fn public_ordinal_response_error(
     error: PublicOrdinalRangeError,
 ) -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::BAD_REQUEST,
         ErrorCode::InvalidRequest,
         &format!("invalid {name} `{value}`: {error}"),
     )
@@ -676,7 +684,6 @@ pub(super) fn resolve_page_limit(
 fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
     value.parse::<u32>().map_err(|error| {
         ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
             &format!("invalid limit `{value}`: {error}"),
         )
@@ -695,21 +702,11 @@ pub(super) fn decode_optional_cursor<C: loonfs_api::PageCursor>(
 }
 
 fn limit_response_error(error: LimitError) -> ApiResponseError {
-    ApiResponseError::new(
-        StatusCode::BAD_REQUEST,
-        ErrorCode::InvalidRequest,
-        &error.to_string(),
-    )
-    .with_param("limit")
+    ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("limit")
 }
 
 fn page_cursor_response_error(error: PageCursorError) -> ApiResponseError {
-    ApiResponseError::new(
-        StatusCode::BAD_REQUEST,
-        ErrorCode::InvalidRequest,
-        &error.to_string(),
-    )
-    .with_param("cursor")
+    ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("cursor")
 }
 
 #[cfg(test)]

@@ -2,12 +2,12 @@
 //! handlers.
 
 use super::error::ApiResponseError;
-use super::handlers_filesystem::{parse_public_ordinal, resolve_page_limit};
+use super::handlers_filesystem::{invalid_path_id_error, parse_public_ordinal, resolve_page_limit};
 use super::{
     authorize, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson,
 };
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::Json;
 use loonfs::{CheckpointPageCursor, CreateNamespaceOptions, DeleteNamespaceOptions};
 #[cfg(feature = "openapi")]
@@ -447,12 +447,8 @@ pub(super) async fn list_checkpoints(
         .map(|cursor| decode_namespace_cursor::<CheckpointPageCursor>(cursor, &namespace_id))
         .transpose()
         .map_err(|error| {
-            ApiResponseError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                &error.to_string(),
-            )
-            .with_param("cursor")
+            ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string())
+                .with_param("cursor")
         })?;
     let response = state
         .admin
@@ -516,14 +512,8 @@ pub(super) struct CheckpointPathParams {
 }
 
 fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
-    CheckpointId::parse(value).map_err(|error| {
-        ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            &format!("invalid checkpoint_id `{value}`: {error}"),
-        )
-        .with_param("checkpoint_id")
-    })
+    CheckpointId::parse(value)
+        .map_err(|error| invalid_path_id_error("checkpoint_id", value, error.reason()))
 }
 
 #[cfg_attr(

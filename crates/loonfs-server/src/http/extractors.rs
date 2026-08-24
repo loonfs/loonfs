@@ -20,7 +20,6 @@ use tokio::sync::OwnedSemaphorePermit;
 /// `shutting_down` (drain) and `commit_queue_full` (publisher backpressure).
 pub(super) fn server_busy_error(what: &str) -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
         ErrorCode::ServerBusy,
         &format!("the server is at its concurrency limit for {what}; retry shortly"),
     )
@@ -56,7 +55,6 @@ pub(super) fn authorize(
         Ok(())
     } else {
         Err(ApiResponseError::new(
-            StatusCode::UNAUTHORIZED,
             ErrorCode::Unauthorized,
             "missing or invalid bearer token",
         ))
@@ -115,7 +113,6 @@ where
 
 fn invalid_path_params(rejection: &PathRejection) -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::BAD_REQUEST,
         ErrorCode::InvalidRequest,
         &format!("invalid path parameters: {rejection}"),
     )
@@ -184,7 +181,6 @@ where
         serde_urlencoded::Deserializer::new(form_urlencoded::parse(query.as_bytes()));
     serde_path_to_error::deserialize(deserializer).map_err(|error| {
         let response = ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
             &format!("invalid query parameters: {}", error.inner()),
         );
@@ -227,7 +223,6 @@ where
         }
         Err(rejection) => {
             return Err(ApiResponseError::new(
-                StatusCode::BAD_REQUEST,
                 ErrorCode::InvalidRequest,
                 &rejection.body_text(),
             ));
@@ -245,7 +240,6 @@ where
         let param = json_pointer(error.path())
             .and_then(|pointer| refine_internally_tagged_path(body, pointer));
         let response = ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
             &format!("invalid JSON request body: {}", error.inner()),
         );
@@ -258,7 +252,6 @@ where
     // single field can be blamed for, so this arm carries no param.
     deserializer.end().map_err(|error| {
         ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
             &format!("invalid JSON request body: {error}"),
         )
@@ -404,7 +397,6 @@ where
             Err(body_too_large)
         }
         Err(rejection) => Err(ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
             &format!("request body unreadable: {}", rejection.body_text()),
         )),
@@ -527,7 +519,6 @@ impl UploadStreamOutcome {
         {
             Some(UploadStreamAbort::TooLarge) => Some(upload_body_too_large_error()),
             Some(UploadStreamAbort::Unreadable(error)) => Some(ApiResponseError::new(
-                StatusCode::BAD_REQUEST,
                 ErrorCode::InvalidRequest,
                 &format!("request body unreadable: {error}"),
             )),
@@ -581,7 +572,6 @@ fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
 /// and the optional `direct_put` path that bypasses proxied buffering.
 fn upload_body_too_large_error() -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::PAYLOAD_TOO_LARGE,
         ErrorCode::ContentTooLarge,
         "request body exceeds this deployment's limit; check the \
          `upload.max_content_bytes` capability limit, and use `direct_put` \
@@ -592,7 +582,6 @@ fn upload_body_too_large_error() -> ApiResponseError {
 /// 413 for ordinary JSON routes that retain the framework's default bound.
 fn json_body_too_large_error() -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::PAYLOAD_TOO_LARGE,
         ErrorCode::ContentTooLarge,
         "JSON request body exceeds this route's body limit",
     )
@@ -601,7 +590,6 @@ fn json_body_too_large_error() -> ApiResponseError {
 /// Returns a 413 error for an upload request that exceeds its route's limit.
 fn upload_control_body_too_large_error(max_bytes: usize) -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::PAYLOAD_TOO_LARGE,
         ErrorCode::ContentTooLarge,
         &format!("upload-control request body exceeds this route's limit of {max_bytes} bytes"),
     )
@@ -610,7 +598,6 @@ fn upload_control_body_too_large_error(max_bytes: usize) -> ApiResponseError {
 /// Returns a 413 error when optional JSON exceeds its body-size limit.
 fn optional_json_body_too_large_error() -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::PAYLOAD_TOO_LARGE,
         ErrorCode::ContentTooLarge,
         &format!(
             "JSON request body exceeds this route's limit of {MAX_OPTIONAL_JSON_BODY_BYTES} bytes"

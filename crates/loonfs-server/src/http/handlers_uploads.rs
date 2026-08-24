@@ -1,13 +1,14 @@
 //! Upload session handlers plus the presign and content-token helpers
 //! backing them.
 
-use super::error::{status_for_core_error_code, ApiResponseError};
+use super::error::ApiResponseError;
+use super::handlers_filesystem::invalid_path_id_error;
 use super::{
     authorize, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, UploadBodyBytes,
     UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::Json;
 use loonfs::content_tokens::{
     mint_content_token, CompletedUploadReceipt, ContentToken, ContentTokenError,
@@ -169,7 +170,6 @@ async fn begin_direct_put_upload(
     let max_content_bytes = issuer.max_content_bytes();
     if let Some(size_bytes) = size_bytes.filter(|size_bytes| *size_bytes > max_content_bytes) {
         return Err(ApiResponseError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
             ErrorCode::ContentTooLarge,
             &format!(
                 "this deployment's provider accepts at most {max_content_bytes} bytes in one \
@@ -356,11 +356,7 @@ pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError 
         ObjectStoreError::PermissionDenied { .. } => (ErrorCode::StoragePermissionDenied, None),
         _ => (ErrorCode::ServerError, None),
     };
-    let response = ApiResponseError::new(
-        status_for_core_error_code(code),
-        code,
-        &error.public_message(),
-    );
+    let response = ApiResponseError::new(code, &error.public_message());
     if let Some(param) = param {
         response.with_param(param)
     } else {
@@ -453,7 +449,6 @@ fn is_forged_content_token(error: &ContentTokenError) -> bool {
 
 fn content_token_error(error: ContentTokenError) -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
         ErrorCode::ServerError,
         &format!("failed to mint content token: {error}"),
     )
@@ -478,14 +473,12 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
             ApiResponseError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::ServerError,
                 &format!("system time is before unix epoch: {error}"),
             )
         })?;
     u64::try_from(duration.as_millis()).map_err(|error| {
         ApiResponseError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::ServerError,
             &format!("system time overflowed milliseconds: {error}"),
         )
@@ -617,15 +610,15 @@ fn decode_completion_body(
     let invalid = |error: serde_json::Error| {
         format!(
             "request body is not valid JSON for {} completion: {error}",
-            upload_mode_name(mode)
+            mode.as_str()
         )
     };
     let request = serde_json::from_slice::<CompleteUploadRequest>(body).map_err(invalid)?;
     if request.mode() != mode {
         return Err(format!(
             "completion request mode `{}` does not match stored upload mode `{}`",
-            upload_mode_name(request.mode()),
-            upload_mode_name(mode)
+            request.mode().as_str(),
+            mode.as_str()
         ));
     }
 
@@ -637,14 +630,6 @@ fn decode_completion_body(
         CompleteUploadRequest::DirectMultipart { content, parts } => Ok(
             ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
         ),
-    }
-}
-
-fn upload_mode_name(mode: UploadMode) -> &'static str {
-    match mode {
-        UploadMode::ServiceProxied => "service_proxied",
-        UploadMode::DirectPut => "direct_put",
-        UploadMode::DirectMultipart => "direct_multipart",
     }
 }
 
@@ -869,12 +854,6 @@ pub(super) async fn abort_upload(
 }
 
 fn parse_upload_id(value: &str) -> Result<UploadId, ApiResponseError> {
-    UploadId::parse(value).map_err(|error| {
-        ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            &error.to_string(),
-        )
-        .with_param("upload_id")
-    })
+    UploadId::parse(value)
+        .map_err(|error| invalid_path_id_error("upload_id", value, error.reason()))
 }

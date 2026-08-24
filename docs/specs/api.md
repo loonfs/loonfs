@@ -82,9 +82,6 @@ either way.
     "core.namespaces.fork": true,
     "core.namespaces.delete": true,
     "core.attributes": true,
-    "core.uploads.direct_put": false,
-    "core.uploads.direct_multipart": false,
-    "core.downloads.direct_get": false,
     "query.grep": true
   },
   "limits": {

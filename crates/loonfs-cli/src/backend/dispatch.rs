@@ -333,10 +333,11 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
+        limit: Option<u32>,
     ) -> Result<GrepResponse, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.grep(namespace_id, request).await,
-            Self::Remote(target) => Ok(target.client.grep(namespace_id, request).await?),
+            Self::Embedded(target) => target.backend.grep(namespace_id, request, limit).await,
+            Self::Remote(target) => Ok(target.client.grep(namespace_id, request, limit).await?),
         }
     }
 

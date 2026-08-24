@@ -16,7 +16,9 @@ use foyer::{
     BlockEngineConfig, Compression, DeviceBuilder, FsDeviceBuilder, HybridCache,
     HybridCacheBuilder, HybridCachePolicy, PsyncIoEngineConfig, RecoverMode,
 };
-use loonfs::metrics::{CounterHandle, MetricsRecorder};
+use loonfs::metrics::{
+    CounterHandle, MetricsRecorder, RESULT_ERROR, RESULT_HIT, RESULT_MISS, RESULT_OK,
+};
 use loonfs::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
     StoredMetadataBlockKind,
@@ -571,17 +573,17 @@ impl LocalCacheMetrics {
             hits: per_kind(
                 "loonfs.local_cache.gets",
                 "Local block cache lookups, by block kind and outcome",
-                "hit",
+                RESULT_HIT,
             ),
             misses: per_kind(
                 "loonfs.local_cache.gets",
                 "Local block cache lookups, by block kind and outcome",
-                "miss",
+                RESULT_MISS,
             ),
             get_failures: per_kind(
                 "loonfs.local_cache.gets",
                 "Local block cache lookups, by block kind and outcome",
-                "failed",
+                RESULT_ERROR,
             ),
             inserts: BLOCK_KINDS.map(|kind| {
                 recorder.register_counter(
@@ -598,8 +600,8 @@ impl LocalCacheMetrics {
                     &[("kind", kind_label(kind))],
                 )
             }),
-            closes_clean: closes("clean"),
-            closes_failed: closes("failed"),
+            closes_clean: closes(RESULT_OK),
+            closes_failed: closes(RESULT_ERROR),
         }
     }
 }

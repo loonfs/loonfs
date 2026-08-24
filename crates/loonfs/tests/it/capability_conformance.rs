@@ -49,6 +49,16 @@ fn is_grep_key(key: &str) -> bool {
     key.starts_with("query.") || key.starts_with("admin.grep.")
 }
 
+/// A feature only a serving host can answer: the three direct transports are
+/// properties of the deployment's object store, so these handles leave them
+/// absent and the host adds them when its store can presign.
+fn is_host_transfer_key(key: &str) -> bool {
+    matches!(
+        key,
+        "core.uploads.direct_put" | "core.uploads.direct_multipart" | "core.downloads.direct_get"
+    )
+}
+
 fn spec_section<'a>(spec: &'a str, start: &str, end: &str) -> &'a str {
     spec.split(start)
         .nth(1)
@@ -106,7 +116,7 @@ fn advertised_features_match_the_spec_feature_registry() {
 
     let runtime_registry: BTreeSet<String> = registry
         .into_iter()
-        .filter(|key| !is_grep_key(key))
+        .filter(|key| !is_grep_key(key) && !is_host_transfer_key(key))
         .collect();
     let advertised: BTreeSet<String> = embedded_capabilities().features.into_keys().collect();
     assert_eq!(

@@ -180,9 +180,7 @@ impl FsWriter {
         )
     )]
     pub async fn flush_background(&self) -> Result<()> {
-        let span = tracing::Span::current();
-        span.record("mode", self.core.trace_mode());
-        span.record("store_kind", self.core.trace_store_kind());
+        self.core.record_trace_context(&tracing::Span::current());
         self.bits.maintenance.drain().await
     }
 
@@ -205,9 +203,7 @@ impl FsWriter {
         )
     )]
     pub async fn shutdown(&self) -> Result<()> {
-        let span = tracing::Span::current();
-        span.record("mode", self.core.trace_mode());
-        span.record("store_kind", self.core.trace_store_kind());
+        self.core.record_trace_context(&tracing::Span::current());
         self.close_admission_for_shutdown();
         self.publisher.drain().await?;
         self.bits.maintenance.drain().await
@@ -429,8 +425,6 @@ impl FsWriterBuilder {
             core.clone(),
             Arc::downgrade(&bits),
             std::time::Duration::from_millis(self.min_publish_interval_ms),
-            core.trace_mode(),
-            core.trace_store_kind(),
         );
         // The runtime's own executors register last: they run as an admin
         // over this writer's parts, so both have to exist first.

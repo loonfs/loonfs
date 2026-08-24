@@ -9,8 +9,9 @@
 //! [`FsWriter::shutdown`](crate::FsWriter::shutdown).
 
 use crate::fs::{ReadCore, WriterBits};
-use crate::metrics::PublishOutcome;
+use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
+use crate::trace::phase_span;
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeCacheConfig, RuntimeError,
 };
@@ -82,8 +83,6 @@ pub struct PublisherRegistry {
     /// without ever leaving the caches or store dangling.
     writer: Weak<WriterBits>,
     min_publish_interval: Duration,
-    trace_mode: &'static str,
-    trace_store_kind: &'static str,
 }
 
 /// State shared by all publishers in this registry: admission status,
@@ -301,8 +300,6 @@ impl PublisherRegistry {
         read_core: ReadCore,
         writer: Weak<WriterBits>,
         min_publish_interval: Duration,
-        trace_mode: &'static str,
-        trace_store_kind: &'static str,
     ) -> Self {
         Self {
             shared: Arc::new(RegistryShared {
@@ -316,8 +313,6 @@ impl PublisherRegistry {
             read_core,
             writer,
             min_publish_interval,
-            trace_mode,
-            trace_store_kind,
         }
     }
 
@@ -385,8 +380,6 @@ impl PublisherRegistry {
                     self.writer.clone(),
                     Arc::downgrade(&self.shared),
                     self.min_publish_interval,
-                    self.trace_mode,
-                    self.trace_store_kind,
                 )
             })
             .clone())
@@ -460,8 +453,6 @@ struct NamespacePublisher {
     /// registry is gone keeps serving, with an unowned worker.
     shared: Weak<RegistryShared>,
     min_publish_interval: Duration,
-    trace_mode: &'static str,
-    trace_store_kind: &'static str,
 }
 
 /// Commit engine and writer session retained by one namespace publisher.
@@ -552,8 +543,6 @@ impl NamespacePublisher {
         writer: Weak<WriterBits>,
         shared: Weak<RegistryShared>,
         min_publish_interval: Duration,
-        trace_mode: &'static str,
-        trace_store_kind: &'static str,
     ) -> Self {
         Self {
             namespace_id,
@@ -572,8 +561,6 @@ impl NamespacePublisher {
             })),
             shared,
             min_publish_interval,
-            trace_mode,
-            trace_store_kind,
         }
     }
 
@@ -799,8 +786,8 @@ impl NamespacePublisher {
                         .publisher_batch(batch.candidates.len());
                     tracing::info!(
                         phase = "batch_collect",
-                        mode = self.trace_mode,
-                        store_kind = self.trace_store_kind,
+                        mode = self.read_core.trace_mode(),
+                        store_kind = self.read_core.trace_store_kind(),
                         batch_size = usize_to_u64(batch.candidates.len()),
                         queue_depth_start = usize_to_u64(queue_depth_start),
                         queue_depth_end = usize_to_u64(batch.candidates.len()),
@@ -885,21 +872,20 @@ impl NamespacePublisher {
         for candidate in &candidates {
             tracing::info!(
                 phase = "wait_for_batch",
-                mode = self.trace_mode,
-                store_kind = self.trace_store_kind,
-                result = "ok",
+                mode = self.read_core.trace_mode(),
+                store_kind = self.read_core.trace_store_kind(),
+                result = RESULT_OK,
                 wait_ms = elapsed_ms_from(candidate.enqueued_at, selected_at)
             );
         }
 
-        let publish_span = tracing::debug_span!(
-            "loonfs.phase",
-            phase = "batch_publish",
-            mode = self.trace_mode,
-            store_kind = self.trace_store_kind,
+        let publish_span = phase_span!(
+            self.read_core,
+            "batch_publish",
+            self.namespace_id,
             batch_size = usize_to_u64(candidates.len()),
             result = tracing::field::Empty,
-            retry_count = tracing::field::Empty
+            retry_count = tracing::field::Empty,
         );
         let (results, retry_count) = async {
             let mut results = Vec::new();
@@ -1133,8 +1119,8 @@ impl NamespacePublisher {
             self.read_core.instruments().publisher_publish(outcome);
             tracing::info!(
                 phase = "wait_for_result",
-                mode = self.trace_mode,
-                store_kind = self.trace_store_kind,
+                mode = self.read_core.trace_mode(),
+                store_kind = self.read_core.trace_store_kind(),
                 result = outcome.as_str(),
                 wait_ms
             );
@@ -1151,8 +1137,8 @@ impl NamespacePublisher {
             .publisher_queue_depth(queue_depth);
         tracing::info!(
             phase = "enqueue",
-            mode = self.trace_mode,
-            store_kind = self.trace_store_kind,
+            mode = self.read_core.trace_mode(),
+            store_kind = self.read_core.trace_store_kind(),
             queue_depth = usize_to_u64(queue_depth),
             reason
         );

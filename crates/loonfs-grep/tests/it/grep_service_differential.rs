@@ -3,14 +3,14 @@
 
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
-use crate::common::{control, grep_with, GrepHost};
+use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
     DestinationBehavior, FsAdmin, FsReader, FsWriter, MaintenancePlan, MetadataMaintenanceOptions,
     MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore,
 };
-use loonfs_api::{AbsolutePath, GrepRequest, GrepResponse};
+use loonfs_api::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
 use loonfs_grep::root::load_grep_root;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepReorganizeOutcome, GrepService, GrepWorker};
@@ -26,7 +26,6 @@ fn request(pattern: &str) -> GrepRequest {
         case_insensitive: false,
         path_prefix: None,
         cursor: None,
-        limit: None,
         allow_stale: false,
         allow_scan: false,
     }
@@ -56,12 +55,21 @@ impl ServiceHarness {
     }
 
     async fn result(&self, grep_request: &GrepRequest) -> loonfs_grep::Result<GrepResponse> {
+        self.page(grep_request, default_page_limit()).await
+    }
+
+    async fn page(
+        &self,
+        grep_request: &GrepRequest,
+        limit: EffectiveLimit,
+    ) -> loonfs_grep::Result<GrepResponse> {
         grep_with(
             &self.service,
             &self.reader,
             &self.store,
             &self.namespace_id,
             grep_request,
+            limit,
         )
         .await
     }
@@ -567,15 +575,15 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     assert!(empty.next_cursor.is_none());
 
     let mut paged_request = request("budget-needle");
-    paged_request.limit = Some(17);
     let mut pages = 0usize;
     let mut matches = 0usize;
     let mut matched_paths = BTreeSet::new();
     let mut cursors = BTreeSet::new();
     loop {
         let page = harness
-            .success("multi-page cursor walk", &paged_request)
-            .await;
+            .page(&paged_request, page_limit(17))
+            .await
+            .expect("multi-page cursor walk");
         pages += 1;
         matches += page.matches.len();
         assert_eq!(page.namespace_id, namespace_id);

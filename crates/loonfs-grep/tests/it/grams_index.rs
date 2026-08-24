@@ -3,16 +3,14 @@
 
 //! Tests grep through runtime handles and direct `GrepWorker` operations.
 
-use crate::common::{is_content_object, GrepHost};
+use crate::common::{default_page_limit, is_content_object, page_limit, GrepHost};
 use loonfs::publish::{CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
     NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::v0::GrepIndexLifecycle;
-use loonfs_api::{
-    decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest, DEFAULT_MAX_PAGE_LIMIT,
-};
+use loonfs_api::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
@@ -33,7 +31,6 @@ fn request(pattern: &str) -> GrepRequest {
         case_insensitive: false,
         path_prefix: None,
         cursor: None,
-        limit: None,
         allow_stale: false,
         allow_scan: false,
     }
@@ -120,24 +117,9 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .await
         .expect("write bravo");
 
-    // Request validation precedes feature materialization; snapshot
-    // construction must preserve that error ordering.
-    for limit in [0, DEFAULT_MAX_PAGE_LIMIT + 1] {
-        let mut invalid_limit = request("needle");
-        invalid_limit.limit = Some(limit);
-        let error = host
-            .grep(&namespace_id, &invalid_limit)
-            .await
-            .expect_err("invalid limit must win before the missing feature");
-        let GrepError::Runtime(core) = &error else {
-            panic!("expected a grep core passthrough, got {error:?}");
-        };
-        assert_eq!(core.code(), ErrorCode::InvalidRequest);
-    }
-
     // Before enablement, grep names the missing data half.
     let error = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect_err("grep without the feature must be refused");
     assert!(matches!(error, GrepError::NotEnabled));
@@ -156,7 +138,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     }
 
     let response = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect("grep after steps");
     assert_eq!(response.matches.len(), 1);
@@ -174,13 +156,13 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .await
         .expect("write charlie");
     let response = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect("grep with tail");
     assert_eq!(response.matches.len(), 2);
     drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect("grep after catch-up step");
     assert_eq!(response.matches.len(), 2);
@@ -192,7 +174,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .expect("disable");
     assert_eq!(disabled.lifecycle, GrepIndexLifecycle::Disabled);
     let error = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect_err("grep after disable must be refused");
     assert!(matches!(error, GrepError::NotEnabled));
@@ -251,7 +233,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         loonfs_grep::root::GrepIndexStatus::Backfilling { .. }
     ));
     let error = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect_err("background metadata work must not materialize grep");
     assert!(matches!(error, GrepError::Backfilling));
@@ -265,7 +247,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
     let mut stale = request("needle");
     stale.allow_stale = true;
     let response = host
-        .grep(&namespace_id, &stale)
+        .grep(&namespace_id, &stale, default_page_limit())
         .await
         .expect("stale grep after explicit worker catch-up");
     assert_eq!(response.matches.len(), 1);
@@ -558,11 +540,10 @@ async fn collect_grep_paths(
     pattern: &str,
 ) -> BTreeSet<String> {
     let mut request = request(pattern);
-    request.limit = Some(1_000);
     let mut paths = BTreeSet::new();
     loop {
         let response = host
-            .grep(namespace_id, &request)
+            .grep(namespace_id, &request, page_limit(1_000))
             .await
             .expect("grep bounded atomic commit");
         paths.extend(
@@ -615,7 +596,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
         expected_paths.push(path);
 
         let response = host
-            .grep(&namespace_id, &request("needle"))
+            .grep(&namespace_id, &request("needle"), default_page_limit())
             .await
             .expect("grep");
         let mut matched: Vec<String> = response
@@ -701,7 +682,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
 
     let before_first = raw_store.count(OperationClass::Read);
     let first = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect("first grep");
     assert_eq!(first.matches.len(), 1);
@@ -712,7 +693,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     );
 
     let second = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect("second grep");
     assert_eq!(second.matches, first.matches);
@@ -780,7 +761,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
     let healthy = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect("grep before the fault");
     assert_eq!(healthy.matches.len(), 3);
@@ -794,7 +775,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     // An unlimited page walks past alpha into bravo, so the failed read
     // fails that page, exactly as the serial scan did.
     let error = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect_err("a reached candidate's failed read must fail its page");
     let GrepError::Runtime(core) = &error else {
@@ -805,10 +786,9 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     // With a one-match limit, alpha's second match fills the page before
     // the walk reaches bravo: the speculative failed read is discarded and
     // the full page comes back with a cursor.
-    let mut first_page = request("needle");
-    first_page.limit = Some(1);
+    let first_page = request("needle");
     let response = host
-        .grep(&namespace_id, &first_page)
+        .grep(&namespace_id, &first_page, page_limit(1))
         .await
         .expect("a page that fills before the failed candidate must succeed");
     assert_eq!(response.matches.len(), 1);
@@ -821,10 +801,9 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     // The next page's walk reaches bravo and surfaces the read error at
     // the position the serial scan would have.
     let mut second_page = request("needle");
-    second_page.limit = Some(1);
     second_page.cursor = Some(cursor);
     let error = host
-        .grep(&namespace_id, &second_page)
+        .grep(&namespace_id, &second_page, page_limit(1))
         .await
         .expect_err("the deferred read error must surface on the next page");
     let GrepError::Runtime(core) = &error else {
@@ -907,10 +886,9 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 
     raw_store.reset();
 
-    let mut first_page = request("needle");
-    first_page.limit = Some(1);
+    let first_page = request("needle");
     let page_one = host
-        .grep(&namespace_id, &first_page)
+        .grep(&namespace_id, &first_page, page_limit(1))
         .await
         .expect("first page");
     assert_eq!(page_one.matches.len(), 1);
@@ -930,10 +908,9 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     assert_eq!(cursor.last_byte_offset, u64::MAX);
 
     let mut second_page = request("needle");
-    second_page.limit = Some(1);
     second_page.cursor = Some(cursor_token);
     let page_two = host
-        .grep(&namespace_id, &second_page)
+        .grep(&namespace_id, &second_page, page_limit(1))
         .await
         .expect("second page");
     assert_eq!(page_two.matches.len(), 1);
@@ -1032,7 +1009,7 @@ async fn worker_and_service_share_decoded_index_blocks() {
 
     let gets_before_query = raw_store.count(OperationClass::Read);
     let result = host
-        .grep(&namespace_id, &request("needle"))
+        .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect("grep after worker load");
     assert_eq!(result.matches.len(), 8);

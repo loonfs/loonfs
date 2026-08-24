@@ -6,6 +6,7 @@
 //! checkpoint calls, and its hosts drive it.
 
 use crate::maintenance_runner::CompactionStart;
+use crate::trace::phase_span;
 use crate::FsAdmin;
 use crate::NamespaceDiagnostics;
 use crate::{
@@ -19,6 +20,7 @@ use loonfs_api::PageRequest;
 use loonfs_core::cache::load_namespace_flush_basis;
 use loonfs_core::CheckpointPageCursor;
 use tokio::time::Instant;
+use tracing::Instrument;
 
 #[cfg(test)]
 mod tests;
@@ -835,23 +837,18 @@ impl FsAdmin {
     }
 
     /// Shared implementation for metadata maintenance and [`Self::flush_wal`].
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.phase",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            phase = "wal_flush",
-            namespace_id = %namespace_id,
-        )
-    )]
     async fn run_wal_flush(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
-        let result = self
-            .engine(namespace_id)
-            .flush_wal()
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        async {
+            let result = self
+                .engine(namespace_id)
+                .flush_wal()
+                .await
+                .map_err(RuntimeError::from);
+            self.finish_namespace_mutation(namespace_id, result)
+                .inspect_err(|error| tracing::debug!(%error))
+        }
+        .instrument(phase_span!(self.core, "wal_flush", namespace_id))
+        .await
     }
 
     /// The one implementation both the step and

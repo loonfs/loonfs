@@ -32,6 +32,19 @@ pub enum UploadMode {
     DirectMultipart,
 }
 
+impl UploadMode {
+    /// Returns the mode's wire spelling, the one `rename_all` above serializes.
+    /// Messages that quote a mode back to a client read it from here so they
+    /// cannot name a spelling the API no longer accepts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ServiceProxied => "service_proxied",
+            Self::DirectPut => "direct_put",
+            Self::DirectMultipart => "direct_multipart",
+        }
+    }
+}
+
 /// Request to start an upload session, tagged by transport mode.
 ///
 /// Each variant contains only fields valid for that transport, so invalid

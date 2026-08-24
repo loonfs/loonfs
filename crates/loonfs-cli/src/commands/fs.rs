@@ -350,7 +350,6 @@ pub(crate) async fn run_filesystem_grep(
         case_insensitive: args.ignore_case,
         path_prefix,
         cursor: args.cursor.clone(),
-        limit: None,
         allow_stale: args.allow_stale,
         allow_scan: args.allow_scan,
     };
@@ -360,10 +359,9 @@ pub(crate) async fn run_filesystem_grep(
     let stdout = io::stdout();
     let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
     let (namespace_id, head_seq, built_through_seq, next_cursor) = loop {
-        request.limit = plan.request_size();
         let response = context
             .target
-            .grep(&context.namespace, &request)
+            .grep(&context.namespace, &request, plan.request_size())
             .await
             .map_err(|error| context.fail(kind, error))?;
         let snapshot = (

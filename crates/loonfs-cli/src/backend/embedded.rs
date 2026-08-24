@@ -287,11 +287,12 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
+        limit: Option<u32>,
     ) -> Result<GrepResponse, BackendError> {
         let store = self.writer.object_store();
         let reads = NamespaceReads::new(&self.reader, namespace_id);
         self.grep
-            .query(request, &reads, &store)
+            .query(request, resolve_cli_page_limit(limit)?, &reads, &store)
             .await
             .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
     }

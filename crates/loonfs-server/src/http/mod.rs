@@ -30,7 +30,7 @@ pub use self::serve::{
 };
 pub use self::tls::TlsConfigError;
 
-use self::error::{status_for_core_error_code, ApiResponseError, ServedErrorCode};
+use self::error::{ApiResponseError, ServedErrorCode};
 use self::extractors::{
     acquire_download_permit, authorize, AppJson, AppPath, AppQuery, NamespaceIdPath, NoQuery,
     OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
@@ -147,7 +147,6 @@ async fn with_request_deadline(request_deadline_ms: u64, request: Request, next:
     {
         Ok(response) => response,
         Err(_) => ApiResponseError::new(
-            status_for_core_error_code(ErrorCode::DeadlineExceeded),
             ErrorCode::DeadlineExceeded,
             &format!(
                 "the server cancelled the request at the configured deadline; \
@@ -418,7 +417,6 @@ fn router(state: AppState) -> Router {
 /// matched handler.
 async fn route_not_found() -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::NOT_FOUND,
         ErrorCode::RouteNotFound,
         "no v0 route matches this path; see the API spec for the served surface",
     )
@@ -427,7 +425,6 @@ async fn route_not_found() -> ApiResponseError {
 /// 405 for matched paths hit with an unserved method.
 async fn method_not_allowed() -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::METHOD_NOT_ALLOWED,
         ErrorCode::MethodNotAllowed,
         "this path exists but does not serve this HTTP method",
     )
@@ -483,7 +480,6 @@ async fn get_health() -> &'static str {
 async fn get_readiness(State(state): State<AppState>) -> Result<&'static str, ApiResponseError> {
     if state.writer.is_shutting_down() {
         return Err(ApiResponseError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::ShuttingDown,
             "the server is shutting down and no longer admits new work",
         ));

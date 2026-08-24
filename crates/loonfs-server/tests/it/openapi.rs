@@ -12,6 +12,7 @@ const PROXY_OPENAPI_JSON_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../docs/specs/openapi-proxy.json"
 );
+const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/api.md");
 const OPENAPI_PATH_SOURCES: &[&str] = &[
     include_str!("../../src/http/mod.rs"),
     include_str!("../../src/http/handlers_downloads.rs"),
@@ -675,6 +676,49 @@ fn every_registered_operation_publishes_its_retry_class() {
         .map(|(operation_id, retry_class)| (*operation_id, retry_class.as_str()))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(published, expected);
+}
+
+#[test]
+fn the_api_spec_retry_table_matches_the_registered_retry_classes() {
+    let spec = std::fs::read_to_string(API_SPEC_PATH).expect("read docs/specs/api.md");
+    let table = spec
+        .split("The table below lists the retry class for every v0 operation.")
+        .nth(1)
+        .expect("api.md retry table intro");
+    let mut documented = table
+        .lines()
+        .skip_while(|line| !line.starts_with("| Purpose "))
+        .skip(2)
+        .take_while(|line| line.starts_with('|'))
+        .map(|line| {
+            let mut cells = line.split(" | ").skip(1);
+            let operation_id = cells.next().expect("operation id cell");
+            let retry_class = cells.next().expect("retry class cell");
+            (
+                operation_id.trim_matches('`').to_owned(),
+                retry_class.trim_matches('`').to_owned(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert!(
+        !documented.is_empty(),
+        "no rows parsed from the api.md retry table"
+    );
+
+    for (operation_id, retry_class) in openapi_postprocess::OPERATION_RETRY_CLASSES {
+        let class = documented.remove(*operation_id).unwrap_or_else(|| {
+            panic!("`{operation_id}` is registered but missing from the api.md retry table")
+        });
+        assert_eq!(
+            retry_class.as_str(),
+            class,
+            "retry class for `{operation_id}` disagrees with the api.md retry table"
+        );
+    }
+    assert!(
+        documented.is_empty(),
+        "api.md documents retry classes for operations this build does not register: {documented:?}"
+    );
 }
 
 #[test]

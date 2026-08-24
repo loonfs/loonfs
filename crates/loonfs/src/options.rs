@@ -88,13 +88,7 @@ impl MaintenancePlan {
                 .map(metadata_options_from_request)
                 .transpose()?,
             advance_retention: request.retention.is_some(),
-            gc: request.gc.map(|request| {
-                let mut config = gc_config_from_request(request);
-                if config.max_objects.is_none() {
-                    config.max_objects = Some(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
-                }
-                config
-            }),
+            gc: request.gc.map(gc_config_from_request),
         })
     }
 }
@@ -219,19 +213,18 @@ mod tests {
     }
 
     #[test]
-    fn explicit_gc_stays_unbounded_while_step_gc_gets_the_default_budget() {
+    fn a_gc_request_translates_without_resolving_its_budget() {
         let explicit = gc_config_from_request(GcRequest::default());
         assert_eq!(explicit.max_objects, None);
         assert_eq!(explicit.cursor, None);
 
+        // The step is what bounds a GC pass, so a plan built from a request
+        // hands it the same absent budget every other plan producer does.
         let step = plan(MaintenanceStepRequest {
             gc: Some(GcRequest::default()),
             ..MaintenanceStepRequest::default()
         });
-        assert_eq!(
-            step.gc.expect("GC opted in").max_objects,
-            Some(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS)
-        );
+        assert_eq!(step.gc.expect("GC opted in").max_objects, None);
     }
 
     #[test]

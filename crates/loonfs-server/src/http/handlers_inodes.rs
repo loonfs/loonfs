@@ -2,17 +2,17 @@
 
 use super::error::ApiResponseError;
 use super::handlers_filesystem::{
-    buffered_download_response, decode_optional_cursor, parse_include_attributes,
-    parse_revision_no, resolve_page_limit, PageQuery,
+    buffered_download_response, decode_optional_cursor, invalid_path_id_error,
+    parse_include_attributes, parse_revision_no, resolve_page_limit, PageQuery,
 };
 use super::{
     acquire_download_permit, authorize, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery,
 };
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::Json;
-use loonfs::{ErrorCode, StatPathOptions};
+use loonfs::StatPathOptions;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
@@ -31,14 +31,8 @@ pub(super) struct InodeRevisionPathParams {
 }
 
 pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
-    public_inode_id::decode(value).map_err(|error| {
-        ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            &format!("path.inode_id {}", error.reason()),
-        )
-        .with_param("inode_id")
-    })
+    public_inode_id::decode(value)
+        .map_err(|error| invalid_path_id_error("inode_id", value, error.reason()))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -182,9 +176,9 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let path = path.into_params()?;
-    query.into_params()?;
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
+    query.into_params()?;
     let permit = acquire_download_permit(&state)?;
     let bytes = state
         .reader

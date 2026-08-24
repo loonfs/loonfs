@@ -20,7 +20,7 @@ use loonfs::{
 use loonfs_api::ErrorCode;
 use loonfs_api::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
-    FEATURE_QUERY_GREP,
+    PaginationPolicy, FEATURE_QUERY_GREP,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
@@ -1355,7 +1355,6 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
         case_insensitive: false,
         path_prefix: None,
         cursor: None,
-        limit: None,
         allow_stale: false,
         allow_scan: false,
     };
@@ -1366,7 +1365,14 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
     let store = state.writer.object_store();
     let reads = NamespaceReads::new(&state.reader, &namespace_id);
     let response = service
-        .query(&request, &reads, &store)
+        .query(
+            &request,
+            PaginationPolicy::default()
+                .resolve_limit(None)
+                .expect("the pagination policy accepts its own default"),
+            &reads,
+            &store,
+        )
         .await
         .expect("grep caught-up index");
     assert_eq!(response.matches.len(), 1);
@@ -1400,7 +1406,7 @@ async fn grep_error_disabled_root_is_not_materialized_and_core_reads_survive() {
     let harness = start_grep_error_server(store, temp_dir.path(), "disabled-server").await;
     let client = &harness.client;
     let binding = grep_error_request();
-    let result = client.grep(&namespace_id, &binding);
+    let result = client.grep(&namespace_id, &binding, None);
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
@@ -1429,7 +1435,7 @@ async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
     let harness = start_grep_error_server(store, temp_dir.path(), "backfill-server").await;
     let client = &harness.client;
     let binding = grep_error_request();
-    let result = client.grep(&namespace_id, &binding);
+    let result = client.grep(&namespace_id, &binding, None);
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
@@ -1460,7 +1466,7 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     fault_store.fail_next(1);
     let client = &harness.client;
     let binding = grep_error_request();
-    let result = client.grep(&namespace_id, &binding);
+    let result = client.grep(&namespace_id, &binding, None);
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
@@ -1545,7 +1551,9 @@ async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() 
         corrupt_manifest,
         identity_mismatch,
     ] {
-        let result = client.grep(&namespace_id, &grep_error_request()).await;
+        let result = client
+            .grep(&namespace_id, &grep_error_request(), None)
+            .await;
         assert_grep_api_error_and_core_read(
             client,
             &namespace_id,
@@ -3123,7 +3131,6 @@ fn grep_error_request() -> GrepRequest {
         case_insensitive: false,
         path_prefix: None,
         cursor: None,
-        limit: None,
         allow_stale: false,
         allow_scan: false,
     }
