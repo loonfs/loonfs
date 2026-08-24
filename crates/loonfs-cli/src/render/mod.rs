@@ -68,9 +68,7 @@ pub(crate) fn render_error(failure: &CommandFailure, json_mode: bool) -> io::Res
 
 fn human_error(error: &CliError) -> String {
     let mut rendered = error.message.clone();
-    if let Some(request_id) = &error.request_id {
-        rendered.push_str(&format!(" (request id: {request_id})"));
-    }
+    rendered.push_str(&request_id_suffix(error.request_id.as_deref()));
     if let Some(feature) = &error.feature {
         rendered.push_str(&format!("\nfeature: {feature}"));
     }
@@ -78,6 +76,13 @@ fn human_error(error: &CliError) -> String {
         rendered.push_str(&format!("\nparam: {param}"));
     }
     rendered
+}
+
+/// The one spelling of a server correlation id in human output.
+fn request_id_suffix(request_id: Option<&str>) -> String {
+    request_id.map_or_else(String::new, |request_id| {
+        format!(" (request id: {request_id})")
+    })
 }
 
 pub(crate) fn write_stderr_warning(message: impl std::fmt::Display) {

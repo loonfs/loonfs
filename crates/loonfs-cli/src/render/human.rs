@@ -445,10 +445,8 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             };
             let mut lines = Vec::new();
             for failure in failures {
-                lines.push(format!(
-                    "failed {}: {}: {}",
-                    failure.path, failure.error.code, failure.error.message
-                ));
+                let rendered = human_error(&failure.error);
+                lines.push(format!("failed {}: {rendered}", failure.path));
             }
             let directory_noun = if *directories == 1 {
                 "directory"
@@ -604,11 +602,9 @@ fn human_doctor(checks: &[DoctorCheck]) -> String {
         }
         if check.status == DoctorStatus::Failed {
             lines.push(format!("{}: failed", check.name));
-            let mut detail = format!("  detail: {}", single_line(&check.message));
-            if let Some(request_id) = &check.request_id {
-                detail.push_str(&format!(" (request id: {request_id})"));
-            }
-            lines.push(detail);
+            let detail = single_line(&check.message);
+            let request_id = request_id_suffix(check.request_id.as_deref());
+            lines.push(format!("  detail: {detail}{request_id}"));
         } else {
             lines.push(format!(
                 "{}: {}: {}",
