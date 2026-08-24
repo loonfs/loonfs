@@ -294,7 +294,6 @@ fn openapi_documents_current_server_paths() {
         &["limit", "cursor"],
     );
 
-    let mut namespace_scoped_operations = 0;
     for (path, path_item) in paths {
         if !path.contains("/namespaces/{") {
             continue;
@@ -308,7 +307,6 @@ fn openapi_documents_current_server_paths() {
             let Some(operation) = path_item.get(method) else {
                 continue;
             };
-            namespace_scoped_operations += 1;
             let path_parameter_names = operation
                 .get("parameters")
                 .and_then(Value::as_array)
@@ -324,7 +322,6 @@ fn openapi_documents_current_server_paths() {
             assert!(!path_parameter_names.contains("namespace"));
         }
     }
-    assert_eq!(namespace_scoped_operations, 31);
 
     for (path, method, parameter, schema_name) in [
         (

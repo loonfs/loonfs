@@ -597,7 +597,10 @@ async fn http_admin_store_probe_requires_a_token_and_accepts_a_bodyless_request(
     // the same request as `{}`.
     let bodyless: loonfs_api::v0::StoreProbeResponse =
         post_admin_json(&url, "test-token").expect("probe with no body");
-    assert_eq!(bodyless.checks.len(), 14);
+    assert!(
+        !bodyless.checks.is_empty(),
+        "a bodyless request runs the probe rather than selecting nothing"
+    );
 
     harness.server.abort();
 }

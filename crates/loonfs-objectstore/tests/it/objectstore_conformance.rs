@@ -20,6 +20,7 @@ use loonfs_objectstore::s3_compatible::{
 };
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{AwsS3Credentials, ObjectStore};
+use loonfs_test_support::stores::BufferWatchStore;
 use tempfile::TempDir;
 
 #[test]
@@ -117,6 +118,62 @@ async fn local_fs_streamed_write_round_trips() {
     let temp_dir = test_dir("streamed-write");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
     assert_streamed_write_round_trips(&store).await;
+}
+
+/// What the write path is allowed to hold at once, and what it is asked to
+/// carry: three internal parts' worth, so a path that materializes its
+/// payload is caught by more than a rounding error.
+const MEMORY_BOUND_PART_BYTES: u64 = loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
+const MEMORY_BOUND_PAYLOAD_BYTES: usize = 3 * MEMORY_BOUND_PART_BYTES as usize + 4_096;
+
+/// `put_streamed` regroups the caller's chunks into parts of its own and
+/// never holds more than one of them, which is what lets a proxied upload of
+/// any size run in fixed memory.
+#[tokio::test]
+async fn local_fs_put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
+    let temp_dir = test_dir("streamed-write-memory-bound");
+    let watched = BufferWatchStore::watching_content(
+        LocalFsStore::new(temp_dir.path()).expect("create local object store"),
+    );
+
+    let payload: Vec<u8> = (0..MEMORY_BOUND_PAYLOAD_BYTES)
+        .map(|offset| (offset % 251) as u8)
+        .collect();
+    let key = content_blob(
+        &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
+            .expect("valid content store id"),
+        &ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+    );
+    let stored = watched
+        .put_streamed(
+            &key,
+            streamed_chunks(&payload, 64 * 1024),
+            loonfs_objectstore::PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("stream a multi-part payload into the store");
+
+    assert_eq!(stored, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    let peaks = watched.peaks();
+    assert_eq!(peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    assert!(
+        peaks.largest_buffer_bytes <= MEMORY_BOUND_PART_BYTES,
+        "no single buffer may exceed one part: largest was {}",
+        peaks.largest_buffer_bytes
+    );
+    assert!(
+        peaks.peak_live_bytes <= MEMORY_BOUND_PART_BYTES,
+        "the store held {} bytes at once, past its one-part window",
+        peaks.peak_live_bytes
+    );
+    assert_eq!(
+        watched
+            .get(&key, None)
+            .await
+            .expect("read back")
+            .expect("object exists"),
+        Bytes::from(payload)
+    );
 }
 
 #[tokio::test]
