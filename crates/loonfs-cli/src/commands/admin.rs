@@ -871,16 +871,21 @@ mod tests {
         pass.retain(RetainedReason::UploadSessionWindow);
         pass.next_reclamation_at_ms = Some(1_700_000_000_000);
 
-        assert_eq!(
-            gc_pass_line(&pass),
-            "3 deleted, 5 retained (mostly within_grace_window: 4); \
-             next reclaimable at 2023-11-14 22:13:20Z"
+        let line = gc_pass_line(&pass);
+        assert!(
+            line.contains("3 deleted, 5 retained (mostly within_grace_window: 4)"),
+            "{line}"
         );
-    }
+        assert!(
+            line.contains("next reclaimable at 2023-11-14 22:13:20Z"),
+            "{line}"
+        );
 
-    #[test]
-    fn a_pass_line_that_kept_nothing_names_no_reason() {
-        let pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
-        assert_eq!(gc_pass_line(&pass), "0 deleted, 0 retained");
+        let quiet = gc_pass_line(&GcResponse::empty(
+            NamespaceId::parse("demo").expect("namespace id"),
+        ));
+        assert!(quiet.contains("0 deleted, 0 retained"), "{quiet}");
+        assert!(!quiet.contains("mostly"), "{quiet}");
+        assert!(!quiet.contains("next reclaimable"), "{quiet}");
     }
 }

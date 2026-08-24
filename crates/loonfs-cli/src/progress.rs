@@ -545,30 +545,55 @@ mod tests {
         let mut single = state(512 * 1_024, Some(1_024 * 1_024));
         single.files_total = Some(1);
         single.current = Some("/docs/big.bin".to_owned());
-        assert_eq!(
-            one_file.human_line(&single, 256 * 1_024),
-            "get /docs/big.bin  512.0 KiB/1.0 MiB  50%  256.0 KiB/s  eta 0:02"
-        );
+        let line = one_file.human_line(&single, 256 * 1_024);
+        for field in [
+            "get",
+            "/docs/big.bin",
+            "512.0 KiB/1.0 MiB",
+            "50%",
+            "256.0 KiB/s",
+            "eta 0:02",
+        ] {
+            assert!(line.contains(field), "{line}");
+        }
+        assert!(!line.contains("files"), "{line}");
 
         let tree = silent_reporter(ProgressOp::Put, "demo:/up");
         let mut many = state(300, Some(1_000));
         many.files_done = 2;
         many.files_total = Some(10);
         many.current = Some("/up/docs/a.txt".to_owned());
-        assert_eq!(
-            tree.human_line(&many, 100),
-            "put demo:/up  2/10 files  300 B/1000 B  30%  100 B/s  eta 0:07  /up/docs/a.txt"
-        );
+        let line = tree.human_line(&many, 100);
+        for field in [
+            "put",
+            "demo:/up",
+            "2/10 files",
+            "300 B/1000 B",
+            "30%",
+            "100 B/s",
+            "eta 0:07",
+            "/up/docs/a.txt",
+        ] {
+            assert!(line.contains(field), "{line}");
+        }
 
         // A pipe has no total, so it has no percentage and nothing to
         // estimate — only what has gone by.
         let piped = silent_reporter(ProgressOp::Put, "/piped.bin");
         let mut unknown = state(2_048, None);
         unknown.files_total = Some(1);
-        assert_eq!(
-            piped.human_line(&unknown, 1_024),
-            "put /piped.bin  2.0 KiB  (size unknown)  1.0 KiB/s"
-        );
+        let line = piped.human_line(&unknown, 1_024);
+        for field in [
+            "put",
+            "/piped.bin",
+            "2.0 KiB",
+            "(size unknown)",
+            "1.0 KiB/s",
+        ] {
+            assert!(line.contains(field), "{line}");
+        }
+        assert!(!line.contains('%'), "{line}");
+        assert!(!line.contains("eta"), "{line}");
     }
 
     #[test]

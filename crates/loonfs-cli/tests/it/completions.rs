@@ -1,20 +1,6 @@
 use std::process::{Command, Output, Stdio};
 
 #[test]
-fn completion_generates_for_zsh_and_bash() {
-    for shell in ["zsh", "bash"] {
-        let output = loonfs()
-            .args(["completion", "--shell", shell])
-            .output()
-            .expect("run completion generation");
-
-        assert!(output.status.success(), "{output:?}");
-        assert!(!output.stdout.is_empty());
-        assert!(stdout(&output).contains("loonfs"));
-    }
-}
-
-#[test]
 fn completion_covers_capabilities_and_doctor_selectors() {
     let output = loonfs()
         .args(["completion", "--shell", "zsh"])
@@ -32,6 +18,16 @@ fn completion_covers_capabilities_and_doctor_selectors() {
     ] {
         assert!(script.contains(surface), "missing {surface} in completion");
     }
+
+    let bash = loonfs()
+        .args(["completion", "--shell", "bash"])
+        .output()
+        .expect("run completion generation");
+
+    assert!(bash.status.success(), "{bash:?}");
+    let bash_script = stdout(&bash);
+    assert!(bash_script.contains("loonfs"), "{bash_script}");
+    assert!(bash_script.contains("--write-check"), "{bash_script}");
 }
 
 #[test]

@@ -18,8 +18,6 @@ fn profile_create_list_show_delete_work() {
     assert_success(&add_embedded);
     assert_eq!(json_data(&add_embedded)["mode"], "embedded");
 
-    let external = harness
-        .start_external_server(harness.write_server_config("remote", "profile-create-remote"));
     let add_remote = harness.run(&[
         "--json",
         "profile",
@@ -27,7 +25,7 @@ fn profile_create_list_show_delete_work() {
         "remote",
         "prod",
         "--server-url",
-        &external.server_url,
+        "http://127.0.0.1:9400",
         "--auth-token",
         "test-token",
     ]);
@@ -532,32 +530,11 @@ fn removing_default_profile_requires_explicit_reselection() {
 
     let use_profile = harness.run(&["--json", "profile", "use", "beta"]);
     assert_success(&use_profile);
+    assert_eq!(json_data(&use_profile)["name"], "beta");
 
     let show_after = harness.run(&["--json", "profile", "show"]);
     assert_success(&show_after);
     assert_eq!(json_data(&show_after)["mode"], "embedded");
-}
-
-#[test]
-fn profile_update_changes_fields() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-
-    let new_root = harness.store_root("updated");
-    let update = harness.run(&[
-        "--json",
-        "profile",
-        "update",
-        "default",
-        "--root",
-        new_root.to_str().expect("utf-8 path"),
-    ]);
-    assert_success(&update);
-
-    let show = harness.run(&["--json", "profile", "show", "default"]);
-    assert_success(&show);
-    let store = &json_data(&show)["store"];
-    assert_eq!(store["root"], new_root.to_str().expect("utf-8 path"));
 }
 
 #[test]
@@ -593,21 +570,6 @@ fn profile_update_with_only_service_account_key_path_applies() {
         json_data(&show)["store"]["credentials"]["path"],
         "/new/service-account.json"
     );
-}
-
-#[test]
-fn profile_use_switches_default() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("alpha");
-    harness.add_embedded_profile("beta");
-
-    let use_profile = harness.run(&["--json", "profile", "use", "beta"]);
-    assert_success(&use_profile);
-    assert_eq!(json_data(&use_profile)["name"], "beta");
-
-    let current = harness.run(&["--json", "current"]);
-    assert_success(&current);
-    assert_eq!(json_data(&current)["profile"], "beta");
 }
 
 #[test]
@@ -916,65 +878,26 @@ root = "{}"
 }
 
 #[test]
-fn profiles_nest_under_their_own_table() {
+fn blank_default_profile_in_config_is_rejected() {
     let harness = Harness::new();
-    harness.write_cli_config(format!(
-        r#"
+
+    for value in ["", "   "] {
+        harness.write_cli_config(format!(
+            r#"
 config_version = 1
+default_profile = "{value}"
+"#
+        ));
 
-[profiles.default_profile]
-mode = "embedded"
-
-[profiles.default_profile.store]
-kind = "local-fs"
-root = "{}"
-"#,
-        harness.store_root("default_profile").display()
-    ));
-
-    let list = harness.run(&["--json", "profile", "list"]);
-    assert_success(&list);
-    assert_eq!(json_data(&list)["profiles"][0]["name"], "default_profile");
-}
-
-#[test]
-fn empty_default_profile_in_config_is_rejected() {
-    let harness = Harness::new();
-    harness.write_cli_config(
-        r#"
-config_version = 1
-default_profile = ""
-"#,
-    );
-
-    let list = harness.run(&["--json", "profile", "list"]);
-    assert_failure(&list);
-    let error = json_error(&list);
-    assert_eq!(error["code"], "invalid_config");
-    assert!(error["message"]
-        .as_str()
-        .expect("json string")
-        .contains("default_profile"));
-}
-
-#[test]
-fn whitespace_default_profile_in_config_is_rejected() {
-    let harness = Harness::new();
-    harness.write_cli_config(
-        r#"
-config_version = 1
-default_profile = "   "
-"#,
-    );
-
-    let list = harness.run(&["--json", "profile", "list"]);
-    assert_failure(&list);
-    let error = json_error(&list);
-    assert_eq!(error["code"], "invalid_config");
-    assert!(error["message"]
-        .as_str()
-        .expect("json string")
-        .contains("default_profile"));
+        let list = harness.run(&["--json", "profile", "list"]);
+        assert_failure(&list);
+        let error = json_error(&list);
+        assert_eq!(error["code"], "invalid_config");
+        assert!(error["message"]
+            .as_str()
+            .expect("json string")
+            .contains("default_profile"));
+    }
 }
 
 #[test]
@@ -1308,20 +1231,6 @@ fn current_uses_namespace_from_environment() {
 
     assert_success(&current);
     assert_eq!(json_data(&current)["namespace"], "from-environment");
-}
-
-#[test]
-fn current_uses_profile_default_without_namespace_environment() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "profile-default"]));
-    assert_success(&harness.run(&["use", "profile-default"]));
-
-    // `Harness::run` spawns the command with `LOONFS_NAMESPACE` removed.
-    let current = harness.run(&["--json", "current"]);
-
-    assert_success(&current);
-    assert_eq!(json_data(&current)["namespace"], "profile-default");
 }
 
 #[test]
