@@ -967,8 +967,7 @@ access_key = "{AZURITE_ACCOUNT_KEY}"
 
     #[test]
     fn load_rejects_blank_auth_token_when_present() {
-        // A blank file value falls back to the environment, so an ambient
-        // token would satisfy this config instead of failing it.
+        // Prevent an ambient token from filling the blank value.
         let _auth_token = EnvGuard::unset(AUTH_TOKEN_ENV);
         let path = write_config(
             r#"
@@ -1364,7 +1363,6 @@ root = "/tmp/loonfs-server"
         );
         assert_eq!(config.content_token_secret(), "env-content-token-secret");
 
-        // A blank file value falls back to the environment for both secrets.
         config.auth_token = Some(loonfs_api::SecretString::new("   ".to_owned()));
         config.content_token_secret = loonfs_api::SecretString::new("   ".to_owned());
         config.apply_env_fallbacks(

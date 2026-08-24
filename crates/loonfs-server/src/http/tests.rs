@@ -806,8 +806,6 @@ async fn deadline_exemptions_name_served_routes_and_cover_both_content_spellings
     .await
     .expect("build app");
 
-    // The same bytes by path and by inode are one operation, so neither
-    // spelling is cancelled at the deadline while the other runs on.
     for content_route in [
         "/v0/namespaces/{namespace_id}/filesystem/content",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
@@ -2720,9 +2718,6 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         "server_busy",
         Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
     );
-    // Both routes validate before they take a slot, so a malformed read
-    // answers 400 rather than 503 while the cap is full, and the two
-    // rejections above stay the only ones counted.
     expect_enveloped(
         || {
             raw_agent()
