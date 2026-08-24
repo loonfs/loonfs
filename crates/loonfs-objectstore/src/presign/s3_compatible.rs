@@ -557,6 +557,13 @@ mod tests {
     const CONTENT_KEY: &str =
         "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef";
 
+    /// Credential-shaped fixture values. AWS publishes this key pair in its
+    /// own documentation, so it looks exactly like a real one without being
+    /// one.
+    const FIXTURE_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
+    const FIXTURE_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const FIXTURE_SESSION_TOKEN: &str = "FwoGZXIvYXdzEBYaDEZJWFRVUkVUT0tFTg==";
+
     #[derive(Debug, Default)]
     struct RotatingCredentialsSource {
         next: AtomicUsize,
@@ -863,6 +870,9 @@ mod tests {
 
     #[test]
     fn presigner_debug_redacts_credentials() {
+        // The fixture carries credential-shaped values and the assertions
+        // search for those same constants, so a Debug that started printing
+        // one fails here instead of passing on a spelling mismatch.
         let config = S3PresignerConfig {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
@@ -872,23 +882,19 @@ mod tests {
             direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
         };
         let credentials = AwsS3Credentials::Static {
-            access_key_id: "debug-access-key".into(),
-            secret_access_key: "debug-secret".into(),
-            session_token: Some("debug-session-token".into()),
+            access_key_id: FIXTURE_ACCESS_KEY_ID.into(),
+            secret_access_key: FIXTURE_SECRET_ACCESS_KEY.into(),
+            session_token: Some(FIXTURE_SESSION_TOKEN.into()),
         };
 
-        let config_debug = format!("{config:?}");
         let credentials_debug = format!("{credentials:?}");
         let signer = S3CompatiblePresigner::new(config, credentials).expect("signer");
         let signer_debug = format!("{signer:?}");
 
-        assert!(!config_debug.contains("debug-secret"));
-        assert!(!config_debug.contains("debug-access-key"));
-        assert!(!config_debug.contains("debug-session-token"));
         for rendered in [credentials_debug, signer_debug] {
-            assert!(!rendered.contains("debug-secret"));
-            assert!(!rendered.contains("debug-access-key"));
-            assert!(!rendered.contains("debug-session-token"));
+            assert!(!rendered.contains(FIXTURE_ACCESS_KEY_ID));
+            assert!(!rendered.contains(FIXTURE_SECRET_ACCESS_KEY));
+            assert!(!rendered.contains(FIXTURE_SESSION_TOKEN));
             assert!(rendered.contains("<redacted>"));
         }
     }

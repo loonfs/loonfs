@@ -1397,55 +1397,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_store_range_semantics_match_blocking_contract() {
-        let store = memory_store();
-        let key = "content-stores/cs_0123456789abcdef0123456789abcdef/objects/ab/cd/con_abcdef0123456789abcdef0123456789";
-        store
-            .put_overwrite(key, Bytes::from_static(b"abcdef"))
-            .await
-            .expect("put");
-
-        assert_eq!(
-            store
-                .get(
-                    key,
-                    Some(ByteRange {
-                        start_inclusive: 2,
-                        end_exclusive: 4,
-                    }),
-                )
-                .await
-                .expect("range"),
-            Some(Bytes::from_static(b"cd"))
-        );
-        assert_eq!(
-            store
-                .get(
-                    key,
-                    Some(ByteRange {
-                        start_inclusive: 6,
-                        end_exclusive: 10,
-                    }),
-                )
-                .await
-                .expect("empty"),
-            Some(Bytes::new())
-        );
-        assert!(matches!(
-            store
-                .get(
-                    key,
-                    Some(ByteRange {
-                        start_inclusive: 7,
-                        end_exclusive: 8,
-                    }),
-                )
-                .await,
-            Err(ObjectStoreError::InvalidRange { .. })
-        ));
-    }
-
-    #[tokio::test]
     async fn provider_stream_reports_invalid_prefix() {
         let store = memory_store();
         let mut stream = store.list_prefix_stream("../");

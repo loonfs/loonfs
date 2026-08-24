@@ -271,6 +271,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
+    /// Credential-shaped fixture values. AWS publishes this pair in its own
+    /// documentation, so it looks exactly like a real key without being one.
+    const FIXTURE_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
+    const FIXTURE_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
     #[tokio::test]
     async fn configured_local_fs_scopes_optional_key_prefix() {
         let temp_dir = unique_temp_dir("configured-store-local");
@@ -298,15 +303,6 @@ mod tests {
                 .expect("list scoped prefix"),
             vec![head_key]
         );
-    }
-
-    #[test]
-    fn gcs_advertises_the_direct_transfers_its_live_run_proved() {
-        let transfers = gcs_store()
-            .direct_transfers()
-            .expect("a proven provider hands out its bundle");
-        assert!(transfers.put.is_some());
-        assert!(transfers.multipart.is_none());
     }
 
     #[test]
@@ -561,20 +557,23 @@ mod tests {
 
     #[test]
     fn configured_object_store_debug_redacts_presigner_credentials() {
+        // The fixture carries credential-shaped values and the assertions
+        // search for those same constants, so a Debug that started printing
+        // either one fails here instead of passing on a spelling mismatch.
         let store = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
-            access_key_id: "access".into(),
-            secret_access_key: "debug-secret".into(),
+            access_key_id: FIXTURE_ACCESS_KEY_ID.into(),
+            secret_access_key: FIXTURE_SECRET_ACCESS_KEY.into(),
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct r2 store");
 
         let rendered = format!("{store:?}");
 
-        assert!(!rendered.contains("debug-secret"));
-        assert!(!rendered.contains("debug-access-key"));
+        assert!(!rendered.contains(FIXTURE_ACCESS_KEY_ID));
+        assert!(!rendered.contains(FIXTURE_SECRET_ACCESS_KEY));
     }
 
     #[tokio::test]

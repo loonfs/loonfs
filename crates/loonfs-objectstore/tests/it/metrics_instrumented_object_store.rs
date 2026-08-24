@@ -22,6 +22,17 @@ fn bytes(bytes: &'static [u8]) -> Bytes {
     Bytes::from_static(bytes)
 }
 
+/// A path segment that appears nowhere else, built into the key the leak
+/// checks read back. Searching for a string the fixture does not contain is
+/// how a redaction assertion quietly stops testing anything.
+const SECRET_KEY_SEGMENT: &str = "secret-segment";
+
+/// A key whose own name carries [`SECRET_KEY_SEGMENT`], so a sample that
+/// leaked any part of it fails the checks below.
+fn secret_key() -> String {
+    format!("namespaces/ns-1/wal/{SECRET_KEY_SEGMENT}.wal.zst")
+}
+
 #[tokio::test]
 async fn records_put_success() {
     let temp_dir = tempdir().expect("tempdir");
@@ -131,10 +142,10 @@ async fn records_not_found_without_key_leak() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
+    let raw_key = secret_key();
 
     assert!(store
-        .get(raw_key, None)
+        .get(&raw_key, None)
         .await
         .expect("get missing")
         .is_none());
@@ -143,8 +154,8 @@ async fn records_not_found_without_key_leak() {
     assert_eq!(sample.operation, ObjectStoreOperation::Get);
     assert_eq!(sample.result, ObjectStoreResultClass::NotFound);
     let encoded = serde_json::to_string(&sample).expect("serialize sample");
-    assert!(!encoded.contains(raw_key));
-    assert!(!encoded.contains("secret-segment"));
+    assert!(!encoded.contains(&raw_key));
+    assert!(!encoded.contains(SECRET_KEY_SEGMENT));
 }
 
 #[tokio::test]
@@ -225,7 +236,7 @@ async fn instrumented_store_forwards_start_after_listing() {
 }
 
 #[tokio::test]
-async fn classifies_wal_and_manifest_key_families() {
+async fn classifies_wal_manifest_segment_and_checkpoint_key_families() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
@@ -263,41 +274,6 @@ async fn classifies_wal_and_manifest_key_families() {
         )
         .await
         .expect("put segment");
-
-    let samples = recorder.samples();
-    assert_eq!(samples[0].key_class, KeyClass::WalSegment);
-    assert_eq!(samples[1].key_class, KeyClass::NamespaceManifest);
-    assert_eq!(samples[2].key_class, KeyClass::MetadataSegment);
-}
-
-#[tokio::test]
-async fn classifies_gc_namespace_layout_family() {
-    let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
-    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-
-    store
-        .put_overwrite(
-            &metadata_manifest_object(
-                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &ManifestObjectId::parse("man_00000000000000000001-0123456789abcdef")
-                    .expect("valid manifest object id"),
-            ),
-            bytes(b"manifest"),
-        )
-        .await
-        .expect("put namespace manifest");
-    store
-        .put_overwrite(
-            &metadata_segment(
-                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
-                    .expect("valid metadata segment id"),
-            ),
-            bytes(b"metadata"),
-        )
-        .await
-        .expect("put metadata segment");
     store
         .put_overwrite(
             &checkpoint_record(
@@ -311,9 +287,10 @@ async fn classifies_gc_namespace_layout_family() {
         .expect("put checkpoint record");
 
     let samples = recorder.samples();
-    assert_eq!(samples[0].key_class, KeyClass::NamespaceManifest);
-    assert_eq!(samples[1].key_class, KeyClass::MetadataSegment);
-    assert_eq!(samples[2].key_class, KeyClass::GcControl);
+    assert_eq!(samples[0].key_class, KeyClass::WalSegment);
+    assert_eq!(samples[1].key_class, KeyClass::NamespaceManifest);
+    assert_eq!(samples[2].key_class, KeyClass::MetadataSegment);
+    assert_eq!(samples[3].key_class, KeyClass::GcControl);
 }
 
 #[tokio::test]
@@ -323,7 +300,7 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
     let recorder =
         Arc::new(JsonlObjectStoreMetricsRecorder::create(&metrics_path).expect("recorder"));
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
+    let raw_key = secret_key();
 
     store
         .put_overwrite(
@@ -333,7 +310,7 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
         .await
         .expect("put object");
     assert!(store
-        .get(raw_key, None)
+        .get(&raw_key, None)
         .await
         .expect("get missing")
         .is_none());
@@ -342,8 +319,8 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
     let jsonl = std::fs::read_to_string(metrics_path).expect("read metrics");
     let lines = jsonl.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 2);
-    assert!(!jsonl.contains(raw_key));
-    assert!(!jsonl.contains("secret-segment"));
+    assert!(!jsonl.contains(&raw_key));
+    assert!(!jsonl.contains(SECRET_KEY_SEGMENT));
 
     let first: serde_json::Value = serde_json::from_str(lines[0]).expect("first sample");
     assert_eq!(first["operation"], "put");

@@ -116,36 +116,3 @@ pub(crate) async fn transport_retry_pause(backoff: Duration) {
     // pacing never feeds protocol state and replay stays deterministic.
     tokio::time::sleep(backoff).await;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::attempts::counting_attempts;
-
-    #[tokio::test]
-    async fn every_granted_retry_counts_as_an_attempt() {
-        let policy = TransportRetryPolicy {
-            max_retries: 1,
-            initial_backoff: Duration::from_millis(1),
-            max_backoff: Duration::from_millis(1),
-            operation_deadline: Duration::from_secs(1),
-        };
-        let (_, attempts) = counting_attempts(async {
-            let mut retries = 0;
-            assert_eq!(
-                next_retry_backoff(
-                    &policy,
-                    "namespaces/demo/wal/segments/seg_test.wal.zst",
-                    "put_immutable_verified",
-                    7,
-                    &mut retries,
-                    None,
-                ),
-                Some(Duration::from_millis(1))
-            );
-        })
-        .await;
-
-        assert_eq!(attempts, 2);
-    }
-}

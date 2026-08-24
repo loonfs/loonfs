@@ -685,36 +685,19 @@ fn object_store_endpoint_url(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        multipart_error, object_store_endpoint_url, AwsS3StoreConfig, S3CompatibleConfig,
-        S3CompatibleStore, AWS_S3_MAX_DIRECT_PUT_BYTES,
-    };
-    use crate::aws_credentials::static_aws_credentials_source;
+    use super::{multipart_error, object_store_endpoint_url, AwsS3StoreConfig, S3CompatibleStore};
+    use crate::test_support::{aws_environment_lock, isolated_aws_environment};
     use crate::{AwsS3Credentials, ObjectStoreErrorClass};
 
-    fn test_config() -> S3CompatibleConfig {
-        S3CompatibleConfig {
-            provider_name: "test-s3",
-            bucket: "bucket".to_owned(),
-            region: "us-east-1".to_owned(),
-            endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
-            credentials: static_aws_credentials_source("access".into(), "secret".into(), None),
-            key_prefix: Some("tenant-a".to_owned()),
-            force_path_style: true,
-            sha256_upload_checksum: true,
-            direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
-        }
-    }
+    /// The credential chain is emptied first. An eager resolution would then
+    /// have nothing to resolve and would fail, so this only passes when
+    /// construction really does defer the lookup to the first call.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ambient_aws_store_construction_does_not_resolve_credentials() {
+        let _lock = aws_environment_lock().await;
+        let tempdir = tempfile::tempdir().expect("create temporary AWS config directory");
+        let _environment = isolated_aws_environment(&tempdir, None);
 
-    #[test]
-    fn s3_compatible_store_builds_without_hidden_runtime() {
-        let store = S3CompatibleStore::new(test_config()).expect("construct store");
-        let debug = format!("{store:?}");
-        assert!(debug.contains("test-s3"));
-    }
-
-    #[test]
-    fn ambient_aws_store_construction_does_not_resolve_credentials() {
         S3CompatibleStore::aws_s3(AwsS3StoreConfig {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),

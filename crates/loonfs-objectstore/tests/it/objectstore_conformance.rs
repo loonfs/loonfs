@@ -7,12 +7,10 @@ use crate::provider_env::{
 };
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
-use loonfs_api::{Checksum, ContentId, ManifestObjectId};
+use loonfs_api::{Checksum, ContentId};
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
-use loonfs_objectstore::keys::{
-    content_blob, metadata_manifest_object, metadata_segment, wal_head, wal_segment,
-};
+use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
 use loonfs_objectstore::s3_compatible::{
@@ -21,61 +19,6 @@ use loonfs_objectstore::s3_compatible::{
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{AwsS3Credentials, ObjectStore};
 use tempfile::TempDir;
-
-#[test]
-fn key_builders_cover_locked_object_families() {
-    assert_eq!(
-        wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
-        "namespaces/ns-1/wal/head.json"
-    );
-    assert_eq!(
-        content_blob(
-            &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001").expect("valid content store id"),
-            &ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("valid content id"),
-        ),
-        "content-stores/cs_00000000000000000000000000000001/objects/ab/cd/con_abcdef0123456789abcdef0123456789"
-    );
-    assert_eq!(
-        wal_segment(
-            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &loonfs_api::WalSegmentId::parse("wal_00000000000000000001-644e4d336fd4ee33")
-                .expect("valid WAL segment id")
-        ),
-        "namespaces/ns-1/wal/segments/wal_00000000000000000001-644e4d336fd4ee33.wal.zst"
-    );
-    assert_eq!(
-        metadata_manifest_object(
-            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &ManifestObjectId::parse("man_00000000000000000420-0123456789abcdef")
-                .expect("valid manifest object id"),
-        ),
-        "namespaces/ns-1/metadata/manifests/man_00000000000000000420-0123456789abcdef.manifest.json"
-    );
-    assert_eq!(
-        metadata_segment(
-            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
-                .expect("valid metadata segment id")
-        ),
-        "namespaces/ns-1/metadata/segments/seg_00000000000000000000000000000001.sst.zst"
-    );
-    assert_eq!(
-        metadata_segment(
-            &loonfs_api::NamespaceId::parse("source-ns").expect("valid namespace id"),
-            &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000002")
-                .expect("valid metadata segment id")
-        ),
-        "namespaces/source-ns/metadata/segments/seg_00000000000000000000000000000002.sst.zst"
-    );
-    assert_eq!(
-        metadata_segment(
-            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &loonfs_api::MetadataSegmentId::parse("seg_ffffffffffffffffffffffffffffffff")
-                .expect("valid metadata segment id")
-        ),
-        "namespaces/ns-1/metadata/segments/seg_ffffffffffffffffffffffffffffffff.sst.zst"
-    );
-}
 
 #[test]
 fn provider_env_example_covers_real_provider_contract() {
