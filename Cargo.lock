@@ -1928,6 +1928,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "ciborium",
+ "crc32c",
  "futures",
  "loonfs",
  "loonfs-api",
@@ -1942,6 +1943,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "zstd",
 ]
 
 [[package]]
