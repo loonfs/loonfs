@@ -747,8 +747,9 @@ impl ObjectStore for ProviderObjectStore {
     /// Bounded reads issue the ranged GET directly — one round trip, not a
     /// sizing HEAD plus a GET — and pay a single HEAD only on the failure
     /// path, to decide whether the range or the transport was the problem.
-    /// The contract matches the local reference provider exactly: a missing
-    /// object is `Ok(None)` however the request was shaped, an end past the
+    /// The contract matches the local reference provider exactly: a descending
+    /// range is `InvalidRange` before existence is consulted, a missing object
+    /// is otherwise `Ok(None)` however the request was shaped, an end past the
     /// object clamps, `start == size` reads empty, and `start > size` is
     /// `InvalidRange`.
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {

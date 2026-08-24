@@ -615,6 +615,20 @@ async fn range_reads(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
             "a bounded read of a deleted object answered bytes instead of absence",
         ));
     }
+    match store.get(&key, bounded(4, 1)).await {
+        Err(ObjectStoreError::InvalidRange { .. }) => {}
+        Err(error) => {
+            return Err(wrong(format!(
+                "a descending range of a missing object should be an invalid range, but failed differently: {}",
+                error.public_message()
+            )))
+        }
+        Ok(_) => {
+            return Err(wrong(
+                "a descending range of a missing object should be an invalid range, but returned a response",
+            ))
+        }
+    }
     Ok(())
 }
 
