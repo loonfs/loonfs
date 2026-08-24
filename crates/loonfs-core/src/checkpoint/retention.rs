@@ -3,9 +3,9 @@
 use super::load::{ensure_root_matches_manifest, load_verified_manifest_segments};
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
+use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::{
     load_head_object, load_metadata_root_object_if_present, load_wal_floor_object,
@@ -72,7 +72,8 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
 
     // Monotonic floor publication: never decrease. The first advance
     // creates the object, because create and fork write no floor.
-    for _attempt in 0..CONTENTION_RETRY_LIMIT {
+    let object_key = &loonfs_objectstore::keys::wal_floor(namespace_id);
+    let advanced = retry_while_contended(|| async move {
         let loaded = match load_wal_floor_object(store, namespace_id).await {
             Ok(loaded) => Some(loaded),
             Err(ControlObjectLoadError::MissingObject { .. }) => None,
@@ -80,16 +81,13 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         };
         let published_floor = loaded.as_ref().map(|loaded| loaded.state.floor_seq);
         if let Some(floor_seq) = published_floor.filter(|floor_seq| *floor_seq >= target_floor) {
-            return Ok(AdvanceRetentionResponse {
-                retention_floor_seq: floor_seq,
-            });
+            return Ok(CasAttempt::Settled(floor_seq));
         }
         let next = WalFloorState {
             namespace_id: namespace_id.clone(),
             floor_seq: target_floor,
             updated_at_ms: context.now_ms,
         };
-        let object_key = loonfs_objectstore::keys::wal_floor(namespace_id);
         let encoded =
             encode_control_state(ControlObjectKind::WalFloor, &next).map_err(|error| {
                 CoreError::Codec {
@@ -100,23 +98,20 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         let published = match &loaded {
             Some(loaded) => {
                 store
-                    .compare_and_swap(&object_key, &loaded.etag, Bytes::from(encoded))
+                    .compare_and_swap(object_key, &loaded.etag, Bytes::from(encoded))
                     .await
             }
             // The retention floor is mutable control state, so its first publication is a conditional create.
-            None => store.put_if_absent(&object_key, Bytes::from(encoded)).await,
+            None => store.put_if_absent(object_key, Bytes::from(encoded)).await,
         };
         match published {
-            Ok(_) => {
-                return Ok(AdvanceRetentionResponse {
-                    retention_floor_seq: target_floor,
-                })
-            }
-            Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
-            Err(error) => return Err(CoreError::store(&object_key, &error)),
+            Ok(_) => Ok(CasAttempt::Settled(target_floor)),
+            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
+            Err(error) => Err(CoreError::store(object_key, &error)),
         }
-    }
-    Err(CoreError::Internal(
-        "retention floor compare-and-swap retry exhausted".to_owned(),
-    ))
+    })
+    .await?;
+    Ok(AdvanceRetentionResponse {
+        retention_floor_seq: advanced.ok_or_else(|| CoreError::contention_exhausted(object_key))?,
+    })
 }

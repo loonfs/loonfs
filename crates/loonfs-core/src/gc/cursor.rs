@@ -1,5 +1,6 @@
 //! Opaque, namespace-bound cursors for bounded GC enumeration.
 
+use super::reap::manifest_object_id_of;
 use crate::error::{CoreError, Result};
 use loonfs_api::{
     decode_namespace_cursor, encode_cursor, NamespaceCursor, NamespaceCursorError, NamespaceId,
@@ -9,6 +10,7 @@ use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_compaction_prefix, metadata_manifest_prefix,
     metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
 };
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +45,25 @@ impl CandidateFamily {
             .iter()
             .position(|family| *family == self)
             .expect("every family is listed in ALL")
+    }
+
+    /// Returns whether `key` matches this family's durable grammar.
+    pub(super) fn recognizes(self, key: &str) -> bool {
+        let Some(family) = parse_object_key(key).map(|parsed| parsed.family()) else {
+            return false;
+        };
+        match self {
+            Self::WalSegments => family == DurableObjectFamily::WalSegment,
+            Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
+            Self::CompactionStaging => matches!(
+                family,
+                DurableObjectFamily::MetadataCompactionStaging
+                    | DurableObjectFamily::MetadataCompactionLease
+            ),
+            Self::Manifests => matches!(manifest_object_id_of(key), Some(Ok(_))),
+            Self::Checkpoints => family == DurableObjectFamily::CheckpointRecord,
+            Self::UploadSessions => family == DurableObjectFamily::UploadSession,
+        }
     }
 
     pub(super) fn prefix(self, namespace_id: &NamespaceId) -> String {

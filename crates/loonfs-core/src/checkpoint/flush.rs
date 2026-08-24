@@ -17,10 +17,11 @@ use super::runs::{flatten_manifest_segments, MetadataLsmPolicy, CHECKPOINT_BASE_
 use super::scan::VerifiedMetadataSegments;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
+use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
-use crate::limits::{CONTENTION_RETRY_LIMIT, METADATA_PUBLICATION_BUDGET_MS};
+use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{
     advanced_floor_without_root, load_head_and_metadata_basis, namespace_birth_seq,
@@ -87,21 +88,22 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<FlushWalResponse> {
-    for _attempt in 0..CONTENTION_RETRY_LIMIT {
-        match try_flush_wal(store, namespace_id, context, timer).await? {
-            TryFlushWal::Settled(basis) => {
-                return Ok(FlushWalResponse {
+    let flushed = retry_while_contended(|| async move {
+        Result::Ok(
+            match try_flush_wal(store, namespace_id, context, timer).await? {
+                TryFlushWal::Settled(basis) => CasAttempt::Settled(FlushWalResponse {
                     namespace_id: namespace_id.clone(),
                     target_head_seq: basis.target_head_seq,
                     manifest_no: basis.root_after_manifest_no,
                     manifest_head_seq: basis.root_after_head_seq,
                     outcome: basis.outcome,
-                });
-            }
-            TryFlushWal::RaceLost => continue,
-        }
-    }
-    Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
+                }),
+                TryFlushWal::RaceLost => CasAttempt::Contended,
+            },
+        )
+    })
+    .await?;
+    flushed.ok_or(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
 }
 
 /// One flush attempt against one fresh projection.

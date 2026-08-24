@@ -4,8 +4,7 @@
 use super::error::ManifestLoadError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::CONTENTION_RETRY_LIMIT;
-use crate::namespace::control::{load_metadata_root_object, load_metadata_root_object_if_present};
+use crate::namespace::control::load_metadata_root_object_if_present;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, ManifestRef, MetadataRootState,
@@ -21,6 +20,7 @@ pub(super) enum ManifestPublicationOutcome {
     /// Someone already published something at least as new; the caller's
     /// manifest stays durable and valid, the newer root simply wins.
     Superseded(MetadataRootState),
+    /// The root changed, but the candidate can still be retried.
     RootCasRaceLost,
 }
 
@@ -115,91 +115,101 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     // manifest (pure compaction), and a lower-seq attempt no-ops in favor of
     // whatever newer root someone else already published.
     //
-    // `expected_predecessor` is the root manifest the caller read when it
-    // built this successor, or `None` when the caller built on a basis this
-    // namespace had not published a root for — a young namespace's genesis
-    // or fork basis, whose successor creates the root object. Head ordering
-    // alone is not enough to decide the winner: every manifest carries
-    // forward the retention floor, so a candidate built from a superseded
-    // basis could win on a higher head while silently reverting a sibling's
-    // acknowledged publication. A root that no longer names the predecessor
-    // therefore supersedes the candidate, whatever the head ordering says;
-    // the caller rebases against the current root and retries.
+    // Callers own the retry policy because rebuilding costs vary by operation.
     let candidate = manifest_ref_for(namespace_id, manifest);
-    for _attempt in 0..CONTENTION_RETRY_LIMIT {
-        let Some(loaded) = load_metadata_root_object_if_present(store, namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?
-        else {
-            match create_first_metadata_root(store, namespace_id, &candidate, updated_at_ms).await?
-            {
-                Some(published) => return Ok(ManifestPublicationOutcome::Published(published)),
-                // Another publisher created the root first; re-read and let
-                // the ordinary rules decide.
-                None => continue,
+    let Some(loaded) = load_metadata_root_object_if_present(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?
+    else {
+        return match create_first_metadata_root(store, namespace_id, &candidate, updated_at_ms)
+            .await?
+        {
+            Some(published) => Ok(ManifestPublicationOutcome::Published(published)),
+            None => {
+                resolve_lost_root_swap(store, namespace_id, &candidate, &expected_predecessor).await
             }
         };
-        let current = &loaded.state;
-        if current.manifest == candidate {
-            // Idempotent re-publication: the root already names this
-            // candidate (a retried call, or a racing writer of the same
-            // bytes).
-            return Ok(ManifestPublicationOutcome::Published(current.clone()));
+    };
+    match root_decision(loaded.state, &candidate, &expected_predecessor) {
+        ManifestPublicationOutcome::RootCasRaceLost => {}
+        decided => return Ok(decided),
+    }
+    let next = MetadataRootState {
+        namespace_id: namespace_id.clone(),
+        manifest: candidate.clone(),
+        updated_at_ms,
+    };
+    let encoded =
+        encode_control_state(ControlObjectKind::MetadataRoot, &next).map_err(|error| {
+            CoreError::Codec {
+                object_key: loaded.object_key.clone(),
+                message: error.to_string(),
+            }
+        })?;
+    match store
+        .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
+        .await
+    {
+        Ok(_) => Ok(ManifestPublicationOutcome::Published(next)),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {
+            resolve_lost_root_swap(store, namespace_id, &candidate, &expected_predecessor).await
         }
-        if root_supersedes_candidate(current, &candidate) {
-            return Ok(ManifestPublicationOutcome::Superseded(current.clone()));
-        }
-        match &expected_predecessor {
-            Some(expected_predecessor)
-                if current.manifest.manifest_object_id == *expected_predecessor => {}
-            // Either the root moved off the basis this candidate was built
-            // on, or the candidate was built on no root at all and one now
-            // exists.
-            _ => return Ok(ManifestPublicationOutcome::Superseded(current.clone())),
-        }
-
-        let next = MetadataRootState {
-            namespace_id: namespace_id.clone(),
-            manifest: candidate.clone(),
-            updated_at_ms,
-        };
-        let encoded =
-            encode_control_state(ControlObjectKind::MetadataRoot, &next).map_err(|error| {
-                CoreError::Codec {
-                    object_key: loaded.object_key.clone(),
-                    message: error.to_string(),
+        // Re-read the root to resolve an unknown write outcome.
+        Err(error) => {
+            match resolve_lost_root_swap(store, namespace_id, &candidate, &expected_predecessor)
+                .await?
+            {
+                ManifestPublicationOutcome::RootCasRaceLost => {
+                    Err(CoreError::store(&loaded.object_key, &error))
                 }
-            })?;
-        match store
-            .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
-            .await
-        {
-            Ok(_) => return Ok(ManifestPublicationOutcome::Published(next)),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
-            Err(error) => {
-                let recovered = load_metadata_root_object(store, namespace_id)
-                    .await
-                    .map_err(CoreError::ControlObjectLoad)?
-                    .state;
-                if recovered.manifest == candidate {
-                    return Ok(ManifestPublicationOutcome::Published(recovered));
-                }
-                if root_supersedes_candidate(&recovered, &candidate) {
-                    return Ok(ManifestPublicationOutcome::Superseded(recovered));
-                }
-                return Err(CoreError::store(&loaded.object_key, &error));
+                outcome => Ok(outcome),
             }
         }
     }
-    Ok(ManifestPublicationOutcome::RootCasRaceLost)
+}
+
+/// Decides whether the current root accepts, supersedes, or leaves the candidate retryable.
+///
+/// A candidate may replace only its expected predecessor. This prevents stale
+/// work from overwriting a sibling publication, even at a higher head sequence.
+fn root_decision(
+    root: MetadataRootState,
+    candidate: &ManifestRef,
+    expected_predecessor: &Option<ManifestObjectId>,
+) -> ManifestPublicationOutcome {
+    if root.manifest == *candidate {
+        return ManifestPublicationOutcome::Published(root);
+    }
+    if root_supersedes_candidate(&root, candidate) {
+        return ManifestPublicationOutcome::Superseded(root);
+    }
+    match expected_predecessor {
+        Some(predecessor) if root.manifest.manifest_object_id == *predecessor => {
+            ManifestPublicationOutcome::RootCasRaceLost
+        }
+        _ => ManifestPublicationOutcome::Superseded(root),
+    }
+}
+
+/// Re-reads the root after a lost or unconfirmed swap.
+async fn resolve_lost_root_swap<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    candidate: &ManifestRef,
+    expected_predecessor: &Option<ManifestObjectId>,
+) -> Result<ManifestPublicationOutcome> {
+    let Some(loaded) = load_metadata_root_object_if_present(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?
+    else {
+        return Ok(ManifestPublicationOutcome::RootCasRaceLost);
+    };
+    Ok(root_decision(loaded.state, candidate, expected_predecessor))
 }
 
 /// Publishes the namespace's first `metadata/root.json`.
 ///
-/// A namespace that has never flushed has no root object to compare and
-/// swap, so its first publication is a create-if-absent. Losing that race
-/// returns `None`: the winner's root is then read and the ordinary
-/// supersession rules apply.
+/// Returns `None` when another publisher wins the conditional create.
 async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -219,7 +229,6 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
                 message: error.to_string(),
             }
         })?;
-    // The metadata root is mutable control state, so its first publication is a conditional create.
     match store.put_if_absent(&object_key, Bytes::from(encoded)).await {
         Ok(_) => Ok(Some(next)),
         Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(None),

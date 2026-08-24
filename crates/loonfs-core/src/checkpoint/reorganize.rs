@@ -297,7 +297,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     )
     .await?;
 
-    let mut next_segments: Vec<_> = previous
+    let surviving: Vec<_> = previous
         .payload
         .segments
         .iter()
@@ -306,31 +306,13 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         })
         .cloned()
         .collect();
-    // A merge whose rows all fell to retention writes no segment, and a run
-    // nothing names takes no number.
-    let next_run_no = if merged.output_segments.is_empty() {
-        previous.payload.next_run_no
-    } else {
-        next_run_no_after(run_no)?
-    };
-    next_segments.extend(merged.output_segments);
-    // `base_seq` is the manifest's oldest-run marker: every referenced run
-    // must sit at or above it, including delta runs other groups have not
-    // folded yet.
-    let base_seq = next_segments
-        .iter()
-        .map(|descriptor| descriptor.run_seq)
-        .min()
-        .unwrap_or(previous.payload.base_seq);
-
-    let manifest = write_reorganized_manifest(
+    let manifest = write_replacement_manifest(
         store,
         namespace_id,
         previous,
-        next_segments,
-        base_seq,
-        next_run_no,
-        previous.payload.retention_floor_seq.max(floor_seq),
+        surviving,
+        merged.output_segments,
+        floor_seq,
     )
     .await?;
 
@@ -792,15 +774,29 @@ fn group_delta_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGro
         .sum()
 }
 
-pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
+/// Writes a replacement manifest from surviving and newly produced segments.
+///
+/// The resulting segments determine the base sequence and next run number.
+pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     previous: &NamespaceManifestEnvelope,
-    segments: Vec<MetadataSegmentRef>,
-    base_seq: ChangeSeq,
-    next_run_no: RunNo,
-    retention_floor_seq: ChangeSeq,
+    surviving: Vec<MetadataSegmentRef>,
+    outputs: Vec<MetadataSegmentRef>,
+    floor_seq: ChangeSeq,
 ) -> Result<NamespaceManifestEnvelope> {
+    let next_run_no = if outputs.is_empty() {
+        previous.payload.next_run_no
+    } else {
+        next_run_no_after(previous.payload.next_run_no)?
+    };
+    let segments: Vec<MetadataSegmentRef> = surviving.into_iter().chain(outputs).collect();
+    let base_seq = segments
+        .iter()
+        .map(|descriptor| descriptor.run_seq)
+        .min()
+        .unwrap_or(previous.payload.base_seq);
+    let retention_floor_seq = previous.payload.retention_floor_seq.max(floor_seq);
     // One generated object id, one write. The generated id ends in 16 random
     // hex characters, so the key is this unit's alone and a conflict under it
     // is corruption rather than contention.

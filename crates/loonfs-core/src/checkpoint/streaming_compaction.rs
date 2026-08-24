@@ -20,7 +20,7 @@ use super::compaction_merge::{
 use super::compaction_output::MergeSegmentWriter;
 use super::compaction_retention::{KeptRow, RetentionRule};
 use super::error::ManifestLoadError;
-use super::flush::{ensure_metadata_publication_budget, next_run_no_after};
+use super::flush::ensure_metadata_publication_budget;
 use super::frozen_floor::{
     bind_survives_frozen_floor, unbinding_at_or_below_floor, unbindings_at_or_below_floor,
     BindingGeneration,
@@ -29,7 +29,7 @@ use super::load::{
     load_manifest_segment_rows_in_key_range_with_cache, load_verified_manifest_segments,
 };
 use super::publish::{publish_metadata_root, ManifestPublicationOutcome};
-use super::reorganize::{group_run_descriptors, write_reorganized_manifest, MergePlacement};
+use super::reorganize::{group_run_descriptors, write_replacement_manifest, MergePlacement};
 use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
 use super::scan::{descriptor_may_intersect_range, Readahead, VerifiedMetadataSegments};
 use crate::context::MutationContext;
@@ -622,7 +622,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         }
 
         let previous = segments.manifest();
-        let mut next_segments: Vec<MetadataSegmentRef> = previous
+        let surviving: Vec<MetadataSegmentRef> = previous
             .payload
             .segments
             .iter()
@@ -634,35 +634,22 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         // started. So the number is taken here, from the manifest this
         // attempt replaces, and stamped onto the output the job wrote.
         let run_no = previous.payload.next_run_no;
-        next_segments.extend(result.output_segments.iter().cloned().map(|descriptor| {
-            MetadataSegmentRef {
+        let outputs: Vec<MetadataSegmentRef> = result
+            .output_segments
+            .iter()
+            .cloned()
+            .map(|descriptor| MetadataSegmentRef {
                 run_no,
                 ..descriptor
-            }
-        }));
-        // A job whose rows all fell to retention writes no segment, and a run
-        // nothing names takes no number.
-        let next_run_no = if result.output_segments.is_empty() {
-            previous.payload.next_run_no
-        } else {
-            next_run_no_after(run_no)?
-        };
-        let base_seq = next_segments
-            .iter()
-            .map(|descriptor| descriptor.run_seq)
-            .min()
-            .unwrap_or(previous.payload.base_seq);
-        let manifest = write_reorganized_manifest(
+            })
+            .collect();
+        let manifest = write_replacement_manifest(
             store,
             namespace_id,
             previous,
-            next_segments,
-            base_seq,
-            next_run_no,
-            previous
-                .payload
-                .retention_floor_seq
-                .max(spec.frozen_floor_seq()),
+            surviving,
+            outputs,
+            spec.frozen_floor_seq(),
         )
         .await?;
 
@@ -681,29 +668,28 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         )
         .await?;
         drop(segments);
-        match published {
+        let lost_to = match published {
             ManifestPublicationOutcome::Published(_) => {
                 return Ok(Finalization::Published(manifest.payload.manifest_no))
             }
-            ManifestPublicationOutcome::Superseded(_)
-            | ManifestPublicationOutcome::RootCasRaceLost => {
-                tracing::debug!(
-                    namespace_id = namespace_id.as_str(),
-                    families = ?spec.families(),
-                    attempt,
-                    attempts = MAX_FINALIZATION_ATTEMPTS,
-                    "a publication landed while a streaming metadata compaction was finalizing; \
-                     reloading"
-                );
-            }
-        }
+            ManifestPublicationOutcome::Superseded(_) => "a newer root",
+            ManifestPublicationOutcome::RootCasRaceLost => "the root compare-and-swap",
+        };
+        tracing::debug!(
+            namespace_id = namespace_id.as_str(),
+            families = ?spec.families(),
+            attempt,
+            attempts = MAX_FINALIZATION_ATTEMPTS,
+            lost_to,
+            "a streaming metadata compaction lost its finalizing publication; reloading"
+        );
     }
     tracing::info!(
         namespace_id = namespace_id.as_str(),
         families = ?spec.families(),
         attempts = MAX_FINALIZATION_ATTEMPTS,
-        "streaming metadata compaction superseded at every publication attempt; a later step \
-         plans it again"
+        "streaming metadata compaction lost every publication attempt; a later step plans it \
+         again"
     );
     Ok(Finalization::Superseded)
 }

@@ -32,9 +32,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
 ) -> Result<LoadedHeadBasis> {
     let loaded = load_head_and_metadata_basis(store, expected_namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::ControlObjectLoad)?;
     let head = loaded.head.state;
     if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
@@ -69,9 +67,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     let (current_manifest_no, basis_head_seq) = basis.map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
     })?;
-    let retention_floor_seq = retention_floor_seq.map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-    })?;
+    let retention_floor_seq = retention_floor_seq.map_err(CoreError::ControlObjectLoad)?;
     Ok(LoadedHeadBasis {
         head,
         current_manifest_no,
@@ -160,9 +156,7 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
 ) -> Result<NamespaceDiagnostics> {
     let head = crate::namespace::control::load_head_object(store, expected_namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?
+        .map_err(CoreError::ControlObjectLoad)?
         .state;
     if head.status != (NamespaceStatus::Deleted {}) {
         return Err(CoreError::Internal(format!(
@@ -171,9 +165,7 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
     }
     let retention_floor_seq = resolve_retention_floor_seq(store, &head)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::ControlObjectLoad)?;
     Ok(NamespaceDiagnostics {
         namespace_id: head.namespace_id,
         head_seq: head.seq,

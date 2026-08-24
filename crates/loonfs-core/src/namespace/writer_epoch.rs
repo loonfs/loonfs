@@ -4,9 +4,10 @@
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
-use crate::error::StoreFailureClass;
-use crate::limits::CONTENTION_RETRY_LIMIT;
-use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceStatus, WriterBlock};
+use crate::error::{CoreError, StoreFailureClass, WriterFence};
+use loonfs_api::wire::control::{
+    AcquiredWriter, HeadIdentityDrift, HeadState, NamespaceStatus, WriterBlock,
+};
 use loonfs_api::{next_public_ordinal, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -31,8 +32,11 @@ pub enum WriterEpochAcquireError {
         message: String,
         class: StoreFailureClass,
     },
-    #[error("writer epoch acquire retries exhausted after {attempts} attempts")]
-    RetryExhausted { attempts: usize },
+    #[error("{}", crate::error::contention_message(object_key))]
+    RetryExhausted { object_key: String },
+    /// The successor head changed immutable namespace identity.
+    #[error("{0}")]
+    HeadIdentityDrift(HeadIdentityDrift),
 }
 
 /// Acquires the namespace writer epoch for one writer session.
@@ -58,7 +62,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         return Err(WriterEpochAcquireError::EmptyWriterId);
     }
 
-    update_head(store, namespace_id, CONTENTION_RETRY_LIMIT, |loaded_head| {
+    update_head(store, namespace_id, |loaded_head| {
         let head = &loaded_head.state;
         // A deleted namespace cannot grant another writer epoch, even to the
         // writer recorded in its tombstone.
@@ -70,7 +74,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
 
         let next_epoch = next_writer_epoch(head.writer_epoch)?;
         Ok(HeadReplacement {
-            next: Box::new(head_with_writer(head, next_epoch, context)),
+            next: Box::new(head_with_writer(head, next_epoch, context)?),
             outcome: AcquiredWriter {
                 writer_id: context.writer_id.clone(),
                 writer_epoch: next_epoch,
@@ -78,6 +82,22 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         })
     })
     .await
+}
+
+/// Rejects a write when another writer has acquired a newer epoch.
+pub(crate) fn ensure_writer_not_fenced(
+    head: &HeadState,
+    acquired_writer: &AcquiredWriter,
+) -> Result<(), CoreError> {
+    if head.writer_epoch == acquired_writer.writer_epoch {
+        return Ok(());
+    }
+    Err(CoreError::WriterFenced(WriterFence {
+        fenced_epoch: acquired_writer.writer_epoch,
+        active_epoch: head.writer_epoch,
+        active_writer: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
+        active_acquired_at_ms: head.writer.as_ref().map(|writer| writer.acquired_at_ms),
+    }))
 }
 
 fn next_writer_epoch(active: WriterEpoch) -> Result<WriterEpoch, WriterEpochAcquireError> {
@@ -90,27 +110,19 @@ fn head_with_writer(
     current_head: &HeadState,
     writer_epoch: WriterEpoch,
     context: &MutationContext,
-) -> HeadState {
-    HeadState {
-        namespace_id: current_head.namespace_id.clone(),
-        // Epoch acquisition rewrites the head, so it carries the
-        // namespace's immutable identity forward like every other
-        // successor.
-        content_store_id: current_head.content_store_id.clone(),
-        created_at_ms: current_head.created_at_ms,
-        fork_basis: current_head.fork_basis.clone(),
-        seq: current_head.seq,
-        head_commit_id: current_head.head_commit_id.clone(),
+) -> Result<HeadState, WriterEpochAcquireError> {
+    let successor = HeadState {
         writer_epoch,
         writer: Some(WriterBlock {
             writer_id: context.writer_id.clone(),
             acquired_at_ms: context.now_ms,
         }),
-        next_inode_id: current_head.next_inode_id,
-        visible_wal_tip: current_head.visible_wal_tip.clone(),
-        recent_segments: current_head.recent_segments.clone(),
-        status: current_head.status,
-    }
+        ..current_head.clone()
+    };
+    current_head
+        .ensure_successor_identity(&successor)
+        .map_err(WriterEpochAcquireError::HeadIdentityDrift)?;
+    Ok(successor)
 }
 
 impl From<ControlUpdateError> for WriterEpochAcquireError {
@@ -134,7 +146,9 @@ impl From<ControlUpdateError> for WriterEpochAcquireError {
                 message,
                 class,
             },
-            ControlUpdateError::RetryExhausted { attempts } => Self::RetryExhausted { attempts },
+            ControlUpdateError::RetryExhausted { object_key } => {
+                Self::RetryExhausted { object_key }
+            }
         }
     }
 }

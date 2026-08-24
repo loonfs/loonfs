@@ -78,21 +78,12 @@ pub(crate) fn prepare_commit_head_publish(
     let object_key = wal_head(&current_head.namespace_id);
     let new_tip = wal.envelope.pointer();
     let resulting_head = HeadState {
-        namespace_id: current_head.namespace_id.clone(),
-        // The head is the only durable home of the namespace's content
-        // store, name policy, and fork provenance: every successor carries
-        // them forward verbatim, and the assertion below proves it did.
-        content_store_id: current_head.content_store_id.clone(),
-        created_at_ms: current_head.created_at_ms,
-        fork_basis: current_head.fork_basis.clone(),
         seq: plan.assigned_seq,
         head_commit_id: plan.commit_id.clone(),
-        writer_epoch: current_head.writer_epoch,
-        writer: current_head.writer.clone(),
         next_inode_id: plan.resulting_next_inode_id,
         recent_segments: next_recent_segments(current_head),
         visible_wal_tip: Some(new_tip),
-        status: current_head.status,
+        ..current_head.clone()
     };
     current_head
         .ensure_successor_identity(&resulting_head)

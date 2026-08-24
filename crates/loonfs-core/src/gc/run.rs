@@ -208,6 +208,10 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
 
     /// Decides one candidate using the pass-owned verifier and family state.
     async fn process_candidate(&mut self, family: CandidateFamily, key: &str) -> Result<SweepStep> {
+        if !family.recognizes(key) {
+            self.report.retain(RetainedReason::UnrecognizedKey);
+            return Ok(SweepStep::Continue);
+        }
         let family = match family {
             CandidateFamily::UploadSessions => {
                 self.process_upload_session(key).await?;
@@ -321,10 +325,10 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             }
             StagedObject::ClaimedLease => {}
             StagedObject::Orphaned => {
-                if self
-                    .sweep_aged(key, METADATA_COMPACTION_STAGING_GRACE_MS)
-                    .await?
-                    && key.ends_with(".sst.zst")
+                if key.ends_with(".sst.zst")
+                    && self
+                        .sweep_aged(key, METADATA_COMPACTION_STAGING_GRACE_MS)
+                        .await?
                 {
                     self.report.deleted.metadata_segments += 1;
                 }

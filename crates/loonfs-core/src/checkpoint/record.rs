@@ -11,6 +11,9 @@ use crate::control_object::{
     expect_identity_field, expect_namespace, expect_own_manifest, load_control_object,
     ControlObjectLoadError, LoadedControl,
 };
+use crate::control_update::{
+    create_control_object_under_generated_id, retry_while_contended, CasAttempt,
+};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::load_head_object;
@@ -35,25 +38,15 @@ pub(crate) fn encode_checkpoint_record(
         })
 }
 
-/// Writes a record under its freshly generated id with create-if-absent.
-///
-/// The id comes from [`CheckpointId::generate`], so the key is this pin's
-/// alone: an occupied key means two generated ids collided, which is a
-/// broken generator rather than a lifecycle a caller could resolve.
+/// Writes a record under its freshly generated [`CheckpointId`].
 pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,
 ) -> Result<()> {
     let encoded = encode_checkpoint_record(record)?;
     let object_key = checkpoint_record(&record.namespace_id, &record.checkpoint_id);
-    // A checkpoint record is mutable control state, so its first lifecycle state is a conditional create.
-    match store.put_if_absent(&object_key, encoded).await {
-        Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Err(CoreError::Internal(format!(
-            "generated checkpoint id collided with the existing record `{object_key}`"
-        ))),
-        Err(error) => Err(CoreError::store(&object_key, &error)),
-    }
+    create_control_object_under_generated_id(store, &object_key, encoded).await?;
+    Ok(())
 }
 
 pub(crate) type LoadedCheckpointRecord = LoadedControl<CheckpointRecordState>;
@@ -147,45 +140,60 @@ pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Moves a record `active -> released` by compare-and-swap, stamping
-/// `released_at_ms`.
-///
-/// This is the only state change a checkpoint record ever makes, and it is
-/// one-way, so every caller converges: the owner asking for it and garbage
-/// collection acting on a passed expiry reach the same end state, and a
-/// record that is already released is left exactly as the winner wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckpointRelease {
+    Released,
+    LostRace,
+}
+
+/// Tries one `active -> released` transition using the loaded ETag.
+pub(crate) async fn release_inspected_checkpoint_record<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    loaded: LoadedCheckpointRecord,
+    released_at_ms: u64,
+) -> Result<CheckpointRelease> {
+    let mut next = loaded.state;
+    next.status = CheckpointStatus::Released { released_at_ms };
+    let encoded = encode_checkpoint_record(&next)?;
+    match store
+        .compare_and_swap(object_key, &loaded.etag, encoded)
+        .await
+    {
+        Ok(_) => Ok(CheckpointRelease::Released),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CheckpointRelease::LostRace),
+        Err(error) => Err(CoreError::store(object_key, &error)),
+    }
+}
+
+/// Releases a checkpoint record, retrying CAS conflicts.
 pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
     released_at_ms: u64,
 ) -> Result<()> {
-    const RELEASE_CAS_ATTEMPTS: usize = 4;
-    let object_key = checkpoint_record(namespace_id, checkpoint_id);
-    for _attempt in 0..RELEASE_CAS_ATTEMPTS {
-        let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
-            // Reaped underneath us: no active pin under this id is exactly
-            // what the release asked for.
-            return Ok(());
+    let object_key = &checkpoint_record(namespace_id, checkpoint_id);
+    let released = retry_while_contended(|| async move {
+        let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id)
+            .await?
+            .filter(|loaded| loaded.state.status == (CheckpointStatus::Active {}))
+        else {
+            // Reaped or released underneath us: either way no active pin
+            // stands under this id, which is what the release asked for.
+            return Ok::<_, CoreError>(CasAttempt::Settled(()));
         };
-        if matches!(loaded.state.status, CheckpointStatus::Released { .. }) {
-            return Ok(());
-        }
-        let mut next = loaded.state;
-        next.status = CheckpointStatus::Released { released_at_ms };
-        let encoded = encode_checkpoint_record(&next)?;
-        match store
-            .compare_and_swap(&object_key, &loaded.etag, encoded)
-            .await
-        {
-            Ok(_) => return Ok(()),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
-            Err(error) => return Err(CoreError::store(&object_key, &error)),
-        }
-    }
-    Err(CoreError::Internal(format!(
-        "checkpoint record `{object_key}` release retries exhausted"
-    )))
+        Ok(
+            match release_inspected_checkpoint_record(store, object_key, loaded, released_at_ms)
+                .await?
+            {
+                CheckpointRelease::Released => CasAttempt::Settled(()),
+                CheckpointRelease::LostRace => CasAttempt::Contended,
+            },
+        )
+    })
+    .await?;
+    released.ok_or_else(|| CoreError::contention_exhausted(object_key))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

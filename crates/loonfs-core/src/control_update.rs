@@ -1,21 +1,60 @@
-//! Read-modify-write loops for control objects: load, edit, and
-//! compare-and-swap the head or an upload session on its etag.
+//! Shared writes and compare-and-swap loops for mutable control objects.
 
 use crate::control_object::{
     expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
     LoadedControl,
 };
 use crate::error::{CoreError, StoreFailureClass};
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::control::{load_head_object, LoadedHeadObject};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, HeadState, UploadSessionState,
 };
 use loonfs_api::{NamespaceId, UploadId};
-use loonfs_objectstore::keys::upload_session;
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::keys::{upload_session, wal_head};
+use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
 use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CasAttempt<T> {
+    Settled(T),
+    Contended,
+}
+
+/// Runs up to [`CONTENTION_RETRY_LIMIT`] attempts.
+///
+/// Returns `None` if every attempt encounters contention.
+pub(crate) async fn retry_while_contended<T, E, F, Fut>(
+    mut attempt: F,
+) -> std::result::Result<Option<T>, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<CasAttempt<T>, E>>,
+{
+    for _attempt in 0..CONTENTION_RETRY_LIMIT {
+        if let CasAttempt::Settled(outcome) = attempt().await? {
+            return Ok(Some(outcome));
+        }
+    }
+    Ok(None)
+}
+
+/// Creates a control object and reports a generated-ID collision as an internal error.
+pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    encoded: Bytes,
+) -> crate::error::Result<ObjectMetadata> {
+    match store.put_if_absent(object_key, encoded).await {
+        Ok(metadata) => Ok(metadata),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => Err(CoreError::Internal(format!(
+            "a generated id collided with the existing control object `{object_key}`"
+        ))),
+        Err(error) => Err(CoreError::store(object_key, &error)),
+    }
+}
 
 /// Replacement head state and the value returned after its CAS succeeds.
 /// An update that should not write must return an error instead.
@@ -34,12 +73,6 @@ pub(crate) enum UploadSessionUpdate<T> {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UploadSessionCas<T> {
-    Applied(T),
-    Conflict,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum ControlUpdateError {
     #[error(transparent)]
@@ -52,8 +85,8 @@ pub(crate) enum ControlUpdateError {
         message: String,
         class: StoreFailureClass,
     },
-    #[error("control object update retries exhausted after {attempts} attempts")]
-    RetryExhausted { attempts: usize },
+    #[error("{}", crate::error::contention_message(object_key))]
+    RetryExhausted { object_key: String },
 }
 
 /// Reads the head, asks `update` to build a replacement, and applies it with
@@ -63,15 +96,15 @@ pub(crate) enum ControlUpdateError {
 pub(crate) async fn update_head<S, T, E, F>(
     store: &S,
     namespace_id: &NamespaceId,
-    max_attempts: usize,
-    mut update: F,
+    update: F,
 ) -> Result<T, E>
 where
     S: ObjectStore + ?Sized,
     E: From<ControlUpdateError>,
-    F: FnMut(&LoadedHeadObject) -> Result<HeadReplacement<T>, E>,
+    F: Fn(&LoadedHeadObject) -> Result<HeadReplacement<T>, E>,
 {
-    for _attempt in 0..max_attempts {
+    let update = &update;
+    let updated = retry_while_contended(|| async move {
         let loaded = load_head_object(store, namespace_id)
             .await
             .map_err(|error| E::from(ControlUpdateError::LoadHead(error)))?;
@@ -81,59 +114,50 @@ where
             .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
             .await
         {
-            Ok(_) => return Ok(outcome),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => {
-                continue;
-            }
-            Err(error) => {
-                return Err(E::from(ControlUpdateError::Store {
-                    object_key: loaded.object_key,
-                    message: error.public_message().into_owned(),
-                    class: StoreFailureClass::of(&error),
-                }))
-            }
+            Ok(_) => Ok(CasAttempt::Settled(outcome)),
+            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
+            // Do not retry an unknown outcome because each attempt allocates a new epoch.
+            Err(error) => Err(E::from(ControlUpdateError::Store {
+                object_key: loaded.object_key,
+                message: error.public_message().into_owned(),
+                class: StoreFailureClass::of(&error),
+            })),
         }
-    }
-
-    Err(E::from(ControlUpdateError::RetryExhausted {
-        attempts: max_attempts,
-    }))
+    })
+    .await?;
+    updated.ok_or_else(|| {
+        E::from(ControlUpdateError::RetryExhausted {
+            object_key: wal_head(namespace_id),
+        })
+    })
 }
 
 pub(crate) async fn update_upload_session<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    max_attempts: usize,
-    mut update: F,
+    update: F,
 ) -> crate::error::Result<T>
 where
     S: ObjectStore + ?Sized,
-    F: FnMut(UploadSessionState) -> Fut,
+    F: Fn(UploadSessionState) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
-    for _attempt in 0..max_attempts {
-        match try_update_upload_session(store, namespace_id, upload_id, &mut update).await? {
-            UploadSessionCas::Applied(outcome) => return Ok(outcome),
-            UploadSessionCas::Conflict => continue,
-        }
-    }
-
-    Err(CoreError::Internal(
-        "upload session compare-and-swap retry exhausted".to_owned(),
-    ))
+    let update = &update;
+    let updated = retry_while_contended(|| async move {
+        try_update_upload_session(store, namespace_id, upload_id, update).await
+    })
+    .await?;
+    updated.ok_or_else(|| CoreError::contention_exhausted(&upload_session(namespace_id, upload_id)))
 }
 
-/// Applies at most one upload-session compare-and-swap against the state and
-/// metadata loaded together. Callers that must act only on one inspection
-/// (garbage collection) retain on [`UploadSessionCas::Conflict`]; ordinary
-/// upload operations wrap this helper in their bounded retry loop above.
+/// Tries one upload-session update against the state and ETag loaded together.
 pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     update: F,
-) -> crate::error::Result<UploadSessionCas<T>>
+) -> crate::error::Result<CasAttempt<T>>
 where
     S: ObjectStore + ?Sized,
     F: FnOnce(UploadSessionState) -> Fut,
@@ -141,7 +165,7 @@ where
 {
     let loaded = load_upload_session_object(store, namespace_id, upload_id).await?;
     match update(loaded.state).await? {
-        UploadSessionUpdate::Noop(outcome) => Ok(UploadSessionCas::Applied(outcome)),
+        UploadSessionUpdate::Noop(outcome) => Ok(CasAttempt::Settled(outcome)),
         UploadSessionUpdate::Replace { next, outcome } => {
             let encoded = encode_control_state(ControlObjectKind::UploadSession, next.as_ref())
                 .map_err(|error| CoreError::Codec {
@@ -152,8 +176,8 @@ where
                 .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
                 .await
             {
-                Ok(_) => Ok(UploadSessionCas::Applied(outcome)),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(UploadSessionCas::Conflict),
+                Ok(_) => Ok(CasAttempt::Settled(outcome)),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
                 Err(error) => Err(CoreError::store(&loaded.object_key, &error)),
             }
         }
@@ -252,7 +276,7 @@ mod tests {
         );
         store.fail_next(1);
 
-        let outcome = update_head(&store, &namespace_id, 3, |loaded| {
+        let outcome = update_head(&store, &namespace_id, |loaded| {
             let mut next = loaded.state.clone();
             next.seq.0 += 1;
             Ok::<_, ControlUpdateError>(HeadReplacement {
@@ -276,7 +300,7 @@ mod tests {
         let store = MetadataMapStore::without_etag(inner, KeyPredicate::any());
 
         let closure_called = AtomicBool::new(false);
-        let error = update_head(&store, &namespace_id, 3, |loaded| {
+        let error = update_head(&store, &namespace_id, |loaded| {
             closure_called.store(true, Ordering::SeqCst);
             Ok::<_, ControlUpdateError>(HeadReplacement {
                 next: Box::new(loaded.state.clone()),

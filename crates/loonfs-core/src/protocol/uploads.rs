@@ -11,14 +11,13 @@
 
 use crate::context::MutationContext;
 use crate::control_update::{
-    load_upload_session_state, update_upload_session, UploadSessionUpdate,
+    create_control_object_under_generated_id, load_upload_session_state, update_upload_session,
+    UploadSessionUpdate,
 };
-use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::{
-    COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENTION_RETRY_LIMIT, MAX_MULTIPART_PARTS,
-    MAX_MULTIPART_PART_BYTES, MAX_SIGNED_PARTS_PER_REQUEST, MIN_MULTIPART_PART_BYTES,
-    UPLOAD_SESSION_LEASE_MS,
+    COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, MAX_MULTIPART_PARTS, MAX_MULTIPART_PART_BYTES,
+    MAX_SIGNED_PARTS_PER_REQUEST, MIN_MULTIPART_PART_BYTES, UPLOAD_SESSION_LEASE_MS,
 };
 use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
 use crate::namespace::control::load_namespace_head_control;
@@ -444,11 +443,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
                 message: error.to_string(),
             }
         })?;
-    // An upload session is mutable control state, so its first lifecycle state is a conditional create.
-    store
-        .put_if_absent(&object_key, Bytes::from(encoded))
-        .await
-        .map_err(|err| CoreError::store(&object_key, &err))?;
+    create_control_object_under_generated_id(store, &object_key, Bytes::from(encoded)).await?;
     Ok(upload_id)
 }
 
@@ -462,9 +457,7 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
 ) -> Result<()> {
     let head = load_namespace_head_control(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?
+        .map_err(CoreError::ControlObjectLoad)?
         .state;
     if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
@@ -516,40 +509,32 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
 ) -> Result<StagingSlot> {
-    update_upload_session(
-        store,
-        namespace_id,
-        upload_id,
-        CONTENTION_RETRY_LIMIT,
-        |mut state| {
-            let upload_id = upload_id.to_owned();
-            async move {
-                if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
-                    return Err(error);
-                }
-                let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
-                    return Err(CoreError::Internal(
-                        "staging slot requested from a direct upload session".to_owned(),
-                    ));
-                };
-                match staging {
-                    ProxiedStaging::Idle => {
-                        *staging = ProxiedStaging::Claimed;
-                        Ok(UploadSessionUpdate::Replace {
-                            next: Box::new(state),
-                            outcome: StagingSlot::Claimed,
-                        })
-                    }
-                    // Another request is writing the object right now. Its
-                    // bytes and digest are not this request's to displace.
-                    ProxiedStaging::Claimed => Err(CoreError::UploadContentConflict { upload_id }),
-                    ProxiedStaging::Staged(content_ref) => Ok(UploadSessionUpdate::Noop(
-                        StagingSlot::AlreadyStaged(content_ref.clone()),
-                    )),
-                }
+    update_upload_session(store, namespace_id, upload_id, |mut state| {
+        let upload_id = upload_id.to_owned();
+        async move {
+            if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
+                return Err(error);
             }
-        },
-    )
+            let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
+                return Err(CoreError::Internal(
+                    "staging slot requested from a direct upload session".to_owned(),
+                ));
+            };
+            match staging {
+                ProxiedStaging::Idle => {
+                    *staging = ProxiedStaging::Claimed;
+                    Ok(UploadSessionUpdate::Replace {
+                        next: Box::new(state),
+                        outcome: StagingSlot::Claimed,
+                    })
+                }
+                ProxiedStaging::Claimed => Err(CoreError::UploadContentConflict { upload_id }),
+                ProxiedStaging::Staged(content_ref) => Ok(UploadSessionUpdate::Noop(
+                    StagingSlot::AlreadyStaged(content_ref.clone()),
+                )),
+            }
+        }
+    })
     .await
 }
 
@@ -564,28 +549,22 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
 ) {
-    let released = update_upload_session(
-        store,
-        namespace_id,
-        upload_id,
-        CONTENTION_RETRY_LIMIT,
-        |mut state| async move {
-            if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
-                return Ok(UploadSessionUpdate::Noop(()));
-            }
-            let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
-                return Ok(UploadSessionUpdate::Noop(()));
-            };
-            if !matches!(staging, ProxiedStaging::Claimed) {
-                return Ok(UploadSessionUpdate::Noop(()));
-            }
-            *staging = ProxiedStaging::Idle;
-            Ok(UploadSessionUpdate::Replace {
-                next: Box::new(state),
-                outcome: (),
-            })
-        },
-    )
+    let released = update_upload_session(store, namespace_id, upload_id, |mut state| async move {
+        if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
+            return Ok(UploadSessionUpdate::Noop(()));
+        }
+        let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
+            return Ok(UploadSessionUpdate::Noop(()));
+        };
+        if !matches!(staging, ProxiedStaging::Claimed) {
+            return Ok(UploadSessionUpdate::Noop(()));
+        }
+        *staging = ProxiedStaging::Idle;
+        Ok(UploadSessionUpdate::Replace {
+            next: Box::new(state),
+            outcome: (),
+        })
+    })
     .await;
     if let Err(error) = released {
         tracing::warn!(
@@ -692,51 +671,45 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
     content_ref: ContentRef,
     already_present: bool,
 ) -> Result<UploadContentResponse> {
-    update_upload_session(
-        store,
-        namespace_id,
-        upload_id,
-        CONTENTION_RETRY_LIMIT,
-        |mut state| {
-            let namespace_id = namespace_id.clone();
-            let upload_id = upload_id.to_owned();
-            let content_ref = content_ref.clone();
-            async move {
-                if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
-                    return Err(error);
-                }
-                let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
-                    return Err(CoreError::Internal(
-                        "staged content recorded for a direct upload session".to_owned(),
-                    ));
-                };
-                let response = UploadContentResponse {
-                    namespace_id,
-                    upload_id: upload_id.clone(),
-                    content_ref: content_ref.clone(),
-                };
-                if already_present && !matches!(staging, ProxiedStaging::Staged(_)) {
-                    return Err(CoreError::UploadContentConflict { upload_id });
-                }
-                match staging {
-                    ProxiedStaging::Staged(existing) => {
-                        if existing == &content_ref {
-                            Ok(UploadSessionUpdate::Noop(response))
-                        } else {
-                            Err(CoreError::UploadContentConflict { upload_id })
-                        }
+    update_upload_session(store, namespace_id, upload_id, |mut state| {
+        let namespace_id = namespace_id.clone();
+        let upload_id = upload_id.to_owned();
+        let content_ref = content_ref.clone();
+        async move {
+            if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
+                return Err(error);
+            }
+            let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
+                return Err(CoreError::Internal(
+                    "staged content recorded for a direct upload session".to_owned(),
+                ));
+            };
+            let response = UploadContentResponse {
+                namespace_id,
+                upload_id: upload_id.clone(),
+                content_ref: content_ref.clone(),
+            };
+            if already_present && !matches!(staging, ProxiedStaging::Staged(_)) {
+                return Err(CoreError::UploadContentConflict { upload_id });
+            }
+            match staging {
+                ProxiedStaging::Staged(existing) => {
+                    if existing == &content_ref {
+                        Ok(UploadSessionUpdate::Noop(response))
+                    } else {
+                        Err(CoreError::UploadContentConflict { upload_id })
                     }
-                    ProxiedStaging::Idle | ProxiedStaging::Claimed => {
-                        *staging = ProxiedStaging::Staged(content_ref);
-                        Ok(UploadSessionUpdate::Replace {
-                            next: Box::new(state),
-                            outcome: response,
-                        })
-                    }
+                }
+                ProxiedStaging::Idle | ProxiedStaging::Claimed => {
+                    *staging = ProxiedStaging::Staged(content_ref);
+                    Ok(UploadSessionUpdate::Replace {
+                        next: Box::new(state),
+                        outcome: response,
+                    })
                 }
             }
-        },
-    )
+        }
+    })
     .await
 }
 
@@ -912,55 +885,43 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
     verified: &ContentRef,
     now_ms: u64,
 ) -> Result<CompletedUpload> {
-    update_upload_session(
-        store,
-        namespace_id,
-        upload_id,
-        CONTENTION_RETRY_LIMIT,
-        |mut state| {
-            let namespace_id = namespace_id.clone();
-            let content_store_id = content_store_id.clone();
-            let upload_id = upload_id.to_owned();
-            let verified = verified.clone();
-            async move {
-                // A racing abort or a peer's completion may have landed
-                // between the read above and this swap. Whatever the durable
-                // record says now is what happened.
-                if let Some(completed) = already_completed_outcome(
-                    &state.status,
-                    &namespace_id,
-                    &content_store_id,
-                    &upload_id,
-                    Some(&verified),
-                    upload_mode(&state.mode),
-                    now_ms,
-                )? {
-                    return Ok(UploadSessionUpdate::Noop(completed));
-                }
-
-                // The completed state is where a session's reference lives,
-                // and the only place: whatever the open state was holding
-                // is replaced by it rather than kept beside it.
-                state.status = UploadSessionRecordStatus::Completed {
-                    completed_at_ms: now_ms,
-                    content_ref: verified.clone(),
-                };
-                let outcome = completed_upload(
-                    &namespace_id,
-                    &content_store_id,
-                    &upload_id,
-                    &verified,
-                    upload_mode(&state.mode),
-                    now_ms,
-                    now_ms,
-                );
-                Ok(UploadSessionUpdate::Replace {
-                    next: Box::new(state),
-                    outcome,
-                })
+    update_upload_session(store, namespace_id, upload_id, |mut state| {
+        let namespace_id = namespace_id.clone();
+        let content_store_id = content_store_id.clone();
+        let upload_id = upload_id.to_owned();
+        let verified = verified.clone();
+        async move {
+            if let Some(completed) = already_completed_outcome(
+                &state.status,
+                &namespace_id,
+                &content_store_id,
+                &upload_id,
+                Some(&verified),
+                upload_mode(&state.mode),
+                now_ms,
+            )? {
+                return Ok(UploadSessionUpdate::Noop(completed));
             }
-        },
-    )
+
+            state.status = UploadSessionRecordStatus::Completed {
+                completed_at_ms: now_ms,
+                content_ref: verified.clone(),
+            };
+            let outcome = completed_upload(
+                &namespace_id,
+                &content_store_id,
+                &upload_id,
+                &verified,
+                upload_mode(&state.mode),
+                now_ms,
+                now_ms,
+            );
+            Ok(UploadSessionUpdate::Replace {
+                next: Box::new(state),
+                outcome,
+            })
+        }
+    })
     .await
 }
 
@@ -1095,12 +1056,8 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<UploadSession> {
     let now_ms = context.now_ms;
-    let (response, abandoned) = update_upload_session(
-        store,
-        namespace_id,
-        upload_id,
-        CONTENTION_RETRY_LIMIT,
-        |mut state| {
+    let (response, abandoned) =
+        update_upload_session(store, namespace_id, upload_id, |mut state| {
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.to_owned();
             async move {
@@ -1133,9 +1090,8 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
                     }
                 }
             }
-        },
-    )
-    .await?;
+        })
+        .await?;
 
     abandoned.release(store, content_store_id).await;
     Ok(response)

@@ -260,8 +260,6 @@ pub enum CommitValidationError {
     },
     #[error("validated preview apply failed: {0}")]
     ValidatedPreviewApplyFailed(String),
-    #[error("next inode id counter overflow")]
-    NextInodeOverflow,
     #[error("op index overflow")]
     OpIndexOverflow,
     #[error("delta index overflow")]

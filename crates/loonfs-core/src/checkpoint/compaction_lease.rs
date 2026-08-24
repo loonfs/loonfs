@@ -11,6 +11,7 @@
 use crate::control_object::{
     expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
 };
+use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::limits::{
     METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS, METADATA_COMPACTION_LEASE_EXPIRY_MS,
@@ -186,24 +187,10 @@ impl<'a> CompactionLease<'a> {
 
     /// Writes the lease for the first time, before the job's first output
     /// object, so no object under the prefix is ever unclaimed.
-    ///
-    /// Create-if-absent, like every other object written under a freshly
-    /// generated id: an occupied key means two generated job ids collided,
-    /// which is a broken generator rather than a lifecycle a caller could
-    /// resolve.
     pub(super) async fn create<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
         let encoded = encode_lease(&self.state)?;
-        // A lease is mutable control state, so its first lifecycle state is a conditional create.
-        let metadata = match store.put_if_absent(&self.object_key, encoded).await {
-            Ok(metadata) => metadata,
-            Err(ObjectStoreError::PreconditionFailed { .. }) => {
-                return Err(CoreError::Internal(format!(
-                    "generated compaction job id collided with the existing lease `{}`",
-                    self.object_key
-                )))
-            }
-            Err(error) => return Err(CoreError::store(&self.object_key, &error)),
-        };
+        let metadata =
+            create_control_object_under_generated_id(store, &self.object_key, encoded).await?;
         self.etag = Some(self.required_etag(metadata.etag)?);
         Ok(())
     }

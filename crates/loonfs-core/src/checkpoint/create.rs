@@ -12,15 +12,16 @@ use super::row::manifest_rows_for_family;
 use super::runs::CHECKPOINT_ROW_FAMILIES;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
+use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 #[cfg(test)]
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
 use loonfs_api::{Checkpoint, CheckpointId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
 use super::load::append_rows_to_metadata;
@@ -53,14 +54,15 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     // 4. On verification failure, release the record — terminally — and
     //    retry against a newer basis under a new id.
     validate_checkpoint_owner(&owner)?;
-    let timer = StdMonotonicTimer::default();
-    let mut saw_root_cas_race = false;
-    for _publication_attempt in 0..CONTENTION_RETRY_LIMIT {
-        let basis = match try_flush_wal(store, namespace_id, context, &timer).await? {
+    let timer = &StdMonotonicTimer::default();
+    let owner = &owner;
+    let saw_root_cas_race = &AtomicBool::new(false);
+    let created = retry_while_contended(|| async move {
+        let basis = match try_flush_wal(store, namespace_id, context, timer).await? {
             TryFlushWal::Settled(basis) => basis,
             TryFlushWal::RaceLost => {
-                saw_root_cas_race = true;
-                continue;
+                saw_root_cas_race.store(true, Ordering::Relaxed);
+                return Ok(CasAttempt::Contended);
             }
         };
 
@@ -100,20 +102,23 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
             <= CHECKPOINT_VERIFY_BUDGET_MS;
         if verification == CheckpointBasisVerification::Verified && within_budget {
-            return Ok(super::checkpoint_summary(record));
+            return Ok(CasAttempt::Settled(super::checkpoint_summary(record)));
         }
 
         // Overrunning the budget counts as verification failure: the record
         // may have raced the grace window, so it must not stand as a root.
         release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms).await?;
-    }
+        Ok(CasAttempt::Contended)
+    })
+    .await?;
 
-    if saw_root_cas_race {
-        Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
-    } else {
-        Err(CoreError::CheckpointUnavailable(
+    match (created, saw_root_cas_race.load(Ordering::Relaxed)) {
+        (Some(checkpoint), _) => Ok(checkpoint),
+        // Root contention is retryable; other exhaustion means no basis verified.
+        (None, true) => Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead)),
+        (None, false) => Err(CoreError::CheckpointUnavailable(
             "checkpoint publication retry exhausted".to_owned(),
-        ))
+        )),
     }
 }
 

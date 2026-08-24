@@ -344,6 +344,10 @@ impl CoreError {
         }
     }
 
+    pub(crate) fn contention_exhausted(object_key: &str) -> Self {
+        Self::Internal(contention_message(object_key))
+    }
+
     pub fn kind(&self) -> ErrorKind {
         self.code().kind()
     }
@@ -498,6 +502,13 @@ impl CoreError {
             _ => None,
         }
     }
+}
+
+pub(crate) fn contention_message(object_key: &str) -> String {
+    format!(
+        "`{object_key}` lost all {} compare-and-swap attempts to contention",
+        crate::limits::CONTENTION_RETRY_LIMIT
+    )
 }
 
 fn metadata_projection_store_message(
@@ -726,9 +737,7 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
     fn from(value: crate::control_update::ControlUpdateError) -> Self {
         use crate::control_update::ControlUpdateError;
         match value {
-            ControlUpdateError::LoadHead(error) => {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-            }
+            ControlUpdateError::LoadHead(error) => CoreError::ControlObjectLoad(error),
             ControlUpdateError::Store {
                 object_key,
                 message,
@@ -751,7 +760,8 @@ fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> Error
         WriterEpochAcquireError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
         WriterEpochAcquireError::EmptyWriterId
         | WriterEpochAcquireError::WriterEpochOverflow { .. }
-        | WriterEpochAcquireError::RetryExhausted { .. } => ErrorCode::ServerError,
+        | WriterEpochAcquireError::RetryExhausted { .. }
+        | WriterEpochAcquireError::HeadIdentityDrift(_) => ErrorCode::ServerError,
         WriterEpochAcquireError::HeadWrite { class, .. } => classify_store_failure(*class),
     }
 }
@@ -834,7 +844,6 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         CommitValidationError::ValidatedPreviewApplyFailed(_)
         | CommitValidationError::RestoreRevisionOverflow { .. }
         | CommitValidationError::ReplaceFileRevisionOverflow { .. }
-        | CommitValidationError::NextInodeOverflow
         | CommitValidationError::OpIndexOverflow
         | CommitValidationError::DeltaIndexOverflow => ErrorCode::ServerError,
     }
