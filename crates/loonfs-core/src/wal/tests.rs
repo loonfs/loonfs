@@ -397,6 +397,9 @@ async fn validated_wal_chain_rejects_corrupt_visible_segments() {
         envelope.payload.start_seq = ChangeSeq(2);
         envelope.payload.end_seq = ChangeSeq(2);
         envelope.payload.records[0].seq = ChangeSeq(2);
+        // Keep the id consistent so this test reaches the chain validation.
+        envelope.payload.segment_id =
+            WalSegmentId::parse("00000000000000000002-cccccccccccccccc").expect("valid segment id");
         rewrap_envelope(envelope);
         *pointer = envelope.pointer();
     })

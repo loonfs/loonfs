@@ -5,9 +5,9 @@
 use crate::envelope::EnvelopeCodecError;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
-    ContentRefKind, ContentStoreId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
-    NamespaceId, UploadId, WalSegmentId,
+    wal_segment_id_start_seq, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId,
+    ContentId, ContentRef, ContentRefKind, ContentStoreId, InodeId, ManifestNo, ManifestObjectId,
+    MetadataCompactionId, NamespaceId, UploadId, WalSegmentId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -294,9 +294,11 @@ pub struct CheckpointRecordState {
 ///
 /// Pointers in immutable WAL segments accept unknown fields. The mutable head
 /// uses a strict decoder for the same shape so a rewrite cannot discard data.
+/// Both decoders reject a pointer whose `segment_id` does not encode its
+/// `start_seq`.
 ///
 /// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WalSegmentPointer {
     /// Segment identity used to derive the immutable object key and expected
     /// to agree with the decoded payload.
@@ -308,6 +310,46 @@ pub struct WalSegmentPointer {
     /// Checksum of the referenced segment's payload bytes, in `sha256:<hex>`
     /// form. Must equal the `payload_checksum` in the referenced envelope.
     pub payload_checksum: String,
+}
+
+impl<'de> Deserialize<'de> for WalSegmentPointer {
+    /// Decodes a pointer and verifies that its id matches `start_seq`.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        /// Stored fields before validating the segment position.
+        #[derive(Deserialize)]
+        struct StoredWalSegmentPointer {
+            segment_id: WalSegmentId,
+            start_seq: ChangeSeq,
+            end_seq: ChangeSeq,
+            payload_checksum: String,
+        }
+
+        let stored = StoredWalSegmentPointer::deserialize(deserializer)?;
+        validated_wal_segment_pointer(Self {
+            segment_id: stored.segment_id,
+            start_seq: stored.start_seq,
+            end_seq: stored.end_seq,
+            payload_checksum: stored.payload_checksum,
+        })
+    }
+}
+
+/// Verifies that a WAL segment id encodes the supplied start sequence.
+/// Reclamation derives the sequence from the object key, so a mismatch could
+/// cause a live segment to be collected.
+pub(crate) fn validate_wal_segment_start_seq(
+    segment_id: &WalSegmentId,
+    start_seq: ChangeSeq,
+) -> Result<(), String> {
+    if wal_segment_id_start_seq(segment_id.as_str()) == Some(start_seq) {
+        return Ok(());
+    }
+    Err(format!(
+        "wal segment id `{segment_id}` does not encode start seq `{start_seq}`"
+    ))
 }
 
 /// Strict WAL pointer shape used only while decoding the mutable head.
@@ -331,6 +373,15 @@ impl From<StrictWalSegmentPointer> for WalSegmentPointer {
     }
 }
 
+/// Applies the shared position check after strict decoding.
+fn validated_wal_segment_pointer<E>(pointer: WalSegmentPointer) -> Result<WalSegmentPointer, E>
+where
+    E: serde::de::Error,
+{
+    validate_wal_segment_start_seq(&pointer.segment_id, pointer.start_seq).map_err(E::custom)?;
+    Ok(pointer)
+}
+
 /// Decodes the head's visible WAL tip without accepting unknown fields.
 fn strict_wal_segment_pointer<'de, D>(
     deserializer: D,
@@ -338,7 +389,9 @@ fn strict_wal_segment_pointer<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    Ok(Option::<StrictWalSegmentPointer>::deserialize(deserializer)?.map(Into::into))
+    Option::<StrictWalSegmentPointer>::deserialize(deserializer)?
+        .map(|pointer| validated_wal_segment_pointer(pointer.into()))
+        .transpose()
 }
 
 /// Decodes the head's predecessor hints without accepting unknown fields.
@@ -346,10 +399,10 @@ fn strict_wal_segment_pointers<'de, D>(deserializer: D) -> Result<Vec<WalSegment
 where
     D: Deserializer<'de>,
 {
-    Ok(Vec::<StrictWalSegmentPointer>::deserialize(deserializer)?
+    Vec::<StrictWalSegmentPointer>::deserialize(deserializer)?
         .into_iter()
-        .map(Into::into)
-        .collect())
+        .map(|pointer| validated_wal_segment_pointer(pointer.into()))
+        .collect()
 }
 
 /// Who most recently acquired the writer epoch, and when.
@@ -1168,6 +1221,47 @@ mod tests {
         let older = wal_pointer_json("00000000000000000001-0123456789abcdef", 1, 1);
         serde_json::from_value::<HeadState>(head_json(Some(older), vec![tip]))
             .expect_err("the head rejects a field a predecessor hint does not define");
+    }
+
+    /// WAL pointers reject ids that do not encode their start sequence.
+    #[test]
+    fn wal_pointers_reject_an_id_that_disagrees_with_its_start_seq() {
+        let agreeing = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+        serde_json::from_value::<WalSegmentPointer>(agreeing)
+            .expect("a pointer whose id encodes its start seq decodes");
+
+        let disagreeing = wal_pointer_json("00000000000000000003-fedcba9876543210", 2, 2);
+        let error = serde_json::from_value::<WalSegmentPointer>(disagreeing)
+            .expect_err("a pointer whose id disagrees with its start seq is corruption");
+        let message = error.to_string();
+        assert!(
+            message.contains("`00000000000000000003-fedcba9876543210`")
+                && message.contains("start seq `2`"),
+            "the rejection should name both values: {message}"
+        );
+    }
+
+    /// The strict head decoder applies the same check to its tip and hints.
+    #[test]
+    fn the_head_rejects_a_pointer_whose_id_disagrees_with_its_start_seq() {
+        let tip = wal_pointer_json("00000000000000000003-aaaaaaaaaaaaaaaa", 3, 3);
+        let older = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+        serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), vec![older.clone()]))
+            .expect("pointers whose ids encode their start seqs decode");
+
+        let drifted_tip = wal_pointer_json("00000000000000000004-aaaaaaaaaaaaaaaa", 3, 3);
+        let error = serde_json::from_value::<HeadState>(head_json(Some(drifted_tip), vec![older]))
+            .expect_err("the head rejects a tip that disagrees with its start seq");
+        let message = error.to_string();
+        assert!(
+            message.contains("`00000000000000000004-aaaaaaaaaaaaaaaa`")
+                && message.contains("start seq `3`"),
+            "the rejection should name both values: {message}"
+        );
+
+        let drifted_hint = wal_pointer_json("00000000000000000001-fedcba9876543210", 2, 2);
+        serde_json::from_value::<HeadState>(head_json(Some(tip), vec![drifted_hint]))
+            .expect_err("the head rejects a hint that disagrees with its start seq");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The WAL segment format: envelopes, commit payloads, and the delta
 //! records replay applies (format spec, "WAL segments").
 
-use crate::control::WalSegmentPointer;
+use crate::control::{validate_wal_segment_start_seq, WalSegmentPointer};
 use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::manifest::{required_option, DeletedDirentry, TombstoneGeneration};
@@ -302,7 +302,8 @@ pub fn encode_wal_segment_envelope_zstd(
 /// Decodes and verifies a durable zstd-compressed WAL segment envelope.
 ///
 /// Decoding fails for invalid compression or CBOR, the wrong kind or version,
-/// a checksum mismatch, or an invalid payload. See
+/// a checksum mismatch, or an invalid payload. A payload whose `segment_id`
+/// does not encode its `start_seq` is one of those invalid payloads. See
 /// [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
 pub fn decode_wal_segment_envelope_zstd(
     bytes: &[u8],
@@ -320,6 +321,8 @@ pub fn decode_wal_segment_envelope_zstd(
     envelope::verify_payload_checksum(&document.payload_checksum, &document.payload)?;
     let payload: WalSegmentPayload = from_reader(document.payload.as_slice())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
+    validate_wal_segment_start_seq(&payload.segment_id, payload.start_seq)
+        .map_err(EnvelopeCodecError::PayloadDecode)?;
 
     Ok(WalSegmentEnvelope {
         kind: expected_kind,
