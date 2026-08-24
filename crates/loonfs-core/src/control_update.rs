@@ -1,6 +1,4 @@
-//! Writes to mutable control objects: the conditional create that installs
-//! one under a generated id, and the read-modify-write loops that load, edit,
-//! and compare-and-swap the head or an upload session on its etag.
+//! Shared writes and compare-and-swap loops for mutable control objects.
 
 use crate::control_object::{
     expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
@@ -19,25 +17,15 @@ use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
 use thiserror::Error;
 
-/// What one attempt of a bounded compare-and-swap loop decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CasAttempt<T> {
-    /// The attempt reached an outcome, whether or not it wrote anything.
     Settled(T),
-    /// The object moved under the etag this attempt read it at, so the whole
-    /// read-decide-swap cycle has to run again against the current state.
     Contended,
 }
 
-/// Runs `attempt` until it settles, at most [`CONTENTION_RETRY_LIMIT`] times.
+/// Runs up to [`CONTENTION_RETRY_LIMIT`] attempts.
 ///
-/// No control object is worth a different number of tries than its
-/// neighbours, so the bound is one number for all of them. `None` means every
-/// attempt lost its race, and what that means to a caller belongs to the
-/// operation rather than to this loop: publication reports a lost root race,
-/// deletion a stale head, everything else
-/// [`CoreError::contention_exhausted`]. Attempts run back to back; whether
-/// contention should be paced is a decision this crate has not made anywhere.
+/// Returns `None` if every attempt encounters contention.
 pub(crate) async fn retry_while_contended<T, E, F, Fut>(
     mut attempt: F,
 ) -> std::result::Result<Option<T>, E>
@@ -53,17 +41,12 @@ where
     Ok(None)
 }
 
-/// Installs a control object under a freshly generated id.
-///
-/// Every generated id ends in 16 random hex characters, so the key is this
-/// object's alone: an occupied key means two ids collided, which is a broken
-/// generator rather than a lifecycle a caller could resolve.
+/// Creates a control object and reports a generated-ID collision as an internal error.
 pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     encoded: Bytes,
 ) -> crate::error::Result<ObjectMetadata> {
-    // Mutable control state, so its first lifecycle state is a conditional create.
     match store.put_if_absent(object_key, encoded).await {
         Ok(metadata) => Ok(metadata),
         Err(ObjectStoreError::PreconditionFailed { .. }) => Err(CoreError::Internal(format!(
@@ -133,9 +116,7 @@ where
         {
             Ok(_) => Ok(CasAttempt::Settled(outcome)),
             Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
-            // The head is the one control object whose unobserved swap is not
-            // retried: acquisition bumps the epoch on every attempt, so a
-            // blind retry would bump it twice.
+            // Do not retry an unknown outcome because each attempt allocates a new epoch.
             Err(error) => Err(E::from(ControlUpdateError::Store {
                 object_key: loaded.object_key,
                 message: error.public_message().into_owned(),
@@ -170,10 +151,7 @@ where
     updated.ok_or_else(|| CoreError::contention_exhausted(&upload_session(namespace_id, upload_id)))
 }
 
-/// Applies at most one upload-session compare-and-swap against the state and
-/// metadata loaded together. Callers that must act only on one inspection
-/// (garbage collection) retain on [`CasAttempt::Contended`]; ordinary upload
-/// operations wrap this helper in the bounded retry loop above.
+/// Tries one upload-session update against the state and ETag loaded together.
 pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,

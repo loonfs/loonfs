@@ -140,24 +140,13 @@ pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
-/// What one release compare-and-swap did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckpointRelease {
-    /// This caller wrote the release.
     Released,
-    /// The record changed under the etag that was inspected, so nothing was
-    /// written. Whether to look again is the caller's policy.
     LostRace,
 }
 
-/// Moves one inspected record `active -> released` by compare-and-swap on the
-/// etag it was read at, stamping `released_at_ms`.
-///
-/// This is the only state change a checkpoint record ever makes, and it is
-/// one-way, so every caller converges: the owner asking for it and garbage
-/// collection acting on a passed expiry reach the same end state. Callers
-/// differ only in what they do with a lost race — garbage collection acts on
-/// one inspection and retains, while [`release_checkpoint_record`] reloads.
+/// Tries one `active -> released` transition using the loaded ETag.
 pub(crate) async fn release_inspected_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
@@ -177,8 +166,7 @@ pub(crate) async fn release_inspected_checkpoint_record<S: ObjectStore + ?Sized>
     }
 }
 
-/// Releases the record named by `checkpoint_id`, reloading while it keeps
-/// losing the race.
+/// Releases a checkpoint record, retrying CAS conflicts.
 pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

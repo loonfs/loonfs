@@ -324,8 +324,6 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                 self.report.retain(RetainedReason::UnrecognizedKey);
             }
             StagedObject::ClaimedLease => {}
-            // A job's own lease is not a segment, so the shape has to decide
-            // before the delete rather than only before the counter.
             StagedObject::Orphaned => {
                 if key.ends_with(".sst.zst")
                     && self

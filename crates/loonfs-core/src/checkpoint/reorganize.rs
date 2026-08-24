@@ -774,16 +774,9 @@ fn group_delta_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGro
         .sum()
 }
 
-/// Writes the manifest that replaces `previous`: the descriptors that survived
-/// the merge, then the merge's own output.
+/// Writes a replacement manifest from surviving and newly produced segments.
 ///
-/// `next_run_no` and `base_seq` are manifest invariants, so they are derived
-/// here rather than at each caller. A merge whose rows all fell to retention
-/// writes no segment, and a run nothing names takes no number. `base_seq` is
-/// the oldest-run marker: every referenced run sits at or above it, including
-/// delta runs other groups have not folded yet. Which descriptors survive
-/// stays the caller's question, because a bounded merge and a streaming
-/// compaction select their inputs differently.
+/// The resulting segments determine the base sequence and next run number.
 pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

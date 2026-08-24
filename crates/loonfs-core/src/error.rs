@@ -344,8 +344,6 @@ impl CoreError {
         }
     }
 
-    /// The one answer a bounded compare-and-swap loop gives when it loses
-    /// every race it runs (`crate::control_update`).
     pub(crate) fn contention_exhausted(object_key: &str) -> Self {
         Self::Internal(contention_message(object_key))
     }
@@ -506,11 +504,6 @@ impl CoreError {
     }
 }
 
-/// The one sentence for a bounded compare-and-swap loop that lost every race.
-///
-/// Contention is not something the caller did wrong, but it is also not a
-/// lifecycle answer, so it is reported as what it is. Enums with their own
-/// exhaustion variant display through this, so the sentence stays one.
 pub(crate) fn contention_message(object_key: &str) -> String {
     format!(
         "`{object_key}` lost all {} compare-and-swap attempts to contention",

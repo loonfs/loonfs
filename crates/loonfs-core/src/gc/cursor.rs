@@ -47,12 +47,7 @@ impl CandidateFamily {
             .expect("every family is listed in ALL")
     }
 
-    /// True when `key` has this family's durable shape.
-    ///
-    /// A prefix listing returns whatever is under the prefix, and only the
-    /// key grammar says which of those objects this protocol wrote. A pass
-    /// deletes only what it wrote: a future sidecar, an extension's own
-    /// keyspace, and an operator's stray file are none of its business.
+    /// Returns whether `key` matches this family's durable grammar.
     pub(super) fn recognizes(self, key: &str) -> bool {
         let Some(family) = parse_object_key(key).map(|parsed| parsed.family()) else {
             return false;
@@ -65,9 +60,6 @@ impl CandidateFamily {
                 DurableObjectFamily::MetadataCompactionStaging
                     | DurableObjectFamily::MetadataCompactionLease
             ),
-            // The sweep reads a manifest key back through
-            // `manifest_object_id_of`, which is stricter than the grammar: it
-            // wants the `.manifest.json` suffix the writer emits.
             Self::Manifests => matches!(manifest_object_id_of(key), Some(Ok(_))),
             Self::Checkpoints => family == DurableObjectFamily::CheckpointRecord,
             Self::UploadSessions => family == DurableObjectFamily::UploadSession,

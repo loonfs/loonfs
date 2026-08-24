@@ -56,8 +56,6 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     validate_checkpoint_owner(&owner)?;
     let timer = &StdMonotonicTimer::default();
     let owner = &owner;
-    // Each attempt runs as its own future, so the record of a lost root race
-    // has to sit outside them all.
     let saw_root_cas_race = &AtomicBool::new(false);
     let created = retry_while_contended(|| async move {
         let basis = match try_flush_wal(store, namespace_id, context, timer).await? {
@@ -116,8 +114,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
 
     match (created, saw_root_cas_race.load(Ordering::Relaxed)) {
         (Some(checkpoint), _) => Ok(checkpoint),
-        // A lost root race is contention on the namespace, which the caller
-        // retries; every other exhaustion means no basis ever verified.
+        // Root contention is retryable; other exhaustion means no basis verified.
         (None, true) => Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead)),
         (None, false) => Err(CoreError::CheckpointUnavailable(
             "checkpoint publication retry exhausted".to_owned(),

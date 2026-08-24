@@ -20,8 +20,7 @@ pub(super) enum ManifestPublicationOutcome {
     /// Someone already published something at least as new; the caller's
     /// manifest stays durable and valid, the newer root simply wins.
     Superseded(MetadataRootState),
-    /// The root moved under this attempt but still names the predecessor the
-    /// candidate was built on, so nothing decided it. The caller rebases.
+    /// The root changed, but the candidate can still be retried.
     RootCasRaceLost,
 }
 
@@ -116,10 +115,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     // manifest (pure compaction), and a lower-seq attempt no-ops in favor of
     // whatever newer root someone else already published.
     //
-    // This is one attempt. A loser's next move is to rebase on the winner's
-    // root, and only the caller knows what rebuilding its candidate costs.
-    // Every caller already runs a bounded loop, so a budget here would
-    // silently multiply theirs.
+    // Callers own the retry policy because rebuilding costs vary by operation.
     let candidate = manifest_ref_for(namespace_id, manifest);
     let Some(loaded) = load_metadata_root_object_if_present(store, namespace_id)
         .await
@@ -129,14 +125,12 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             .await?
         {
             Some(published) => Ok(ManifestPublicationOutcome::Published(published)),
-            // Another publisher created the root first; its state decides.
             None => {
                 resolve_lost_root_swap(store, namespace_id, &candidate, &expected_predecessor).await
             }
         };
     };
     match root_decision(loaded.state, &candidate, &expected_predecessor) {
-        // The root still names the predecessor, so this attempt may swap.
         ManifestPublicationOutcome::RootCasRaceLost => {}
         decided => return Ok(decided),
     }
@@ -160,9 +154,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
             resolve_lost_root_swap(store, namespace_id, &candidate, &expected_predecessor).await
         }
-        // The swap's outcome is unobserved, so the published root answers it.
-        // A root that still names the predecessor answers nothing, and then
-        // the store failure stands.
+        // Re-read the root to resolve an unknown write outcome.
         Err(error) => {
             match resolve_lost_root_swap(store, namespace_id, &candidate, &expected_predecessor)
                 .await?
@@ -176,29 +168,16 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     }
 }
 
-/// What the currently published `root` decides about `candidate`.
+/// Decides whether the current root accepts, supersedes, or leaves the candidate retryable.
 ///
-/// [`ManifestPublicationOutcome::RootCasRaceLost`] means the root decided
-/// nothing: it still names the predecessor, so the swap is the caller's to
-/// attempt or to report.
-///
-/// `expected_predecessor` is the root manifest the caller read when it built
-/// this successor, or `None` when the caller built on a basis this namespace
-/// had not published a root for — a young namespace's genesis or fork basis,
-/// whose successor creates the root object. Head ordering alone is not enough
-/// to decide the winner: every manifest carries forward the retention floor,
-/// so a candidate built from a superseded basis could win on a higher head
-/// while silently reverting a sibling's acknowledged publication. A root that
-/// no longer names the predecessor therefore supersedes the candidate,
-/// whatever the head ordering says.
+/// A candidate may replace only its expected predecessor. This prevents stale
+/// work from overwriting a sibling publication, even at a higher head sequence.
 fn root_decision(
     root: MetadataRootState,
     candidate: &ManifestRef,
     expected_predecessor: &Option<ManifestObjectId>,
 ) -> ManifestPublicationOutcome {
     if root.manifest == *candidate {
-        // Idempotent re-publication: a retried call, or a racing writer of
-        // the same bytes.
         return ManifestPublicationOutcome::Published(root);
     }
     if root_supersedes_candidate(&root, candidate) {
@@ -208,17 +187,11 @@ fn root_decision(
         Some(predecessor) if root.manifest.manifest_object_id == *predecessor => {
             ManifestPublicationOutcome::RootCasRaceLost
         }
-        // Either the root moved off the basis this candidate was built on, or
-        // the candidate was built on no root at all and one now exists.
         _ => ManifestPublicationOutcome::Superseded(root),
     }
 }
 
-/// Re-reads the root after a swap this attempt did not win and says what its
-/// current state decides.
-///
-/// A root that is still absent decides nothing either: the winner of a lost
-/// create raced this attempt and has not landed yet.
+/// Re-reads the root after a lost or unconfirmed swap.
 async fn resolve_lost_root_swap<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -236,10 +209,7 @@ async fn resolve_lost_root_swap<S: ObjectStore + ?Sized>(
 
 /// Publishes the namespace's first `metadata/root.json`.
 ///
-/// A namespace that has never flushed has no root object to compare and
-/// swap, so its first publication is a create-if-absent. Losing that race
-/// returns `None`: the winner's root is then read and the ordinary
-/// supersession rules apply.
+/// Returns `None` when another publisher wins the conditional create.
 async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -259,7 +229,6 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
                 message: error.to_string(),
             }
         })?;
-    // The metadata root is mutable control state, so its first publication is a conditional create.
     match store.put_if_absent(&object_key, Bytes::from(encoded)).await {
         Ok(_) => Ok(Some(next)),
         Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(None),

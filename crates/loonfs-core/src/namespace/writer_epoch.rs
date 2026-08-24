@@ -34,9 +34,7 @@ pub enum WriterEpochAcquireError {
     },
     #[error("{}", crate::error::contention_message(object_key))]
     RetryExhausted { object_key: String },
-    /// The successor head this acquisition built does not carry the
-    /// namespace's immutable identity forward. A construction bug, caught
-    /// before the compare-and-swap so it can never become durable.
+    /// The successor head changed immutable namespace identity.
     #[error("{0}")]
     HeadIdentityDrift(HeadIdentityDrift),
 }
@@ -86,10 +84,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Checks that the head still carries the epoch this session acquired.
-///
-/// The epoch is the fence: any takeover bumps it, so a mismatch means another
-/// writer owns the namespace and this session's write must not land.
+/// Rejects a write when another writer has acquired a newer epoch.
 pub(crate) fn ensure_writer_not_fenced(
     head: &HeadState,
     acquired_writer: &AcquiredWriter,
@@ -124,8 +119,6 @@ fn head_with_writer(
         }),
         ..current_head.clone()
     };
-    // Epoch acquisition rewrites the head, so it carries the namespace's
-    // immutable identity forward like every other successor.
     current_head
         .ensure_successor_identity(&successor)
         .map_err(WriterEpochAcquireError::HeadIdentityDrift)?;

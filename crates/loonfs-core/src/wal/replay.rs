@@ -185,9 +185,7 @@ fn replay_next_inode_id_from_commit_deltas(
         .iter()
         .fold(current_next_inode_id, |next_inode_id, delta| {
             match &delta.delta {
-                // At the ceiling the allocator has already refused to hand
-                // out another id, so clamping here reconstructs exactly the
-                // position the write path stopped at.
+                // At the limit, allocation stops at the current ID.
                 WalDelta::CreateInode { inode_id, .. } => {
                     next_inode_id.max(next_inode_after(*inode_id).unwrap_or(*inode_id))
                 }

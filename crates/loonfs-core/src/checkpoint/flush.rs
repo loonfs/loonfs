@@ -103,8 +103,6 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
         )
     })
     .await?;
-    // A flush that lost every root race is a namespace under active
-    // publication, which the caller retries as a stale head.
     flushed.ok_or(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
 }
 

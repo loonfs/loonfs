@@ -528,8 +528,6 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
                         outcome: StagingSlot::Claimed,
                     })
                 }
-                // Another request is writing the object right now. Its
-                // bytes and digest are not this request's to displace.
                 ProxiedStaging::Claimed => Err(CoreError::UploadContentConflict { upload_id }),
                 ProxiedStaging::Staged(content_ref) => Ok(UploadSessionUpdate::Noop(
                     StagingSlot::AlreadyStaged(content_ref.clone()),
@@ -893,9 +891,6 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
         let upload_id = upload_id.to_owned();
         let verified = verified.clone();
         async move {
-            // A racing abort or a peer's completion may have landed
-            // between the read above and this swap. Whatever the durable
-            // record says now is what happened.
             if let Some(completed) = already_completed_outcome(
                 &state.status,
                 &namespace_id,
@@ -908,9 +903,6 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
                 return Ok(UploadSessionUpdate::Noop(completed));
             }
 
-            // The completed state is where a session's reference lives,
-            // and the only place: whatever the open state was holding
-            // is replaced by it rather than kept beside it.
             state.status = UploadSessionRecordStatus::Completed {
                 completed_at_ms: now_ms,
                 content_ref: verified.clone(),

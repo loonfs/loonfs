@@ -25,8 +25,6 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     options: DeleteNamespaceOptions,
     acquired_writer: AcquiredWriter,
 ) -> Result<DeleteNamespaceResponse, CoreError> {
-    // Each attempt runs as its own future, so the record of an unobserved
-    // swap has to sit outside them all.
     let attempted_swap = &AtomicBool::new(false);
     let acquired_writer = &acquired_writer;
     let deleted = retry_while_contended(|| async move {
@@ -91,8 +89,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             // The head moved (a commit, fence takeover, or another deleter
             // landed first). Reload and re-evaluate.
             Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
-            // Outcome unobserved; the reload at the top of the next attempt
-            // resolves it, because the target state is terminal.
+            // Reload to determine whether an unconfirmed delete succeeded.
             Err(ObjectStoreError::Transport { .. }) => {
                 attempted_swap.store(true, Ordering::Relaxed);
                 Ok(CasAttempt::Contended)
@@ -102,8 +99,6 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     })
     .await?;
 
-    // A delete that lost every race is a head under active contention, which
-    // is the caller's `stale_head` to retry rather than a server fault.
     deleted.ok_or(CoreError::HeadPublish(
         crate::commit::CommitHeadPublishError::StaleHead,
     ))

@@ -83,9 +83,6 @@ pub(crate) fn prepare_commit_head_publish(
         next_inode_id: plan.resulting_next_inode_id,
         recent_segments: next_recent_segments(current_head),
         visible_wal_tip: Some(new_tip),
-        // The head is the only durable home of the namespace's content
-        // store, name policy, and fork provenance: every successor carries
-        // them forward verbatim, and the assertion below proves it did.
         ..current_head.clone()
     };
     current_head
