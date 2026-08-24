@@ -1707,7 +1707,11 @@ once its lease has passed, so a lease with more than one provider operation
 left cannot legally be released between the read and the caller acting on it.
 Past that point the target head is the protection — a fork record whose
 target namespace exists and is not deleted is retained by every pass,
-whatever its lease says, so nothing has to clear the lease afterwards.
+whatever its lease says, so nothing has to clear the lease afterwards. The
+owner rule precedes the record status: if the target lands between a GC
+target-head read and the checkpoint release CAS, that now-`released` fork
+record is still retained while the target is live. This covers a forker that
+crashes before its post-install guard can observe the raced release.
 Deleting the target through the ordinary delete path, rather than erasing the
 head, keeps the failure inside the one lifecycle every other operation
 already understands.

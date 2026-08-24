@@ -62,7 +62,7 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     Ok(true)
 }
 
-/// Decides one active fork-owned sweep candidate immediately before acting
+/// Decides one fork-owned sweep candidate immediately before acting
 /// (rule 3): re-reads the record, re-proves the target namespace is gone,
 /// and releases the record by compare-and-swap on the just-observed etag.
 /// The etag check means one pass releases and any other observes it; the
@@ -80,9 +80,6 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
-    if loaded.state.status != (CheckpointStatus::Active {}) {
-        return Ok(ForkCheckpointSweep::NotAnActiveFork);
-    }
     let CheckpointOwner::Fork {
         target_namespace_id,
         expires_at_ms,
@@ -92,6 +89,12 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     };
     if !fork_target_proven_gone(store, &target_namespace_id, expires_at_ms, context).await? {
         return Ok(ForkCheckpointSweep::Retained);
+    }
+    // A released fork record may have acquired a live target between an
+    // earlier target-head read and release CAS. Prove the target gone before
+    // allowing the normal released-record path to consider reaping it.
+    if loaded.state.status != (CheckpointStatus::Active {}) {
+        return Ok(ForkCheckpointSweep::NotAnActiveFork);
     }
     match release_inspected_checkpoint_record(store, key, loaded, context.now_ms).await? {
         CheckpointRelease::Released => Ok(ForkCheckpointSweep::Released),

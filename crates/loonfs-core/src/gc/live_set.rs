@@ -390,11 +390,15 @@ async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> CollectResult<bool> {
-    // User checkpoints expire by time. Fork checkpoints remain active while
-    // their target namespace exists.
+    // User checkpoints expire by time. A fork checkpoint remains a root while
+    // its target namespace exists even if a racing pass already moved the
+    // record to `released`: the target head can land between that pass's head
+    // read and checkpoint CAS, and the forker can then crash before its guard.
     match &record.owner {
-        _ if record.status != (CheckpointStatus::Active {}) => Ok(true),
-        CheckpointOwner::User { .. } => Ok(lease_expired(record, context.now_ms)),
+        CheckpointOwner::User { .. } => {
+            Ok(record.status != (CheckpointStatus::Active {})
+                || lease_expired(record, context.now_ms))
+        }
         CheckpointOwner::Fork {
             target_namespace_id,
             expires_at_ms,
