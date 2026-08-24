@@ -1272,7 +1272,6 @@ async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_cont
     );
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
 
-    // Unreadable rows are treated conservatively.
     store.fail_all();
     let report = gc_namespace(&store, &namespace_id, &config(), &past)
         .await
@@ -1289,7 +1288,6 @@ async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_cont
         .await
         .is_some());
 
-    // Corrupt rows fail the pass.
     store.clear();
     for key in &segment_keys {
         let mut bytes = store
@@ -2829,7 +2827,6 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .expect("tail commit stays readable");
 }
 
-/// Runs GC with the default or an overridden re-verification chunk size.
 async fn gc_pass(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
@@ -2845,7 +2842,6 @@ async fn gc_pass(
     }
 }
 
-/// Checks that a released record is deleted before its basis.
 async fn assert_record_reaped_and_basis_kept(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
@@ -2881,7 +2877,6 @@ async fn assert_record_reaped_and_basis_kept(
     }
 }
 
-/// Checks that a later pass deletes the unreferenced basis.
 async fn assert_basis_reaped(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
@@ -3504,7 +3499,6 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .expect("first gc pass");
     assert_eq!(first_pass.deleted.checkpoint_records, 1);
 
-    // The surviving record keeps the shared basis.
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("second gc pass");
@@ -3722,7 +3716,6 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .expect("fork");
     let fork_record = read_fork_record(store.inner(), &source).await;
 
-    // An unreadable target head retains the fork record.
     store.fail_all();
     let report = gc_namespace(&store, &source, &config(), &setup)
         .await
@@ -3733,7 +3726,6 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         CheckpointStatus::Active {}
     );
 
-    // A corrupt target head fails the pass.
     store.clear();
     store
         .put_overwrite(&wal_head(&clone), Bytes::from_static(b"not json"))
@@ -3976,7 +3968,6 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
     let before = namespace_keys(store.inner(), &namespace_id).await;
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
 
-    // An unreadable record fails without deleting anything.
     store.fail_all();
     let error = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
@@ -3992,7 +3983,6 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
         "a failed pass deletes nothing"
     );
 
-    // A corrupt record reports namespace corruption.
     store.clear();
     store
         .put_overwrite(&record_key, Bytes::from_static(b"not json"))
@@ -4054,7 +4044,6 @@ async fn a_corrupt_reference_anchor_fails_and_an_unreadable_one_reads_as_missing
         .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
         .await
         .expect("corrupt reference manifest");
-    // The overwrite resets the object's age.
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
     let mut budget = PassBudget::new(None);
     let error = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
@@ -4098,7 +4087,6 @@ async fn a_corrupt_root_manifest_fails_the_pass_and_an_unreadable_one_degrades_i
     let before = namespace_keys(store.inner(), &namespace_id).await;
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
 
-    // Unreadable manifests degrade the pass.
     store.fail_all();
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
@@ -4116,7 +4104,6 @@ async fn a_corrupt_root_manifest_fails_the_pass_and_an_unreadable_one_degrades_i
         "a degraded pass reclaims nothing in the affected families"
     );
 
-    // Corrupt manifests fail the pass.
     store.clear();
     for key in &manifest_keys {
         store

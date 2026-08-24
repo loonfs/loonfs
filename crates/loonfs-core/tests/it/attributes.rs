@@ -38,7 +38,6 @@ fn path(value: &str) -> AbsolutePath {
     AbsolutePath::parse(value).expect("valid path")
 }
 
-/// Checks the typed error variant and public error code.
 fn assert_invalid_commit_request(error: &CoreError, label: &str) {
     assert!(
         matches!(error, CoreError::InvalidCommitRequest(_)),

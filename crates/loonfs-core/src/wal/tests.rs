@@ -112,7 +112,6 @@ fn wal_segment_namespace_mismatch_names_record_and_segment_values() {
     let error = prepare_wal_segment(segment_namespace.clone(), WriterEpoch(1), None, &[record])
         .expect_err("namespace mismatch should fail");
 
-    // Check both namespace IDs without depending on the exact wording.
     let message = error.to_string();
     assert!(
         message.contains(record_namespace.as_str()),
@@ -350,7 +349,6 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
     .await
     .expect_err("missing previous segment link should fail");
 
-    // Check the segment ID and missing boundary without pinning the full message.
     let message = error.to_string();
     assert!(
         message.contains(segment.envelope.payload.segment_id.as_str()),

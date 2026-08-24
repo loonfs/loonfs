@@ -1045,13 +1045,11 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         .await
         .expect("bootstrap");
 
-    // Exceed both the configured threshold and the default delta-run cap.
     let rounds = DEFAULT_MAX_CHECKPOINT_DELTA_RUNS + 2;
     for index in 1..=u64::try_from(rounds).expect("round count fits") {
         write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
 
-    // Checkpointing adds delta runs; only reorganization compacts them.
     let appended = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,

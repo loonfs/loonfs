@@ -351,7 +351,6 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     .await
     .expect("load manifest");
 
-    // Receipts below the floor are removed, but the floor's receipt remains.
     let receipts = manifest_rows_for_family(
         &materialized.metadata_state,
         ApiMetadataRowFamily::CommitReceipts,
@@ -370,7 +369,6 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq == floor
     )));
 
-    // Revision history and its index remain complete.
     let revisions = manifest_rows_for_family(
         &materialized.metadata_state,
         ApiMetadataRowFamily::Revisions,
@@ -391,7 +389,6 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     );
     assert_eq!(index_rows.len(), revisions.len());
 
-    // The deleted file's bind and unbind rows are removed.
     let binds = manifest_rows_for_family(
         &materialized.metadata_state,
         ApiMetadataRowFamily::DirentryBinds,
@@ -409,7 +406,6 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         "spent unbind markers survived: {unbinds:?}"
     );
 
-    // Revisions below the floor can still be restored.
     let restored = restore_file_revision(
         &store,
         &namespace_id,

@@ -162,7 +162,6 @@ mod tests {
         touch(&mut recency, &mut entries, "a");
         assert_eq!(recency.positions(), 1);
 
-        // Repeated touches create ghosts until compaction leaves the live entry.
         let mut previous = recency.positions();
         let mut compacted = false;
         for _ in 0..1_024 {
