@@ -10,7 +10,7 @@ pub(crate) fn wal_payload_from_materialized_commit(
     WalCommitPayload {
         seq: prepared.assigned_seq,
         commit_id: prepared.commit_id.clone(),
-        actor: prepared.actor.clone(),
+        committed_by: prepared.actor.clone(),
         semantic_commit_fingerprint: prepared.semantic_identity.as_str().to_owned(),
         committed_at_ms: commit.committed_at_ms,
         message: prepared.message.clone(),

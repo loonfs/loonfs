@@ -376,7 +376,7 @@ mod tests {
             commit_id: loonfs_api::CommitId::parse(format!("c_attribute_{committed_seq}"))
                 .expect("commit id"),
             delta_index: 0,
-            actor: loonfs_api::ActorRef::loonfs_system(),
+            updated_by: loonfs_api::ActorRef::loonfs_system(),
             updated_at_ms: 1_000 + committed_seq,
             attributes: Default::default(),
         }

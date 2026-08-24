@@ -126,7 +126,7 @@ impl MetadataState {
                     committed_seq,
                     commit_id: commit_id.clone(),
                     committed_at_ms,
-                    actor: actor.clone(),
+                    committed_by: actor.clone(),
                     revision_delta_index: *delta_index,
                     content_ref: content_ref.clone(),
                 });
@@ -144,7 +144,7 @@ impl MetadataState {
                     },
                     commit_id: commit_id.clone(),
                     deleted_at_ms: committed_at_ms,
-                    actor: actor.clone(),
+                    deleted_by: actor.clone(),
                     action: SubtreeTombstoneAction::Set {
                         deleted_direntry: deleted_direntry.clone(),
                     },
@@ -163,7 +163,7 @@ impl MetadataState {
                     },
                     commit_id: commit_id.clone(),
                     deleted_at_ms: committed_at_ms,
-                    actor: actor.clone(),
+                    deleted_by: actor.clone(),
                     action: SubtreeTombstoneAction::Revoke { target: *target },
                 });
             }
@@ -179,7 +179,7 @@ impl MetadataState {
                     committed_seq,
                     commit_id: commit_id.clone(),
                     delta_index: *delta_index,
-                    actor: actor.clone(),
+                    updated_by: actor.clone(),
                     updated_at_ms: committed_at_ms,
                     attributes: attributes.clone(),
                 });
@@ -191,7 +191,7 @@ impl MetadataState {
         self.apply_committed_wal_record_parts_mut(
             CommitReceiptRecord {
                 commit_id: record.commit_id.clone(),
-                actor: record.actor.clone(),
+                committed_by: record.committed_by.clone(),
                 semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
                 committed_seq: record.seq,
                 committed_at_ms: record.committed_at_ms,
@@ -210,7 +210,7 @@ impl MetadataState {
             self.apply_committed_wal_delta_mut(
                 receipt.committed_seq,
                 &receipt.commit_id,
-                &receipt.actor,
+                &receipt.committed_by,
                 receipt.committed_at_ms,
                 &delta.delta,
             );

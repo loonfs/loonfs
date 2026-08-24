@@ -37,7 +37,7 @@ struct NormalizedAttributeRevision {
     committed_seq: u64,
     commit_id: CommitId,
     delta_index: u32,
-    actor: ActorRef,
+    updated_by: ActorRef,
     updated_at_ms: u64,
     entries: Vec<(String, String)>,
 }
@@ -54,7 +54,7 @@ struct NormalizedTombstone {
     tombstone_delta_index: u32,
     commit_id: CommitId,
     deleted_at_ms: u64,
-    actor: ActorRef,
+    deleted_by: ActorRef,
     action: NormalizedTombstoneAction,
 }
 
@@ -567,7 +567,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     revision.committed_seq.0,
                     revision.commit_id.clone(),
                     revision.committed_at_ms,
-                    revision.actor.clone(),
+                    revision.committed_by.clone(),
                     revision.revision_delta_index,
                     revision.content_ref.content_id.clone(),
                 )
@@ -582,7 +582,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 tombstone_delta_index: tombstone.generation.delta_index,
                 commit_id: tombstone.commit_id.clone(),
                 deleted_at_ms: tombstone.deleted_at_ms,
-                actor: tombstone.actor.clone(),
+                deleted_by: tombstone.deleted_by.clone(),
                 action: match &tombstone.action {
                     CoreTombstoneAction::Set { deleted_direntry } => {
                         NormalizedTombstoneAction::Set {
@@ -611,7 +611,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 committed_seq: record.committed_seq.0,
                 commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
-                actor: record.actor.clone(),
+                updated_by: record.updated_by.clone(),
                 updated_at_ms: record.updated_at_ms,
                 entries: record
                     .attributes
@@ -667,7 +667,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                     revision.committed_seq.0,
                     revision.commit_id.clone(),
                     revision.committed_at_ms,
-                    revision.actor.clone(),
+                    revision.committed_by.clone(),
                     revision.revision_delta_index,
                     revision.content_ref.content_id.clone(),
                 )
@@ -681,7 +681,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 tombstone_delta_index: tombstone.tombstone_delta_index,
                 commit_id: tombstone.commit_id.clone(),
                 deleted_at_ms: tombstone.deleted_at_ms,
-                actor: tombstone.actor.clone(),
+                deleted_by: tombstone.deleted_by.clone(),
                 action: match &tombstone.action {
                     ModelTombstoneAction::Set { deleted_binding } => {
                         NormalizedTombstoneAction::Set {
@@ -709,7 +709,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 committed_seq: record.committed_seq.0,
                 commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
-                actor: record.actor.clone(),
+                updated_by: record.updated_by.clone(),
                 updated_at_ms: record.updated_at_ms,
                 entries: record
                     .entries

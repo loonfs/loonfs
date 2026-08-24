@@ -104,7 +104,7 @@ pub(super) fn manifest_rows_for_family(
                 committed_seq: revision.committed_seq,
                 commit_id: revision.commit_id.clone(),
                 committed_at_ms: revision.committed_at_ms,
-                actor: revision.actor.clone(),
+                committed_by: revision.committed_by.clone(),
                 delta_index: revision.revision_delta_index,
                 content_ref: revision.content_ref.clone(),
             })
@@ -118,7 +118,7 @@ pub(super) fn manifest_rows_for_family(
                 commit_id: tombstone.commit_id.clone(),
                 action: tombstone_row_action(&tombstone.action),
                 deleted_at_ms: tombstone.deleted_at_ms,
-                actor: tombstone.actor.clone(),
+                deleted_by: tombstone.deleted_by.clone(),
             })
             .collect::<Vec<_>>(),
         MetadataRowFamily::ActiveDeletions => metadata_state
@@ -131,7 +131,7 @@ pub(super) fn manifest_rows_for_family(
             .iter()
             .map(|record| MetadataRow::CommitReceipt {
                 commit_id: record.commit_id.clone(),
-                actor: record.actor.clone(),
+                committed_by: record.committed_by.clone(),
                 semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
                 committed_seq: record.committed_seq,
                 committed_at_ms: record.committed_at_ms,
@@ -147,7 +147,7 @@ pub(super) fn manifest_rows_for_family(
                 committed_seq: record.committed_seq,
                 commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
-                actor: record.actor.clone(),
+                updated_by: record.updated_by.clone(),
                 updated_at_ms: record.updated_at_ms,
                 attributes: record.attributes.clone(),
             })

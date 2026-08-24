@@ -2207,7 +2207,7 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
         loonfs_api::wire::control::MetadataCompactionLeaseState {
             job_id: metadata_compaction_id.clone(),
             namespace_id: namespace_id.clone(),
-            owner_id: "writer".to_owned(),
+            writer_id: "writer".to_owned(),
             status,
             started_at_ms: 1_000,
             heartbeat_at_ms,

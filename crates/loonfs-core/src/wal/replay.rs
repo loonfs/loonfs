@@ -46,7 +46,7 @@ where
         current_metadata_state.apply_committed_wal_record_parts_mut(
             CommitReceiptRecord {
                 commit_id: record.commit_id.clone(),
-                actor: record.actor.clone(),
+                committed_by: record.committed_by.clone(),
                 semantic_commit_fingerprint: record.semantic_commit_fingerprint.to_owned(),
                 committed_seq: record.seq,
                 committed_at_ms: record.committed_at_ms,

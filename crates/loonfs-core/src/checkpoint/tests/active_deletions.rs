@@ -28,7 +28,7 @@ fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombsto
         generation: generation(seq),
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         deleted_at_ms: 1_000 + seq,
-        actor: loonfs_api::ActorRef::loonfs_system(),
+        deleted_by: loonfs_api::ActorRef::loonfs_system(),
         action: SubtreeTombstoneAction::Set {
             deleted_direntry: Some(DeletedDirentry {
                 parent_inode_id: InodeId(1),
@@ -45,7 +45,7 @@ fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> Subtre
         generation: generation(seq),
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         deleted_at_ms: 1_000 + seq,
-        actor: loonfs_api::ActorRef::loonfs_system(),
+        deleted_by: loonfs_api::ActorRef::loonfs_system(),
         action: SubtreeTombstoneAction::Revoke {
             target: generation(target_seq),
         },
@@ -334,7 +334,7 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
                 inode_id: root_inode_id,
                 deletion_seq: active.generation.seq,
                 deleted_at_ms: active.deleted_at_ms,
-                deleted_by: active.actor,
+                deleted_by: active.deleted_by,
                 deleted_binding: deleted_direntry.map(|direntry| DirectoryBinding {
                     parent_inode_id: direntry.parent_inode_id,
                     name_key: direntry.name_key,

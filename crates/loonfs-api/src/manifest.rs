@@ -179,8 +179,8 @@ pub enum MetadataRow {
         /// onto the row so revision reads answer times without a receipt
         /// join. Never a validity input; `committed_seq` is the order.
         committed_at_ms: u64,
-        /// Actor responsible for this revision, as supplied by the application.
-        actor: crate::ActorRef,
+        /// Actor that committed this revision, as supplied by the application.
+        committed_by: crate::ActorRef,
         /// Delta position that disambiguates the revision within `committed_seq`.
         delta_index: u32,
         /// Immutable bytes published by the revision.
@@ -201,8 +201,8 @@ pub enum MetadataRow {
         /// Wall-clock stamp of the recording commit. Observational, like
         /// every `committed_at_ms`.
         deleted_at_ms: u64,
-        /// Actor responsible for this tombstone event.
-        actor: crate::ActorRef,
+        /// Actor that recorded this tombstone event.
+        deleted_by: crate::ActorRef,
     },
     /// Derived row used to list currently recoverable deletions.
     ///
@@ -224,8 +224,8 @@ pub enum MetadataRow {
     CommitReceipt {
         /// Caller idempotency key whose later reuse is checked against this row.
         commit_id: CommitId,
-        /// Actor responsible for the commit, as supplied by the application.
-        actor: crate::ActorRef,
+        /// Actor that committed the change, as supplied by the application.
+        committed_by: crate::ActorRef,
         /// Digest used to distinguish a safe retry from conflicting id reuse.
         semantic_commit_fingerprint: String,
         /// Namespace sequence assigned to the accepted commit.
@@ -256,8 +256,8 @@ pub enum MetadataRow {
         commit_id: CommitId,
         /// Delta position that disambiguates the revision within `committed_seq`.
         delta_index: u32,
-        /// Actor responsible for this attribute update.
-        actor: crate::ActorRef,
+        /// Actor that updated the attributes.
+        updated_by: crate::ActorRef,
         /// Time of the attribute update, in Unix milliseconds.
         updated_at_ms: u64,
         /// The inode's complete attribute map at this revision. An empty map
@@ -1162,7 +1162,7 @@ mod tests {
             committed_seq: ChangeSeq(12),
             commit_id: row_commit_id(),
             committed_at_ms: 12_000,
-            actor: crate::ActorRef::loonfs_system(),
+            committed_by: crate::ActorRef::loonfs_system(),
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
@@ -1193,7 +1193,7 @@ mod tests {
                 committed_seq: ChangeSeq(seq),
                 commit_id: row_commit_id(),
                 delta_index,
-                actor: crate::ActorRef::loonfs_system(),
+                updated_by: crate::ActorRef::loonfs_system(),
                 updated_at_ms: 12_000 + seq,
                 attributes: crate::Attributes::default(),
             };
@@ -1247,7 +1247,7 @@ mod tests {
             committed_seq: ChangeSeq(12),
             commit_id: row_commit_id(),
             committed_at_ms: 12_000,
-            actor: crate::ActorRef::loonfs_system(),
+            committed_by: crate::ActorRef::loonfs_system(),
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
@@ -1297,7 +1297,7 @@ mod tests {
                         deleted_direntry: None,
                     },
                     deleted_at_ms: 12_000,
-                    actor: crate::ActorRef::loonfs_system(),
+                    deleted_by: crate::ActorRef::loonfs_system(),
                 },
             ),
             (
@@ -1315,7 +1315,7 @@ mod tests {
                 super::MetadataRow::CommitReceipt {
                     commit_id: CommitId::parse("c_00000000000000000000000000000001")
                         .expect("commit id"),
-                    actor: crate::ActorRef::loonfs_system(),
+                    committed_by: crate::ActorRef::loonfs_system(),
                     semantic_commit_fingerprint: "sha256:unused".to_owned(),
                     committed_seq: ChangeSeq(12),
                     committed_at_ms: 12_000,
@@ -1330,7 +1330,7 @@ mod tests {
                     committed_seq: ChangeSeq(12),
                     commit_id: row_commit_id(),
                     delta_index: 0,
-                    actor: crate::ActorRef::loonfs_system(),
+                    updated_by: crate::ActorRef::loonfs_system(),
                     updated_at_ms: 12_000,
                     attributes: crate::Attributes::default(),
                 },
@@ -1374,7 +1374,7 @@ mod tests {
                         committed_seq: ChangeSeq(12),
                         commit_id: row_commit_id(),
                         committed_at_ms: 12_000,
-                        actor: actor.clone(),
+                        committed_by: actor.clone(),
                         delta_index: 3,
                         content_ref: crate::ContentRef::blob_v1(
                             crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
@@ -1396,7 +1396,7 @@ mod tests {
                             deleted_direntry: None,
                         },
                         deleted_at_ms: 12_000,
-                        actor: actor.clone(),
+                        deleted_by: actor.clone(),
                     },
                 ),
                 (
@@ -1419,7 +1419,7 @@ mod tests {
                         committed_seq: ChangeSeq(12),
                         commit_id: row_commit_id(),
                         delta_index: 3,
-                        actor,
+                        updated_by: actor,
                         updated_at_ms: 12_000,
                         attributes: crate::Attributes::default(),
                     },

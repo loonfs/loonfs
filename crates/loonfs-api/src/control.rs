@@ -181,8 +181,8 @@ pub struct MetadataCompactionLeaseState {
     /// Namespace whose family group the job is rebuilding.
     pub namespace_id: NamespaceId,
     /// Writer identity the job runs under, for an operator reading the
-    /// object.
-    pub owner_id: String,
+    /// object. This is the same label the namespace head records.
+    pub writer_id: String,
     /// Who owns the prefix: the job that wrote the lease, or the collector
     /// that claimed it.
     pub status: CompactionLeaseStatus,
