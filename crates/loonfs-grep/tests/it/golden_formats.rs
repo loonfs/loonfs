@@ -133,7 +133,10 @@ pub(crate) fn sample_active_manifest(
             built_through_seq,
             next_event_index,
         },
-        GrepIndexState::new(Some(reorganize), RunNo(4)),
+        GrepIndexState {
+            reorganize: Some(reorganize),
+            next_run_no: RunNo(4),
+        },
         vec![
             segment_ref(1, 1, 0, 0),
             segment_ref(2, 2, 0, 0),
@@ -155,7 +158,10 @@ pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
             checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
                 .expect("valid checkpoint id"),
         },
-        GrepIndexState::new(None, RunNo(2)),
+        GrepIndexState {
+            reorganize: None,
+            next_run_no: RunNo(2),
+        },
         vec![segment_ref(1, 1, 0, 0)],
     )
     .expect("valid backfilling manifest state")
@@ -167,7 +173,10 @@ pub(crate) fn sample_disabled_manifest() -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
         GrepIndexStatus::Disabled {},
-        GrepIndexState::new(None, RunNo(4)),
+        GrepIndexState {
+            reorganize: None,
+            next_run_no: RunNo(4),
+        },
         Vec::new(),
     )
     .expect("valid disabled manifest state")

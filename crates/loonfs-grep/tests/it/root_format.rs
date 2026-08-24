@@ -172,11 +172,9 @@ fn mutable_pointer_envelope_rejects_unknown_fields_as_corruption() {
 /// tolerated. It is not a version at all, and the probe says so.
 #[test]
 fn decoder_rejects_the_string_format_version_without_a_shim() {
-    // The envelope's version is the first one the document spells; the
-    // nested index state carries the second.
     let manifest = String::from_utf8(read_golden(DISABLED_MANIFEST_FIXTURE))
         .expect("manifest JSON is UTF-8")
-        .replacen("\"format_version\":1", "\"format_version\":\"v1\"", 1);
+        .replace("\"format_version\":1", "\"format_version\":\"v1\"");
 
     assert!(matches!(
         decode_grep_manifest(manifest.as_bytes()),
@@ -216,27 +214,10 @@ fn decoder_rejects_an_active_status_that_omits_its_event_index() {
 }
 
 #[test]
-fn decoder_rejects_unknown_index_version_without_fallback() {
-    let edited = edited_document(DISABLED_MANIFEST_FIXTURE, "", |payload| {
-        payload["index"]["format_version"] = serde_json::Value::from(7);
-    });
-
-    assert!(matches!(
-        decode_grep_manifest(&edited),
-        Err(GrepEnvelopeCodecError::InvalidState(
-            GrepManifestStateError::UnsupportedIndexFormatVersion {
-                found: 7,
-                supported: 1
-            }
-        ))
-    ));
-}
-
-#[test]
 fn decoder_rejects_unknown_version_without_fallback() {
     let wrong_version = String::from_utf8(read_golden(ACTIVE_MANIFEST_FIXTURE))
         .expect("manifest JSON is UTF-8")
-        .replacen("\"format_version\":1", "\"format_version\":7", 1);
+        .replace("\"format_version\":1", "\"format_version\":7");
 
     assert!(matches!(
         decode_grep_manifest(wrong_version.as_bytes()),
@@ -275,14 +256,16 @@ fn decoder_rejects_truncated_payload() {
 
 #[test]
 fn constructor_rejects_reorganization_segment_mismatch() {
-    let mut index = GrepIndexState::new(None, RunNo(2));
-    index.reorganize = Some(GrepReorganizeState {
-        snapshot_segment_ids: vec![segment_id(9)],
-        output_segment_ids: Vec::new(),
-        row_key_cursor: String::new(),
-        output_level: 1,
-        run_no: RunNo(1),
-    });
+    let index = GrepIndexState {
+        reorganize: Some(GrepReorganizeState {
+            snapshot_segment_ids: vec![segment_id(9)],
+            output_segment_ids: Vec::new(),
+            row_key_cursor: String::new(),
+            output_level: 1,
+            run_no: RunNo(1),
+        }),
+        next_run_no: RunNo(2),
+    };
 
     assert!(matches!(
         GrepManifestState::new(

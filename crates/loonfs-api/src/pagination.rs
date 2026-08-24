@@ -17,8 +17,8 @@ pub const DEFAULT_PAGE_LIMIT: u32 = 1_000;
 /// This value is deliberately fixed and advertised through capabilities.
 pub const DEFAULT_MAX_PAGE_LIMIT: u32 = 1_000;
 
-/// Wire cursor format version.
-pub const PAGE_CURSOR_VERSION: u8 = 1;
+/// Format version written into every encoded cursor.
+pub const PAGE_CURSOR_FORMAT_VERSION: u8 = 1;
 
 /// A validated page size selected from a caller request and a policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -268,9 +268,7 @@ pub trait PageCursor: Serialize + serde::de::DeserializeOwned {
 
 #[derive(Serialize, Deserialize)]
 struct CursorEnvelope<C> {
-    // The wire field is frozen as `v` in page cursor version 1.
-    #[serde(rename = "v")]
-    version: u8,
+    format_version: u8,
     kind: String,
     #[serde(flatten)]
     cursor: C,
@@ -279,7 +277,7 @@ struct CursorEnvelope<C> {
 /// Encodes a cursor as the opaque string clients round-trip.
 pub fn encode_cursor<C: PageCursor>(cursor: &C) -> Result<String, PageCursorError> {
     let bytes = serde_json::to_vec(&CursorEnvelope {
-        version: PAGE_CURSOR_VERSION,
+        format_version: PAGE_CURSOR_FORMAT_VERSION,
         kind: C::KIND.to_owned(),
         cursor,
     })
@@ -291,8 +289,7 @@ pub fn encode_cursor<C: PageCursor>(cursor: &C) -> Result<String, PageCursorErro
 /// endpoint reports `WrongKind` rather than a missing-field decode error.
 #[derive(Deserialize)]
 struct CursorHeader {
-    #[serde(rename = "v")]
-    version: u8,
+    format_version: u8,
     kind: String,
 }
 
@@ -302,10 +299,10 @@ pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, PageCursorError> {
         crate::hex::hex_decode_bytes(value).map_err(|_| PageCursorError::InvalidEncoding)?;
     let header: CursorHeader = serde_json::from_slice(&bytes)
         .map_err(|error| PageCursorError::InvalidJson(error.to_string()))?;
-    if header.version != PAGE_CURSOR_VERSION {
+    if header.format_version != PAGE_CURSOR_FORMAT_VERSION {
         return Err(PageCursorError::UnsupportedVersion {
-            expected: PAGE_CURSOR_VERSION,
-            actual: header.version,
+            expected: PAGE_CURSOR_FORMAT_VERSION,
+            actual: header.format_version,
         });
     }
     if header.kind != C::KIND {
@@ -533,7 +530,7 @@ mod tests {
     #[test]
     fn unsupported_cursor_version_is_rejected() {
         let bytes = serde_json::to_vec(&CursorEnvelope {
-            version: PAGE_CURSOR_VERSION + 1,
+            format_version: PAGE_CURSOR_FORMAT_VERSION + 1,
             kind: DirectoryPageCursor::KIND.to_owned(),
             cursor: DirectoryPageCursor {
                 head_seq: ChangeSeq(11),
@@ -547,8 +544,8 @@ mod tests {
         assert_eq!(
             decode_cursor::<DirectoryPageCursor>(&encoded),
             Err(PageCursorError::UnsupportedVersion {
-                expected: PAGE_CURSOR_VERSION,
-                actual: PAGE_CURSOR_VERSION + 1,
+                expected: PAGE_CURSOR_FORMAT_VERSION,
+                actual: PAGE_CURSOR_FORMAT_VERSION + 1,
             })
         );
     }

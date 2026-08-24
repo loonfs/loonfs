@@ -7,13 +7,6 @@ use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, NamespaceId, 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Version of the grep index state nested inside a v1 manifest.
-///
-/// Before the first stable release this schema evolves in place at version 1;
-/// compatibility starts with the released format, not intermediate
-/// pre-release encodings.
-pub const GREP_INDEX_FORMAT_VERSION: u32 = 1;
-
 /// Small mutable control payload installed at `extensions/grep/root.json`.
 ///
 /// The pointer names the manifest and carries its digest, so the object the
@@ -160,8 +153,6 @@ pub struct GrepReorganizeState {
 /// lives in [`GrepIndexStatus`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepIndexState {
-    /// Version of this nested index-state schema.
-    pub format_version: u32,
     /// One in-progress partitioned reorganize, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reorganize: Option<GrepReorganizeState>,
@@ -211,17 +202,6 @@ impl ChangeFeedResume {
 
     pub(crate) fn next_event_index(self) -> u32 {
         self.next_event_index
-    }
-}
-
-impl GrepIndexState {
-    /// Creates index bookkeeping in the current grep-owned format.
-    pub fn new(reorganize: Option<GrepReorganizeState>, next_run_no: RunNo) -> Self {
-        Self {
-            format_version: GREP_INDEX_FORMAT_VERSION,
-            reorganize,
-            next_run_no,
-        }
     }
 }
 
@@ -295,12 +275,6 @@ impl GrepManifestState {
     }
 
     pub(super) fn validate(&self) -> Result<(), GrepManifestStateError> {
-        if self.index.format_version != GREP_INDEX_FORMAT_VERSION {
-            return Err(GrepManifestStateError::UnsupportedIndexFormatVersion {
-                found: self.index.format_version,
-                supported: GREP_INDEX_FORMAT_VERSION,
-            });
-        }
         if matches!(self.status, GrepIndexStatus::Disabled {}) {
             if !self.segments.is_empty() {
                 return Err(GrepManifestStateError::DisabledHasSegments);

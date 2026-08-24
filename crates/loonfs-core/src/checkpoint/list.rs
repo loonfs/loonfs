@@ -156,7 +156,7 @@ mod cursor_tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let token = loonfs_api::wire::hex::hex_encode_bytes(
             &serde_json::to_vec(&serde_json::json!({
-                "v": 1,
+                "format_version": 1,
                 "kind": "checkpoint_inventory",
                 "namespace_id": "demo",
                 "last_key": "namespaces/demo/checkpoints/chk_00000000000000000000000000000001.json",

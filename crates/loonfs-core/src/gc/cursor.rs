@@ -135,7 +135,7 @@ mod tests {
     fn cursor_decode_tolerates_additive_fields() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let token = token_over(&serde_json::json!({
-            "v": 1,
+            "format_version": 1,
             "kind": "core_gc",
             "namespace_id": "demo",
             "family": "metadata_segments",
@@ -166,7 +166,7 @@ mod tests {
         assert!(GcCursor::decode(&token, &other_namespace_id).is_err());
 
         let wrong_family_prefix = token_over(&serde_json::json!({
-            "v": 1,
+            "format_version": 1,
             "kind": "core_gc",
             "namespace_id": "demo",
             "family": "wal_segments",
@@ -182,7 +182,7 @@ mod tests {
     fn a_cursor_from_another_job_is_refused() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let foreign_kind = token_over(&serde_json::json!({
-            "v": 1,
+            "format_version": 1,
             "kind": "grep_gc",
             "namespace_id": "demo",
             "family": "wal_segments",

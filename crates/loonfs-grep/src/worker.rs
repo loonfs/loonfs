@@ -364,7 +364,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next = GrepManifestState::new(
             namespace_id.clone(),
             GrepIndexStatus::Disabled {},
-            GrepIndexState::new(None, current.manifest_state().index().next_run_no),
+            GrepIndexState {
+                reorganize: None,
+                next_run_no: current.manifest_state().index().next_run_no,
+            },
             Vec::new(),
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
@@ -661,10 +664,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next = GrepManifestState::new(
             namespace_id.clone(),
             status,
-            GrepIndexState::new(
-                current.manifest_state().index().reorganize.clone(),
+            GrepIndexState {
+                reorganize: current.manifest_state().index().reorganize.clone(),
                 next_run_no,
-            ),
+            },
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
@@ -714,7 +717,10 @@ fn backfilling_root(
             cursor_inode_id: None,
             checkpoint_id,
         },
-        GrepIndexState::new(None, next_run_no),
+        GrepIndexState {
+            reorganize: None,
+            next_run_no,
+        },
         Vec::new(),
     )
     .map_err(|error| core_state_error(namespace_id, error))
@@ -1251,7 +1257,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next = GrepManifestState::new(
             namespace_id.clone(),
             current.manifest_state().status().clone(),
-            GrepIndexState::new(reorganize, next_run_no),
+            GrepIndexState {
+                reorganize,
+                next_run_no,
+            },
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
