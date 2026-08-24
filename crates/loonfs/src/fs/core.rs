@@ -4,7 +4,7 @@ use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::{validate_writer_id, ReadConfig};
 use crate::maintenance_runner::MaintenanceRunner;
 use crate::metrics::RuntimeInstruments;
-use crate::publisher::PublishObserver;
+use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 use crate::{
     ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, NamespaceId, ObjectStore,
     RuntimeCacheStats,
@@ -58,7 +58,39 @@ pub(crate) struct WriterBits {
     pub(crate) maintenance: MaintenanceRunner,
     /// Optional synchronous notification after a mutation batch durably
     /// advances a namespace. Callers promise that it does not block.
-    pub(crate) publish_observer: Option<PublishObserver>,
+    pub(crate) namespace_advance_observer: Option<NamespaceAdvanceObserver>,
+}
+
+impl WriterBits {
+    /// Reports that `namespace_id` is durably visible through `through_seq`.
+    ///
+    /// The one post-publication emission point. A host observer panic is
+    /// contained here: the commit it followed is already durable.
+    pub(crate) fn notify_namespace_advanced(
+        &self,
+        namespace_id: &NamespaceId,
+        through_seq: ChangeSeq,
+    ) {
+        // Nudge runtime-owned work first: a slow or panicking observer must
+        // not delay it.
+        self.maintenance.nudge_publication_subscribers(namespace_id);
+
+        let Some(observer) = &self.namespace_advance_observer else {
+            return;
+        };
+        let hint = NamespaceAdvanceHint {
+            namespace_id: namespace_id.clone(),
+            through_seq,
+        };
+        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
+        if observed.is_err() {
+            tracing::error!(
+                namespace_id = %namespace_id,
+                through_seq = through_seq.0,
+                "namespace advance observer panicked; the commit was already durable"
+            );
+        }
+    }
 }
 
 impl WriterIdentity {

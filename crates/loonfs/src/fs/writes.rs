@@ -974,11 +974,8 @@ pub(crate) async fn publish_batch_with_engine(
         .map(|result| result.map_err(RuntimeError::Core))
         .collect::<Vec<_>>();
     // Notify observers only when at least one commit succeeded.
-    if let Some(committed_seq) = highest_committed_seq(&results) {
-        notify_publish_observer(writer, namespace_id, committed_seq);
-        writer
-            .maintenance
-            .nudge_publication_subscribers(namespace_id);
+    if let Some(through_seq) = highest_committed_seq(&results) {
+        writer.notify_namespace_advanced(namespace_id, through_seq);
     }
     maybe_auto_step_after_publish(writer, namespace_id, wal_tail_segments);
     results
@@ -991,16 +988,6 @@ fn highest_committed_seq(results: &[Result<CommitResponse>]) -> Option<ChangeSeq
         .filter_map(|result| result.as_ref().ok())
         .map(|response| response.committed_seq)
         .max()
-}
-
-fn notify_publish_observer(
-    writer: &WriterBits,
-    namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
-) {
-    if let Some(observer) = &writer.publish_observer {
-        observer(namespace_id, committed_seq);
-    }
 }
 
 /// Tells the maintenance runner a namespace crossed its WAL-tail threshold.

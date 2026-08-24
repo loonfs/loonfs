@@ -16,7 +16,7 @@ use crate::{
 };
 use futures::FutureExt;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
-use loonfs_api::{CommitId, NamespaceId};
+use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
 use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
 use loonfs_core::publish::{NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState};
@@ -33,14 +33,29 @@ use tracing::Instrument;
 type CommitResult = Result<ApiCommitResponse, RuntimeError>;
 type DeleteResult = Result<DeleteNamespaceResponse, RuntimeError>;
 
-/// A synchronous notification after one mutation batch durably advances a
+/// A report that one namespace's durable mutation history advanced.
+///
+/// A namespace-advance hint is a wake-up, not history. Consumers read the
+/// ordered change feed and keep their own durable cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceAdvanceHint {
+    /// Namespace whose durable mutation history advanced.
+    pub namespace_id: NamespaceId,
+    /// The namespace is durably visible through at least this sequence.
+    ///
+    /// One publication batch may carry several commits, so this is a
+    /// high-water mark and not the identity of one commit.
+    pub through_seq: ChangeSeq,
+}
+
+/// A synchronous, best-effort notification handed one
+/// [`NamespaceAdvanceHint`] after a publication batch durably advances a
 /// namespace.
 ///
-/// The callback runs on the publication task after durability and before
-/// results are delivered. It must not block; enqueue any follow-up work onto
-/// a non-blocking channel. The sequence is the highest committed sequence in
-/// that publication batch.
-pub type PublishObserver = Arc<dyn Fn(&NamespaceId, loonfs_api::ChangeSeq) + Send + Sync + 'static>;
+/// Register one with
+/// [`FsWriterBuilder::namespace_advance_observer`](crate::FsWriterBuilder::namespace_advance_observer),
+/// which documents what the callback may do.
+pub type NamespaceAdvanceObserver = Arc<dyn Fn(NamespaceAdvanceHint) + Send + Sync + 'static>;
 
 /// Maximum candidates queued for one namespace before admission reports
 /// `commit_queue_full`.

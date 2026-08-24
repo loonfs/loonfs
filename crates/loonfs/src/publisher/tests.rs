@@ -215,7 +215,7 @@ fn test_writer_bits() -> Arc<WriterBits> {
             std::num::NonZeroUsize::new(1).expect("nonzero"),
             RuntimeInstruments::new(None),
         ),
-        publish_observer: None,
+        namespace_advance_observer: None,
     })
 }
 
