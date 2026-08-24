@@ -342,15 +342,18 @@ impl ServerConfig {
     }
 
     /// Fills `auth_token` and `content_token_secret` from the environment
-    /// when the file left them unset. Non-blank file values win; blank
-    /// environment values are ignored.
-    ///
+    /// when the file left them unset or blank. Non-blank file values win;
+    /// blank environment values are ignored.
     fn apply_env_fallbacks(
         &mut self,
         auth_token_env: Option<String>,
         content_token_secret_env: Option<String>,
     ) {
-        if self.auth_token.is_none() {
+        if self
+            .auth_token
+            .as_ref()
+            .is_none_or(|token| token.expose().trim().is_empty())
+        {
             if let Some(token) = non_blank(auth_token_env) {
                 self.auth_token = Some(SecretString::new(token));
             }
@@ -964,6 +967,9 @@ access_key = "{AZURITE_ACCOUNT_KEY}"
 
     #[test]
     fn load_rejects_blank_auth_token_when_present() {
+        // A blank file value falls back to the environment, so an ambient
+        // token would satisfy this config instead of failing it.
+        let _auth_token = EnvGuard::unset(AUTH_TOKEN_ENV);
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1320,7 +1326,7 @@ session_token = "debug-session-token"
     }
 
     #[test]
-    fn env_fallbacks_fill_only_unset_secrets() {
+    fn env_fallbacks_fill_blank_or_unset_secrets() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1348,6 +1354,19 @@ root = "/tmp/loonfs-server"
         // The environment fills fields the file left unset.
         config.auth_token = None;
         config.content_token_secret = loonfs_api::SecretString::default();
+        config.apply_env_fallbacks(
+            Some("env-auth-token".to_owned()),
+            Some("env-content-token-secret".to_owned()),
+        );
+        assert_eq!(
+            config.auth_token.as_ref().map(|token| token.expose()),
+            Some("env-auth-token")
+        );
+        assert_eq!(config.content_token_secret(), "env-content-token-secret");
+
+        // A blank file value falls back to the environment for both secrets.
+        config.auth_token = Some(loonfs_api::SecretString::new("   ".to_owned()));
+        config.content_token_secret = loonfs_api::SecretString::new("   ".to_owned());
         config.apply_env_fallbacks(
             Some("env-auth-token".to_owned()),
             Some("env-content-token-secret".to_owned()),

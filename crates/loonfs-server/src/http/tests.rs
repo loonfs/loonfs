@@ -794,7 +794,7 @@ async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
 }
 
 #[tokio::test]
-async fn every_deadline_exemption_names_a_served_route() {
+async fn deadline_exemptions_name_served_routes_and_cover_both_content_spellings() {
     use tower::ServiceExt;
 
     let temp_dir = tempdir().expect("tempdir");
@@ -806,10 +806,24 @@ async fn every_deadline_exemption_names_a_served_route() {
     .await
     .expect("build app");
 
+    // The same bytes by path and by inode are one operation, so neither
+    // spelling is cancelled at the deadline while the other runs on.
+    for content_route in [
+        "/v0/namespaces/{namespace_id}/filesystem/content",
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+    ] {
+        assert!(
+            super::DEADLINE_EXEMPT_ROUTES.contains(&content_route),
+            "content route `{content_route}` is not deadline exempt"
+        );
+    }
+
     for route in super::DEADLINE_EXEMPT_ROUTES {
         let uri = route
             .replace("{namespace_id}", "deadline-exempt")
-            .replace("{upload_id}", "upl_deadline_exempt");
+            .replace("{upload_id}", "upl_deadline_exempt")
+            .replace("{inode_id}", "ino_1")
+            .replace("{revision_no}", "1");
         let response = router
             .clone()
             .oneshot(
@@ -2636,6 +2650,8 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     server.abort();
 }
 
+// The request closures return ureq's large error type.
+#[allow(clippy::result_large_err)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2703,6 +2719,35 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         503,
         "server_busy",
         Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
+    );
+    // Both routes validate before they take a slot, so a malformed read
+    // answers 400 rather than 503 while the cap is full, and the two
+    // rejections above stay the only ones counted.
+    expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/filesystem/content"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "a missing path should answer 400 at the concurrency cap",
+        400,
+        "invalid_request",
+    );
+    expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/inodes/not-an-inode/revisions/1/content"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "a malformed inode id should answer 400 at the concurrency cap",
+        400,
+        "invalid_request",
     );
     assert!(state
         .metrics

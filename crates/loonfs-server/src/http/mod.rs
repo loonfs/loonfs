@@ -32,7 +32,7 @@ pub use self::tls::TlsConfigError;
 
 use self::error::{status_for_core_error_code, ApiResponseError, ServedErrorCode};
 use self::extractors::{
-    authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, NoQuery,
+    acquire_download_permit, authorize, AppJson, AppPath, AppQuery, NamespaceIdPath, NoQuery,
     OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
     MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
@@ -108,6 +108,7 @@ enum RequestLogSeverity {
 // Membership is limited to streamed content and operator work that is long by design.
 const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
     "/v0/namespaces/{namespace_id}/filesystem/content",
+    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
     "/v0/admin/namespaces/{namespace_id}/maintenance/run",
     "/v0/admin/store/probe",

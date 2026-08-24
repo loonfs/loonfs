@@ -26,6 +26,22 @@ pub(super) fn server_busy_error(what: &str) -> ApiResponseError {
     )
 }
 
+/// The admission slot a proxied content read holds until its response body
+/// is consumed. Handlers acquire it after validating the request, so a
+/// malformed read never takes a slot.
+pub(super) fn acquire_download_permit(
+    state: &AppState,
+) -> Result<OwnedSemaphorePermit, ApiResponseError> {
+    state
+        .download_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            state.metrics.download_rejected_as_busy();
+            server_busy_error("proxied content reads")
+        })
+}
+
 pub(super) fn authorize(
     policy: AuthPolicy<'_>,
     headers: &HeaderMap,
