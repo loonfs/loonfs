@@ -434,7 +434,9 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Reads a full object or one half-open byte range, returning `None` when absent.
     ///
     /// A range ending beyond the object is truncated; a descending range or
-    /// start beyond the object returns [`ObjectStoreError::InvalidRange`].
+    /// start beyond the object returns [`ObjectStoreError::InvalidRange`]. A
+    /// descending range is refused before existence is consulted, so absence
+    /// never answers in its place.
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>>;
 
     /// Writes bytes under the requested overwrite or provider-enforced precondition.

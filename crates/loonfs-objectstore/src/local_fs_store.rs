@@ -370,6 +370,17 @@ impl LocalFsStore {
     /// promise on this provider alone.
     async fn get_object(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Vec<u8>>> {
         let path = self.resolve_key(key)?;
+        let invalid_range = || ObjectStoreError::InvalidRange {
+            object_key: key.to_owned(),
+        };
+        // A descending range is a caller error, answered before the open so a
+        // missing object cannot report absence in its place.
+        if range
+            .as_ref()
+            .is_some_and(|range| range.end_exclusive < range.start_inclusive)
+        {
+            return Err(invalid_range());
+        }
         let mut file = match File::open(&path).await {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -384,15 +395,12 @@ impl LocalFsStore {
             return Ok(Some(bytes));
         };
 
-        let invalid_range = || ObjectStoreError::InvalidRange {
-            object_key: key.to_owned(),
-        };
         let size_bytes = file
             .metadata()
             .await
             .map_err(|err| io_error(key, err))?
             .len();
-        if range.end_exclusive < range.start_inclusive || range.start_inclusive > size_bytes {
+        if range.start_inclusive > size_bytes {
             return Err(invalid_range());
         }
         // A range ending past the object is truncated, never refused.
