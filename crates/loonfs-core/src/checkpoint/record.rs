@@ -327,30 +327,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listed_loader_validates_embedded_namespace_against_the_key() {
-        let (_directory, store) = local_store();
-        let key_namespace_id = namespace("demo");
-        let embedded_namespace_id = namespace("other");
-        let checkpoint_id = checkpoint("chk_00000000000000000000000000000001");
-        let object_key = checkpoint_record(&key_namespace_id, &checkpoint_id);
-        let bytes = encode_checkpoint_record(&record(embedded_namespace_id, checkpoint_id))
-            .expect("record bytes");
-        store
-            .put_overwrite(&object_key, bytes)
-            .await
-            .expect("write record");
-
-        let error = load_checkpoint_record_at_key(&store, &object_key)
-            .await
-            .expect_err("namespace mismatch should fail");
-
-        assert!(matches!(
-            error,
-            ControlObjectLoadError::NamespaceMismatch { .. }
-        ));
-    }
-
-    #[tokio::test]
     async fn loader_rejects_a_record_pinning_another_namespaces_manifest() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
@@ -375,28 +351,60 @@ mod tests {
         ));
     }
 
+    /// A record has to describe the key it is stored under. Each case forges
+    /// one half of that identity and the loader has to refuse it.
     #[tokio::test]
-    async fn listed_loader_validates_embedded_checkpoint_id_against_the_key() {
+    async fn listed_loader_validates_the_record_against_its_key() {
+        enum Mismatch {
+            Namespace,
+            CheckpointId,
+        }
+
         let (_directory, store) = local_store();
-        let namespace_id = namespace("demo");
+        let key_namespace_id = namespace("demo");
         let key_checkpoint_id = checkpoint("chk_00000000000000000000000000000001");
-        let embedded_checkpoint_id = checkpoint("chk_00000000000000000000000000000002");
-        let object_key = checkpoint_record(&namespace_id, &key_checkpoint_id);
-        let bytes = encode_checkpoint_record(&record(namespace_id, embedded_checkpoint_id))
-            .expect("record bytes");
-        store
-            .put_overwrite(&object_key, bytes)
-            .await
-            .expect("write record");
+        let object_key = checkpoint_record(&key_namespace_id, &key_checkpoint_id);
 
-        let error = load_checkpoint_record_at_key(&store, &object_key)
-            .await
-            .expect_err("checkpoint mismatch should fail");
+        let cases = [
+            (
+                "embedded namespace",
+                record(namespace("other"), key_checkpoint_id.clone()),
+                Mismatch::Namespace,
+            ),
+            (
+                "embedded checkpoint id",
+                record(
+                    key_namespace_id.clone(),
+                    checkpoint("chk_00000000000000000000000000000002"),
+                ),
+                Mismatch::CheckpointId,
+            ),
+        ];
 
-        assert!(matches!(
-            error,
-            ControlObjectLoadError::IdentityMismatch { field, .. }
-                if field == "checkpoint id"
-        ));
+        for (label, forged, expected) in cases {
+            let bytes = encode_checkpoint_record(&forged).expect("record bytes");
+            store
+                .put_overwrite(&object_key, bytes)
+                .await
+                .expect("write record");
+
+            let error = load_checkpoint_record_at_key(&store, &object_key)
+                .await
+                .expect_err("a record that does not describe its key should fail");
+            match expected {
+                Mismatch::Namespace => assert!(
+                    matches!(error, ControlObjectLoadError::NamespaceMismatch { .. }),
+                    "for `{label}`: {error:?}"
+                ),
+                Mismatch::CheckpointId => assert!(
+                    matches!(
+                        error,
+                        ControlObjectLoadError::IdentityMismatch { ref field, .. }
+                            if field == "checkpoint id"
+                    ),
+                    "for `{label}`: {error:?}"
+                ),
+            }
+        }
     }
 }

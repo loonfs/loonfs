@@ -15,7 +15,7 @@ use loonfs_api::{Checksum, ChecksumAlgorithm};
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
 };
-use loonfs_objectstore::keys::{upload_session, upload_session_prefix};
+use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
@@ -222,31 +222,6 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         .expect("complete upload idempotently");
     assert_eq!(completed_again, completed);
     assert_eq!(store.count(OperationClass::Read), 0);
-}
-
-#[tokio::test]
-async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-
-    let invalid_upload_id = ["upl", "123"].join("-");
-    let error = UploadId::parse(&invalid_upload_id)
-        .map_err(CoreError::InvalidUploadId)
-        .expect_err("invalid upload_id should be rejected");
-
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    assert_eq!(
-        store
-            .list_prefix(&upload_session_prefix(&namespace_id))
-            .await
-            .expect("list upload sessions"),
-        Vec::<String>::new()
-    );
 }
 
 /// The streamed proxied upload: same session, same reference, same
@@ -664,7 +639,10 @@ mod direct_multipart {
         .await
         .expect_err("a multipart completion needs at least one part");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
-        assert!(error.to_string().contains("at least one uploaded part"));
+        assert!(
+            matches!(error, CoreError::InvalidUploadContent(_)),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

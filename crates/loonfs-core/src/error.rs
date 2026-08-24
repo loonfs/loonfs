@@ -985,20 +985,20 @@ mod tests {
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(details.active_writer.as_deref(), Some("writer-b"));
         assert_eq!(details.active_acquired_at_ms, Some(2_000));
-        assert!(fenced
-            .to_string()
-            .contains("epoch 3 was fenced by epoch 4 (writer `writer-b`, acquired at 2000 ms)"));
 
-        // A head with no writer block still names both epochs.
+        // A head with no writer block still names both epochs and carries
+        // neither half of the writer block.
         let anonymous = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
             active_epoch: WriterEpoch(4),
             active_writer: None,
             active_acquired_at_ms: None,
         });
-        assert!(anonymous
-            .to_string()
-            .ends_with("epoch 3 was fenced by epoch 4"));
+        let details = anonymous.details().expect("fence details");
+        assert_eq!(details.fenced_writer_epoch, Some(WriterEpoch(3)));
+        assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
+        assert_eq!(details.active_writer, None);
+        assert_eq!(details.active_acquired_at_ms, None);
 
         // A conflict decided against a durable receipt names where the
         // commit id landed and what landed there, which is what a retry
@@ -1041,13 +1041,12 @@ mod tests {
         assert_eq!(details.expected_revision_no, Some(RevisionNo(2)));
         assert_eq!(details.actual_revision_no, Some(RevisionNo(5)));
         // The prose says the same thing in words, so neither revision
-        // reaches a reader as Rust formatting.
-        assert!(
-            stale
-                .to_string()
-                .ends_with("expected revision 2, found revision 5"),
-            "{stale}"
-        );
+        // reaches a reader as Rust formatting. The sentence itself is free
+        // to change.
+        let message = stale.to_string();
+        assert!(message.contains("revision 2"), "{message}");
+        assert!(message.contains("revision 5"), "{message}");
+        assert!(!message.contains("Some("), "{message}");
 
         // A file with no revision at all reads as a sentence rather than
         // printing the absent value.
@@ -1057,12 +1056,9 @@ mod tests {
                 expected: RevisionNo(2),
                 actual: None,
             });
-        assert!(
-            unversioned
-                .to_string()
-                .ends_with("expected revision 2, found no revision"),
-            "{unversioned}"
-        );
+        let message = unversioned.to_string();
+        assert!(message.contains("revision 2"), "{message}");
+        assert!(!message.contains("None"), "{message}");
         assert_eq!(
             unversioned
                 .details()

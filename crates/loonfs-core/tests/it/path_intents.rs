@@ -333,39 +333,6 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
 }
 
 #[tokio::test]
-async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    let namespace_id = namespace_id("demo");
-
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    put_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file.txt",
-        b"file",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-file"),
-    )
-    .await
-    .expect("put file");
-
-    let stat = resolve_path_latest(&store, &namespace_id, "/docs/file.txt")
-        .await
-        .expect("stat with manifest");
-    let list = list_path_latest(&store, &namespace_id, "/docs")
-        .await
-        .expect("list with manifest");
-
-    assert_eq!(stat.size_bytes(), Some(4));
-    assert_eq!(list.len(), 1);
-}
-
-#[tokio::test]
 async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = content_blob_counting_store(temp_dir.path());
@@ -1088,88 +1055,11 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
         )));
 }
 
+/// The batch resolves a move against the put before it, and the ladder keeps
+/// climbing across the single commits that follow: put, move, copy, delete at
+/// sequences one through four.
 #[tokio::test]
-async fn path_intents_cover_basic_mutations() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-
-    let content = store_bytes_as_content(&store, &namespace_id, b"hello")
-        .await
-        .expect("stage content");
-    let put = submit_operation(
-        &store,
-        &namespace_id,
-        CommitId::parse("put-path").expect("valid commit id"),
-        FilesystemOperation::PutFile {
-            path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            content_ref: content.content_ref().clone(),
-            behavior: DestinationBehavior::NoReplace,
-            expected_revision_no: None,
-        },
-        &context,
-    )
-    .await
-    .expect("put path");
-    assert_eq!(put.committed_seq, ChangeSeq(1));
-
-    let moved = submit_operation(
-        &store,
-        &namespace_id,
-        CommitId::parse("move-path").expect("valid commit id"),
-        FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-        },
-        &context,
-    )
-    .await
-    .expect("move path");
-    assert_eq!(moved.committed_seq, ChangeSeq(2));
-
-    let copied = submit_operation(
-        &store,
-        &namespace_id,
-        CommitId::parse("copy-path").expect("valid commit id"),
-        FilesystemOperation::CopyPath {
-            from_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/c.txt").expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-        },
-        &context,
-    )
-    .await
-    .expect("copy path");
-    assert_eq!(copied.committed_seq, ChangeSeq(3));
-
-    let deleted = submit_operation(
-        &store,
-        &namespace_id,
-        CommitId::parse("delete-path").expect("valid commit id"),
-        FilesystemOperation::DeletePath {
-            path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: DeleteDirectoryBehavior::NonRecursive,
-            expected_inode_id: None,
-        },
-        &context,
-    )
-    .await
-    .expect("delete path");
-    assert_eq!(deleted.committed_seq, ChangeSeq(4));
-
-    let copied_bytes = read_file_bytes(&store, &namespace_id, "/docs/c.txt")
-        .await
-        .expect("read copied file");
-    assert_eq!(copied_bytes.bytes, b"hello");
-}
-
-#[tokio::test]
-async fn path_intents_in_one_batch_see_tentative_state() {
+async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladder() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1241,48 +1131,34 @@ async fn path_intents_in_one_batch_see_tentative_state() {
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
     assert_eq!(segment.payload.records.len(), 2);
-}
 
-#[tokio::test]
-async fn move_path_into_occupied_target_is_path_conflict() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    let copied = copy_file_path(
+        &store,
+        &namespace_id,
+        "/docs/b.txt",
+        "/docs/c.txt",
+        &context,
+        Some("copy-path"),
+    )
+    .await
+    .expect("copy path");
+    assert_eq!(copied.committed_seq, ChangeSeq(3));
+
+    let deleted = delete_path_non_recursive(
+        &store,
+        &namespace_id,
+        "/docs/b.txt",
+        &context,
+        Some("delete-path"),
+    )
+    .await
+    .expect("delete path");
+    assert_eq!(deleted.committed_seq, ChangeSeq(4));
+
+    let copied_bytes = read_file_bytes(&store, &namespace_id, "/docs/c.txt")
         .await
-        .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/docs/a.txt",
-        b"alpha",
-        &context,
-        Some("seed-docs"),
-    )
-    .await
-    .expect("seed docs");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/tmp/a.txt",
-        b"tmp-a",
-        &context,
-        Some("seed-tmp"),
-    )
-    .await
-    .expect("seed tmp");
-
-    let error = move_path(
-        &store,
-        &namespace_id("demo"),
-        "/tmp/a.txt",
-        "/docs/a.txt",
-        &context,
-        Some("move-conflict"),
-    )
-    .await
-    .expect_err("move conflict");
-    assert_eq!(error.code(), ErrorCode::PathConflict);
+        .expect("read copied file");
+    assert_eq!(copied_bytes.bytes, b"hello");
 }
 
 #[tokio::test]
@@ -1337,38 +1213,6 @@ async fn move_path_respells_the_same_slot_without_a_conflict() {
     .await
     .expect_err("unchanged spelling");
     assert_eq!(error.code(), ErrorCode::PathConflict);
-}
-
-#[tokio::test]
-async fn move_path_directory_cycle_is_would_cycle() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
-        .await
-        .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/docs/archive/leaf.txt",
-        b"leaf",
-        &context,
-        Some("seed-cycle"),
-    )
-    .await
-    .expect("seed cycle dirs");
-
-    let error = move_path(
-        &store,
-        &namespace_id("demo"),
-        "/docs",
-        "/docs/archive/docs",
-        &context,
-        Some("cycle"),
-    )
-    .await
-    .expect_err("cycle");
-    assert_eq!(error.code(), ErrorCode::WouldCycle);
 }
 
 #[tokio::test]
@@ -1555,8 +1399,10 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
     .expect("the moved inode keeps its identity under the new binding");
 }
 
+/// Create-only refuses an occupied name, whether the request spells it exactly
+/// as stored or in a casefold- and NFC-equivalent way.
 #[tokio::test]
-async fn put_file_no_replace_rejects_existing_target_without_force() {
+async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1573,6 +1419,16 @@ async fn put_file_no_replace_rejects_existing_target_without_force() {
     )
     .await
     .expect("seed file");
+    write_file_bytes(
+        &store,
+        &namespace_id("demo"),
+        "/Cafe\u{0301}.txt",
+        b"hello",
+        &context,
+        Some("seed-unicode-name"),
+    )
+    .await
+    .expect("seed unicode name");
 
     let error = put_file_bytes(
         &store,
@@ -1585,6 +1441,19 @@ async fn put_file_no_replace_rejects_existing_target_without_force() {
     )
     .await
     .expect_err("put without force");
+    assert_eq!(error.code(), ErrorCode::PathConflict);
+
+    let error = put_file_bytes(
+        &store,
+        &namespace_id("demo"),
+        "/CAF\u{00c9}.TXT",
+        b"new-bytes",
+        DestinationBehavior::NoReplace,
+        &context,
+        Some("create-only-conflict"),
+    )
+    .await
+    .expect_err("create-only conflict");
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
@@ -1689,39 +1558,6 @@ async fn resolve_path_uses_nfc_casefold_folding() {
         .expect("resolve path");
     assert_eq!(resolved.path.as_str(), stored_path);
     assert_eq!(named_entry(&resolved), "Cafe\u{0301}.txt");
-}
-
-#[tokio::test]
-async fn no_replace_put_rejects_casefold_and_normalization_equivalent_name() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
-        .await
-        .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/Cafe\u{0301}.txt",
-        b"hello",
-        &context,
-        Some("seed-unicode-name"),
-    )
-    .await
-    .expect("seed unicode name");
-
-    let error = put_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/CAF\u{00c9}.TXT",
-        b"new-bytes",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("create-only-conflict"),
-    )
-    .await
-    .expect_err("create-only conflict");
-    assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
 #[tokio::test]

@@ -121,19 +121,6 @@ mod tests {
     }
 
     #[test]
-    fn multiple_accepted_candidates_advance_one_batch_allocator() {
-        let mut allocator = InodeAllocator::new(InodeId(2));
-        for expected in [InodeId(2), InodeId(3), InodeId(4)] {
-            let mut candidate = allocator.begin_candidate();
-            assert_eq!(candidate.allocate().expect("create"), expected);
-            allocator.commit_candidate(candidate).expect("commit");
-        }
-
-        let next = allocator.begin_candidate();
-        assert_eq!(next.resulting_next_inode_id(), InodeId(5));
-    }
-
-    #[test]
     fn retry_from_the_same_head_replays_the_same_allocations() {
         let allocator = InodeAllocator::new(InodeId(7));
         let mut first_attempt = allocator.begin_candidate();

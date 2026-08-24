@@ -283,8 +283,13 @@ fn assert_revision_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
     }
 }
 
+/// One seed, four properties of the same fold. The namespace is written so
+/// every commit that matters sits below the advanced floor: two plain files,
+/// two revisions of one file, and a file created and deleted again. Nine
+/// write-plus-checkpoint rounds then push the runs past the reorganization
+/// trigger, and one drain folds them.
 #[tokio::test]
-async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
+async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -292,35 +297,33 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/one.txt",
-        b"one\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write one");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/two.txt",
-        b"two\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write two");
+    for (path, body) in [
+        ("/docs/one.txt", &b"one\n"[..]),
+        ("/docs/two.txt", &b"two\n"[..]),
+        ("/docs/a.txt", &b"alpha one\n"[..]),
+        ("/docs/a.txt", &b"alpha two\n"[..]),
+        ("/docs/tmp.txt", &b"scratch\n"[..]),
+    ] {
+        write_file_bytes(&store, &namespace_id, path, body, &context, None)
+            .await
+            .expect("write");
+    }
+    delete_path(&store, &namespace_id, "/docs/tmp.txt", &context, None)
+        .await
+        .expect("delete tmp");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
     let advanced = advance_retention_floor(&store, &namespace_id, &context)
         .await
         .expect("advance floor");
-    assert_eq!(advanced.retention_floor_seq, ChangeSeq(2));
+    let floor = advanced.retention_floor_seq;
+    assert_eq!(
+        floor,
+        ChangeSeq(6),
+        "every seeded commit sits at or below the floor"
+    );
 
-    let mut last_manifest_no = None;
     for round in 0..9u32 {
         write_file_bytes(
             &store,
@@ -332,14 +335,12 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
         )
         .await
         .expect("write");
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("create checkpoint");
-        last_manifest_no = Some(checkpoint.manifest_no);
     }
     // Checkpoints only append; dropping happens when reorganization folds
     // the runs against the advanced floor.
-    let _ = last_manifest_no.expect("manifest number");
     let reorganized_manifest_no = drain_reorganization(
         &store,
         &namespace_id,
@@ -347,7 +348,6 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
         MetadataLsmPolicy::default(),
     )
     .await;
-
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
@@ -355,6 +355,8 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
     )
     .await
     .expect("load manifest");
+
+    // Commit receipts below the floor go, and the floor's own receipt stays.
     let receipts = manifest_rows_for_family(
         &materialized.metadata_state,
         ApiMetadataRowFamily::CommitReceipts,
@@ -363,17 +365,71 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
     for row in &receipts {
         if let MetadataRow::CommitReceipt { committed_seq, .. } = row {
             assert!(
-                *committed_seq >= ChangeSeq(2),
+                *committed_seq >= floor,
                 "receipt below floor survived: {committed_seq:?}"
             );
         }
     }
     assert!(receipts.iter().any(|row| matches!(
         row,
-        MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq == ChangeSeq(2)
+        MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq == floor
     )));
-}
 
+    // Revision rows are never dropped: file history is durable data, not
+    // replay state, and its index keeps one row per revision.
+    let revisions = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataRowFamily::Revisions,
+    );
+    let checksum_one = Checksum::sha256(b"alpha one\n");
+    let checksum_two = Checksum::sha256(b"alpha two\n");
+    assert!(revisions.iter().any(|row| matches!(
+        row,
+        MetadataRow::FileRevision { content_ref, .. } if content_ref.checksum == checksum_one
+    )));
+    assert!(revisions.iter().any(|row| matches!(
+        row,
+        MetadataRow::FileRevision { content_ref, .. } if content_ref.checksum == checksum_two
+    )));
+    let index_rows = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataRowFamily::RevisionsByInodeDesc,
+    );
+    assert_eq!(index_rows.len(), revisions.len());
+
+    // A binding unbound below the floor goes, and so does the spent unbind
+    // marker that covered it.
+    let binds = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataRowFamily::DirentryBinds,
+    );
+    assert!(!binds.iter().any(|row| matches!(
+        row,
+        MetadataRow::DirentryBind { display_name, .. } if display_name.as_str() == "tmp.txt"
+    )));
+    let unbinds = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataRowFamily::DirentryUnbinds,
+    );
+    assert!(
+        unbinds.is_empty(),
+        "spent unbind markers survived: {unbinds:?}"
+    );
+
+    // And the user-visible consequence: a revision below the floor is still
+    // restorable after the fold.
+    let restored = restore_file_revision(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        RevisionNo(1),
+        &context,
+        None,
+    )
+    .await
+    .expect("restoring a revision below the floor succeeds");
+    assert!(restored.committed_seq > ChangeSeq(0));
+}
 #[test]
 fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     use std::collections::BTreeMap;
@@ -482,255 +538,6 @@ fn drop_pass_refuses_superseded_bind_without_unbind() {
     let error = fold_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
         .expect_err("superseded live bind must refuse the drop");
     assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
-}
-
-#[tokio::test]
-async fn restore_below_the_floor_succeeds_after_reorganization() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"one\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write one");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"two\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write two");
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-    advance_retention_floor(&store, &namespace_id, &context)
-        .await
-        .expect("advance floor");
-    for round in 0..9u32 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write");
-        create_checkpoint(&store, &namespace_id, &context)
-            .await
-            .expect("create checkpoint");
-    }
-    // Revision history is retained independently of the replay floor:
-    // folding the runs against the advanced floor must leave every
-    // revision readable.
-    drain_reorganization(
-        &store,
-        &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
-    )
-    .await;
-
-    let restored = restore_file_revision(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        RevisionNo(1),
-        &context,
-        None,
-    )
-    .await
-    .expect("restoring a revision below the floor succeeds");
-    assert!(restored.committed_seq > ChangeSeq(0));
-}
-
-#[tokio::test]
-async fn base_rebuild_retains_revisions_superseded_below_floor() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"one\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write one");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"two\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write two");
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-    advance_retention_floor(&store, &namespace_id, &context)
-        .await
-        .expect("advance floor");
-
-    let mut last_manifest_no = None;
-    for round in 0..9u32 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write");
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context)
-            .await
-            .expect("create checkpoint");
-        last_manifest_no = Some(checkpoint.manifest_no);
-    }
-    // Checkpoints only append, and the base rebuild folds the runs against
-    // the advanced floor — but revision rows are never dropped: file
-    // history is durable data, not replay state.
-    let _ = last_manifest_no.expect("manifest number");
-    let reorganized_manifest_no = drain_reorganization(
-        &store,
-        &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
-    )
-    .await;
-
-    let materialized = load_manifest_materialization_for_inspection(
-        &store,
-        &namespace_id,
-        reorganized_manifest_no,
-    )
-    .await
-    .expect("load manifest");
-    let revisions = manifest_rows_for_family(
-        &materialized.metadata_state,
-        ApiMetadataRowFamily::Revisions,
-    );
-    let checksum_one = Checksum::sha256(b"one\n");
-    let checksum_two = Checksum::sha256(b"two\n");
-    assert!(revisions.iter().any(|row| matches!(
-        row,
-        MetadataRow::FileRevision { content_ref, .. } if content_ref.checksum == checksum_one
-    )));
-    assert!(revisions.iter().any(|row| matches!(
-        row,
-        MetadataRow::FileRevision { content_ref, .. } if content_ref.checksum == checksum_two
-    )));
-    let index_rows = manifest_rows_for_family(
-        &materialized.metadata_state,
-        ApiMetadataRowFamily::RevisionsByInodeDesc,
-    );
-    assert_eq!(index_rows.len(), revisions.len());
-}
-
-#[tokio::test]
-async fn base_rebuild_drops_bindings_unbound_below_floor() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/tmp.txt",
-        b"scratch\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write tmp");
-    delete_path(&store, &namespace_id, "/docs/tmp.txt", &context, None)
-        .await
-        .expect("delete tmp");
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-    advance_retention_floor(&store, &namespace_id, &context)
-        .await
-        .expect("advance floor");
-
-    let mut last_manifest_no = None;
-    for round in 0..9u32 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write");
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context)
-            .await
-            .expect("create checkpoint");
-        last_manifest_no = Some(checkpoint.manifest_no);
-    }
-    // Checkpoints only append; dropping happens when reorganization folds
-    // the runs against the advanced floor.
-    let _ = last_manifest_no.expect("manifest number");
-    let reorganized_manifest_no = drain_reorganization(
-        &store,
-        &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
-    )
-    .await;
-
-    let materialized = load_manifest_materialization_for_inspection(
-        &store,
-        &namespace_id,
-        reorganized_manifest_no,
-    )
-    .await
-    .expect("load manifest");
-    let binds = manifest_rows_for_family(
-        &materialized.metadata_state,
-        ApiMetadataRowFamily::DirentryBinds,
-    );
-    assert!(!binds.iter().any(|row| matches!(
-        row,
-        MetadataRow::DirentryBind { display_name, .. } if display_name.as_str() == "tmp.txt"
-    )));
-    let unbinds = manifest_rows_for_family(
-        &materialized.metadata_state,
-        ApiMetadataRowFamily::DirentryUnbinds,
-    );
-    assert!(
-        unbinds.is_empty(),
-        "spent unbind markers survived: {unbinds:?}"
-    );
 }
 
 #[tokio::test]
@@ -1216,8 +1023,20 @@ async fn manifest_rejects_missing_revision_desc_index() {
     );
 }
 
+/// Every way one revision-index segment can disagree with the revision family
+/// it indexes is refused at manifest load. One materialization pays for all
+/// four: the index segment object is restored from its original bytes before
+/// each case, so every case starts from the same durable state.
 #[tokio::test]
-async fn manifest_rejects_revision_desc_index_missing_row() {
+async fn manifest_rejects_a_revision_desc_index_that_disagrees_with_its_family() {
+    enum Rejection {
+        IndexMismatch,
+        DuplicateRow,
+    }
+
+    /// One corruption of the revision index, and the rejection it must draw.
+    type IndexCorruption = (&'static str, fn(&mut Vec<MetadataRow>), Rejection);
+
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1246,146 +1065,115 @@ async fn manifest_rejects_revision_desc_index_missing_row() {
     .await
     .expect("write other");
 
-    let (manifest_no, mut manifest, mut revision_index_rows) =
+    let (manifest_no, pristine_manifest, pristine_rows) =
         revision_index_test_materialization(&store, &namespace_id, &context).await;
-    revision_index_rows.pop().expect("revision index row");
-    rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
-    overwrite_manifest(&store, &namespace_id, manifest).await;
-
-    assert_revision_index_mismatch(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
+    let index_key = metadata_segment_object_key(
+        pristine_manifest
+            .payload
+            .segments
+            .iter()
+            .find(|descriptor| {
+                descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
+                    && descriptor.family == ApiMetadataRowFamily::RevisionsByInodeDesc
+            })
+            .expect("revision index metadata file"),
     );
-}
-
-#[tokio::test]
-async fn manifest_rejects_revision_desc_index_extra_row() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    let pristine_index_bytes = store
+        .get(&index_key, None)
         .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+        .expect("read revision index segment")
+        .expect("revision index segment exists");
 
-    let (manifest_no, mut manifest, mut revision_index_rows) =
-        revision_index_test_materialization(&store, &namespace_id, &context).await;
-    let extra_row = revision_index_rows
-        .first()
-        .expect("revision index row")
-        .clone();
-    revision_index_rows.push(match extra_row {
-        MetadataRow::FileRevision {
-            inode_id,
-            revision_no,
-            committed_seq,
-            commit_id,
-            committed_at_ms,
-            committed_by,
-            delta_index,
-            content_ref,
-        } => MetadataRow::FileRevision {
-            inode_id,
-            revision_no: loonfs_api::RevisionNo(revision_no.0 + 100),
-            committed_seq,
-            commit_id,
-            committed_at_ms,
-            committed_by,
-            delta_index,
-            content_ref,
-        },
-        other => other,
-    });
-    rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
-    overwrite_manifest(&store, &namespace_id, manifest).await;
+    let cases: [IndexCorruption; 4] = [
+        (
+            "missing row",
+            |rows| {
+                rows.pop().expect("revision index row");
+            },
+            Rejection::IndexMismatch,
+        ),
+        (
+            "extra row",
+            |rows| {
+                let extra = rows.first().expect("revision index row").clone();
+                rows.push(match extra {
+                    MetadataRow::FileRevision {
+                        inode_id,
+                        revision_no,
+                        committed_seq,
+                        commit_id,
+                        committed_at_ms,
+                        committed_by,
+                        delta_index,
+                        content_ref,
+                    } => MetadataRow::FileRevision {
+                        inode_id,
+                        revision_no: loonfs_api::RevisionNo(revision_no.0 + 100),
+                        committed_seq,
+                        commit_id,
+                        committed_at_ms,
+                        committed_by,
+                        delta_index,
+                        content_ref,
+                    },
+                    other => other,
+                });
+            },
+            Rejection::IndexMismatch,
+        ),
+        (
+            "changed content ref",
+            |rows| {
+                let first = rows.first_mut().expect("revision index row");
+                if let MetadataRow::FileRevision { content_ref, .. } = first {
+                    content_ref.content_id = ContentId::generate();
+                }
+            },
+            Rejection::IndexMismatch,
+        ),
+        (
+            "duplicate row",
+            |rows| {
+                rows.push(rows.first().expect("revision index row").clone());
+            },
+            Rejection::DuplicateRow,
+        ),
+    ];
 
-    assert_revision_index_mismatch(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
-    );
-}
+    for (label, corrupt, expected) in cases {
+        store
+            .put_overwrite(&index_key, pristine_index_bytes.clone())
+            .await
+            .expect("restore the revision index segment");
+        let mut manifest = pristine_manifest.clone();
+        let mut rows = pristine_rows.clone();
+        corrupt(&mut rows);
+        rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, rows).await;
+        overwrite_manifest(&store, &namespace_id, manifest).await;
 
-#[tokio::test]
-async fn manifest_rejects_revision_desc_index_changed_content_ref() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-
-    let (manifest_no, mut manifest, mut revision_index_rows) =
-        revision_index_test_materialization(&store, &namespace_id, &context).await;
-    let first = revision_index_rows.first_mut().expect("revision index row");
-    if let MetadataRow::FileRevision { content_ref, .. } = first {
-        content_ref.content_id = ContentId::generate();
-    }
-    rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
-    overwrite_manifest(&store, &namespace_id, manifest).await;
-
-    assert_revision_index_mismatch(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
-    );
-}
-
-#[tokio::test]
-async fn manifest_rejects_revision_desc_index_duplicate_rows() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-
-    let (manifest_no, mut manifest, mut revision_index_rows) =
-        revision_index_test_materialization(&store, &namespace_id, &context).await;
-    revision_index_rows.push(
-        revision_index_rows
-            .first()
-            .expect("revision index row")
-            .clone(),
-    );
-    rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
-    overwrite_manifest(&store, &namespace_id, manifest).await;
-
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await {
-        Err(ManifestLoadError::DuplicateRevisionRow { family, .. }) => {
-            assert_eq!(family, ApiMetadataRowFamily::RevisionsByInodeDesc);
+        let result =
+            load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await;
+        match expected {
+            Rejection::IndexMismatch => match result {
+                Err(ManifestLoadError::RevisionIndexMismatch { .. }) => {}
+                Err(other) => {
+                    panic!("expected revision index mismatch for `{label}`, got {other:?}")
+                }
+                Ok(_) => panic!("expected revision index mismatch for `{label}`"),
+            },
+            Rejection::DuplicateRow => match result {
+                Err(ManifestLoadError::DuplicateRevisionRow { family, .. }) => {
+                    assert_eq!(
+                        family,
+                        ApiMetadataRowFamily::RevisionsByInodeDesc,
+                        "for `{label}`"
+                    );
+                }
+                other => panic!("expected duplicate revision row for `{label}`, got {other:?}"),
+            },
         }
-        other => panic!("expected duplicate revision row, got {other:?}"),
     }
 }
-
 #[tokio::test]
 async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
     let temp_dir = tempdir().expect("tempdir");

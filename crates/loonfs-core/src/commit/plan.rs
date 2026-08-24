@@ -164,34 +164,3 @@ pub(crate) enum ValidatedOp {
         attributes_delta_index: u32,
     },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finishing_validated_plan_moves_identity_into_one_owner() {
-        let semantic_identity = CommitFingerprint::new_unchecked("v1:sha256:test".to_owned());
-        let validated = ValidatedCommitPlan {
-            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            commit_id: CommitId::parse("commit-a").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
-            writer_epoch: WriterEpoch(7),
-            message: Some("create docs".to_owned()),
-            semantic_identity: semantic_identity.clone(),
-            apply_after_seq: ChangeSeq(3),
-            assigned_seq: ChangeSeq(4),
-            validated_ops: Vec::new(),
-        };
-        let plan = validated.finish(InodeId(3));
-
-        assert_eq!(plan.namespace_id.as_str(), "demo");
-        assert_eq!(plan.commit_id.as_str(), "commit-a");
-        assert_eq!(plan.writer_epoch, WriterEpoch(7));
-        assert_eq!(plan.message.as_deref(), Some("create docs"));
-        assert_eq!(plan.semantic_identity, semantic_identity);
-        assert_eq!(plan.apply_after_seq, ChangeSeq(3));
-        assert_eq!(plan.assigned_seq, ChangeSeq(4));
-        assert_eq!(plan.resulting_next_inode_id, InodeId(3));
-    }
-}

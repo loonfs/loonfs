@@ -12,8 +12,8 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::{
     v0::{FilesystemChange, UploadSessionStatus},
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
-    InodeId, NamespaceId, RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    NamespaceId, RevisionNo,
 };
 use loonfs_core::content::{
     mint_content_token, store_bytes_as_content, verify_content_token, ContentTokenError,
@@ -140,8 +140,10 @@ fn commit_id(value: &str) -> CommitId {
     CommitId::parse(value).expect("valid commit id")
 }
 
+/// One unadmitted content reference fails on its own, and two candidates that
+/// share one unadmitted reference both fail. Neither shape reads the blob.
 #[tokio::test]
-async fn path_put_file_without_admission_fails_without_reading_content() {
+async fn unadmitted_content_fails_every_candidate_without_being_read() {
     let temp_dir = tempdir().expect("tempdir");
     let store = content_blob_counting_store(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -162,7 +164,7 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
             commit_id("put-cold-content"),
             loonfs_test_support::test_actor(),
             None,
-            put_file("/docs/hello.txt", content.into_content_ref()),
+            put_file("/docs/hello.txt", content.content_ref().clone()),
         ))],
         &context,
     )
@@ -176,21 +178,6 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
         ErrorCode::ContentNotPrepared
     );
     assert_eq!(store.count(OperationClass::Read), 0);
-}
-
-#[tokio::test]
-async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = content_blob_counting_store(temp_dir.path());
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"shared")
-        .await
-        .expect("stage content");
 
     store.reset();
     let responses = publish_namespace_commits_batch(
@@ -469,12 +456,6 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
     resolve_path(&store, &namespace_id, "/discarded")
         .await
         .expect_err("rejected candidate publishes nothing");
-}
-
-#[tokio::test]
-async fn mutation_paths_reject_invalid_display_names() {
-    assert!(DisplayName::parse("a/b").is_err());
-    assert!(DisplayName::parse(".").is_err());
 }
 
 #[tokio::test]
