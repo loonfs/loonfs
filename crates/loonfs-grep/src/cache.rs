@@ -2,7 +2,7 @@
 
 use crate::codec::IndexRow;
 use crate::root::GrepManifestState;
-use loonfs::metrics::{CounterHandle, MetricsRecorder};
+use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
 use loonfs::{DecodedBlock, DecodedBlockCache, DecodedBlockCacheObserver};
 use loonfs_api::wire::sst_blocks::{
     DecodedDataBlock, SegmentFilter, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
@@ -82,8 +82,8 @@ impl GrepBlockCacheMetrics {
             )
         };
         Self {
-            hits: get("hit"),
-            misses: get("miss"),
+            hits: get(RESULT_HIT),
+            misses: get(RESULT_MISS),
             inserts: recorder.register_counter(
                 "loonfs.grep_block_cache.inserts",
                 "Blocks inserted into the decoded grep block cache",
