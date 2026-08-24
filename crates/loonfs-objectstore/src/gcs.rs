@@ -2,9 +2,8 @@
 
 use super::{ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::object_store::Result;
-use crate::presign::{
-    stored_crc32c, GcsPresignerConfig, GcsV4Presigner, PresignedUrl, CHECKSUM_HEAD_TTL,
-};
+use crate::presign::{stored_crc32c, GcsPresignerConfig, GcsV4Presigner, CHECKSUM_HEAD_TTL};
+use crate::signed_request::{execute_signed, stored_checksum_from_signed_head};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
     ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig, StoredObjectChecksum,
@@ -115,33 +114,6 @@ impl GcpGcsStore {
         SystemTime::now()
     }
 
-    /// Issues one internally signed request and returns its status and headers.
-    ///
-    /// The metadata read this serves carries no body in either direction, so
-    /// it lands on the store's own HTTP client, runtime, and timeouts without
-    /// reading one.
-    async fn execute_signed(&self, key: &str, signed: PresignedUrl) -> Result<http::Response<()>> {
-        let mut builder = http::Request::builder()
-            .method(signed.method.as_str())
-            .uri(&signed.url);
-        for (name, value) in &signed.headers {
-            builder = builder.header(name, value);
-        }
-        let request = builder
-            .body(HttpRequestBody::empty())
-            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
-        let response = self
-            .http
-            .execute(request)
-            .await
-            .map_err(|err| ObjectStoreError::retryable_transport(key, err.to_string()))?;
-
-        let mut parts = http::Response::new(());
-        *parts.status_mut() = response.status();
-        *parts.headers_mut() = response.headers().clone();
-        Ok(parts)
-    }
-
     fn generation_as_compare_token(metadata: ObjectMetadata) -> ObjectMetadata {
         ObjectMetadata {
             etag: metadata.version.clone(),
@@ -176,60 +148,14 @@ impl ObjectStore for GcpGcsStore {
     /// request, so this is a `HEAD` and nothing more. The provider client
     /// surfaces neither that header nor any other checksum, which is why the
     /// request is signed here rather than asked of the client.
-    ///
-    /// An object GCS acknowledges but reports no usable CRC-32C for is an
-    /// error, never a size-only answer: completion compares a stored checksum
-    /// against a promised one, and there is nothing to compare.
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         let signed = self.request_signer.presign_head_stored_checksum(
             key,
             CHECKSUM_HEAD_TTL,
             Self::signing_time(),
         )?;
-        let response = self.execute_signed(key, signed).await?;
-
-        let status = response.status();
-        if status == http::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if status == http::StatusCode::FORBIDDEN || status == http::StatusCode::UNAUTHORIZED {
-            return Err(ObjectStoreError::PermissionDenied {
-                object_key: key.to_owned(),
-                message: format!("provider refused the checksum head with {status}"),
-            });
-        }
-        if !status.is_success() {
-            let message = format!("checksum head failed with {status}");
-            return Err(
-                if status == http::StatusCode::REQUEST_TIMEOUT
-                    || status == http::StatusCode::TOO_MANY_REQUESTS
-                    || status.is_server_error()
-                {
-                    ObjectStoreError::retryable_transport(key, message)
-                } else {
-                    ObjectStoreError::transport(key, message)
-                },
-            );
-        }
-
-        let headers = response.headers();
-        let checksum = stored_crc32c_from_headers(headers).ok_or_else(|| {
-            ObjectStoreError::StoredChecksumMissing {
-                object_key: key.to_owned(),
-            }
-        })?;
-        let size_bytes = headers
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| {
-                ObjectStoreError::transport(key, "checksum head reported no content length")
-            })?;
-
-        Ok(Some(StoredObjectChecksum {
-            size_bytes,
-            checksum,
-        }))
+        let response = execute_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        stored_checksum_from_signed_head(key, &response, stored_crc32c_from_headers)
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {

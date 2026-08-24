@@ -1,4 +1,4 @@
-//! Key validation and prefix scoping shared by the provider stores.
+//! Shared key and endpoint helpers for provider stores.
 
 use crate::object_store::Result;
 use crate::ObjectStoreError;
@@ -108,6 +108,14 @@ pub(crate) fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint<'_>> {
         authority,
         path: path.trim_end_matches('/'),
     })
+}
+
+pub(crate) fn virtual_hosted_authority(bucket: &str, authority: &str) -> String {
+    let bucket = bucket.trim();
+    if authority.starts_with(&format!("{bucket}.")) {
+        return authority.to_owned();
+    }
+    format!("{bucket}.{authority}")
 }
 
 #[cfg(test)]

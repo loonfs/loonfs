@@ -8,12 +8,14 @@ use crate::aws_credentials::{
     aws_credentials_source, static_aws_credentials_source, ObjectStoreAwsCredentialProvider,
     SharedAwsCredentialsSource,
 };
-use crate::keyspace::parse_endpoint_url;
+use crate::keyspace::{parse_endpoint_url, virtual_hosted_authority};
 use crate::object_store::Result;
-use crate::presign::PresignedUrl;
 use crate::presign::{
-    S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
-    CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+    base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
+    CHECKSUM_HEAD_TTL, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+};
+use crate::signed_request::{
+    execute_signed, execute_signed_with_body, stored_checksum_from_signed_head, SignedResponse,
 };
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
@@ -286,58 +288,6 @@ impl S3CompatibleStore {
         // enter wall time here. Nothing durable is derived from it.
         SystemTime::now()
     }
-
-    /// Issues one internally signed request and returns its status, headers,
-    /// and body.
-    ///
-    /// Every caller here signs a request the provider client cannot build,
-    /// so they all land on the same transport: the store's own HTTP client,
-    /// runtime, and timeouts.
-    async fn execute_signed(
-        &self,
-        key: &str,
-        signed: PresignedUrl,
-        body: HttpRequestBody,
-    ) -> Result<SignedResponse> {
-        let mut builder = http::Request::builder()
-            .method(signed.method.as_str())
-            .uri(&signed.url);
-        for (name, value) in &signed.headers {
-            builder = builder.header(name, value);
-        }
-        let request = builder
-            .body(body)
-            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
-        let response = self
-            .http
-            .execute(request)
-            .await
-            .map_err(|err| ObjectStoreError::retryable_transport(key, err.to_string()))?;
-
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = response
-            .into_body()
-            .bytes()
-            .await
-            .map_err(|err| ObjectStoreError::retryable_transport(key, err.to_string()))?;
-        Ok(SignedResponse {
-            status,
-            headers,
-            body,
-        })
-    }
-}
-
-/// One internally signed response, read whole.
-///
-/// The bodies here are small provider control documents — an upload id, or
-/// an error — so reading them fully is what makes the S3 family's habit of
-/// reporting failures inside a 200 response detectable at all.
-struct SignedResponse {
-    status: http::StatusCode,
-    headers: http::HeaderMap,
-    body: bytes::Bytes,
 }
 
 impl SignedResponse {
@@ -382,46 +332,8 @@ impl ObjectStore for S3CompatibleStore {
             .request_signer
             .presign_head_stored_checksum(key, CHECKSUM_HEAD_TTL, Self::signing_time())
             .await?;
-        let response = self
-            .execute_signed(key, signed, HttpRequestBody::empty())
-            .await?;
-
-        let status = response.status;
-        if status == http::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if status == http::StatusCode::FORBIDDEN || status == http::StatusCode::UNAUTHORIZED {
-            return Err(ObjectStoreError::PermissionDenied {
-                object_key: key.to_owned(),
-                message: format!("provider refused the checksum head with {status}"),
-            });
-        }
-        if !status.is_success() {
-            return Err(transport_for_status(
-                key,
-                status,
-                format!("checksum head failed with {status}"),
-            ));
-        }
-
-        let headers = &response.headers;
-        let Some(checksum) = s3_stored_checksum(headers) else {
-            return Err(ObjectStoreError::StoredChecksumMissing {
-                object_key: key.to_owned(),
-            });
-        };
-        let size_bytes = headers
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| {
-                ObjectStoreError::transport(key, "checksum head reported no content length")
-            })?;
-
-        Ok(Some(StoredObjectChecksum {
-            size_bytes,
-            checksum,
-        }))
+        let response = execute_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        stored_checksum_from_signed_head(key, &response, s3_stored_checksum)
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
@@ -429,9 +341,8 @@ impl ObjectStore for S3CompatibleStore {
             .request_signer
             .presign_create_multipart(key, MULTIPART_CONTROL_TTL, Self::signing_time())
             .await?;
-        let response = self
-            .execute_signed(key, signed, HttpRequestBody::empty())
-            .await?;
+        let response =
+            execute_signed_with_body(&self.http, key, signed, HttpRequestBody::empty()).await?;
         if let Some(code) = response.provider_error_code() {
             return Err(multipart_error(key, "create", &code));
         }
@@ -457,9 +368,13 @@ impl ObjectStore for S3CompatibleStore {
                 Self::signing_time(),
             )
             .await?;
-        let response = self
-            .execute_signed(key, signed, complete_multipart_body(parts)?.into())
-            .await?;
+        let response = execute_signed_with_body(
+            &self.http,
+            key,
+            signed,
+            complete_multipart_body(parts)?.into(),
+        )
+        .await?;
         match response.provider_error_code().as_deref() {
             None => Ok(MultipartCompletion::Assembled),
             // The upload is gone, which says nothing about the object: an
@@ -480,9 +395,8 @@ impl ObjectStore for S3CompatibleStore {
                 Self::signing_time(),
             )
             .await?;
-        let response = self
-            .execute_signed(key, signed, HttpRequestBody::empty())
-            .await?;
+        let response =
+            execute_signed_with_body(&self.http, key, signed, HttpRequestBody::empty()).await?;
         match response.provider_error_code().as_deref() {
             // Nothing to abandon is the state an abort is trying to reach.
             None | Some("NoSuchUpload") => Ok(()),
@@ -589,20 +503,11 @@ fn complete_multipart_body(parts: &[MultipartPart]) -> Result<String> {
         body.push_str("</PartNumber><ETag>");
         body.push_str(&xml_escape(&part.etag));
         body.push_str("</ETag><ChecksumCRC64NVME>");
-        body.push_str(&xml_escape(&base64_checksum(&part.checksum)?));
+        body.push_str(&xml_escape(&base64_crc64nvme(&part.checksum)?));
         body.push_str("</ChecksumCRC64NVME></Part>");
     }
     body.push_str("</CompleteMultipartUpload>");
     Ok(body)
-}
-
-fn base64_checksum(checksum: &Checksum) -> Result<String> {
-    checksum
-        .validate()
-        .map_err(|error| ObjectStoreError::InvalidContentRef(error.to_string()))?;
-    let raw = loonfs_api::wire::hex::hex_decode_bytes(&checksum.value)
-        .map_err(|error| ObjectStoreError::InvalidContentRef(error.to_string()))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 
 fn multipart_error(key: &str, operation: &str, code: &str) -> ObjectStoreError {
@@ -631,21 +536,6 @@ fn multipart_error(key: &str, operation: &str, code: &str) -> ObjectStoreError {
     }
 }
 
-fn transport_for_status(
-    key: &str,
-    status: http::StatusCode,
-    message: impl Into<String>,
-) -> ObjectStoreError {
-    if status == http::StatusCode::REQUEST_TIMEOUT
-        || status == http::StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
-    {
-        ObjectStoreError::retryable_transport(key, message)
-    } else {
-        ObjectStoreError::transport(key, message)
-    }
-}
-
 fn validate_config(config: &S3CompatibleConfig) -> Result<()> {
     if config.bucket.trim().is_empty() {
         return Err(ObjectStoreError::Configuration(
@@ -670,14 +560,11 @@ fn object_store_endpoint_url(
     }
 
     let parsed = parse_endpoint_url(endpoint_url)?;
-    let bucket_prefix = format!("{}.", bucket.trim());
-    if parsed.authority.starts_with(&bucket_prefix) {
-        return Ok(endpoint_url.to_owned());
-    }
-
     Ok(format!(
-        "{}://{}.{}/{}",
-        parsed.scheme, bucket, parsed.authority, parsed.path
+        "{}://{}/{}",
+        parsed.scheme,
+        virtual_hosted_authority(bucket, parsed.authority),
+        parsed.path
     )
     .trim_end_matches('/')
     .to_owned())

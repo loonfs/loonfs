@@ -23,3 +23,4 @@ pub use s3_compatible::{
 };
 
 pub(crate) use gcs::stored_crc32c;
+pub(crate) use s3_compatible::base64_crc64nvme;
