@@ -3,6 +3,7 @@
 //! Public IDs use the form `ino_<number>`. They are scoped to a namespace and
 //! should be treated as identifiers rather than numbers.
 
+use crate::ids::validation_error;
 use crate::InodeId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -21,25 +22,7 @@ pub const DESCRIPTION: &str = "Stable inode ID within a namespace";
 
 const INVALID_REASON: &str = "must use `ino_` followed by a nonzero u64 without leading zeroes";
 
-/// Explains why a string is not a valid public inode ID.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid inode id {value:?}: {reason}")]
-pub struct PublicInodeIdError {
-    value: String,
-    reason: String,
-}
-
-impl PublicInodeIdError {
-    /// Returns the rejected input.
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    /// Returns the validation rule that the input failed.
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
-}
+validation_error!(PublicInodeIdError, "invalid inode id {value:?}: {reason}");
 
 /// Converts an inode ID to its public API string.
 pub fn encode(id: InodeId) -> String {

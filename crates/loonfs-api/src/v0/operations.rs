@@ -710,14 +710,22 @@ pub struct DeletedObjectCounts {
 }
 
 impl DeletedObjectCounts {
-    /// Adds counts from another pass.
+    /// Adds counts from another pass. Exhaustive so a new field cannot escape the sum.
     pub fn add(&mut self, other: &Self) {
-        self.wal_segments += other.wal_segments;
-        self.metadata_segments += other.metadata_segments;
-        self.manifests += other.manifests;
-        self.checkpoint_records += other.checkpoint_records;
-        self.upload_sessions += other.upload_sessions;
-        self.content_objects += other.content_objects;
+        let Self {
+            wal_segments,
+            metadata_segments,
+            manifests,
+            checkpoint_records,
+            upload_sessions,
+            content_objects,
+        } = other;
+        self.wal_segments += wal_segments;
+        self.metadata_segments += metadata_segments;
+        self.manifests += manifests;
+        self.checkpoint_records += checkpoint_records;
+        self.upload_sessions += upload_sessions;
+        self.content_objects += content_objects;
     }
 }
 
@@ -741,11 +749,16 @@ pub struct ReleasedCheckpointCounts {
 }
 
 impl ReleasedCheckpointCounts {
-    /// Adds counts from another pass.
+    /// Adds counts from another pass. Exhaustive so a new field cannot escape the sum.
     pub fn add(&mut self, other: &Self) {
-        self.fork += other.fork;
-        self.expired += other.expired;
-        self.missing_basis += other.missing_basis;
+        let Self {
+            fork,
+            expired,
+            missing_basis,
+        } = other;
+        self.fork += fork;
+        self.expired += expired;
+        self.missing_basis += missing_basis;
     }
 }
 
@@ -862,34 +875,59 @@ impl RetainedReason {
 
 impl RetainedCandidates {
     /// Every reason and its count, in a fixed order, for callers that
-    /// report the breakdown rather than read one field of it.
+    /// report the breakdown rather than read one field of it. The labels are the serialized field
+    /// names; exhaustive so a new field cannot escape the breakdown.
     pub fn by_reason(&self) -> [(&'static str, u64); 10] {
+        let Self {
+            referenced,
+            within_grace_window,
+            no_provider_timestamp,
+            no_reference_manifest,
+            degraded_roots,
+            unrecognized_key,
+            checkpoint_not_releasable,
+            upload_session_window,
+            upload_session_undecided,
+            content_scan_deferred,
+        } = *self;
         [
-            ("referenced", self.referenced),
-            ("within_grace_window", self.within_grace_window),
-            ("no_provider_timestamp", self.no_provider_timestamp),
-            ("no_reference_manifest", self.no_reference_manifest),
-            ("degraded_roots", self.degraded_roots),
-            ("unrecognized_key", self.unrecognized_key),
-            ("checkpoint_not_releasable", self.checkpoint_not_releasable),
-            ("upload_session_window", self.upload_session_window),
-            ("upload_session_undecided", self.upload_session_undecided),
-            ("content_scan_deferred", self.content_scan_deferred),
+            ("referenced", referenced),
+            ("within_grace_window", within_grace_window),
+            ("no_provider_timestamp", no_provider_timestamp),
+            ("no_reference_manifest", no_reference_manifest),
+            ("degraded_roots", degraded_roots),
+            ("unrecognized_key", unrecognized_key),
+            ("checkpoint_not_releasable", checkpoint_not_releasable),
+            ("upload_session_window", upload_session_window),
+            ("upload_session_undecided", upload_session_undecided),
+            ("content_scan_deferred", content_scan_deferred),
         ]
     }
 
-    /// Folds another pass's breakdown into this one.
+    /// Folds another pass's breakdown into this one. Exhaustive so a new field cannot escape the sum.
     pub fn add(&mut self, other: &Self) {
-        self.referenced += other.referenced;
-        self.within_grace_window += other.within_grace_window;
-        self.no_provider_timestamp += other.no_provider_timestamp;
-        self.no_reference_manifest += other.no_reference_manifest;
-        self.degraded_roots += other.degraded_roots;
-        self.unrecognized_key += other.unrecognized_key;
-        self.checkpoint_not_releasable += other.checkpoint_not_releasable;
-        self.upload_session_window += other.upload_session_window;
-        self.upload_session_undecided += other.upload_session_undecided;
-        self.content_scan_deferred += other.content_scan_deferred;
+        let Self {
+            referenced,
+            within_grace_window,
+            no_provider_timestamp,
+            no_reference_manifest,
+            degraded_roots,
+            unrecognized_key,
+            checkpoint_not_releasable,
+            upload_session_window,
+            upload_session_undecided,
+            content_scan_deferred,
+        } = other;
+        self.referenced += referenced;
+        self.within_grace_window += within_grace_window;
+        self.no_provider_timestamp += no_provider_timestamp;
+        self.no_reference_manifest += no_reference_manifest;
+        self.degraded_roots += degraded_roots;
+        self.unrecognized_key += unrecognized_key;
+        self.checkpoint_not_releasable += checkpoint_not_releasable;
+        self.upload_session_window += upload_session_window;
+        self.upload_session_undecided += upload_session_undecided;
+        self.content_scan_deferred += content_scan_deferred;
     }
 
     /// The reason with the highest count, and that count. `None` when

@@ -3,8 +3,8 @@
 //! Use a stable ID such as `usr_8f3c`, rather than an email address or display
 //! name. Profile changes should not change the actor recorded in file history.
 
+use crate::ids::{string_id, validation_error};
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use thiserror::Error;
 
 const MAX_ACTOR_ID_BYTES: usize = 256;
@@ -85,127 +85,24 @@ impl ActorKind {
     }
 }
 
-/// A validated actor identifier supplied by the application.
-///
-/// Actor IDs may use the syntax of the application's identity system. They
-/// must contain between 1 and 256 UTF-8 bytes, must not begin or end with
-/// whitespace, and must not contain control characters.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ActorId(String);
+validation_error!(
+    ActorIdValidationError,
+    "invalid actor_id {value:?}: {reason}"
+);
 
-impl ActorId {
-    /// Parses and validates an actor ID.
-    pub fn parse(value: impl AsRef<str>) -> Result<Self, ActorIdValidationError> {
-        let value = value.as_ref();
-        validate_actor_id(value)?;
-        Ok(Self(value.to_owned()))
-    }
-
-    /// Returns the actor ID as a string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<&str> for ActorId {
-    type Error = ActorIdValidationError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
-}
-
-impl TryFrom<String> for ActorId {
-    type Error = ActorIdValidationError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
-}
-
-impl std::str::FromStr for ActorId {
-    type Err = ActorIdValidationError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::parse(value)
-    }
-}
-
-impl AsRef<str> for ActorId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::borrow::Borrow<str> for ActorId {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for ActorId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-#[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for ActorId {
-    #[allow(
-        deprecated,
-        reason = "the published schema uses the requested singular example field"
-    )]
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::String)
-            .description(Some(
-                "Opaque hosting-platform actor id: non-empty, at most 256 UTF-8 bytes, without leading or trailing whitespace or control characters.",
-            ))
-            .example(Some(serde_json::json!("usr_8f3c")))
-            .into()
-    }
-}
-
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for ActorId {}
-
-impl Serialize for ActorId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for ActorId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::parse(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// An error returned when an actor ID is invalid.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid actor_id {value:?}: {reason}")]
-pub struct ActorIdValidationError {
-    value: String,
-    reason: String,
-}
-
-impl ActorIdValidationError {
-    /// Returns the rejected input.
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    /// Returns the reason the input was rejected.
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
+string_id! {
+    /// A validated actor identifier supplied by the application.
+    ///
+    /// Actor IDs may use the syntax of the application's identity system. They
+    /// must contain between 1 and 256 UTF-8 bytes, must not begin or end with
+    /// whitespace, and must not contain control characters.
+    ActorId,
+    error = ActorIdValidationError,
+    validate = validate_actor_id,
+    schema(
+        description = "Opaque hosting-platform actor id: non-empty, at most 256 UTF-8 bytes, without leading or trailing whitespace or control characters.",
+        example = "usr_8f3c"
+    )
 }
 
 fn validate_actor_id(value: &str) -> Result<(), ActorIdValidationError> {
