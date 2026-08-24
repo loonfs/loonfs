@@ -121,7 +121,7 @@ fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> 
                 family_segments
                     .segments
                     .into_iter()
-                    .map(|descriptor| descriptor.object_key.clone())
+                    .map(|descriptor| metadata_segment_object_key(&descriptor))
             })
         })
         .collect()
@@ -1868,7 +1868,7 @@ fn group_segment_object_keys(
         .iter()
         .filter(|family_segments| group.contains(&family_segments.family))
         .flat_map(|family_segments| &family_segments.segments)
-        .map(|descriptor| descriptor.object_key.clone())
+        .map(metadata_segment_object_key)
         .collect()
 }
 

@@ -1120,7 +1120,10 @@ async fn multi_block_direntry_segment() -> (
     }
     let built = builder.finish().expect("rebuilt segment");
     store
-        .put_overwrite(&descriptor.object_key, Bytes::from(built.bytes.clone()))
+        .put_overwrite(
+            &metadata_segment_object_key(&descriptor),
+            Bytes::from(built.bytes.clone()),
+        )
         .await
         .expect("overwrite segment");
     descriptor.row_count = built.row_count;
@@ -1181,7 +1184,7 @@ async fn segment_object_bytes(
     descriptor: &MetadataSegmentRef,
 ) -> Bytes {
     store
-        .get(&descriptor.object_key, None)
+        .get(&metadata_segment_object_key(descriptor), None)
         .await
         .expect("read segment object")
         .expect("segment object present")

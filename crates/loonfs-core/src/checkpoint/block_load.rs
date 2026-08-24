@@ -8,6 +8,7 @@ use super::scan::Readahead;
 use super::validate::validate_manifest_row_seq_range;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, DecodedDataBlock};
+use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -184,7 +185,7 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     .collect();
 
     validate_manifest_row_seq_range(
-        &descriptor.object_key,
+        &metadata_segment_object_key(descriptor),
         blocks.iter().flat_map(|block| block.rows.iter()),
         descriptor.run_seq,
     )?;

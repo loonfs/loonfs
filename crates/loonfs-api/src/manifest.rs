@@ -7,7 +7,8 @@ use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    InodeKind, ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo,
+    InodeKind, ManifestNo, ManifestObjectId, MetadataCompactionId, MetadataSegmentId, NameKey,
+    NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -75,8 +76,11 @@ pub struct MetadataSegmentRef {
     pub owner_namespace_id: NamespaceId,
     /// Immutable segment id used in the durable object key.
     pub segment_id: MetadataSegmentId,
-    /// Fully resolved object-store key trusted only after descriptor validation.
-    pub object_key: String,
+    /// Compaction job id when the segment is stored under a compaction
+    /// prefix. Flushed segments omit this field and use `metadata/segments/`.
+    /// The owner, segment id, and optional job id determine the object key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_job_id: Option<MetadataCompactionId>,
     /// Namespace sequence at which this run was produced.
     pub run_seq: ChangeSeq,
     /// Compaction tier used to order overlapping runs during reads and reorganization.
@@ -983,8 +987,8 @@ mod tests {
         MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
     };
     use crate::{
-        ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey,
-        NamespaceId, WriterEpoch,
+        ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
+        MetadataSegmentId, NameKey, NamespaceId, WriterEpoch,
     };
 
     fn row_commit_id() -> CommitId {
@@ -1049,7 +1053,6 @@ mod tests {
                 "seg_00000000000000000000000000000001",
                 ChangeSeq(10),
                 1,
-                "namespaces/demo/metadata/segments/seg_00000000000000000000000000000001.sst.zst",
             )],
         })
         .expect("manifest");
@@ -1068,39 +1071,33 @@ mod tests {
     /// with the manifest.
     #[test]
     fn namespace_manifest_codec_round_trips_inherited_source_segments() {
-        let envelope = NamespaceManifestEnvelope::from_payload(
-            NamespaceManifestPayload {
-                namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-                manifest_no: ManifestNo(12),
-                manifest_object_id: ManifestObjectId::parse(
-                    "00000000000000000012-0123456789abcdef",
-                )
+        let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            manifest_no: ManifestNo(12),
+            manifest_object_id: ManifestObjectId::parse("00000000000000000012-0123456789abcdef")
                 .expect("valid manifest object id"),
-                head_seq: ChangeSeq(12),
-                head_commit_id: CommitId::parse("c_00000000000000000000000000000002")
-                    .expect("commit id"),
-                base_seq: ChangeSeq(10),
-                writer_epoch: WriterEpoch(2),
-                next_inode_id: InodeId(42),
-                retention_floor_seq: ChangeSeq(0),
-                segments: vec![
-                    metadata_segment_ref(
-                        "source",
-                        "seg_00000000000000000000000000000001",
-                        ChangeSeq(10),
-                        1,
-                        "namespaces/source/segments/metadata/seg_00000000000000000000000000000001.sst.zst",
-                    ),
-                    metadata_segment_ref(
-                        "demo",
-                        "seg_00000000000000000000000000000002",
-                        ChangeSeq(12),
-                        0,
-                        "namespaces/demo/metadata/segments/seg_00000000000000000000000000000002.sst.zst",
-                    ),
-                ],
-            },
-        )
+            head_seq: ChangeSeq(12),
+            head_commit_id: CommitId::parse("c_00000000000000000000000000000002")
+                .expect("commit id"),
+            base_seq: ChangeSeq(10),
+            writer_epoch: WriterEpoch(2),
+            next_inode_id: InodeId(42),
+            retention_floor_seq: ChangeSeq(0),
+            segments: vec![
+                metadata_segment_ref(
+                    "source",
+                    "seg_00000000000000000000000000000001",
+                    ChangeSeq(10),
+                    1,
+                ),
+                metadata_segment_ref(
+                    "demo",
+                    "seg_00000000000000000000000000000002",
+                    ChangeSeq(12),
+                    0,
+                ),
+            ],
+        })
         .expect("manifest");
 
         let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
@@ -1113,6 +1110,57 @@ mod tests {
         assert_eq!(
             decoded.payload.segments[0].owner_namespace_id,
             NamespaceId::parse("source").expect("valid namespace id")
+        );
+    }
+
+    /// Compaction segments include a job id; flushed segments omit it.
+    #[test]
+    fn namespace_manifest_codec_round_trips_a_compaction_job_segment() {
+        let compaction_job_id = MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
+            .expect("valid compaction job id");
+        let mut staged = metadata_segment_ref(
+            "demo",
+            "seg_00000000000000000000000000000001",
+            ChangeSeq(14),
+            1,
+        );
+        staged.compaction_job_id = Some(compaction_job_id.clone());
+        let flushed = metadata_segment_ref(
+            "demo",
+            "seg_00000000000000000000000000000002",
+            ChangeSeq(14),
+            0,
+        );
+        let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            manifest_no: ManifestNo(14),
+            manifest_object_id: ManifestObjectId::parse("00000000000000000014-0123456789abcdef")
+                .expect("valid manifest object id"),
+            head_seq: ChangeSeq(14),
+            head_commit_id: CommitId::parse("c_00000000000000000000000000000003")
+                .expect("commit id"),
+            base_seq: ChangeSeq(14),
+            writer_epoch: WriterEpoch(2),
+            next_inode_id: InodeId(42),
+            retention_floor_seq: ChangeSeq(0),
+            segments: vec![staged, flushed],
+        })
+        .expect("manifest");
+
+        let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
+        let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
+
+        assert_eq!(decoded, envelope);
+        assert_eq!(
+            decoded.payload.segments[0].compaction_job_id,
+            Some(compaction_job_id)
+        );
+        assert_eq!(decoded.payload.segments[1].compaction_job_id, None);
+        let text = String::from_utf8(encoded).expect("manifest json is utf-8");
+        assert_eq!(
+            text.matches("\"compaction_job_id\"").count(),
+            1,
+            "only the compaction job's segment writes the field, got {text}"
         );
     }
 
@@ -1456,12 +1504,11 @@ mod tests {
         segment_id: &str,
         run_seq: ChangeSeq,
         level: u32,
-        object_key: &str,
     ) -> MetadataSegmentRef {
         MetadataSegmentRef {
             owner_namespace_id: NamespaceId::parse(owner_namespace_id).expect("valid namespace id"),
             segment_id: MetadataSegmentId::parse(segment_id).expect("valid segment id"),
-            object_key: object_key.to_owned(),
+            compaction_job_id: None,
             run_seq,
             level,
             family: MetadataRowFamily::Inodes,

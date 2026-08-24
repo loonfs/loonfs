@@ -34,7 +34,10 @@ pub(super) async fn rewrite_manifest_segment(
     }
     let built = builder.finish().expect("rewritten segment");
     store
-        .put_overwrite(&descriptor.object_key, Bytes::from(built.bytes.clone()))
+        .put_overwrite(
+            &metadata_segment_object_key(descriptor),
+            Bytes::from(built.bytes.clone()),
+        )
         .await
         .expect("overwrite segment");
 
@@ -193,14 +196,11 @@ async fn load_perturbed_manifest(
 /// The copied row metadata models a stray or duplicate descriptor.
 fn segment_modelled_on(
     modelled_on: &MetadataSegmentRef,
-    namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
     level: u32,
 ) -> MetadataSegmentRef {
-    let segment_id = loonfs_api::MetadataSegmentId::generate();
     MetadataSegmentRef {
-        object_key: metadata_segment(namespace_id, &segment_id),
-        segment_id,
+        segment_id: loonfs_api::MetadataSegmentId::generate(),
         run_seq,
         level,
         segment_index: 0,
@@ -990,7 +990,10 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::Inodes)
         .expect("inode segment");
     store
-        .put_overwrite(&descriptor.object_key, Bytes::from(built.bytes.clone()))
+        .put_overwrite(
+            &metadata_segment_object_key(descriptor),
+            Bytes::from(built.bytes.clone()),
+        )
         .await
         .expect("replace inode segment");
     descriptor.row_count = built.row_count;
@@ -1007,7 +1010,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
         });
     descriptor.filter_block = built.filter;
     descriptor.object_checksum = loonfs_api::sha256_digest(&built.bytes);
-    let segment_key = descriptor.object_key.clone();
+    let segment_key = metadata_segment_object_key(descriptor);
     let manifest_no = materialized.manifest.payload.manifest_no;
     overwrite_manifest(&store, &namespace_id, materialized.manifest).await;
 
@@ -1071,7 +1074,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         .min_key
         .starts_with("direntry-child-bind-000000000000000000"));
 
-    let deleted_key = child_segment.object_key.clone();
+    let deleted_key = metadata_segment_object_key(child_segment);
     store
         .delete(&deleted_key)
         .await
@@ -1663,7 +1666,6 @@ async fn a_manifest_whose_group_base_fragmented_does_not_load() {
     let mut fragmented = manifest.payload.clone();
     fragmented.segments.push(segment_modelled_on(
         &base_segment_of_family(&manifest, ApiMetadataRowFamily::Inodes),
-        &namespace_id,
         manifest.payload.head_seq,
         CHECKPOINT_BASE_RUN_LEVEL,
     ));
@@ -1695,7 +1697,6 @@ async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
     let mut repeated = manifest.payload.clone();
     repeated.segments.push(segment_modelled_on(
         &existing,
-        &namespace_id,
         existing.run_seq,
         existing.level,
     ));
@@ -1726,8 +1727,7 @@ async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
     assert_eq!(existing.segment_index, 0);
 
     let mut overlapping = manifest.payload.clone();
-    let mut second =
-        segment_modelled_on(&existing, &namespace_id, existing.run_seq, existing.level);
+    let mut second = segment_modelled_on(&existing, existing.run_seq, existing.level);
     // Index one keeps the numbering valid, leaving the overlapping range as
     // the only error.
     second.segment_index = 1;

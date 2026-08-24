@@ -93,7 +93,7 @@ The required durable object families and standard key patterns are:
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata segment references and a head summary. Segment references carry their own owner, so a fork target's manifest names source-owned segments without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/segments/{segment_id}.sst.zst` |
-| **Compaction staging** | Immutable | Hold metadata segments one streaming compaction job has written before any manifest references them ("Compaction"). The object is an ordinary metadata segment; only the directory differs. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` |
+| **Compaction staging** | Immutable | Holds segments written by a streaming compaction before publication. The descriptor stores the job id used to derive this key. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` |
 | **Compaction leases** | Mutable lifecycle | Record ownership of a compaction output prefix. A job creates and refreshes an `active` lease. Garbage collection may change an expired lease to terminal `reaping` before reclaiming the output. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/lease.json` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
@@ -1894,6 +1894,8 @@ failures as malformed. The segment format is versioned by the manifest that
 references it (`namespace_manifest` `format_version`), since a segment is
 unreachable except through a manifest. Rows inside a segment use the attribution fields defined in section 3.8.1.
 
+A descriptor does not store an object key. Readers derive the key from `owner_namespace_id`, `segment_id`, and optional `compaction_job_id`. Compaction output includes the job id and remains under that job's prefix (section 6.2). Other segments omit the field and use the owner's `metadata/segments/` prefix.
+
 A run is identified by its `run_seq` and `level` together, and holds one
 family's segments from one producer: a WAL flush's delta run or a rebuild's
 output. A producer writes a family's rows in ascending key order and writes
@@ -2201,22 +2203,9 @@ an undelete give back the map the inode had. A rewrite refuses to compact
 when two rows for one inode share a revision number at or below the floor,
 because that makes "the newest at the floor" arbitrary and the drop unsafe.
 
-A rebuild whose bottom-anchored window cannot fit one step's budget is run as
-a streaming compaction instead: it merges every run of the group in one job
-and writes each finished output segment as it fills, so nothing about the job
-follows the size of the group. Those segments are written under
-`namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst`
-rather than under `metadata/segments/`. The object is an ordinary metadata
-segment — same encoding, same descriptor, same reads — and only its directory
-differs. The directory is what keeps a running job's output out of the
-listing that enumerates metadata segments: a job outlives the collector's grace
-window, so its segments would otherwise read as unreferenced objects aged
-past grace, which is the class the collector reaps. The job id groups one
-job's output together so a collector can decide all of it from that job's
-lease ("Garbage collection", rule 12). Nothing loads or validates the
-compaction directory, and a manifest may reference a staged key directly: a
-completed publication moves no bytes, because a referenced object is live
-wherever it sits.
+A rebuild that cannot fit within one maintenance step runs as a streaming compaction. The job merges every run in the group and writes output segments as they fill. These segments use `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` instead of `metadata/segments/`.
+
+The separate prefix prevents GC from treating unfinished output as abandoned metadata. The job id groups the output under one lease ("Garbage collection", rule 12). A published manifest references the segments in place, so publication does not move them. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
 
 The rules a rebuild applies are the same however it runs them. A bounded
 merge holds every row of its window and decides them together. A streaming

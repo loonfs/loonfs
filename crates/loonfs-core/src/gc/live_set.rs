@@ -21,7 +21,8 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ContentId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, wal_segment_id_from_key,
+    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix,
+    metadata_segment_object_key, wal_segment_id_from_key,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -433,7 +434,7 @@ async fn collect_manifest_segments<S: ObjectStore + ?Sized>(
                     .payload
                     .segments
                     .iter()
-                    .map(|descriptor| descriptor.object_key.clone()),
+                    .map(metadata_segment_object_key),
             ),
             Ok(None) if Some(manifest_object_id) == root_manifest_object_id => {
                 live.degraded = true;
@@ -649,7 +650,7 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
             .payload
             .segments
             .iter()
-            .map(|descriptor| descriptor.object_key.clone())
+            .map(metadata_segment_object_key)
             .collect(),
     })))
 }
