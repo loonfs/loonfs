@@ -154,13 +154,10 @@ pub(crate) async fn run_put_tree(
     // Create empty subtrees before uploading files.
     for components in empty_dirs {
         let remote = joined_remote(remote_root, &components);
-        let spec = match NamespacePath::parse(context.namespace.as_str(), &remote) {
+        let spec = match parse_remote(context, &remote, "local_path") {
             Ok(spec) => spec,
             Err(error) => {
-                tally.fail(
-                    remote,
-                    CliError::invalid_request(error.to_string()).with_param("local_path"),
-                );
+                tally.fail(remote, error);
                 continue;
             }
         };
@@ -225,14 +222,9 @@ pub(crate) async fn run_put_tree(
         let progress = Arc::clone(&progress);
         let remote = format!("{}/{}", remote_root.trim_end_matches('/'), job.remote);
         async move {
-            let spec = match NamespacePath::parse(context.namespace.as_str(), &remote) {
+            let spec = match parse_remote(context, &remote, "local_path") {
                 Ok(spec) => spec,
-                Err(error) => {
-                    return (
-                        remote,
-                        Err(CliError::invalid_request(error.to_string()).with_param("local_path")),
-                    )
-                }
+                Err(error) => return (remote, Err(error)),
             };
             // Use the size found during the directory walk when available.
             // If it was unavailable, try again before uploading this file.
@@ -337,35 +329,25 @@ pub(crate) async fn run_get_tree(
     ));
     progress.expect(tree_bytes(&listing.files), Some(listing.files.len() as u64));
     let outcomes = futures::stream::iter(listing.files.into_iter().map(|job| {
-        let backend = &context.target;
-        let namespace = context.namespace.clone();
         let progress = Arc::clone(&progress);
         let local = local_root.join(job.local);
         async move {
-            let spec = match NamespacePath::parse(namespace.as_str(), &job.remote) {
+            let spec = match parse_remote(context, &job.remote, "remote_path") {
                 Ok(spec) => spec,
-                Err(error) => {
-                    return (
-                        job.remote,
-                        Err(CliError::invalid_request(error.to_string()).with_param("remote_path")),
-                    )
-                }
+                Err(error) => return (job.remote, Err(error)),
             };
-            // Recursive downloads use the same streaming and resume behavior
-            // as single-file downloads.
-            let meta = job
-                .content_ref
-                .as_ref()
-                .map(|content_ref| super::partial::PartialMeta::describe(content_ref, None));
-            let start_offset = meta
-                .as_ref()
-                .map_or(0, |meta| super::partial::resumable_bytes(&local, meta));
-            let mut download = match backend
-                .open_file_download(&spec, None, job.size_bytes, start_offset)
-                .await
+            let (mut download, meta) = match super::fs::open_resumable_download(
+                context,
+                &spec,
+                None,
+                job.size_bytes,
+                &local,
+                job.content_ref.as_ref(),
+            )
+            .await
             {
-                Ok(download) => download,
-                Err(error) => return (job.remote, Err(error.into())),
+                Ok(opened) => opened,
+                Err(error) => return (job.remote, Err(error)),
             };
             progress.file_started(&job.remote, job.size_bytes);
             let derived_name = false;
@@ -434,13 +416,10 @@ pub(crate) async fn run_copy_tree(
     directories.extend(listing.directories);
     for components in &directories {
         let remote = joined_remote(destination_root, components);
-        let spec = match NamespacePath::parse(context.namespace.as_str(), &remote) {
+        let spec = match parse_remote(context, &remote, "destination_path") {
             Ok(spec) => spec,
             Err(error) => {
-                tally.fail(
-                    remote,
-                    CliError::invalid_request(error.to_string()).with_param("destination_path"),
-                );
+                tally.fail(remote, error);
                 continue;
             }
         };
@@ -475,8 +454,6 @@ pub(crate) async fn run_copy_tree(
         DestinationBehavior::NoReplace
     };
     let outcomes = futures::stream::iter(listing.files.into_iter().map(|job| {
-        let backend = &context.target;
-        let namespace = context.namespace.clone();
         let message = message.clone();
         let destination = joined_remote(
             destination_root,
@@ -486,25 +463,14 @@ pub(crate) async fn run_copy_tree(
                 .collect::<Vec<_>>(),
         );
         async move {
-            let from = NamespacePath::parse(namespace.as_str(), &job.remote);
-            let to = NamespacePath::parse(namespace.as_str(), &destination);
+            let from = parse_remote(context, &job.remote, "source_path");
+            let to = parse_remote(context, &destination, "destination_path");
             let (from, to) = match (from, to) {
                 (Ok(from), Ok(to)) => (from, to),
-                (Err(error), _) => {
-                    return (
-                        job.remote,
-                        Err(CliError::invalid_request(error.to_string()).with_param("source_path")),
-                    )
-                }
-                (_, Err(error)) => {
-                    return (
-                        job.remote,
-                        Err(CliError::invalid_request(error.to_string())
-                            .with_param("destination_path")),
-                    )
-                }
+                (Err(error), _) | (_, Err(error)) => return (job.remote, Err(error)),
             };
-            let result = backend
+            let result = context
+                .target
                 .copy_path(
                     &from,
                     &to,
@@ -546,6 +512,18 @@ pub(crate) async fn run_copy_tree(
         tally,
         head_drift,
     ))
+}
+
+fn parse_remote(
+    context: &CommandContext,
+    path: &str,
+    param: &str,
+) -> Result<NamespacePath, CliError> {
+    NamespacePath::parse(context.namespace.as_str(), path).map_err(|error| {
+        crate::backend_error::BackendError::from(error)
+            .with_invalid_request_param(param)
+            .into()
+    })
 }
 
 fn spec_target(spec: &NamespacePath) -> String {
@@ -663,12 +641,8 @@ async fn walk_remote_tree(
         } else {
             &remote_dir
         };
-        let spec = NamespacePath::parse(context.namespace.as_str(), listed).map_err(|error| {
-            context.fail(
-                kind,
-                CliError::invalid_request(error.to_string()).with_param(remote_param),
-            )
-        })?;
+        let spec = parse_remote(context, listed, remote_param)
+            .map_err(|error| context.fail(kind, error))?;
         let mut pager = context
             .target
             .list_path_entries_pager(&spec, None, None)

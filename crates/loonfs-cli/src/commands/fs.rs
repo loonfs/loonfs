@@ -28,7 +28,7 @@ use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
     AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId,
-    CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind,
+    CommitResponse, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind,
     ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
 use loonfs_client::{
@@ -554,22 +554,16 @@ pub(crate) async fn run_filesystem_get(
         args.local_destination.as_deref(),
     )
     .map_err(|error| context.fail(kind, error))?;
-    // Where a download starts is decided before it is opened: the bytes an
-    // interrupted run left are named after this destination, and how many of
-    // them still describe the content resolved just now is how far in this
-    // one begins. A file with no content reference to compare against — one
-    // this build cannot identify — starts over.
-    let meta = entry
-        .content_ref()
-        .map(|content_ref| PartialMeta::describe(content_ref, revision_no));
-    let start_offset = meta
-        .as_ref()
-        .map_or(0, |meta| partial::resumable_bytes(&destination, meta));
-    let mut download = context
-        .target
-        .open_file_download(&spec, revision_no, entry.size_bytes(), start_offset)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let (mut download, meta) = open_resumable_download(
+        &context,
+        &spec,
+        revision_no,
+        entry.size_bytes(),
+        &destination,
+        entry.content_ref(),
+    )
+    .await
+    .map_err(|error| context.fail(kind, error))?;
 
     let progress = Arc::new(ProgressReporter::new(
         runtime,
@@ -608,6 +602,26 @@ pub(crate) async fn run_filesystem_get(
         mode: Some(context.mode),
         data,
     })
+}
+
+/// Opens a download at the offset recorded in a matching partial file.
+pub(super) async fn open_resumable_download(
+    context: &CommandContext,
+    spec: &NamespacePath,
+    revision_no: Option<RevisionNo>,
+    size_bytes: Option<u64>,
+    destination: &Path,
+    content_ref: Option<&ContentRef>,
+) -> Result<(FileDownload, Option<PartialMeta>), CliError> {
+    let meta = content_ref.map(|content_ref| PartialMeta::describe(content_ref, revision_no));
+    let start_offset = meta
+        .as_ref()
+        .map_or(0, |meta| partial::resumable_bytes(destination, meta));
+    let download = context
+        .target
+        .open_file_download(spec, revision_no, size_bytes, start_offset)
+        .await?;
+    Ok((download, meta))
 }
 
 /// Writes a download into its destination through the partial file, and
@@ -664,13 +678,11 @@ fn write_path_entries_page(
     entries: &[loonfs_api::PathEntry],
     jsonl: bool,
 ) -> io::Result<()> {
+    if jsonl {
+        return write_jsonl_page(stdout, entries);
+    }
     for entry in entries {
-        if jsonl {
-            serde_json::to_writer(&mut *stdout, entry).map_err(io::Error::other)?;
-            stdout.write_all(b"\n")?;
-        } else {
-            writeln!(stdout, "{}", crate::render::human_path_entry(entry))?;
-        }
+        writeln!(stdout, "{}", crate::render::human_path_entry(entry))?;
     }
     stdout.flush()
 }
