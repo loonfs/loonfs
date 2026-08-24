@@ -109,7 +109,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
 
     let committed = harness
         .client
-        .commit(
+        .create_commit(
             &remote_ns,
             &CommitRequest {
                 commit_id: commit_id("batch-one"),
@@ -249,7 +249,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
 
     let committed = harness
         .client
-        .commit(&namespace, &request())
+        .create_commit(&namespace, &request())
         .await
         .expect("the put commits");
     assert_eq!(committed.committed_by, loonfs_test_support::test_actor());
@@ -279,7 +279,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     let spec = NamespacePath::parse("demo", ROOT_FILE).expect("path");
     let entry = harness
         .client
-        .stat_path(&spec, &Default::default())
+        .get_path_entry(&spec, &Default::default())
         .await
         .expect("stat the new file");
     assert_eq!(entry.inode_id, created_inode_id);
@@ -303,7 +303,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     // nothing new.
     let replayed = harness
         .client
-        .commit(&namespace, &request())
+        .create_commit(&namespace, &request())
         .await
         .expect("an identical resubmission replays");
     assert_eq!(replayed, committed);
@@ -359,7 +359,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
 
     let committed = harness
         .client
-        .commit(&namespace, &request())
+        .create_commit(&namespace, &request())
         .await
         .expect("the put commits");
     assert!(
@@ -381,7 +381,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
         .expect("create checkpoint");
     let advanced = harness
         .client
-        .maintenance_step(
+        .run_maintenance(
             &namespace,
             &MaintenanceStepRequest {
                 retention: Some(AdvanceRetentionRequest::default()),
@@ -401,7 +401,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
 
     let replayed = harness
         .client
-        .commit(&namespace, &request())
+        .create_commit(&namespace, &request())
         .await
         .expect("an identical resubmission still replays");
     assert_eq!(replayed.committed_seq, committed.committed_seq);
@@ -440,7 +440,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
     // deletes a path that was never bound.
     let error = harness
         .client
-        .commit(
+        .create_commit(
             &namespace,
             &CommitRequest {
                 commit_id: commit_id("batch-stops-at-two"),
@@ -496,7 +496,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
         let spec = NamespacePath::parse("demo", path).expect("path");
         let missing = harness
             .client
-            .stat_path(&spec, &Default::default())
+            .get_path_entry(&spec, &Default::default())
             .await
             .expect_err("the aborted batch wrote nothing");
         match missing {
@@ -538,7 +538,7 @@ async fn an_empty_operation_list_is_rejected() {
 
     let error = harness
         .client
-        .commit(
+        .create_commit(
             &namespace,
             &CommitRequest {
                 commit_id: commit_id("empty-batch"),
@@ -595,7 +595,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
 
     let alone = harness
         .client
-        .commit(
+        .create_commit(
             &namespace,
             &CommitRequest {
                 commit_id: commit_id("root-alone"),
@@ -635,7 +635,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
 
     let in_batch = harness
         .client
-        .commit(
+        .create_commit(
             &namespace,
             &CommitRequest {
                 commit_id: commit_id("root-in-batch"),
@@ -698,7 +698,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
     // namespace that does not answers for the namespace instead.
     let unknown = harness
         .client
-        .commit(
+        .create_commit(
             &namespace_id("missing"),
             &CommitRequest {
                 commit_id: commit_id("root-unknown-namespace"),
@@ -763,12 +763,12 @@ async fn a_batch_replays_under_its_commit_id() {
 
     let first = harness
         .client
-        .commit(&namespace, &batch(operations.clone()))
+        .create_commit(&namespace, &batch(operations.clone()))
         .await
         .expect("batch commits");
     let replayed = harness
         .client
-        .commit(&namespace, &batch(operations.clone()))
+        .create_commit(&namespace, &batch(operations.clone()))
         .await
         .expect("identical resubmission replays");
     assert_eq!(replayed, first);
@@ -787,7 +787,7 @@ async fn a_batch_replays_under_its_commit_id() {
     // id, so the id is spent.
     let conflict = harness
         .client
-        .commit(&namespace, &batch(operations[..1].to_vec()))
+        .create_commit(&namespace, &batch(operations[..1].to_vec()))
         .await
         .expect_err("a different batch cannot reuse the id");
     match conflict {
@@ -843,7 +843,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             .await
             .expect("create namespace");
         let receipt = writer
-            .commit(
+            .create_commit(
                 &namespace,
                 CoreCommitRequest {
                     commit_id: commit_id("crosses-transports"),
@@ -886,7 +886,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
     ];
     let replayed = harness
         .client
-        .commit(
+        .create_commit(
             &namespace,
             &CommitRequest {
                 commit_id: commit_id("crosses-transports"),
@@ -914,7 +914,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
     // fails over HTTP on a receipt the embedded runtime wrote.
     let conflict = harness
         .client
-        .commit(
+        .create_commit(
             &namespace,
             &CommitRequest {
                 commit_id: commit_id("crosses-transports"),
@@ -963,7 +963,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
 
     harness
         .client
-        .commit(
+        .create_commit(
             &namespace,
             &CommitRequest {
                 commit_id: commit_id("guarded-create"),
@@ -1016,7 +1016,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
     // create published.
     let unchanged = harness
         .client
-        .stat_path(
+        .get_path_entry(
             &NamespacePath::parse("demo", FIRST_FILE).expect("path"),
             &Default::default(),
         )
@@ -1035,7 +1035,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
     .expect("the guard spelled correctly commits");
     let replaced = harness
         .client
-        .stat_path(
+        .get_path_entry(
             &NamespacePath::parse("demo", FIRST_FILE).expect("path"),
             &Default::default(),
         )

@@ -259,7 +259,7 @@ async fn read_grep_index_status(
 ) -> Result<GrepIndex, ApiResponseError> {
     state
         .grep_worker()
-        .get_grep_index_status(namespace_id)
+        .get_grep_index(namespace_id)
         .await
         .map_err(|error| map_grep_error(namespace_id, error))
 }

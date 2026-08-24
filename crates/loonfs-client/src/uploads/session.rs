@@ -5,7 +5,7 @@ use super::staging::presigned_put_request;
 
 impl Client {
     /// Starts an upload session using the transport selected by the request.
-    pub async fn begin_upload(
+    pub async fn create_upload(
         &self,
         namespace_id: &NamespaceId,
         request: &BeginUploadRequest,
@@ -19,12 +19,12 @@ impl Client {
     /// Starts a direct upload of bytes the caller already has.
     ///
     /// A size hint lets the server reject an oversized PUT before signing it.
-    pub async fn begin_direct_put(
+    pub async fn create_direct_put_upload(
         &self,
         namespace_id: &NamespaceId,
         size_bytes: Option<u64>,
     ) -> Result<BeginUploadResponse> {
-        self.begin_upload(namespace_id, &BeginUploadRequest::DirectPut { size_bytes })
+        self.create_upload(namespace_id, &BeginUploadRequest::DirectPut { size_bytes })
             .await
     }
 
@@ -33,12 +33,12 @@ impl Client {
     /// The request does not need a payload length or checksum. The server
     /// returns the part size and checksum algorithm; provider details remain
     /// private and the content reference is returned at completion.
-    pub async fn begin_direct_multipart(
+    pub async fn create_direct_multipart_upload(
         &self,
         namespace_id: &NamespaceId,
         options: DirectMultipartUploadOptions,
     ) -> Result<BeginUploadResponse> {
-        self.begin_upload(
+        self.create_upload(
             namespace_id,
             &BeginUploadRequest::DirectMultipart {
                 part_size_bytes: options.part_size_bytes,
@@ -148,13 +148,13 @@ impl Client {
     }
 
     /// Uploads in-memory bytes through the server for a service-proxied session.
-    pub async fn upload_content(
+    pub async fn put_upload_content(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
-        let request = self.upload_content_request(namespace_id, upload_id);
+        let request = self.put_upload_content_request(namespace_id, upload_id);
         // Proxied uploads are the request most likely to hit the server's
         // concurrency cap; staging the same bytes again is idempotent.
         let response = self
@@ -166,7 +166,7 @@ impl Client {
     /// Stages a payload that arrives in pieces, forwarding it to the server
     /// as it is read.
     ///
-    /// This is [`Self::upload_content`] for a caller that does not hold its
+    /// This is [`Self::put_upload_content`] for a caller that does not hold its
     /// bytes: the payload crosses the client in bounded chunks and the
     /// server hashes it as it forwards it on, so neither side ever holds the
     /// object. A source whose length is unknown is sent with chunked
@@ -175,13 +175,13 @@ impl Client {
     /// Unlike the buffered call this one never resends: a stream is consumed
     /// by the attempt that reads it, so a failure here is the caller's to
     /// handle with a fresh source.
-    pub async fn upload_streamed_content(
+    pub async fn put_upload_content_stream(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         source: PayloadSource,
     ) -> Result<UploadContentResponse> {
-        let request = self.upload_content_request(namespace_id, upload_id);
+        let request = self.put_upload_content_request(namespace_id, upload_id);
         let (stream, size_bytes) = source.into_stream();
         let response = self
             .call_streamed_once(&request, stream, size_bytes)
@@ -189,7 +189,7 @@ impl Client {
         serde_json::from_slice(&response).map_err(|err| ClientError::Json(err.to_string()))
     }
 
-    fn upload_content_request(
+    fn put_upload_content_request(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -226,7 +226,7 @@ impl Client {
     /// A completed session returns its content reference and a fresh content
     /// token. A caller that kept the upload id can therefore recover from a
     /// lost completion response without uploading the content again.
-    pub async fn get_upload_status(
+    pub async fn get_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,

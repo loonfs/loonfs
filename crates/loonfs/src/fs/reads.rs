@@ -312,7 +312,7 @@ impl FsReader {
             cache_path = tracing::field::Empty,
         )
     )]
-    pub async fn stat_path(
+    pub async fn get_path_entry(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -342,7 +342,7 @@ impl FsReader {
             cache_path = tracing::field::Empty,
         )
     )]
-    pub async fn stat_inode(
+    pub async fn get_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -543,7 +543,7 @@ impl FsReader {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn direct_download_target(
+    pub async fn create_download(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -571,7 +571,7 @@ impl FsReader {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn direct_download_target_by_inode(
+    pub async fn create_download_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,

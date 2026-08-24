@@ -219,13 +219,13 @@ impl EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
-    pub(super) async fn stat_path(
+    pub(super) async fn get_path_entry(
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
     ) -> Result<PathEntry, BackendError> {
         self.reader
-            .stat_path(
+            .get_path_entry(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 options.clone(),
@@ -234,14 +234,14 @@ impl EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
-    pub(super) async fn stat_inode(
+    pub(super) async fn get_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         options: &StatPathOptions,
     ) -> Result<PathEntry, BackendError> {
         self.reader
-            .stat_inode(namespace_id, inode_id, options.clone())
+            .get_inode(namespace_id, inode_id, options.clone())
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
@@ -317,15 +317,15 @@ impl EmbeddedBackend {
         // server. Driving the backfill afterwards is the command's job, not
         // this call's, so an embedded caller and a remote one get the same
         // answer to the same question.
-        self.get_grep_index_status(namespace_id).await
+        self.get_grep_index(namespace_id).await
     }
 
-    pub(super) async fn get_grep_index_status(
+    pub(super) async fn get_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndex, BackendError> {
         self.grep_worker()
-            .get_grep_index_status(namespace_id)
+            .get_grep_index(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
     }
@@ -534,7 +534,7 @@ impl EmbeddedBackend {
             .map_err(grep_error)?
         {
             GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
-                self.get_grep_index_status(namespace_id).await
+                self.get_grep_index(namespace_id).await
             }
             GrepDisableOutcome::Superseded => Err(grep_error(GrepError::PublicationConflict {
                 object_key: loonfs_grep::keyspace::root_key(namespace_id),
@@ -798,7 +798,7 @@ impl EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    pub(super) async fn maintenance_step(
+    pub(super) async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
@@ -808,7 +808,7 @@ impl EmbeddedBackend {
                 .with_invalid_request_param("/metadata/max_wal_tail_segments")
         })?;
         self.admin
-            .maintenance_step_namespace(namespace_id, plan)
+            .run_maintenance(namespace_id, plan)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
@@ -1099,7 +1099,7 @@ mod tests {
         }
         let indexed_status = target
             .backend
-            .get_grep_index_status(&indexed)
+            .get_grep_index(&indexed)
             .await
             .expect("index status after the drain");
         assert!(
@@ -1187,7 +1187,7 @@ mod tests {
             wait_until(|| async {
                 target
                     .backend
-                    .get_grep_index_status(&namespace)
+                    .get_grep_index(&namespace)
                     .await
                     .expect("index status while hosting")
                     .lifecycle
@@ -1559,7 +1559,7 @@ mod tests {
 
         let missing = rival
             .backend
-            .stat_path(
+            .get_path_entry(
                 &NamespacePath::parse("demo", "/three.txt").expect("namespace path"),
                 &StatPathOptions::default(),
             )

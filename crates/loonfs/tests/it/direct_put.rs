@@ -103,7 +103,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
         .expect("create namespace");
     let claim = direct_put_claim(bytes);
     let begin =
-        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
             .expect("begin direct put");
     // The target is minted here, before a byte is written, and the key it
     // names is derived from that identity alone.
@@ -156,7 +156,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
         .expect("create namespace");
     let claim = direct_put_claim(bytes);
     let begin =
-        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
             .expect("begin direct put");
 
     // Stands in for the provider-verified presigned upload.
@@ -196,7 +196,7 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let begin =
-        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
             .expect("begin direct put");
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes)))
@@ -226,7 +226,7 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
         .expect("create namespace");
     let claim = direct_put_claim(promised);
     let begin =
-        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
             .expect("begin direct put");
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(delivered)))
@@ -267,7 +267,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
         .expect("create namespace");
     let claim = direct_put_claim(bytes);
     let begin =
-        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
             .expect("begin direct put");
 
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
@@ -285,8 +285,8 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
             .is_some(),
         "a store failure must not delete the client's object"
     );
-    let (status, _) = block_on(fs.writer.get_upload_status(&namespace_id, &begin.upload_id))
-        .expect("get upload status");
+    let (status, _) =
+        block_on(fs.writer.get_upload(&namespace_id, &begin.upload_id)).expect("get upload status");
     assert!(
         matches!(status.status, UploadSessionStatus::Open { .. }),
         "a store failure must not end the session"
@@ -425,7 +425,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
         // attaches, so the retry reuses the reference the first put landed.
         let landed = fs
             .reader
-            .stat_path(&namespace_id, "/docs/a.txt", Default::default())
+            .get_path_entry(&namespace_id, "/docs/a.txt", Default::default())
             .await
             .expect("stat the committed file")
             .content_ref()
@@ -531,11 +531,11 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
             let begin = fs
                 .writer
-                .begin_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
+                .create_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
                 .await
                 .expect("begin upload");
             fs.writer
-                .upload_content(&namespace_id, begin.upload_id(), bytes)
+                .put_upload_content(&namespace_id, begin.upload_id(), bytes)
                 .await
                 .expect("upload content");
             let completed = fs

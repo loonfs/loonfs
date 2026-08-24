@@ -86,7 +86,7 @@ pub(super) async fn get_inode(
     }
     let entry = state
         .reader
-        .stat_inode(&namespace_id, inode_id, options)
+        .get_inode(&namespace_id, inode_id, options)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(entry))

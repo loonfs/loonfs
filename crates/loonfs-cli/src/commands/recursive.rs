@@ -169,7 +169,11 @@ pub(crate) async fn run_put_tree(
         {
             Ok(_) => "created",
             Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
-                match context.target.stat_path_without_attributes(&spec).await {
+                match context
+                    .target
+                    .get_path_entry_without_attributes(&spec)
+                    .await
+                {
                     Ok(entry) if entry.inode_kind() == InodeKind::Directory => "already exists",
                     Ok(_) => {
                         tally.fail(remote, error.into());

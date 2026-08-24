@@ -207,7 +207,7 @@ fn read_options_project_grouped_attributes_or_none() {
         .expect("stat");
     assert!(default_stat.attributes.is_some());
 
-    let opted_out = block_on(fs.reader.stat_path(
+    let opted_out = block_on(fs.reader.get_path_entry(
         &namespace_id,
         "/docs/report.txt",
         StatPathOptions {
@@ -262,7 +262,7 @@ fn read_options_project_grouped_attributes_or_none() {
 fn the_embedded_capability_document_advertises_attributes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-capability");
-    let document = fs.reader.capabilities();
+    let document = fs.reader.get_capabilities();
     assert_eq!(
         document.features.get(loonfs::FEATURE_ATTRIBUTES),
         Some(&true)

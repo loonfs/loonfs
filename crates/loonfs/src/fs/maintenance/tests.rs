@@ -114,7 +114,7 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
 
     assert_eq!(counter(&recorder.snapshot(), "loonfs.gc.retained", &[]), 0);
     let step = admin
-        .maintenance_step_namespace(
+        .run_maintenance(
             &namespace,
             MaintenancePlan {
                 gc: Some(GcConfig::default()),
@@ -373,7 +373,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
     // shape, publishes the delta merge. That is what proves the merge was
     // there to take.
     let step = scheduled
-        .maintenance_step_namespace(&automatic, metadata_plan())
+        .run_maintenance(&automatic, metadata_plan())
         .await
         .expect("run a writer-scheduled step");
     assert_eq!(
@@ -461,7 +461,7 @@ async fn a_standalone_step_reports_the_compaction_the_explicit_call_runs() {
     sustained_writes(&writer, &standalone, &namespace).await;
 
     let step = standalone
-        .maintenance_step_namespace(&namespace, metadata_plan())
+        .run_maintenance(&namespace, metadata_plan())
         .await
         .expect("run a standalone step");
     assert_eq!(

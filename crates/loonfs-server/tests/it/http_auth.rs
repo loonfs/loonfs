@@ -374,7 +374,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     assert_eq!(
         harness
             .client
-            .stat_path(
+            .get_path_entry(
                 &NamespacePath::parse("demo", "/first-copy.txt").expect("path"),
                 &Default::default(),
             )
@@ -421,7 +421,7 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
     assert_eq!(response.committed_seq, ChangeSeq(1));
     harness
         .client
-        .stat_path(
+        .get_path_entry(
             &NamespacePath::parse("demo", "/docs").expect("path"),
             &Default::default(),
         )
@@ -449,7 +449,7 @@ async fn every_upload_session_route_requires_the_bearer_token() {
         .expect("create namespace");
     let begin = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let upload_id = begin.upload_id().clone();

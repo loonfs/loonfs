@@ -105,7 +105,7 @@ impl Client {
     ///
     /// If the server advertises no proxy limit, this keeps the proxied path.
     pub async fn offers_direct_download(&self, size_bytes: u64) -> Result<bool> {
-        let capabilities = self.capabilities().await?;
+        let capabilities = self.get_capabilities().await?;
         Ok(capabilities.supports(FEATURE_DOWNLOADS_DIRECT_GET)
             && capabilities
                 .limits
@@ -114,7 +114,7 @@ impl Client {
     }
 
     /// Requests short-lived direct access to a file's content object.
-    pub async fn begin_download(
+    pub async fn create_download(
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
@@ -137,7 +137,7 @@ impl Client {
     }
 
     /// Requests direct access to one retained inode revision.
-    pub async fn begin_download_by_inode(
+    pub async fn create_download_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,

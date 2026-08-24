@@ -498,7 +498,7 @@ fn standalone_reader_builds_without_writer_identity() {
             .expect("build standalone reader");
         // The reader serves the full read surface without an identity.
         let stat = reader
-            .stat_path(&namespace_id, "/docs/hello.txt", Default::default())
+            .get_path_entry(&namespace_id, "/docs/hello.txt", Default::default())
             .await
             .expect("stat through standalone reader");
         assert_eq!(stat.size_bytes(), Some(5));
@@ -569,7 +569,7 @@ fn admin_over_writer_core_invalidates_shared_caches() {
         // Reads and writes on the writer's own runtime see the state the
         // step left behind, with no stale-cache error in between.
         reader
-            .stat_path(&namespace_id, "/docs/file-0.txt", Default::default())
+            .get_path_entry(&namespace_id, "/docs/file-0.txt", Default::default())
             .await
             .expect("read after maintenance is served from revalidated caches");
         writer
@@ -582,7 +582,7 @@ fn admin_over_writer_core_invalidates_shared_caches() {
             .await
             .expect("writes continue against the post-maintenance head");
         reader
-            .stat_path(
+            .get_path_entry(
                 &namespace_id,
                 "/docs/after-maintenance.txt",
                 Default::default(),
@@ -641,11 +641,11 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
 
         let reader = writer.reader();
         let simple_stat = reader
-            .stat_path(&simple_namespace, "/file.txt", Default::default())
+            .get_path_entry(&simple_namespace, "/file.txt", Default::default())
             .await
             .expect("stat simple put");
         let prepared_stat = reader
-            .stat_path(&prepared_namespace, "/file.txt", Default::default())
+            .get_path_entry(&prepared_namespace, "/file.txt", Default::default())
             .await
             .expect("stat prepared put");
         assert_eq!(simple_stat.revision_no(), prepared_stat.revision_no());
@@ -709,7 +709,7 @@ fn manual_only_writer_never_schedules_maintenance() {
 
         // Explicit admin maintenance bounds the tail the writer left.
         let step = admin
-            .maintenance_step_namespace(&namespace_id, MaintenancePlan::metadata())
+            .run_maintenance(&namespace_id, MaintenancePlan::metadata())
             .await
             .expect("explicit maintenance step")
             .metadata_maintenance
@@ -981,7 +981,7 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .expect("create checkpoint");
         assert!(checkpoint.manifest_no > ManifestNo(0));
         let retention = admin
-            .maintenance_step_namespace(
+            .run_maintenance(
                 &namespace_id,
                 MaintenancePlan {
                     advance_retention: true,

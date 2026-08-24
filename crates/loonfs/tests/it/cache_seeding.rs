@@ -478,7 +478,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
         .expect("checkpoint");
 
     let (stat, list) = tokio::join!(
-        fs.stat_path(&namespace_id, "/docs/file.txt"),
+        fs.get_path_entry(&namespace_id, "/docs/file.txt"),
         fs.list_path(&namespace_id, "/docs"),
     );
     let stat = stat.expect("stat file");

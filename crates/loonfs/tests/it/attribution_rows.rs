@@ -254,7 +254,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
 
     fs.create_checkpoint_blocking(&source_id)
         .expect("checkpoint deletion rows");
-    block_on(fs.admin.maintenance_step_namespace(
+    block_on(fs.admin.run_maintenance(
         &source_id,
         MaintenancePlan {
             advance_retention: true,

@@ -187,7 +187,7 @@ impl FsAdmin {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn maintenance_step_namespace(
+    pub async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
         mut plan: MaintenancePlan,
@@ -469,11 +469,11 @@ impl FsAdmin {
     /// caller's own task.
     ///
     /// This is the whole of metadata maintenance for a deployment that
-    /// schedules none: bounded steps run through
-    /// [`Self::maintenance_step_namespace`], and the one piece of upkeep that
-    /// does not fit a step runs here. It plans exactly as a step does, so a
-    /// step reporting [`ReorganizeStepOutcome::CompactionRequired`] is what
-    /// says a call here has work to do.
+    /// schedules none: bounded steps run through [`Self::run_maintenance`],
+    /// and the one piece of upkeep that does not fit a step runs here. It
+    /// plans exactly as a step does, so a step reporting
+    /// [`ReorganizeStepOutcome::CompactionRequired`] is what says a call here
+    /// has work to do.
     ///
     /// The job is the same one background work runs: the same executor, the
     /// same finalizer, and no durable record that it is running. Dropping the
@@ -815,13 +815,12 @@ impl FsAdmin {
     /// Advances the namespace retention floor when a verified checkpoint
     /// makes it safe.
     ///
-    /// One name over the one step path: exactly
-    /// [`Self::maintenance_step_namespace`] with a retention-only plan. It
-    /// keeps a name of its own because of what it costs — advancing the
-    /// floor abandons the replay history below it, which is a decision
-    /// rather than upkeep. Nothing schedules it: no maintenance job exists
-    /// for retention, so an unattended deployment keeps its whole history
-    /// until a call arrives here.
+    /// One name over the one step path: exactly [`Self::run_maintenance`]
+    /// with a retention-only plan. It keeps a name of its own because of what
+    /// it costs — advancing the floor abandons the replay history below it,
+    /// which is a decision rather than upkeep. Nothing schedules it: no
+    /// maintenance job exists for retention, so an unattended deployment keeps
+    /// its whole history until a call arrives here.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.advance_retention_floor",
@@ -840,7 +839,7 @@ impl FsAdmin {
     ) -> Result<AdvanceRetentionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let step = self
-            .maintenance_step_namespace(
+            .run_maintenance(
                 namespace_id,
                 MaintenancePlan {
                     advance_retention: true,

@@ -129,7 +129,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         }
         publish_candidates(&writer, &namespace_id, candidates).await;
         admin
-            .maintenance_step_namespace(
+            .run_maintenance(
                 &namespace_id,
                 MaintenancePlan {
                     metadata: Some(MetadataMaintenanceOptions {
@@ -203,7 +203,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .expect("build reader");
     let _ = log.take_gets();
     let entry = reader
-        .stat_path(
+        .get_path_entry(
             &namespace_id,
             "/tree/dir-000000/file-000000042.txt",
             Default::default(),

@@ -241,7 +241,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
     let materialized_head = control::head(&fixture.store, &fixture.namespace_id).await;
     fixture
         .admin
-        .maintenance_step_namespace(
+        .run_maintenance(
             &fixture.namespace_id,
             MaintenancePlan {
                 metadata: Some(MetadataMaintenanceOptions {
@@ -322,7 +322,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         .expect("write materialized revision");
     fixture
         .admin
-        .maintenance_step_namespace(
+        .run_maintenance(
             &fixture.namespace_id,
             MaintenancePlan {
                 metadata: Some(MetadataMaintenanceOptions {

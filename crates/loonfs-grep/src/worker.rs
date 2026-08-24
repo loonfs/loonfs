@@ -474,7 +474,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     /// Returns the grep index's state and maintenance progress.
-    pub async fn get_grep_index_status(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
+    pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let root = self.root_state(namespace_id).await?;
         let (lifecycle, next_run_no, reorganize_pending) = match &root {
             Some(root) => (

@@ -380,7 +380,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .expect("create file");
     let created = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat created file");
     let inode_id = created.inode_id;
@@ -430,7 +430,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let entry = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat restored file");
     assert_eq!(entry.inode_id, inode_id);
@@ -534,7 +534,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
 
     let entry = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat file");
     let revisions = harness

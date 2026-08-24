@@ -259,12 +259,12 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
     );
     let first = harness
         .client
-        .commit(&namespace, &commit)
+        .create_commit(&namespace, &commit)
         .await
         .expect("first commit");
     let replayed = harness
         .client
-        .commit(&namespace, &commit)
+        .create_commit(&namespace, &commit)
         .await
         .expect("replayed commit");
 
@@ -304,7 +304,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     let payload = request.content_utf8.as_bytes();
     let begin = harness
         .client
-        .begin_direct_put(&namespace, Some(payload.len() as u64))
+        .create_direct_put_upload(&namespace, Some(payload.len() as u64))
         .await
         .expect("begin direct PUT");
     assert_eq!(upload_mode_name(begin.mode()), expected.mode);
@@ -364,7 +364,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
     let stat = harness
         .client
-        .stat_path(&spec, &StatPathOptions::default())
+        .get_path_entry(&spec, &StatPathOptions::default())
         .await
         .expect("stat direct PUT file");
     assert_eq!(stat.content_ref(), Some(&content_ref));
@@ -419,7 +419,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     .expect("valid fixture pattern");
     let begin = harness
         .client
-        .begin_direct_multipart(
+        .create_direct_multipart_upload(
             &namespace,
             DirectMultipartUploadOptions {
                 part_size_bytes: Some(request.part_size_bytes),
@@ -556,7 +556,7 @@ async fn run_abort(harness: &Harness, case: &Case) {
         .expect("create abort namespace");
     let begin = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin abortable upload");
     assert_eq!(upload_mode_name(begin.mode()), expected.mode);
@@ -638,12 +638,12 @@ async fn run_download(harness: &Harness, case: &Case) {
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
     let stat = harness
         .client
-        .stat_path(&spec, &StatPathOptions::default())
+        .get_path_entry(&spec, &StatPathOptions::default())
         .await
         .expect("stat download file");
     let grant = harness
         .client
-        .begin_download(&spec, None)
+        .create_download(&spec, None)
         .await
         .expect("begin direct download");
     assert_eq!(stat.content_ref(), Some(&grant.content_ref));
@@ -824,7 +824,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
     );
     let committed = harness
         .client
-        .commit(&namespace, &commit)
+        .create_commit(&namespace, &commit)
         .await
         .expect("commit change");
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
@@ -907,7 +907,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     assert_eq!(upload.committed_seq.0, expected.upload_committed_seq);
     let stat = harness
         .client
-        .stat_path(&upload_path, &StatPathOptions::default())
+        .get_path_entry(&upload_path, &StatPathOptions::default())
         .await
         .expect("stat end-to-end file");
     assert_eq!(stat.size_bytes(), Some(expected.size_bytes));
@@ -925,7 +925,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let grant = harness
         .client
-        .begin_download(&upload_path, None)
+        .create_download(&upload_path, None)
         .await
         .expect("begin end-to-end download");
     let streamed = stream_grant(&harness.client, &grant).await;

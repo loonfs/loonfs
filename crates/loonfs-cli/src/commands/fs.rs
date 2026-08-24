@@ -201,12 +201,7 @@ pub(crate) async fn run_filesystem_stat(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let entry = match args.inode {
-        Some(inode_id) => {
-            context
-                .target
-                .stat_inode(&context.namespace, inode_id)
-                .await
-        }
+        Some(inode_id) => context.target.get_inode(&context.namespace, inode_id).await,
         None => {
             let path = args
                 .path
@@ -215,7 +210,7 @@ pub(crate) async fn run_filesystem_stat(
             let allow_root = true;
             let spec = namespace_path(&context.namespace, "path", path, allow_root)
                 .map_err(|error| context.fail(kind, error))?;
-            context.target.stat_path(&spec).await
+            context.target.get_path_entry(&spec).await
         }
     }
     .map_err(|error| context.fail(kind, error))?;
@@ -480,7 +475,7 @@ pub(crate) async fn run_filesystem_get(
         .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
-        .stat_path_without_attributes(&spec)
+        .get_path_entry_without_attributes(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?;
     if args.recursive {
@@ -1142,7 +1137,7 @@ async fn commit_a_finished_upload(
     };
     let Ok(status) = context
         .target
-        .get_upload_status(&context.namespace, &resume.upload_id)
+        .get_upload(&context.namespace, &resume.upload_id)
         .await
     else {
         return Ok(None);
@@ -1207,7 +1202,7 @@ pub(crate) async fn run_filesystem_rm(
     // instead of removing (and mis-reporting) a different inode.
     let deleted_inode = context
         .target
-        .stat_path_without_attributes(&spec)
+        .get_path_entry_without_attributes(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?
         .inode_id;
@@ -1369,7 +1364,7 @@ pub(crate) async fn run_filesystem_mkdir(
         Err(error) if args.parents && error.code == ErrorCode::PathConflict.as_str() => {
             let existing = context
                 .target
-                .stat_path_without_attributes(&spec)
+                .get_path_entry_without_attributes(&spec)
                 .await
                 .map_err(|_| context.fail(kind, error.clone()))?;
             if existing.inode_kind() != InodeKind::Directory {
@@ -1445,7 +1440,11 @@ async fn resolve_transfer_destination(
     named: NamespacePath,
     source_leaf: &str,
 ) -> Result<NamespacePath, CliError> {
-    let Ok(existing) = context.target.stat_path_without_attributes(&named).await else {
+    let Ok(existing) = context
+        .target
+        .get_path_entry_without_attributes(&named)
+        .await
+    else {
         // Absent, or unreadable for a reason the transfer itself will
         // report: either way this is not a directory to land inside.
         return Ok(named);
@@ -1525,7 +1524,7 @@ async fn run_filesystem_transfer(
     let result = if transfer_kind == TransferKind::Copy {
         let entry = context
             .target
-            .stat_path_without_attributes(&from)
+            .get_path_entry_without_attributes(&from)
             .await
             .map_err(|error| context.fail(kind, error))?;
         if args.recursive {

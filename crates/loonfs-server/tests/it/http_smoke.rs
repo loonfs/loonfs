@@ -145,7 +145,7 @@ async fn capabilities_endpoint_advertises_capabilities() {
 
     let capabilities = harness
         .client
-        .capabilities()
+        .get_capabilities()
         .await
         .expect("fetch capabilities");
     assert_eq!(capabilities.protocol_version, "v0");
@@ -213,7 +213,7 @@ async fn capabilities_endpoint_advertises_capabilities() {
 
     let cached = harness
         .client
-        .capabilities()
+        .get_capabilities()
         .await
         .expect("cached capabilities");
     assert_eq!(cached, capabilities);
@@ -248,7 +248,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         .expect("create directory");
     let directory_entry = harness
         .client
-        .stat_path(&directory, &Default::default())
+        .get_path_entry(&directory, &Default::default())
         .await
         .expect("stat directory");
     assert_eq!(directory_entry.inode_kind(), InodeKind::Directory);
@@ -277,7 +277,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 
     let entry = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat path");
     assert_eq!(entry.size_bytes(), Some(16));
@@ -381,12 +381,12 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     let source_entry = harness
         .client
-        .stat_path(&source_path, &Default::default())
+        .get_path_entry(&source_path, &Default::default())
         .await
         .expect("source stat");
     let clone_entry = harness
         .client
-        .stat_path(&clone_path, &Default::default())
+        .get_path_entry(&clone_path, &Default::default())
         .await
         .expect("clone stat");
     assert_eq!(source_entry.content_ref(), clone_entry.content_ref());

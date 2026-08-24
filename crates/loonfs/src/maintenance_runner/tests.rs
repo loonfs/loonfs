@@ -887,7 +887,7 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
         .expect("create namespace");
 
     let begun = writer
-        .begin_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     assert_eq!(
@@ -900,7 +900,7 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
     );
 
     writer
-        .upload_content(&namespace_id, begun.upload_id(), b"body")
+        .put_upload_content(&namespace_id, begun.upload_id(), b"body")
         .await
         .expect("upload content");
     writer

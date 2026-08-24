@@ -33,7 +33,7 @@ impl Client {
     /// Operations that introduce new external content carry their proofs in
     /// the request's `content_tokens`; stage the bytes with the upload
     /// methods first.
-    pub async fn commit(
+    pub async fn create_commit(
         &self,
         namespace_id: &NamespaceId,
         request: &CommitRequest,
@@ -141,9 +141,9 @@ impl Client {
 
     /// Commits content after an upload completed but its file commit did not.
     ///
-    /// Call [`Self::get_upload_status`] to recover the content reference and
-    /// token. This method then commits the existing content without uploading
-    /// it again.
+    /// Call [`Self::get_upload`] to recover the content reference and token.
+    /// This method then commits the existing content without uploading it
+    /// again.
     pub async fn commit_completed_upload(
         &self,
         spec: &NamespacePath,
@@ -176,7 +176,7 @@ impl Client {
     ) -> Result<ApiCommitResponse> {
         let commit_id = commit_id_or_generated(&options.commit);
         let response = self
-            .commit(
+            .create_commit(
                 spec.namespace(),
                 &CommitRequest {
                     commit_id: commit_id.clone(),
@@ -239,7 +239,7 @@ impl Client {
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
     ) -> Result<ApiCommitResponse> {
-        self.commit(
+        self.create_commit(
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
@@ -260,7 +260,7 @@ impl Client {
         spec: &NamespacePath,
         options: &DeleteOptions,
     ) -> Result<ApiCommitResponse> {
-        self.commit(
+        self.create_commit(
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
@@ -283,7 +283,7 @@ impl Client {
         spec: &NamespacePath,
         options: &UpdateAttributesOptions,
     ) -> Result<ApiCommitResponse> {
-        self.commit(
+        self.create_commit(
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
@@ -315,7 +315,7 @@ impl Client {
                 to.namespace()
             )));
         }
-        self.commit(
+        self.create_commit(
             from.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
@@ -345,7 +345,7 @@ impl Client {
                 to.namespace()
             )));
         }
-        self.commit(
+        self.create_commit(
             from.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
@@ -372,7 +372,7 @@ impl Client {
     ) -> Result<ApiCommitResponse> {
         // An absent destination restores in place: the entry re-binds under
         // the parent and name its deletion recorded.
-        self.commit(
+        self.create_commit(
             namespace_id,
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
@@ -395,7 +395,7 @@ impl Client {
         source_revision_no: RevisionNo,
         options: &RestoreRevisionOptions,
     ) -> Result<ApiCommitResponse> {
-        self.commit(
+        self.create_commit(
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
@@ -759,7 +759,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .begin_upload(&namespace_id, &BeginUploadRequest::ServiceProxied {})
+                .create_upload(&namespace_id, &BeginUploadRequest::ServiceProxied {})
                 .await,
             &transport,
         );
@@ -768,7 +768,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .begin_direct_put(&namespace_id, Some(b"direct".len() as u64))
+                .create_direct_put_upload(&namespace_id, Some(b"direct".len() as u64))
                 .await,
             &transport,
         );
@@ -807,7 +807,7 @@ mod tests {
         let client = retry_policy_client();
 
         let actual = client
-            .upload_content(&namespace_id, &upload_id, b"content")
+            .put_upload_content(&namespace_id, &upload_id, b"content")
             .await
             .expect("identical content staging should retry");
         assert_eq!(actual, response);

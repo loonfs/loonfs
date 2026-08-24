@@ -94,7 +94,7 @@ async fn run_admin_step(
     };
     let response = context
         .target
-        .maintenance_step(&context.namespace, request)
+        .run_maintenance(&context.namespace, request)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -128,7 +128,7 @@ async fn run_admin_gc(
     loop {
         let pass = context
             .target
-            .maintenance_step(
+            .run_maintenance(
                 &context.namespace,
                 MaintenanceStepRequest {
                     gc: Some(request.clone()),
@@ -364,7 +364,7 @@ async fn run_admin_flush(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
-        .maintenance_step(
+        .run_maintenance(
             &context.namespace,
             MaintenanceStepRequest {
                 metadata_maintenance: Some(MetadataMaintenanceRequest {
@@ -392,7 +392,7 @@ async fn run_admin_retention_advance(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
-        .maintenance_step(
+        .run_maintenance(
             &context.namespace,
             MaintenanceStepRequest {
                 retention: Some(AdvanceRetentionRequest::default()),
@@ -664,7 +664,7 @@ async fn run_admin_index_enable(
     let response = if waited.is_some() {
         context
             .target
-            .get_grep_index_status(&context.namespace)
+            .get_grep_index(&context.namespace)
             .await
             .map_err(|error| context.fail(kind, error))?
     } else {
@@ -692,7 +692,7 @@ async fn run_admin_index_status(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
-        .get_grep_index_status(&context.namespace)
+        .get_grep_index(&context.namespace)
         .await
         .map_err(|error| context.fail(kind, error))?;
     Ok(CommandOutput {

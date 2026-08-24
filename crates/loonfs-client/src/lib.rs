@@ -159,7 +159,7 @@ impl Client {
     /// Feature keys that are not parented by an advertised profile are
     /// dropped rather than trusted, per the spec's client guidance for
     /// malformed documents.
-    pub async fn capabilities(&self) -> Result<CapabilityDocument> {
+    pub async fn get_capabilities(&self) -> Result<CapabilityDocument> {
         if let Some(document) = self.capabilities.get() {
             return Ok(document.clone());
         }
@@ -178,7 +178,7 @@ impl Client {
     }
 
     /// Checks the server's health endpoint.
-    pub async fn health(&self) -> Result<()> {
+    pub async fn get_health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
         self.call_with_transport_retry(&self.get(&url), None)
             .await?;

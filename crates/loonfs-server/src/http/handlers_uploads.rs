@@ -142,7 +142,7 @@ pub(super) async fn create_upload(
         BeginUploadRequest::ServiceProxied {} => {
             let response = state
                 .writer
-                .begin_upload(&namespace_id, request)
+                .create_upload(&namespace_id, request)
                 .await
                 .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
             Ok(Json(response))
@@ -186,7 +186,7 @@ async fn begin_direct_put_upload(
     let checksum_algorithm = issuer.stored_checksum_algorithm();
     let prepared = state
         .writer
-        .begin_direct_put_upload_target(&namespace_id, checksum_algorithm)
+        .create_direct_put_upload_target(&namespace_id, checksum_algorithm)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let signed = issuer
@@ -233,7 +233,7 @@ async fn begin_direct_multipart_upload(
     // Use the server's default when no part size is requested.
     let prepared = state
         .writer
-        .begin_direct_multipart_upload_target(
+        .create_direct_multipart_upload_target(
             &namespace_id,
             DirectMultipartUploadOptions { part_size_bytes },
         )
@@ -305,7 +305,7 @@ pub(super) async fn sign_upload_parts(
 
     let targets = state
         .writer
-        .direct_multipart_part_targets(&namespace_id, &upload_id, &request.parts)
+        .sign_upload_parts(&namespace_id, &upload_id, &request.parts)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let parts = sign_parts(issuer.as_ref(), &targets).await?;
@@ -549,7 +549,7 @@ pub(super) async fn put_upload_content(
     let (stream, outcome) = body.into_stream();
     match state
         .writer
-        .upload_streamed_content(&namespace_id, &upload_id, stream)
+        .put_upload_content_stream(&namespace_id, &upload_id, stream)
         .await
     {
         Ok(response) => Ok(Json(response)),
@@ -818,7 +818,7 @@ pub(super) async fn get_upload(
     let upload_id = parse_upload_id(&upload_id)?;
     let (response, receipt) = state
         .writer
-        .get_upload_status(&namespace_id, &upload_id)
+        .get_upload(&namespace_id, &upload_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(with_content_token(

@@ -79,10 +79,10 @@ impl PathEntriesPager {
 /// the same error-code registry, which keeps command output consistent.
 impl ResolvedTarget {
     /// Returns the capabilities reported by the selected deployment.
-    pub(crate) async fn capabilities(&self) -> Result<CapabilityDocument, BackendError> {
+    pub(crate) async fn get_capabilities(&self) -> Result<CapabilityDocument, BackendError> {
         match self {
-            Self::Embedded(target) => Ok(target.backend.reader.capabilities()),
-            Self::Remote(target) => Ok(target.client.capabilities().await?),
+            Self::Embedded(target) => Ok(target.backend.reader.get_capabilities()),
+            Self::Remote(target) => Ok(target.client.get_capabilities().await?),
         }
     }
 
@@ -93,7 +93,7 @@ impl ResolvedTarget {
     pub(crate) async fn remote_connectivity(&self) -> Result<(), BackendError> {
         match self {
             Self::Embedded(_) => Ok(()),
-            Self::Remote(target) => match target.client.health().await {
+            Self::Remote(target) => match target.client.get_health().await {
                 Ok(()) | Err(ClientError::Api { .. }) => Ok(()),
                 Err(error) => Err(error.into()),
             },
@@ -104,7 +104,7 @@ impl ResolvedTarget {
     pub(crate) async fn remote_health(&self) -> Result<(), BackendError> {
         match self {
             Self::Embedded(_) => Ok(()),
-            Self::Remote(target) => Ok(target.client.health().await?),
+            Self::Remote(target) => Ok(target.client.get_health().await?),
         }
     }
 
@@ -218,13 +218,16 @@ impl ResolvedTarget {
     }
 
     /// Describes a single path entry, attributes included.
-    pub(crate) async fn stat_path(&self, spec: &NamespacePath) -> Result<PathEntry, BackendError> {
-        self.stat_path_projected(spec, &StatPathOptions::default())
+    pub(crate) async fn get_path_entry(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<PathEntry, BackendError> {
+        self.get_path_entry_projected(spec, &StatPathOptions::default())
             .await
     }
 
     /// Describes one visible inode, including its attributes.
-    pub(crate) async fn stat_inode(
+    pub(crate) async fn get_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -233,22 +236,22 @@ impl ResolvedTarget {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .stat_inode(namespace_id, inode_id, &StatPathOptions::default())
+                    .get_inode(namespace_id, inode_id, &StatPathOptions::default())
                     .await
             }
             Self::Remote(target) => Ok(target
                 .client
-                .stat_inode(namespace_id, inode_id, &StatPathOptions::default())
+                .get_inode(namespace_id, inode_id, &StatPathOptions::default())
                 .await?),
         }
     }
 
     /// Describes a path without loading its attributes.
-    pub(crate) async fn stat_path_without_attributes(
+    pub(crate) async fn get_path_entry_without_attributes(
         &self,
         spec: &NamespacePath,
     ) -> Result<PathEntry, BackendError> {
-        self.stat_path_projected(
+        self.get_path_entry_projected(
             spec,
             &StatPathOptions {
                 include_attributes: false,
@@ -257,14 +260,14 @@ impl ResolvedTarget {
         .await
     }
 
-    async fn stat_path_projected(
+    async fn get_path_entry_projected(
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
     ) -> Result<PathEntry, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.stat_path(spec, options).await,
-            Self::Remote(target) => Ok(target.client.stat_path(spec, options).await?),
+            Self::Embedded(target) => target.backend.get_path_entry(spec, options).await,
+            Self::Remote(target) => Ok(target.client.get_path_entry(spec, options).await?),
         }
     }
 
@@ -297,7 +300,7 @@ impl ResolvedTarget {
     ) -> Result<FileDownload, BackendError> {
         if let (Self::Remote(target), Some(size_bytes)) = (self, size_bytes) {
             if target.client.offers_direct_download(size_bytes).await? {
-                let grant = target.client.begin_download(spec, revision_no).await?;
+                let grant = target.client.create_download(spec, revision_no).await?;
                 return Ok(FileDownload::Direct {
                     stream: Box::new(
                         target
@@ -361,13 +364,13 @@ impl ResolvedTarget {
     }
 
     /// Reads the namespace's grep-index lifecycle (admin plane).
-    pub(crate) async fn get_grep_index_status(
+    pub(crate) async fn get_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndex, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.get_grep_index_status(namespace_id).await,
-            Self::Remote(target) => Ok(target.client.get_grep_index_status(namespace_id).await?),
+            Self::Embedded(target) => target.backend.get_grep_index(namespace_id).await,
+            Self::Remote(target) => Ok(target.client.get_grep_index(namespace_id).await?),
         }
     }
 
@@ -407,11 +410,7 @@ impl ResolvedTarget {
                 let started_ms = timer.monotonic_now_ms();
                 let mut steps = 0;
                 loop {
-                    let lifecycle = target
-                        .client
-                        .get_grep_index_status(namespace_id)
-                        .await?
-                        .lifecycle;
+                    let lifecycle = target.client.get_grep_index(namespace_id).await?.lifecycle;
                     let reached = lifecycle.is_built_through(target_seq);
                     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
                     if reached || budget.spent(steps, elapsed_ms) {
@@ -530,17 +529,14 @@ impl ResolvedTarget {
     }
 
     /// Reads what became of an upload session a previous run opened.
-    pub(crate) async fn get_upload_status(
+    pub(crate) async fn get_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> Result<UploadSession, BackendError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
-            Self::Remote(target) => Ok(target
-                .client
-                .get_upload_status(namespace_id, upload_id)
-                .await?),
+            Self::Remote(target) => Ok(target.client.get_upload(namespace_id, upload_id).await?),
         }
     }
 
@@ -738,16 +734,16 @@ impl ResolvedTarget {
     /// reorganization, retention advance, and — when `request.gc` opts in —
     /// one garbage-collection pass. `request.only` restricts it to a single
     /// sub-step.
-    pub(crate) async fn maintenance_step(
+    pub(crate) async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
     ) -> Result<MaintenanceStepResponse, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.maintenance_step(namespace_id, request).await,
+            Self::Embedded(target) => target.backend.run_maintenance(namespace_id, request).await,
             Self::Remote(target) => Ok(target
                 .client
-                .maintenance_step(namespace_id, &request)
+                .run_maintenance(namespace_id, &request)
                 .await?),
         }
     }

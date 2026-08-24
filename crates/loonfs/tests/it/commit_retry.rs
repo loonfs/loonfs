@@ -209,14 +209,14 @@ async fn the_same_bytes_at_a_different_path_still_conflict() {
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
         runtime
-            .stat_path(&namespace_id, "/b.txt")
+            .get_path_entry(&namespace_id, "/b.txt")
             .await
             .expect_err("the refused rerun wrote nothing")
             .code(),
         ErrorCode::PathNotFound
     );
     let entry = runtime
-        .stat_path(&namespace_id, "/a.txt")
+        .get_path_entry(&namespace_id, "/a.txt")
         .await
         .expect("stat path");
     assert_eq!(
@@ -255,7 +255,7 @@ async fn a_changed_behavior_under_a_used_commit_id_still_conflicts() {
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     let entry = runtime
-        .stat_path(&namespace_id, PATH)
+        .get_path_entry(&namespace_id, PATH)
         .await
         .expect("stat path");
     assert_eq!(
@@ -293,7 +293,7 @@ async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     let entry = runtime
-        .stat_path(&namespace_id, PATH)
+        .get_path_entry(&namespace_id, PATH)
         .await
         .expect("stat path");
     assert_eq!(
@@ -352,7 +352,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     let entry = runtime
-        .stat_path(&namespace_id, PATH)
+        .get_path_entry(&namespace_id, PATH)
         .await
         .expect("stat path");
     assert_eq!(
@@ -448,7 +448,7 @@ async fn a_changed_message_under_a_used_commit_id_still_conflicts() {
         "the refused rerun did not rewrite the annotation that landed"
     );
     let entry = runtime
-        .stat_path(&namespace_id, PATH)
+        .get_path_entry(&namespace_id, PATH)
         .await
         .expect("stat path");
     assert_eq!(
@@ -557,19 +557,19 @@ async fn a_changed_message_on_a_direct_commit_still_conflicts() {
 
     let first = runtime
         .writer
-        .commit(&namespace_id, request("one"))
+        .create_commit(&namespace_id, request("one"))
         .await
         .expect("first commit");
     let replay = runtime
         .writer
-        .commit(&namespace_id, request("one"))
+        .create_commit(&namespace_id, request("one"))
         .await
         .expect("an identical retry replays");
     assert_eq!(replay, first);
 
     let error = runtime
         .writer
-        .commit(&namespace_id, request("two"))
+        .create_commit(&namespace_id, request("two"))
         .await
         .expect_err("a changed message is a different commit");
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
@@ -602,7 +602,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
         .expect("create checkpoint");
     let advanced = runtime
         .admin
-        .maintenance_step_namespace(
+        .run_maintenance(
             &namespace_id,
             MaintenancePlan {
                 advance_retention: true,
@@ -684,7 +684,7 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     }
     let advanced = runtime
         .admin
-        .maintenance_step_namespace(
+        .run_maintenance(
             &namespace_id,
             MaintenancePlan {
                 advance_retention: true,
@@ -710,7 +710,7 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     for _ in 0..32 {
         let step = runtime
             .admin
-            .maintenance_step_namespace(&namespace_id, MaintenancePlan::metadata())
+            .run_maintenance(&namespace_id, MaintenancePlan::metadata())
             .await
             .expect("upkeep step")
             .metadata_maintenance
