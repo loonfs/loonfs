@@ -441,9 +441,6 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
     assert_eq!(receipt.semantic_commit_fingerprint, "new");
 }
 
-/// Revision rows keep no in-memory index — reads scan the tail-sized rows —
-/// but they must still advance the indexed-seq watermark that gates at-head
-/// query routing.
 #[test]
 fn revisions_advance_watermark_and_receipt_index() {
     let receipt_commit_id = CommitId::parse("indexed-commit").expect("valid commit id");
@@ -546,8 +543,6 @@ fn append_attributes(
     }
 }
 
-/// Several attribute updates at one sequence replay in delta order, and a
-/// clear is a row like any other.
 #[test]
 fn attribute_deltas_replay_in_delta_order_and_a_clear_keeps_its_row() {
     let mut metadata_state = MetadataState::default();
@@ -580,10 +575,6 @@ fn attribute_deltas_replay_in_delta_order_and_a_clear_keeps_its_row() {
     assert_eq!(metadata_state.indexed_seq(), ChangeSeq(4));
 }
 
-/// A read at a sequence below the head answers with the map that sequence
-/// saw, not with the newest one. Attributes are current state rather than
-/// history, so a leg that let a later row through would answer with a map
-/// the reading sequence never had.
 #[tokio::test]
 async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     let mut state = MetadataState::default();
@@ -647,8 +638,6 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     );
 }
 
-/// The tail's row accounting counts an attribute map's key and value bytes,
-/// so a namespace that writes large maps is charged for them.
 #[test]
 fn attribute_row_accounting_counts_key_and_value_bytes() {
     let small = MetadataState::default().apply_committed_wal_deltas(
@@ -867,8 +856,6 @@ fn incremental_and_rebuilt_indexes_agree_on_latest_binds() {
     }
 }
 
-/// Queries above `indexed_seq()` are at-head queries: commit validation
-/// probes the materialization at the next assigned seq and must hit the indexes.
 #[test]
 fn queries_above_indexed_seq_match_at_head_results() {
     let state = churned_binding_state();
@@ -894,9 +881,6 @@ fn queries_above_indexed_seq_match_at_head_results() {
     );
 }
 
-/// The directory-empty checks probe existence through the bounded
-/// [`MetadataView::has_visible_children`]; a directory whose every child
-/// binding was unbound must read as empty again.
 #[test]
 fn has_visible_children_sees_through_unbinds() {
     let dir = InodeId(1);
@@ -969,8 +953,6 @@ fn has_visible_children_sees_through_unbinds() {
     );
 }
 
-/// The leg names land in log records that operators grep for. They are fixed
-/// strings, and no two legs share one.
 #[test]
 fn every_absent_visibility_leg_has_its_own_stable_name() {
     use visibility::AbsentVisibilityLeg;

@@ -1457,13 +1457,6 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
     ));
 }
 
-/// A data block closes from inside the builder's `push` as soon as it
-/// reaches its target size, so a segment's last row can be the row that
-/// closes its block. The descriptor's max key must still describe the rows
-/// the segment holds: a keyed scan prunes a segment whose max key sorts
-/// below the scan's lower bound, so an empty max key hides every row from
-/// every point and prefix lookup while reorganization, which scans from the
-/// empty bound, still reads them.
 #[tokio::test]
 async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1649,7 +1642,6 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     }
 }
 
-/// A manifest with two base-tier runs for one family group does not load.
 #[tokio::test]
 async fn a_manifest_whose_group_base_fragmented_does_not_load() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1689,7 +1681,6 @@ async fn a_manifest_whose_group_base_fragmented_does_not_load() {
     );
 }
 
-/// Two segments in the same family and run cannot have the same index.
 #[tokio::test]
 async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1721,8 +1712,6 @@ async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
     );
 }
 
-/// Two segments in the same family and run cannot have overlapping key
-/// ranges. This test gives the second segment the first segment's full range.
 #[tokio::test]
 async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
     let temp_dir = tempdir().expect("tempdir");

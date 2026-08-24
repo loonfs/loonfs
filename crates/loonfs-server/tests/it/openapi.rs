@@ -138,8 +138,6 @@ fn every_one_of_is_a_discriminated_non_null_union() {
     }
 }
 
-/// Checks success and error response schemas, including components used only
-/// by `ApiError` and `ErrorDetails`.
 #[test]
 fn no_schema_a_response_reaches_admits_null() {
     let spec: Value = serde_json::from_str(
@@ -1084,10 +1082,6 @@ const UNION_COMPOSITE_ENVELOPES: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// A response that flattens an enum is one discriminated union, never an
-/// `allOf` wrapped around one. SDK generators keep the envelope half of such
-/// an `allOf` and drop the union half, so the generated type would lose every
-/// field the variants carry.
 #[test]
 fn no_openapi_schema_wraps_an_all_of_around_a_one_of() {
     for document_path in [OPENAPI_JSON_PATH, PROXY_OPENAPI_JSON_PATH] {

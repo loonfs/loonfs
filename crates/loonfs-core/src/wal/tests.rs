@@ -596,9 +596,6 @@ async fn write_linked_chain(
     pointers
 }
 
-/// A caller that meters its own reads caps the load, and the loader stops
-/// once it has read that many segment bodies. It reports how many it read
-/// so the caller can charge for exactly those.
 #[tokio::test]
 async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -668,8 +665,6 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
     );
 }
 
-/// A limit that covers the chain exactly does not truncate it. The load
-/// completes and matches what an unbounded load returns.
 #[tokio::test]
 async fn a_limit_that_covers_the_chain_loads_all_of_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -711,11 +706,6 @@ async fn a_limit_that_covers_the_chain_loads_all_of_it() {
     assert_eq!(store.count(OperationClass::Get), 5);
 }
 
-/// A prefetch request that fails is a request the store answered, so it
-/// counts like any other. The walk fetches that segment itself and the
-/// chain still loads. The number the load reports is the number of requests
-/// it issued: one failed prefetch and one walk fetch for each of the three
-/// segments, which is what the counting wrapper saw.
 #[tokio::test]
 async fn a_failed_prefetch_costs_its_own_request_and_the_walk_loads_the_chain() {
     let temp_dir = tempdir().expect("tempdir");
@@ -775,9 +765,6 @@ async fn a_failed_prefetch_costs_its_own_request_and_the_walk_loads_the_chain() 
     }
 }
 
-/// The limit bounds every request the load issues, prefetch included. A
-/// store that fails every prefetch cannot make the load exceed it: the walk
-/// stops once the failures have spent the limit.
 #[tokio::test]
 async fn failed_prefetch_requests_count_against_the_limit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -940,9 +927,6 @@ fn tail_count_request<'a>(
     }
 }
 
-/// The count takes no store at all, so "reads no bodies" is the signature
-/// rather than an assertion — and it holds at the longest tail a landed
-/// publish can leave behind, which is what the head is sized to describe.
 #[test]
 fn tail_count_from_contiguous_hints_covers_the_longest_legal_tail() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1019,9 +1003,6 @@ fn tail_count_at_genesis_is_zero_without_tip_or_hints() {
     assert_eq!(count, 0);
 }
 
-/// A head that does not name its whole tail is corrupted. The count says so
-/// instead of walking chain links one round trip at a time on an inspection
-/// call.
 #[test]
 fn tail_count_rejects_a_head_that_does_not_describe_its_tail() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1068,8 +1049,6 @@ fn tail_count_rejects_a_head_that_does_not_describe_its_tail() {
     ));
 }
 
-/// The two readers diverge on purpose: replay walks chain links for history
-/// the head no longer names, and the count refuses to.
 #[tokio::test]
 async fn tail_count_and_chain_load_agree_where_the_head_describes_the_tail() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1099,8 +1078,6 @@ async fn tail_count_and_chain_load_agree_where_the_head_describes_the_tail() {
     assert_eq!(loaded.segments().len(), 3);
 }
 
-/// The change feed reads history below the accelerator window, so the chain
-/// loader keeps its predecessor walk.
 #[tokio::test]
 async fn chain_load_walks_predecessor_links_past_the_hinted_window() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1129,8 +1106,6 @@ async fn chain_load_walks_predecessor_links_past_the_hinted_window() {
     assert_eq!(loaded.segments()[0].records()[0].seq, ChangeSeq(1));
 }
 
-/// A boundary-length replay is one wave shape: every segment arrives from
-/// the hints, none is fetched twice, and the width is the prefetch bound.
 #[tokio::test]
 async fn boundary_length_replay_fetches_every_segment_once_in_bounded_waves() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1172,7 +1147,6 @@ async fn boundary_length_replay_fetches_every_segment_once_in_bounded_waves() {
     assert_eq!(reads.peak_in_flight, RECENT_SEGMENT_PREFETCH_CONCURRENCY);
 }
 
-/// The prefetch fetches only the segments the replay gap intersects.
 #[tokio::test]
 async fn prefetch_fetches_only_the_segments_the_gap_intersects() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1211,8 +1185,6 @@ async fn prefetch_fetches_only_the_segments_the_gap_intersects() {
     assert_eq!(fetched, expected);
 }
 
-/// Prefetching moves where the bytes come from, not what is checked: every
-/// chain validation runs in the sequential pass either way.
 #[tokio::test]
 async fn a_corrupt_segment_inside_the_hinted_set_is_still_rejected() {
     let temp_dir = tempdir().expect("tempdir");

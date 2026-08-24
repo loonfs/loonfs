@@ -1201,8 +1201,6 @@ mod tests {
         );
     }
 
-    /// The mutable head rejects pointer fields that it cannot preserve during
-    /// a rewrite.
     #[test]
     fn head_rejects_a_pointer_field_it_does_not_define() {
         let mut tip = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
@@ -1218,7 +1216,6 @@ mod tests {
             .expect_err("the head rejects a field a predecessor hint does not define");
     }
 
-    /// WAL pointers reject ids that do not encode their start sequence.
     #[test]
     fn wal_pointers_reject_an_id_that_disagrees_with_its_start_seq() {
         let agreeing = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
@@ -1236,7 +1233,6 @@ mod tests {
         );
     }
 
-    /// The strict head decoder applies the same check to its tip and hints.
     #[test]
     fn the_head_rejects_a_pointer_whose_id_disagrees_with_its_start_seq() {
         let tip = wal_pointer_json("wal_00000000000000000003-aaaaaaaaaaaaaaaa", 3, 3);
@@ -1267,8 +1263,6 @@ mod tests {
         assert!(genesis.recent_segments.is_empty());
     }
 
-    /// A head with no predecessor hints writes an empty list, so a head that
-    /// omits the field is not a head this format wrote.
     #[test]
     fn a_head_that_omits_its_predecessor_hints_does_not_decode() {
         let mut head = head_json(None, Vec::new());

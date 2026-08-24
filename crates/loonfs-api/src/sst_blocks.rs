@@ -1,39 +1,23 @@
 //! Block-granular encoding for metadata and derived-index segments.
 //!
-//! A segment object is a sequence of independently readable sections:
-//! data blocks, then one filter block, then one index block. There is no
-//! footer — the manifest's segment descriptor carries the index and filter
-//! handles, so the descriptor is the only entry point into the object.
-//! Readers fetch the byte range a handle names, verify its CRC32C, and
-//! decode just that section; nothing here performs IO.
+//! A segment contains data blocks followed by one filter block and one index
+//! block. The manifest descriptor stores the index and filter handles. Each
+//! handle identifies a byte range and its CRC32C.
 //!
-//! The block grammar is row-payload-agnostic: the builder and decoders
-//! carry any CBOR row type, and the segment's descriptor family says which
-//! one to expect — [`MetadataRow`] for metadata segments, `IndexRow` for gram
-//! index segments. The section framing, key compression, filter hashing,
-//! and checksums are identical either way.
-//!
-//! Durable layout, frozen by this module:
+//! The block format supports any CBOR row type, including [`MetadataRow`] and
+//! grep index rows. The durable layout is:
 //!
 //! - A **data block** holds prefix-compressed entries: each entry stores
 //!   `(shared_prefix_len, key_suffix_len)` as LEB128 varints, the key
-//!   suffix bytes, then the row as a CBOR-encoded payload length-
-//!   prefixed with a varint. Every [`RESTART_INTERVAL`]th entry is a
-//!   restart point storing its full key (shared prefix length zero). The
-//!   block ends with the restart offsets as little-endian `u32`s and their
-//!   count. The block payload is zstd-compressed.
+//!   suffix, and a length-prefixed CBOR row. Every [`RESTART_INTERVAL`]th
+//!   entry stores its full key. Restart offsets and their count end the
+//!   zstd-compressed block.
 //! - The **index block** is a zstd-compressed CBOR list with one entry per
 //!   data block: the block's last row key and its [`BlockHandle`].
 //! - The **filter block** is a bloom filter over caller-chosen filter keys
-//!   (per-family lookup prefixes): `n_hashes` as a little-endian `u32`,
-//!   the bit length as a little-endian `u64`, then the bit bytes. Filter
-//!   bits do not compress, so the payload is stored raw.
-//! - Every section's CRC32C is computed over its stored bytes and lives in
-//!   the handle that names it (index entries for data blocks; the segment
-//!   descriptor for the index and filter), never inside the section.
-//! - Bloom hashing is two xxh64 passes with fixed seeds combined by double
-//!   hashing. The seeds, like the CRC and hash algorithm choices, are
-//!   frozen durable-format constants.
+//!   and is stored without compression.
+//! - Every section's CRC32C is stored in its handle.
+//! - Bloom hashing uses two xxh64 hashes with fixed seeds.
 
 use crate::wire::manifest::MetadataRow;
 use serde::{Deserialize, Serialize};
@@ -42,12 +26,7 @@ use std::num::NonZeroUsize;
 use thiserror::Error;
 use xxhash_rust::xxh64::xxh64;
 
-/// Target uncompressed size of one data block, in bytes. Sized for direct
-/// object-store reads: request round-trips dominate transfer time at this
-/// scale, so bulk read paths (directory listings read most rows of several
-/// families) want few large ranged GETs, and a lookup fetching one block
-/// still moves trivial bytes. Benchmarked over 8 KiB, which priced a full
-/// listing at one GET per tiny block.
+/// Target uncompressed size of one data block.
 pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 64 * 1024;
 /// Number of level-zero runs that triggers reorganization.
 pub const DEFAULT_MAX_DELTA_RUNS: usize = 8;
@@ -70,9 +49,7 @@ pub const FILTER_HASH_COUNT: u32 = 7;
 
 const FILTER_HASH_SEED_ONE: u64 = 0;
 const FILTER_HASH_SEED_TWO: u64 = 0x9e37_79b9_7f4a_7c15;
-/// One compression level for every zstd-compressed durable artifact (SST
-/// blocks and WAL segment envelopes). 3 is also the library default, so
-/// this pins in a name what an implicit `0` would choose silently.
+/// Compression level for every zstd-compressed durable artifact.
 pub(crate) const ZSTD_LEVEL: i32 = 3;
 
 /// Where one stored section lives inside a segment object, and how to
@@ -816,11 +793,6 @@ mod tests {
         assert!(matches!(error, SstBlockCodecError::EmptySegment));
     }
 
-    /// The builder closes a data block from inside `push` as soon as the
-    /// block reaches its target size, so the last row of a segment can be
-    /// the row that closes one. The segment's max row key must survive that:
-    /// an empty max row key sorts below every bound, so a keyed scan would
-    /// prune the whole segment away and report the rows missing.
     #[test]
     fn max_key_survives_a_last_row_that_closes_its_block() {
         // Calibrate the target so the crossing lands on the final row.
@@ -859,8 +831,6 @@ mod tests {
         assert_eq!(index[0].last_row_key, expected_max);
     }
 
-    /// A segment's key range describes its rows, not its block geometry, so
-    /// the same rows must report the same range at every target size.
     #[test]
     fn block_geometry_does_not_change_the_segment_key_range() {
         let rows = 400usize;
@@ -905,9 +875,6 @@ mod tests {
         }
     }
 
-    /// Closing a block clears the prefix anchor, so the order guard has to
-    /// read the last accepted row key instead. Every push closes a block
-    /// here, which puts the offered row first in a fresh block.
     #[test]
     fn a_descending_row_after_a_block_boundary_is_rejected() {
         let mut builder = SegmentBlocksBuilder::new(NonZeroUsize::MIN);

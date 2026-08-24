@@ -1,22 +1,10 @@
-//! Purpose-specific runtime handles.
+//! Purpose-specific filesystem handles.
 //!
-//! One handle per job, each opened asynchronously inside the Tokio runtime
-//! that will drive it:
-//!
-//! - [`FsWriter`] mutates namespaces and optionally schedules non-destructive
-//!   maintenance after writes, controlled by
-//!   [`FsBackgroundWork`](crate::FsBackgroundWork).
-//! - [`FsReader`] serves namespace state and latest-view reads. It owns no
-//!   writer session and starts no maintenance.
-//! - [`FsAdmin`] runs explicit maintenance: diagnostics, checkpoints,
-//!   retention advancement, and garbage collection, always as one-shot
-//!   calls in the caller's task.
-//!
-//! Builders prefer [`StoreConfig`](crate::StoreConfig) so the object-store
-//! client is constructed inside the handle's runtime ownership domain. The
-//! `builder_with_store` escape hatches are for callers who know the store is
-//! safe in that domain — do not use them to share one provider client across
-//! unrelated runtimes; open another handle from config instead.
+//! [`FsWriter`] mutates namespaces, [`FsReader`] serves reads, and [`FsAdmin`]
+//! runs explicit maintenance. Each handle must be opened in the Tokio runtime
+//! where it will be used. Prefer builders that accept
+//! [`StoreConfig`](crate::StoreConfig); use `builder_with_store` only when the
+//! supplied store is safe to use from that runtime.
 
 mod admin;
 mod builder_core;

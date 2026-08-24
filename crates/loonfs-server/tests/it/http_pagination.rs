@@ -299,9 +299,6 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     harness.server.abort();
 }
 
-/// The client aggregates pages without re-ordering: mixed-case names must come
-/// back in the server's canonical casefolded name-key order, not in raw
-/// display-name byte order (`B.txt` sorts after `a.txt`, not before).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_client_listing_preserves_canonical_name_key_order() {
     let temp_dir = tempdir().expect("tempdir");

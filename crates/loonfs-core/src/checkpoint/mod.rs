@@ -3,21 +3,6 @@
 //! A namespace manifest references the immutable metadata segment runs for one
 //! namespace state. A checkpoint pins a manifest for retention, forks, stable
 //! reads, or restore.
-//!
-//! The submodules cover these areas:
-//! - Building and publishing manifests: [`build`], [`flush`], [`create`], and
-//!   [`publish`].
-//! - Managing checkpoint records: [`record`], [`list`], [`release`], and
-//!   [`files`].
-//! - Loading, validating, and scanning metadata: [`load`], [`validate`],
-//!   [`scan`], and [`row`].
-//! - Planning and running metadata merges: [`reorganize`],
-//!   [`streaming_compaction`], [`compaction_merge`],
-//!   [`compaction_retention`], [`compaction_output`], [`compaction_lease`],
-//!   and [`frozen_floor`].
-//! - Advancing the retention floor: [`retention`].
-//! - Describing run layout and caching: [`runs`], [`cache`], and
-//!   [`stored_block_cache`].
 
 mod block_fetch;
 mod block_load;

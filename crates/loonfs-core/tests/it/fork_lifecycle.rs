@@ -92,9 +92,6 @@ fn metadata_segment_counting_store(root: impl AsRef<Path>) -> CountingStore<Loca
     )
 }
 
-/// A created namespace is exactly one object. It serves reads and accepts
-/// writes with no root, no floor, and no manifest anywhere; the first flush
-/// is what publishes a root.
 #[tokio::test]
 async fn a_created_namespace_is_one_object_until_its_first_flush() {
     let temp_dir = tempdir().expect("tempdir");
@@ -187,8 +184,6 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
     assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
 }
 
-/// Exactly one of two concurrent creates of the same id wins; the loser is
-/// told the id is taken.
 #[tokio::test]
 async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
     let temp_dir = tempdir().expect("tempdir");
@@ -216,11 +211,6 @@ async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
     );
 }
 
-/// A create retry after a lost acknowledgment answers `namespace_exists`,
-/// whoever made the namespace, and leaves the landed head untouched. The
-/// namespace it names is complete and usable, which is the whole point: the
-/// old protocol answered this case with a partial namespace nobody could
-/// use. A caller that wants the retry to succeed asks for that.
 #[tokio::test]
 async fn a_create_retry_after_a_lost_acknowledgment_reports_the_id_as_taken() {
     let temp_dir = tempdir().expect("tempdir");
@@ -260,8 +250,6 @@ async fn a_create_retry_after_a_lost_acknowledgment_reports_the_id_as_taken() {
     );
 }
 
-/// The same one-winner rule covers two forks racing for one target, and a
-/// create racing a fork for the same id.
 #[tokio::test]
 async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     let temp_dir = tempdir().expect("tempdir");
@@ -316,8 +304,6 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     }
 }
 
-/// A fork target is one object too: it reads through the source's manifest
-/// until it flushes, and it never copies content or metadata.
 #[tokio::test]
 async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let temp_dir = tempdir().expect("tempdir");
@@ -520,8 +506,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     );
 }
 
-/// The fork target keeps reading after the source namespace is deleted: the
-/// pinned basis and the source-owned segments it names both survive.
 #[tokio::test]
 async fn fork_clone_survives_source_delete() {
     let temp_dir = tempdir().expect("tempdir");
@@ -550,9 +534,6 @@ async fn fork_clone_survives_source_delete() {
     );
 }
 
-/// The head authorizes the foreign basis and nothing else does: a recorded
-/// checksum that disagrees with the manifest is corruption, never a
-/// fallback to some other basis.
 #[tokio::test]
 async fn a_fork_basis_checksum_mismatch_is_corruption() {
     let temp_dir = tempdir().expect("tempdir");
@@ -588,9 +569,6 @@ async fn a_fork_basis_checksum_mismatch_is_corruption() {
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
-/// Checkpointing a fork target that has never flushed materializes its
-/// first own manifest, because a checkpoint record can only pin a manifest
-/// of its own namespace.
 #[tokio::test]
 async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
     let temp_dir = tempdir().expect("tempdir");
@@ -649,9 +627,6 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
     );
 }
 
-/// A fork that loses its source checkpoint after the target head lands
-/// deletes the target it just created, rather than leaving a namespace
-/// whose basis nothing protects.
 #[tokio::test]
 async fn a_fork_whose_source_pin_is_released_deletes_its_own_target() {
     let temp_dir = tempdir().expect("tempdir");
@@ -680,10 +655,6 @@ async fn a_fork_whose_source_pin_is_released_deletes_its_own_target() {
     assert_eq!(retry.code(), ErrorCode::NamespaceDeleted);
 }
 
-/// The guard is a margin, not a bare re-read. A source record that is still
-/// active but has only the guard margin of lease left could be released by
-/// a pass at any moment, so the fork refuses it and deletes the target it
-/// just published rather than leaving a basis nothing protects.
 #[tokio::test]
 async fn a_fork_whose_source_lease_runs_out_deletes_its_own_target() {
     let temp_dir = tempdir().expect("tempdir");
@@ -710,9 +681,6 @@ async fn a_fork_whose_source_lease_runs_out_deletes_its_own_target() {
     );
 }
 
-/// The other side of the guard: a fork with its whole lease ahead of it
-/// stands, even with a garbage-collection pass running against the source
-/// at the same time.
 #[tokio::test]
 async fn a_fork_with_lease_to_spare_survives_a_concurrent_gc_pass() {
     let temp_dir = tempdir().expect("tempdir");
@@ -741,8 +709,6 @@ async fn a_fork_with_lease_to_spare_survives_a_concurrent_gc_pass() {
     );
 }
 
-/// A source manifest that no longer validates blocks the fork before any
-/// target object exists.
 #[tokio::test]
 async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let temp_dir = tempdir().expect("tempdir");
@@ -798,8 +764,6 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     );
 }
 
-/// A source checkpoint that cannot be written aborts the fork before the
-/// target exists at all.
 #[tokio::test]
 async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
@@ -836,8 +800,6 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     );
 }
 
-/// A create that loses its conditional write to an unrelated namespace
-/// reports the id as taken, and leaves that namespace alone.
 #[tokio::test]
 async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     let temp_dir = tempdir().expect("tempdir");
@@ -968,9 +930,6 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
     );
 }
 
-/// A namespace with no root of its own is still a legal garbage-collection
-/// subject: it roots its WAL from birth and nothing else, and a later
-/// deleted namespace reclaims down to its tombstone.
 #[tokio::test]
 async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
     let temp_dir = tempdir().expect("tempdir");

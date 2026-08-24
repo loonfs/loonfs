@@ -227,8 +227,6 @@ mod tests {
         );
     }
 
-    /// Selection is presence, so a body that names nothing resolves to a
-    /// plan the step refuses rather than one that quietly does nothing.
     #[test]
     fn a_request_that_selects_nothing_is_an_empty_plan() {
         assert!(plan(MaintenanceStepRequest::default()).is_empty());

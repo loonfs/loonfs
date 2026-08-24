@@ -831,8 +831,6 @@ secret_access_key = "secret"
         assert_eq!(error.message, "missing `cloud.store.bucket`");
     }
 
-    /// Every CLI example config must keep parsing into [`CliConfig`]
-    /// (including under `deny_unknown_fields`) and passing validation.
     #[test]
     fn cli_example_configs_parse_and_validate() {
         let configs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
@@ -859,8 +857,6 @@ secret_access_key = "secret"
         );
     }
 
-    /// Loading a config preserves its credential source. Environment
-    /// credentials are read only when the object store is constructed.
     #[test]
     fn the_loader_preserves_the_serialized_credential_source() {
         let store = loonfs_objectstore::StoreConfig::AwsS3 {
@@ -970,8 +966,6 @@ secret_access_key = "secret"
         );
     }
 
-    /// Strict decoding is only safe while a rejected file can be stepped
-    /// around, so every way of failing to load one offers both hatches.
     #[test]
     fn every_unreadable_config_offers_both_escape_hatches() {
         let dir = tempfile::tempdir().expect("tempdir");

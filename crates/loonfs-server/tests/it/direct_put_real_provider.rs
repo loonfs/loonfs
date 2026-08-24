@@ -630,7 +630,6 @@ fn direct_put_prefix(provider: &str, base_prefix: Option<String>) -> String {
     )
 }
 
-/// Runs the direct PUT round trip through native GCS V4 signed URLs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_direct_put_real_provider_round_trip() {
@@ -647,7 +646,6 @@ async fn gcp_gcs_direct_put_real_provider_round_trip() {
     .await;
 }
 
-/// Tests GCS capability scope, replay protection, expiry, and ranged reads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {

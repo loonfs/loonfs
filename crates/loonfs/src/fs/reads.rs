@@ -472,23 +472,13 @@ impl FsReader {
 
     /// Reads a file's current content as bounded chunks instead of one buffer.
     ///
-    /// This is [`Self::get_file_bytes`] for a caller that should not hold what
-    /// it reads: the content arrives one ranged read at a time with the
-    /// verifying digest folded over it, so a 50 GiB file costs one chunk of
-    /// memory rather than 50 GiB. The verification is the buffered read's,
-    /// unweakened — declared size plus the reference's full-object checksum,
-    /// recomputed using the algorithm the reference names — and it lands on the final
-    /// [`FileContentStream::next_chunk`] call. A caller that stops early
-    /// stops with unverified bytes; a caller that wants the whole answer or
-    /// none of it uses [`Self::get_file_bytes`].
+    /// Each ranged read uses bounded memory. Size and checksum verification
+    /// complete when [`FileContentStream::next_chunk`] returns `None`; stopping
+    /// early leaves the content unverified. The buffered-read size limit does
+    /// not apply.
     ///
-    /// The deployment's buffered-read cap does not apply here. That cap
-    /// bounds what one call materializes, and this call materializes a chunk.
-    ///
-    /// [`ReadFileStreamOptions::start_offset`] resumes a read the caller
-    /// already began. Verification stays over the whole object, so a
-    /// resumed stream refuses to fetch anything until it has been handed
-    /// the bytes below its start through
+    /// [`ReadFileStreamOptions::start_offset`] resumes a read. The caller must
+    /// supply earlier bytes for whole-object verification through
     /// [`FileContentStream::fold_resumed_prefix`].
     #[tracing::instrument(
         level = "debug",
@@ -585,21 +575,11 @@ impl FsReader {
         Ok(target)
     }
 
-    /// Reads one page of the files visible in the state a checkpoint pins,
-    /// in ascending inode-id order.
+    /// Lists files visible at a checkpoint in ascending inode-ID order.
     ///
-    /// The checkpoint's pinned manifest is the whole answer: no WAL is
-    /// replayed over it, so a commit landing mid-enumeration changes
-    /// nothing a consumer sees, and everything after
-    /// [`CheckpointFilesPage::checkpoint_seq`] is what
-    /// [`Self::list_changes`] reports. Directories are not returned.
-    ///
-    /// A released, expired, or reaped checkpoint returns
-    /// `checkpoint_unavailable`. The caller must create a new checkpoint and
-    /// restart instead of silently reading current state.
-    ///
-    /// This does not increment the latest-metadata-view metric because it
-    /// reads a checkpoint snapshot.
+    /// The pinned manifest is read without replaying later WAL entries.
+    /// Directories are omitted. An unavailable checkpoint returns
+    /// `checkpoint_unavailable` rather than falling back to current state.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_checkpoint_files_page",
@@ -625,14 +605,10 @@ impl FsReader {
             .await?)
     }
 
-    /// Answers, for each inode id, what it looks like right now: whether it
-    /// is visible, its current revision, and its current path.
+    /// Resolves the current state of each inode ID.
     ///
-    /// One pinned read serves the batch, so every answer describes the same
-    /// state, and answers come back in input order. Ids that name nothing
-    /// answer `visible: false` instead of failing — a consumer holding ids
-    /// from an earlier enumeration routinely holds stale ones. A directory
-    /// id answers visible with a path and no revision.
+    /// Results use one pinned read and preserve input order. Unknown IDs return
+    /// `visible: false`. Directories have a path but no revision.
     ///
     /// At most [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES)
     /// ids per call; a larger batch is refused with `invalid_request`

@@ -1,18 +1,9 @@
-//! The durable envelope layout, decided once.
+//! Shared encoding and validation for durable envelopes.
 //!
-//! Every durable LoonFS object is an envelope document with the same leading
-//! fields — `kind`, `format_version`, `payload_checksum` —
-//! followed by the payload as an opaque sub-document. This module owns the
-//! whole contract: the probe, the one error vocabulary, the kind/version/
-//! checksum validation rules, and the generic JSON codec that control
-//! objects and namespace manifests parameterize. The WAL segment codec keeps
-//! its CBOR-plus-zstd transport but validates through the same rules and
-//! reports through the same errors, so no envelope family can drift from
-//! the others.
-//!
-//! `payload_checksum` is always computed over the exact payload bytes as
-//! stored, never over a re-encoding, so checksum failures mean corruption
-//! and version skew surfaces as a version error.
+//! Durable objects declare `kind`, `format_version`, and `payload_checksum`
+//! before their payload. Checksums cover the stored payload bytes rather than
+//! a re-encoding. JSON control objects and CBOR WAL segments use the same
+//! validation rules and errors.
 
 use crate::digest::sha256_digest;
 use serde::de::DeserializeOwned;

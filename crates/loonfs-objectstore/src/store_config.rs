@@ -635,10 +635,6 @@ access_key = "key"
         }
     }
 
-    /// A provider's own endpoint on plain `http` is a misconfiguration, and
-    /// the message says what to do about it. Any other host is left alone —
-    /// a private gateway on `http` is a legitimate setup that simply earns
-    /// no direct transfers.
     #[test]
     fn a_provider_endpoint_without_tls_is_rejected_by_name() {
         for (contents, host) in [

@@ -1,18 +1,8 @@
-//! The instruments the runtime reports, and the bridge that turns
-//! object-store samples into them.
+//! Runtime instruments and object-store metric reporting.
 //!
-//! One [`RuntimeInstruments`] is built per handle and reaches the reporting
-//! sites through the read core. Without a configured recorder it holds
-//! nothing and every report returns on a null check, which is what makes
-//! "no recorder" cost nothing rather than cost a no-op registration for
-//! every instrument in the set.
-//!
-//! Instruments whose label value is only known when the first report
-//! arrives — the object-store operation that just finished, the id an
-//! extension registered its maintenance job under — are memoized here, so a
-//! recorder still sees exactly one registration per label set as
-//! [`MetricsRecorder`] promises. The memo costs one uncontended lock on
-//! paths whose unit of work is a provider round trip.
+//! Each handle has one [`RuntimeInstruments`] instance. Instruments with
+//! dynamic labels are cached so each label set is registered once. Reporting
+//! returns immediately when no recorder is configured.
 
 use super::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, ObjectStoreMetricSample,
@@ -1179,9 +1169,6 @@ mod tests {
         }
     }
 
-    /// Outcomes share one operation's latency and byte instruments and get a
-    /// counter each, so a failing operation is visible without splitting its
-    /// timing in two.
     #[test]
     fn outcomes_of_one_operation_count_separately() {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -1258,8 +1245,6 @@ mod tests {
         );
     }
 
-    /// What the null check buys: a handle built without a recorder installs
-    /// no wrapper at all, and reporting through it is a returned call.
     #[test]
     fn a_handle_with_no_recorder_installs_nothing() {
         let instruments = RuntimeInstruments::new(None);
@@ -1336,10 +1321,6 @@ mod tests {
         }
     }
 
-    /// A probe that cannot answer leaves the key admitted and says nothing
-    /// else, so this counter is the only standing record that a namespace's
-    /// reconciliation is stuck. It is counted per job, beside the step
-    /// failures, and it is not filed as one: a probe ran no step.
     #[test]
     fn a_failed_reconciliation_probe_counts_against_its_job() {
         let recorder = Arc::new(DefaultMetricsRecorder::new());

@@ -44,13 +44,6 @@ fn test_config_with_local_cache(
     }
 }
 
-/// A restarted server uses the local cache for point-shaped section loads,
-/// while a directory scan skips it for data blocks.
-///
-/// The second server starts with empty in-memory caches, so the only thing
-/// carried over is the cache directory the first one closed. Its index read
-/// hits that tier. Its data span performs no local-cache operation because
-/// the store path can coalesce the selected blocks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     let store_dir = tempdir().expect("store tempdir");

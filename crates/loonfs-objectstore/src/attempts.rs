@@ -1,18 +1,7 @@
-//! Counting the provider attempts one measured object-store call made.
+//! Counts provider attempts for instrumented object-store calls.
 //!
-//! [`InstrumentedObjectStore`](crate::metrics::InstrumentedObjectStore)
-//! wraps above the bounded retry loops in
-//! [`provider_object_store`](crate::provider_object_store), so a sample's
-//! elapsed time already covers every retry while the count itself is
-//! invisible from up there — a slow call and a call that was retried nine
-//! times read the same. This task-local tally is the one channel between
-//! the two: the wrapper opens a tally around the call it is timing, the
-//! retry gate below counts each attempt it grants, and the wrapper reads
-//! the total back when it builds the sample.
-//!
-//! A retry gate outside a measured call finds no tally and counts nothing,
-//! so an uninstrumented store pays one failed task-local lookup per granted
-//! retry and nothing on any other path.
+//! A task-local counter connects the retry loop to the outer metrics wrapper.
+//! Retries outside an instrumented call are ignored.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};

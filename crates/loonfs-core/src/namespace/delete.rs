@@ -11,33 +11,12 @@ use loonfs_api::wire::control::{
 use loonfs_api::{DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
 
-/// Deletes a namespace by compare-and-swapping its head into the terminal
-/// `deleted` state (format spec, "Tombstones and deletion").
+/// Marks a namespace as deleted with a compare-and-swap on its head.
 ///
-/// `acquired_writer` is the deleting session's writer epoch, so no stale
-/// writer session can publish past the delete. The caller owns acquisition —
-/// [`NamespaceCommitEngine`](crate::publish::NamespaceCommitEngine), which
-/// refuses outright when the session is already fenced. Every retry that
-/// still has a swap to make re-checks that epoch against the reloaded head,
-/// so a writer takeover between acquisition and the swap aborts the delete
-/// instead of deleting a namespace another writer now owns.
-/// The delete linearizes at that swap: commits whose
-/// head advance serialized before it stay committed and durable; everything
-/// that observes the deleted head afterward fails with `namespace_deleted`.
-///
-/// A reload that finds the head already deleted answers before the fence,
-/// because there is no swap left to fence. The namespace is in the terminal
-/// state this call was asking for, so the answer is the same whoever owns
-/// the writer epoch now: `namespace_deleted` when this call never swapped
-/// (API spec, "DELETE /v0/namespaces/{ns}"), and success when it did. Every
-/// acquisition bumps the epoch, so checking the fence first would report a
-/// concurrent deleter's tombstone as `writer_fenced` and, worse, would fence
-/// this session for good over a delete that landed.
-///
-/// Because `deleted` is terminal, a lost acknowledgment is self-resolving:
-/// if a reload after an ambiguous swap shows the head deleted, the delete
-/// succeeded (ours or a concurrent deleter's — indistinguishable and
-/// equivalent). Only an unreachable store surfaces an unknown outcome.
+/// Each retry verifies the writer epoch before attempting the swap. A deleted
+/// head is checked first because no further write is required: it indicates
+/// success after an ambiguous swap, or `namespace_deleted` if this call never
+/// attempted one.
 pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -51,13 +30,10 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             .map_err(|error| CoreError::MetadataProjection(error.into()))?;
         let head = loaded.state.clone();
 
-        // Terminal state first, ahead of the fence and the precondition
-        // below: both of those decide whether this call may swap, and there
-        // is nothing left to swap. See the fence paragraph above.
+        // Check the terminal state before the writer fence because a deleted
+        // namespace requires no further write.
         if head.status == (NamespaceStatus::Deleted {}) {
-            // If we already sent a swap, the delete is done regardless of
-            // whose swap landed; if we never sent one, the namespace was
-            // already deleted when we arrived.
+            // A deleted head resolves an earlier ambiguous swap as success.
             if attempted_swap {
                 return Ok(DeleteNamespaceResponse {
                     namespace_id: namespace_id.clone(),

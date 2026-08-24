@@ -91,10 +91,6 @@ async fn seed_succeeds_once_and_second_seed_conflicts() {
     ));
 }
 
-/// Republishing identical state writes a new object rather than adopting the
-/// one an earlier publication left behind. Nothing about a manifest's key
-/// derives from its bytes, which is what stops collection of an old
-/// candidate from ever reaching a new publication's manifest.
 #[tokio::test]
 async fn identical_state_publishes_a_fresh_manifest_object() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -132,9 +128,6 @@ async fn identical_state_publishes_a_fresh_manifest_object() {
     );
 }
 
-/// A manifest key is claimed create-only, so an occupant carrying other
-/// bytes is corruption rather than something to overwrite. A random id
-/// cannot collide, so only a foreign writer or a damaged object gets here.
 #[tokio::test]
 async fn a_manifest_key_occupied_by_other_bytes_is_corrupt() {
     let temp_dir = tempfile::tempdir().expect("temp dir");

@@ -64,9 +64,6 @@ async fn put_file<S: ObjectStore + ?Sized>(
         .expect("put file");
 }
 
-/// Nothing correct depends on listing: reads, commits, and the change feed
-/// complete without a single LIST, even with junk parked in the segment
-/// collection (chain traversal never sees it).
 #[tokio::test]
 async fn reads_commits_and_change_feed_never_list() {
     let temp_dir = tempdir().expect("tempdir");
@@ -153,9 +150,6 @@ async fn reads_commits_and_change_feed_never_list() {
     );
 }
 
-/// The head changes only when commits land: checkpoint creation, root
-/// publication, floor advancement, garbage collection, and the upload
-/// workflow leave `wal/head.json` byte-identical.
 #[tokio::test]
 async fn maintenance_never_touches_the_wal_head() {
     let temp_dir = tempdir().expect("tempdir");

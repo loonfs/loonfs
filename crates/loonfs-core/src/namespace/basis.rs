@@ -1,18 +1,9 @@
-//! Where a namespace's materialized metadata starts.
+//! Resolves the metadata basis for a namespace.
 //!
-//! A namespace publishes `metadata/root.json` at its first flush, not at
-//! creation, so the basis is resolved from the head plus that root when it
-//! exists (format spec, "Resolving the metadata basis"):
-//!
-//! 1. `metadata/root.json` present: the basis is the manifest it names,
-//!    under this namespace's own prefix.
-//! 2. Root absent, head carries no fork basis: the basis is the built-in
-//!    genesis state — one root-inode row at sequence zero. No manifest
-//!    object exists, and none was ever written.
-//! 3. Root absent, head carries a fork basis: the basis is the source
-//!    namespace's manifest, read under the source's prefix and validated
-//!    against the identity and checksum the head recorded. A mismatch is
-//!    corruption, never a fallback.
+//! The basis is the namespace's metadata root when present, its fork source
+//! manifest when recorded in the head, or the built-in genesis state before
+//! the first flush. A fork basis must match the identity and checksum stored
+//! in the head.
 
 use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;

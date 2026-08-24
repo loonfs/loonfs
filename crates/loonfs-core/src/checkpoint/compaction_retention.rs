@@ -1,27 +1,8 @@
-//! The frozen floor's rules as streaming operators: one row in, at most one
-//! row out, and a fixed amount of state in between.
+//! Applies retention rules while rows are streamed in key order.
 //!
-//! Holding every row of a family and deciding them together is not available
-//! to a merge: one inode may hold any number of attribute revisions and one
-//! parent-and-name slot any number of binding generations, so holding "the
-//! rows a rule reads together" is holding an unbounded set. These operators
-//! hold the *answer* a rule is building instead, which is a fixed number of
-//! fields per family and at most one row.
-//!
-//! What makes that possible is the row-key grammar. Rows arrive in row-key
-//! order, and every rule reads neighbours that share a key prefix, so the rows
-//! a rule needs arrive together and in the order the rule wants them:
-//!
-//! | family | grouped by | arrives |
-//! | --- | --- | --- |
-//! | attributes | one inode | newest revision first |
-//! | active deletions | one deletion | the removal before the row it removes |
-//! | binds, unbinds | one binding generation | the bind before its unbinds |
-//!
-//! The reverse bind index is the one family no grouping can serve: it is
-//! keyed by child while the unbind that retires a bind is keyed by parent, so
-//! its rows are decided one at a time by a point read into the merge's snapshot
-//! ([`super::streaming_compaction`]) and it holds no state here at all.
+//! Each operator keeps bounded state for its current key group. Reverse bind
+//! rows require point reads because binds and unbinds use different key
+//! prefixes; [`super::streaming_compaction`] handles those reads.
 
 use super::frozen_floor::{bind_survives_frozen_floor, BindingGeneration};
 use crate::error::{CoreError, Result};
@@ -32,22 +13,17 @@ use std::collections::BTreeSet;
 /// One row a retention operator kept, and the family it belongs to.
 pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
 
-/// Which rule decides a cluster's rows, as the cluster table names it.
-///
-/// The table is `const`, so it names the rule; [`Self::operator`] is what
-/// turns one into the state that runs it.
+/// Retention rule assigned to a row cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RetentionRule {
-    /// Nothing is ever dropped: revision history, inode rows, and tombstone
-    /// rows are retained whatever the floor says.
+    /// Retain every row in the group.
     KeepEveryRow,
     /// A receipt is decided by its own sequence against the floor.
     Receipts,
     /// Every revision above the floor, plus the newest at or below it, per
     /// inode.
     Attributes,
-    /// A cancelled deletion's pair leaves together; a live listing stays
-    /// however far the floor advances.
+    /// Retain active deletions and remove completed deletion pairs.
     ActiveDeletions,
     /// A bind and the unbinds of its own generation, decided together.
     ForwardBindings,
@@ -66,10 +42,8 @@ impl RetentionRule {
                 RetentionOperator::ActiveDeletions(ActiveDeletionRetention::default())
             }
             Self::ForwardBindings => RetentionOperator::ForwardBindings(Box::default()),
-            // The reverse index is decided one row at a time by the merge,
-            // which is the only thing that can read the snapshot, so this
-            // rule has no state of its own to run. The merge still opens and
-            // closes groups over it, and both are nothing to do.
+            // The merge checks reverse bind rows against its snapshot, so
+            // this operator has no state to maintain.
             Self::ReverseBindProbe => RetentionOperator::KeepEveryRow,
         }
     }
@@ -86,11 +60,8 @@ pub(super) enum RetentionOperator {
 }
 
 impl RetentionOperator {
-    /// Judges one row and answers with what survives it.
-    ///
-    /// A `None` means the row was dropped or is being held for a verdict the
-    /// rest of its group has not delivered yet; [`Self::close_group`] is where
-    /// anything held comes back.
+    /// Returns the retained row, or `None` when the row is dropped or held
+    /// until [`Self::close_group`].
     pub(super) fn push(
         &mut self,
         family: MetadataRowFamily,
@@ -107,8 +78,7 @@ impl RetentionOperator {
         Ok(kept.map(|row| (family, row)))
     }
 
-    /// Closes the locality group that just ended and answers with the row it
-    /// was holding, if it was holding one.
+    /// Finishes the current key group and returns any retained row.
     pub(super) fn close_group(&mut self, floor_seq: ChangeSeq) -> Result<Option<KeptRow>> {
         match self {
             Self::KeepEveryRow | Self::Receipts => Ok(None),
@@ -126,11 +96,7 @@ impl RetentionOperator {
         }
     }
 
-    /// How many rows this operator is holding right now.
-    ///
-    /// This is the number the merge's peak counter tracks, and the thing the
-    /// resource tests assert stays small however many revisions one inode has
-    /// or however many generations one name slot has.
+    /// Number of rows currently held by this operator.
     pub(super) fn held_rows(&self) -> usize {
         match self {
             Self::KeepEveryRow
@@ -406,9 +372,6 @@ mod tests {
         }
     }
 
-    /// One inode's revisions arrive newest first, so the operator keeps
-    /// everything above the floor plus the first row at or below it, and its
-    /// state never grows with the history.
     #[test]
     fn one_inode_keeps_the_newest_row_at_the_floor_and_holds_nothing() {
         let mut operator = RetentionRule::Attributes.operator();
@@ -443,8 +406,6 @@ mod tests {
         assert_eq!(kept[2], attribute_row(7, 100_000, 50));
     }
 
-    /// The rule refuses a history where "the newest at the floor" is
-    /// ambiguous.
     #[test]
     fn two_attribute_rows_at_one_revision_below_the_floor_are_refused() {
         let mut operator = RetentionRule::Attributes.operator();
@@ -465,8 +426,6 @@ mod tests {
         assert!(error.to_string().contains("two attribute rows at revision"));
     }
 
-    /// A cancelled deletion's pair leaves together, and a live one stays
-    /// whatever the floor says.
     #[test]
     fn a_cancelled_deletion_leaves_and_a_live_one_stays() {
         let mut operator = RetentionRule::ActiveDeletions.operator();
@@ -506,8 +465,6 @@ mod tests {
         );
     }
 
-    /// One name slot with a hundred thousand generations streams through
-    /// holding at most one row.
     #[test]
     fn one_name_slot_of_many_generations_holds_at_most_one_row() {
         let mut operator = RetentionRule::ForwardBindings.operator();
@@ -543,9 +500,6 @@ mod tests {
         );
     }
 
-    /// A bind that survives the floor is remembered by identity alone, and a
-    /// second surviving bind in the same slot is the invariant violation the
-    /// rule refuses.
     #[test]
     fn a_second_unretired_bind_in_one_slot_is_refused() {
         let mut operator = RetentionRule::ForwardBindings.operator();

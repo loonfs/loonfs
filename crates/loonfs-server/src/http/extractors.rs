@@ -426,22 +426,11 @@ impl<const MAX_BYTES: usize> FromRequest<AppState> for UploadBodyBytes<MAX_BYTES
     }
 }
 
-/// The proxied-upload body as a stream, plus the admission permit that
-/// bounds how many such transfers run at once.
+/// Proxied upload stream and its concurrency permit.
 ///
-/// Extraction runs the admission sequence in bounded-cost order:
-/// authorization first (an unauthenticated caller must not occupy a
-/// transfer slot), then a permit — or 503 `server_busy`. The body itself is
-/// not read here at all. It is handed on as a stream so the write path can
-/// hash it and forward it a piece at a time, which is what keeps a large
-/// upload's memory cost independent of its size. The permit rides with the
-/// stream and frees its slot when the handler drops it.
-///
-/// Two things end a transfer early, and neither can be reported through the
-/// stream itself — a store sees only "the payload stopped". So the reason
-/// is recorded beside it and read back by [`Self::into_rejection`] once the
-/// write has failed: a body past `upload.max_content_bytes` answers 413
-/// `content_too_large`, an unreadable one 400.
+/// Authorization occurs before acquiring a permit. The body remains streamed
+/// so memory use does not grow with payload size. Abort state distinguishes an
+/// oversized body (`413 content_too_large`) from an unreadable body (`400`).
 pub(super) struct UploadBodyStream {
     body: axum::body::Body,
     max_bytes: u64,

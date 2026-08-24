@@ -182,10 +182,6 @@ fn replace_file_options() -> PutFileOptions {
     }
 }
 
-/// The compile-time forcing function for new error codes moved here when
-/// `ErrorCode` became `#[non_exhaustive]`: every registered code must
-/// appear in the api.md error table, and the status this server serves
-/// must be the status the table documents.
 #[test]
 fn error_status_mapping_matches_the_api_spec_table() {
     let spec = std::fs::read_to_string(concat!(
@@ -832,9 +828,6 @@ async fn every_deadline_exemption_names_a_served_route() {
     }
 }
 
-/// The `[local_cache]` table is the whole switch: without it nothing is
-/// built, and a scrape says nothing about a tier this deployment does not
-/// have.
 #[tokio::test]
 async fn a_server_without_the_table_builds_no_local_cache() {
     let temp_dir = tempdir().expect("tempdir");
@@ -896,8 +889,6 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
     assert!(!rendered.contains("loonfs_cache_metadata_segment_cache_hits"));
 }
 
-/// A configured cache is built at startup and reports itself on every
-/// scrape.
 #[tokio::test]
 async fn a_configured_local_cache_is_built_and_scraped() {
     let temp_dir = tempdir().expect("tempdir");
@@ -919,8 +910,6 @@ async fn a_configured_local_cache_is_built_and_scraped() {
     local_cache.close().await.expect("close local cache");
 }
 
-/// The graceful path closes the cache, and closes it after the writer has
-/// settled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graceful_shutdown_closes_the_local_cache() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1170,21 +1159,6 @@ impl MaintenanceJob for StepCountingJob {
     }
 }
 
-/// `FsWriter::shutdown` closes maintenance admission before it starts
-/// draining publications, under a real deployment rather than a bare
-/// writer: this server registers the grep index job and runs the publish
-/// observer that nudges it.
-///
-/// The drain is a wait, and it is the whole window: while it runs, the
-/// runner's timer is still promoting deadlines and every publication that
-/// lands still fires the observer that nudges the grep index. A nudge that
-/// arrives in that window must find the door already shut, or the shutdown
-/// spends it starting work it is about to throw away — and then waits for
-/// that work to finish.
-///
-/// The observation is behavioral rather than a flag read, and it is pinned
-/// on the shutdown's first poll rather than on wall-clock timing: nudge
-/// after that poll, and no step may follow.
 #[tokio::test]
 async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2350,14 +2324,6 @@ fn distinct_bytes(len: usize) -> Vec<u8> {
 const MEMORY_BOUND_PART_BYTES: u64 = loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
 const MEMORY_BOUND_PAYLOAD_BYTES: usize = 3 * MEMORY_BOUND_PART_BYTES as usize + 4_096;
 
-/// The proxied upload route must not materialize its request body.
-///
-/// This is measured, not asserted about the process: the store is wrapped in
-/// a watcher that records every payload buffer handed across the object-store
-/// boundary and, exactly, how many bytes of them are alive at any instant. A
-/// route that buffered its body would hand the store one buffer the size of
-/// the whole payload; a streaming one hands it a series of chunks and never
-/// holds more than a part's worth.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_proxied_upload_route_never_holds_the_whole_payload() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2403,9 +2369,6 @@ async fn the_proxied_upload_route_never_holds_the_whole_payload() {
     harness.server.abort();
 }
 
-/// The same bound one layer down, on the primitive the route depends on.
-/// Driving `put_streamed` directly separates "the route streams" from "the
-/// store writes incrementally", so a regression in either is attributable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3788,9 +3751,6 @@ mod direct_download {
         }
     }
 
-    /// The audit's case in miniature: a file this deployment will not
-    /// buffer for one response comes home through a download grant, byte
-    /// for byte, checked against the reference the grant carried.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_file_past_the_proxy_cap_round_trips_through_a_download_grant() {
         let temp_dir = tempdir().expect("tempdir");
@@ -3866,9 +3826,6 @@ mod direct_download {
         assert_eq!(inode_received, payload);
     }
 
-    /// A grant names one immutable object, so a commit that replaces the
-    /// file afterwards changes neither what it reads nor whether it works —
-    /// and a grant asked for one revision reads that revision.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_grant_keeps_reading_the_revision_it_was_issued_for() {
         let temp_dir = tempdir().expect("tempdir");
@@ -3917,10 +3874,6 @@ mod direct_download {
         assert_eq!(pinned.content_ref, grant.content_ref);
     }
 
-    /// A deployment that cannot presign refuses the grant the same way it
-    /// refuses a direct upload — one typed `not_supported` naming the
-    /// capability a client would have gated on — rather than 404ing a route
-    /// that exists everywhere.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_deployment_that_cannot_presign_refuses_the_grant_by_capability() {
         let temp_dir = tempdir().expect("tempdir");
@@ -3987,9 +3940,6 @@ mod direct_download {
         );
     }
 
-    /// A provider that signs whole-object writes and reads but has no
-    /// multipart API advertises exactly that: each transport comes from its
-    /// own issuer, and the read comes from the bundle existing at all.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_provider_without_multipart_advertises_put_and_get_and_denies_multipart() {
         let temp_dir = tempdir().expect("tempdir");
@@ -4076,14 +4026,6 @@ mod direct_download {
         }
     }
 
-    /// The GCS shape, end to end, with no GCS-specific code anywhere above
-    /// the object-store adapter.
-    ///
-    /// A bundle that signs reads and CRC-32C whole-object writes and no
-    /// multipart is served by the same handler, carried by the same client
-    /// ladder, and completed by the same rule as the S3-compatible one. The client learns `crc32c` from the capability document, folds
-    /// exactly that digest over the payload in its one measuring pass, and
-    /// the ref the commit records carries that full-object checksum.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_crc32c_provider_without_multipart_carries_a_file_end_to_end() {
         let temp_dir = tempdir().expect("tempdir");
@@ -4148,7 +4090,6 @@ mod direct_download {
         assert_eq!(received, payload);
     }
 
-    /// A store that authorizes nothing directly advertises none of the three.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_deployment_without_a_bundle_advertises_no_direct_transfer() {
         let temp_dir = tempdir().expect("tempdir");
@@ -4170,10 +4111,6 @@ mod direct_download {
             .contains_key(LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES));
     }
 
-    /// The ladder's whole point: with no multipart API to open, a payload
-    /// too large for the proxy still reaches object storage — through one
-    /// presigned whole-object write, chosen by the client from what the
-    /// deployment advertised.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_large_file_takes_direct_put_where_multipart_is_not_offered() {
         let temp_dir = tempdir().expect("tempdir");
@@ -4220,9 +4157,6 @@ mod direct_download {
         assert_eq!(received, payload);
     }
 
-    /// A payload no transport can carry is refused before any byte moves,
-    /// naming the caps it passed, rather than being pushed into the capped
-    /// proxy to fail there.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_payload_past_every_transport_is_refused_with_the_caps_named() {
         let temp_dir = tempdir().expect("tempdir");

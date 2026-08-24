@@ -151,9 +151,7 @@ pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Loads the head together with the metadata basis it authorizes, as one
-/// consistent read anchor (see [`load_head_and_metadata_root_if_present`]
-/// for the race rule).
+/// Loads the head and authorized metadata basis as one consistent read anchor.
 pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
@@ -232,7 +230,6 @@ mod tests {
             .expect("write control object");
     }
 
-    /// A metadata root cannot reference another namespace's manifest.
     #[tokio::test]
     async fn root_loader_rejects_a_manifest_owned_by_another_namespace() {
         let (_directory, store) = local_store();
@@ -261,7 +258,6 @@ mod tests {
         ));
     }
 
-    /// A fork basis cannot reference the target namespace's own manifest.
     #[tokio::test]
     async fn head_loader_rejects_a_fork_basis_owned_by_the_namespace_itself() {
         let (_directory, store) = local_store();
@@ -298,7 +294,6 @@ mod tests {
         );
     }
 
-    /// A fork basis may reference its source namespace.
     #[tokio::test]
     async fn head_loader_accepts_a_fork_basis_owned_by_the_source() {
         let (_directory, store) = local_store();

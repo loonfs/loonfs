@@ -1,21 +1,9 @@
-//! Gram query planning: turns a pattern into the grams any match must
-//! contain — the classic code-search transformation, conservatively.
+//! Converts a search pattern into grams that every match must contain.
 //!
-//! The plan is an AND of OR-sets over case-folded grams. Soundness is the
-//! only obligation: every true match satisfies the plan, so dropping a
-//! constraint (a complex subexpression, a wide alternation, a non-ASCII
-//! case pair) costs candidates, never correctness — verification runs the
-//! real pattern over every candidate. A pattern that yields no constraint
-//! at all is unindexable and the caller decides between rejection and a
-//! capped scan.
-//!
-//! The analysis walks the parsed pattern tracking runs of fixed bytes.
-//! Case-insensitive patterns parse into character classes; a class whose
-//! members fold to one ASCII byte extends the run (matching the index's
-//! ASCII-folded tokenizer), anything wider breaks it. Zero-width
-//! constructs (anchors, look-around the dialect permits) pass through;
-//! optional or repeated subexpressions contribute their inner constraints
-//! only when they must occur.
+//! The plan contains required sets of alternative, case-folded grams. The
+//! index may omit a constraint when it cannot prove that every match contains
+//! it; the full pattern still verifies each candidate. Patterns without any
+//! proven grams are unindexable.
 
 use crate::codec::{extract_grams, Gram, GRAM_LEN};
 use regex_syntax::hir::{Class, Hir, HirKind, Look, Repetition};
@@ -78,9 +66,7 @@ pub(crate) fn plan_pattern(
 struct Analysis {
     /// Gram constraints every match of this subexpression satisfies.
     sets: Vec<BTreeSet<Gram>>,
-    /// When the subexpression matches exactly one folded byte string, that
-    /// string — so concatenation can join runs across children before
-    /// extracting grams.
+    /// A fixed folded byte string, when the subexpression has exactly one.
     run: Option<Vec<u8>>,
 }
 

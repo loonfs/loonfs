@@ -107,96 +107,44 @@ pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 /// Default candidate budget for one step-driven garbage-collection pass.
 pub const DEFAULT_GC_MAX_OBJECTS: u64 = 1024;
 
-/// How often a running streaming compaction rewrites its lease (format spec,
-/// "Garbage collection", rule 12).
+/// Interval between streaming-compaction lease heartbeats.
 ///
-/// A job's staged output is unreferenced for as long as the job runs, and a
-/// job has no time budget at all, so the collector cannot tell a running
-/// job's output from a dead one's by age. The lease is what tells it: the
-/// job rewrites it on this interval, and a prefix whose lease is fresh is
-/// retained whole.
-///
-/// One small overwrite per interval is nothing beside the reads the job is
-/// already making, so the interval is set by the other side of the trade:
-/// it has to be long enough that a heartbeat spending its whole provider
-/// budget still lands before the next one is due, and short enough that a
-/// dead job's output is reclaimable in a sensible time. Five minutes is
-/// twice the provider bound below it and leaves the reclamation window
-/// under an hour.
+/// The interval must exceed one provider operation bound so a healthy job can
+/// refresh its lease before the next heartbeat is due.
 pub const METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS: u64 = 5 * 60 * 1000;
 
-/// Heartbeats a lease may miss before the collector reads its job as gone.
+/// Heartbeats a lease may miss before its job is considered inactive.
 pub const METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS: u64 = 5;
 
-/// How long after its last heartbeat an `active` lease still says its job owns
-/// its prefix.
+/// Time after the last heartbeat before a compaction lease expires.
 ///
-/// Two things have to fit inside it. A running job must never lose its
-/// prefix, so the window covers several missed heartbeats rather than one.
-/// And a job's last heartbeat before it publishes is at the top of a
-/// finalization attempt, so the window must also outlast one publication.
-///
-/// That second requirement is what makes the fence complete, and it is an
-/// inequality over the constants here:
-///
-/// ```text
-/// one finalization attempt   <= METADATA_PUBLICATION_BUDGET_MS
-///                                  (enforced: `ensure_metadata_publication_budget`)
-///                             < GC_MIN_GRACE_WINDOW_MS
-///                                  (that budget plus provider bounds and skew)
-///                            <= METADATA_COMPACTION_LEASE_EXPIRY_MS
-///                                  (asserted below)
-/// ```
-///
-/// So a job that heartbeats at the top of an attempt cannot have its lease
-/// expire before that attempt's root compare-and-swap: garbage collection
-/// cannot claim the prefix underneath it mid-attempt, and a job that got past
-/// the heartbeat is the only party that can publish the segments it named.
+/// This must outlast one publication so garbage collection cannot claim a
+/// job's prefix while its final compare-and-swap is in progress.
 pub const METADATA_COMPACTION_LEASE_EXPIRY_MS: u64 =
     METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS * METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS;
 
-/// Grace a streaming compaction's staged segments get, once their job's
-/// lease is stale or gone, before garbage collection may reap one as an
-/// orphan (format spec, "Garbage collection", rule 12).
-///
-/// Derived, not tuned. A job owns its prefix while its lease is fresh, so
-/// what remains to cover is the gap between the last heartbeat and the moment
-/// the objects become referenced: the lease's own expiry, plus the bound on
-/// the publication that names them, which is what `GC_MIN_GRACE_WINDOW_MS`
-/// bounds for every other publication in the system.
-///
-/// This is the window that replaced a fixed day. A day was a guess at how
-/// long a job might run, which is exactly the thing the streaming design
-/// refuses to bound; the lease measures it instead, and this window only has
-/// to cover what happens after a lease stops being refreshed.
+/// Minimum age of staged compaction output before it may be collected after
+/// its lease expires.
 pub const METADATA_COMPACTION_STAGING_GRACE_MS: u64 =
     METADATA_COMPACTION_LEASE_EXPIRY_MS + GC_MIN_GRACE_WINDOW_MS;
 
-/// The heartbeat's inequality, shared by the compile-time assertion below
-/// and the test that proves the assertion has teeth.
+/// Returns whether a heartbeat can complete before the next is due.
 const fn heartbeats_land_before_the_next_one_is_due(interval_ms: u64) -> bool {
     interval_ms > PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS
 }
 
-// A heartbeat is one small overwrite, and one provider operation's total wall
-// time is its deadline plus one attempt timeout. An interval below that would
-// make a healthy job fall behind its own lease under nothing worse than a
-// slow provider, so the two constants have to move together.
+// Keep the heartbeat interval above the maximum provider operation time.
 const _: () = assert!(
     heartbeats_land_before_the_next_one_is_due(METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS),
     "a heartbeat that spends its whole provider budget must still land before the next is due"
 );
 
-/// The lease's inequality, shared by the compile-time assertion below and the
-/// test that proves the assertion has teeth.
+/// Returns whether a lease can cover one metadata publication.
 const fn outlasts_one_publication(expiry_ms: u64) -> bool {
     expiry_ms >= GC_MIN_GRACE_WINDOW_MS
 }
 
-// A job's last heartbeat before its output becomes referenced is at the top
-// of a finalization attempt, and that attempt's compare-and-swap lands within
-// one publication bound of it. A lease shorter than that bound would expire
-// while the publication naming its output was still in flight.
+// The lease must remain valid through a final publication attempt.
 const _: () = assert!(
     outlasts_one_publication(METADATA_COMPACTION_LEASE_EXPIRY_MS),
     "a compaction lease must outlast the publication that ends the job holding it"
@@ -210,15 +158,9 @@ const fn max_u64(left: u64, right: u64) -> u64 {
     }
 }
 
-/// The derived minimum GC grace window and explicit namespace-repair safety
-/// window (format spec, "Garbage collection", rule 1). Every acknowledged
-/// publication starts its final compare-and-swap within a publication budget
-/// measured from its first object write, and that compare-and-swap completes
-/// within one provider operation bound. So an object older than this window
-/// that is still unreachable at delete time cannot belong to a publication
-/// that might yet succeed. `GcConfig::validate` rejects smaller windows, and
-/// namespace repair uses the same bound before reaping non-completable install
-/// debris.
+/// Minimum age of an unreachable object before garbage collection or repair
+/// may remove it. The value covers the longest publication budget, provider
+/// operation time, and clock skew.
 pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     max_u64(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS),
     METADATA_PUBLICATION_BUDGET_MS,
@@ -244,57 +186,24 @@ pub const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// one upload.
 pub const MAX_SIGNED_PARTS_PER_REQUEST: usize = 1_000;
 
-/// Lease every fork attempt takes on the fork-owned source checkpoint it
-/// creates. An attempt that never installs its target head lets the lease
-/// pass, and garbage collection releases the record on that alone — no
-/// provider timestamp, no fork-specific age rule.
+/// Lease for the source checkpoint created by a fork attempt.
 ///
-/// Two grace floors, because a fork attempt is two of the things that floor
-/// already bounds. The first covers creating the record: the WAL flush and
-/// manifest publication it may perform, the post-write basis verification,
-/// and the provider bounds and clock skew around them — which is exactly
-/// what `GC_MIN_GRACE_WINDOW_MS` is the bound for. The second covers
-/// everything after: reading the pinned manifest and the source head,
-/// installing the target head, and the guard read below. Each half is one
-/// publication plus provider bounds plus skew, so each is one floor.
+/// Two GC grace windows cover checkpoint creation followed by target-head
+/// installation and verification.
 pub const FORK_CHECKPOINT_LEASE_MS: u64 = 2 * GC_MIN_GRACE_WINDOW_MS;
 
-/// Lease an upload session takes when it opens. A session is the only place
-/// retry idempotency lives, so the lease has to outlast any single transfer a
-/// client may reasonably be in the middle of — a proxied body, or a presigned
-/// direct write and the completion call after it. Once it passes, the session
-/// is abandoned by definition and upload garbage collection aborts it: unlike
-/// a namespace, a session is a lease, so reclaiming one on age alone is the
-/// correct reading and not a guess about the client.
+/// Lease duration for an upload session.
 pub const UPLOAD_SESSION_LEASE_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// How long one minted content receipt admits the content it names at commit.
-///
-/// Short on purpose: durability lives in the completed upload session, which
-/// is durable and re-mints, so the receipt only has to cover the gap between
-/// finishing an upload and committing the metadata that references it.
+/// Time during which a content receipt may be used in a commit.
 pub const CONTENT_RECEIPT_TTL_MS: u64 = 60 * 60 * 1000;
 
-/// How long a completed session goes on minting receipts for its content.
-///
-/// This is the "a lost publish response never costs a retransfer" promise
-/// expressed as a number: for this long after completion, reading the
-/// session's status hands back a fresh receipt for bytes that are already
-/// durable. After it, the content is either referenced by metadata — which
-/// protects it on its own — or reclaimable.
+/// Time during which a completed upload may issue new content receipts.
 pub const COMPLETED_UPLOAD_RECEIPT_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
-/// Grace a completed upload's content object gets before content garbage
-/// collection may reclaim it as unreferenced. Derived, not tuned.
-///
-/// Three spans have to be over before "no metadata references this" can be
-/// trusted to stay true. The session may mint a receipt at any point in its
-/// receipt window; the last such receipt admits a commit for one more receipt
-/// TTL; and a commit admitted at that last instant still has a publication
-/// budget plus provider bounds and clock skew to land its root — which is
-/// exactly what `GC_MIN_GRACE_WINDOW_MS` bounds. Past their sum no new
-/// reference can appear, so a reference set collected earlier in the pass is
-/// still sound at delete time.
+/// Minimum age of unreferenced content from a completed upload before
+/// collection. The value covers the receipt window, receipt lifetime, and a
+/// final publication.
 pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
     COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS + GC_MIN_GRACE_WINDOW_MS;
 
@@ -343,9 +252,6 @@ mod tests {
     use super::*;
     use crate::gc::GcConfig;
 
-    /// The compile-time assertion above is only worth having if its
-    /// predicate can fail, so the predicate is exercised from both sides
-    /// here: one millisecond below the derivation is rejected.
     #[test]
     fn the_content_grace_floor_rejects_a_window_one_receipt_short() {
         assert!(outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS));
@@ -358,9 +264,6 @@ mod tests {
         assert_eq!(CONTENT_RECLAMATION_GRACE_MS, 608_400_000 + 1_230_000);
     }
 
-    /// Same bargain as above: the head-coverage assertion is only worth
-    /// having if its predicate can fail, so one pointer short of the legal
-    /// tail is exercised too.
     #[test]
     fn the_head_coverage_floor_rejects_a_list_one_segment_short() {
         assert!(covers_every_unflushed_segment(RECENT_SEGMENTS_LIMIT));
@@ -391,9 +294,6 @@ mod tests {
         );
     }
 
-    /// The staging window is derived from the lease, not from a guess at how
-    /// long a job runs. A running job holds its prefix through its lease, so
-    /// this window only has to cover what follows the last heartbeat.
     #[test]
     fn the_compaction_staging_grace_is_the_lease_plus_one_publication() {
         // 25 minutes of lease + 20.5 minutes of publication.
@@ -411,8 +311,6 @@ mod tests {
         assert!(!outlasts_one_publication(GC_MIN_GRACE_WINDOW_MS - 1));
     }
 
-    /// Same bargain as the other derived floors: the heartbeat assertion is
-    /// only worth having if its predicate can fail.
     #[test]
     fn the_heartbeat_interval_floor_rejects_an_interval_one_provider_bound_short() {
         assert!(heartbeats_land_before_the_next_one_is_due(

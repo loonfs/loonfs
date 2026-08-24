@@ -1,9 +1,7 @@
-//! Test doubles for this crate's public seams.
+//! Test helpers and recording implementations.
 
-// Path-mutation wrappers that drive the production commit pipeline one
-// operation at a time. They are `#[cfg(test)]`-only rather than part of the
-// `test-support` feature surface: they lean on this crate's dev-dependencies,
-// and their consumers (checkpoint and planner tests) are in-crate.
+// These path-mutation helpers use dev-dependencies and are only needed by
+// in-crate checkpoint and planner tests.
 #[cfg(test)]
 mod content_write;
 #[cfg(test)]
@@ -17,16 +15,15 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// One call made against a [`RecordingStoredMetadataBlockCache`], in the
-/// form that says what the caller asked for.
+/// A call recorded by [`RecordingStoredMetadataBlockCache`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordedStoredMetadataBlockCall {
-    /// A lookup, with whether it was answered from the map.
+    /// A lookup and whether it hit the cache.
     Get {
         key: StoredMetadataBlockKey,
         hit: bool,
     },
-    /// An insert, with the length of the bytes offered.
+    /// An insert and its byte length.
     Insert {
         key: StoredMetadataBlockKey,
         bytes: usize,
@@ -92,12 +89,7 @@ impl RecordingStoredMetadataBlockCache {
         self.state().closed
     }
 
-    /// Replaces what is held for `key` with the same number of bytes that no
-    /// longer checksum, the way a lost write or a bad sector leaves an
-    /// entry. Does nothing for a key the cache is not holding.
-    ///
-    /// The replacement is not recorded: it is the test arranging the world,
-    /// not a call the code under test made.
+    /// Corrupts an existing entry without recording a cache operation.
     pub fn corrupt(&self, key: &StoredMetadataBlockKey) {
         let mut state = self.state();
         if let Some(held) = state.entries.get_mut(key) {

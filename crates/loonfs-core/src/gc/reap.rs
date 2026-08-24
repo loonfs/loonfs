@@ -1,15 +1,8 @@
 //! Reaping: age-gated deletion of unreachable objects.
 //!
-//! Immutable families age by provider timestamp — nothing else records when
-//! they were written. Checkpoint records do not: their lifecycle instants
-//! (`created_at_ms`, `expires_at_ms`, `released_at_ms`) live in the record,
-//! so no checkpoint state transition depends on object metadata.
-//!
-//! A write time is when an object appeared, not when it stopped being
-//! referenced, and those are the same instant only for an object nothing
-//! ever referenced. The namespace sweep therefore asks this module for the
-//! age and decides the rest itself, from the reference anchor in
-//! `gc/live_set.rs`.
+//! Immutable objects use provider timestamps for age checks. Checkpoints use
+//! lifecycle timestamps stored in their records. The namespace sweep combines
+//! object age with the reference anchor from `gc/live_set.rs`.
 
 use crate::checkpoint::record::{encode_checkpoint_record, load_checkpoint_record_at_key};
 use crate::context::MutationContext;

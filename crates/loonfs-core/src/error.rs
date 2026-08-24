@@ -1090,9 +1090,6 @@ mod tests {
         assert!(CoreError::Internal("boom".to_owned()).details().is_none());
     }
 
-    /// Provider authorization failures map to
-    /// `storage_permission_denied`. Other store failures map to
-    /// `server_error`.
     #[test]
     fn store_permission_denied_classifies_to_its_wire_code() {
         let denied = ObjectStoreError::PermissionDenied {

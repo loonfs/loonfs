@@ -361,9 +361,6 @@ async fn progressed_requeues_immediately_and_stays_fair_at_the_cap() {
     );
 }
 
-/// The continuation round trip over a live runner: what a step hands back
-/// is what the next step is handed, without the job holding a map of its
-/// own.
 #[tokio::test]
 async fn a_progressing_job_resumes_from_where_its_last_step_stopped() {
     let job = TestJob::scripted(
@@ -402,8 +399,6 @@ async fn a_progressing_job_resumes_from_where_its_last_step_stopped() {
     );
 }
 
-/// A step that ran out of budget keeps its position, so the retry picks up
-/// there instead of walking the same ground again.
 #[tokio::test]
 async fn a_blocked_job_resumes_from_where_it_parked() {
     let job = TestJob::scripted(
@@ -428,8 +423,6 @@ async fn a_blocked_job_resumes_from_where_it_parked() {
     );
 }
 
-/// An evicted key takes its position with it: nothing survives the job
-/// saying it has nothing to maintain here.
 #[tokio::test]
 async fn a_not_enabled_conclusion_drops_the_continuation() {
     let job = TestJob::scripted(
@@ -566,10 +559,6 @@ async fn a_key_planted_in_the_future_does_not_fire_early() {
     );
 }
 
-/// The other end of the same mechanism: a step that reports a deadline
-/// arms its own key with it. This is what makes a pass self-scheduling —
-/// reclamation nothing planted a deadline for, and deadlines a restart
-/// forgot, both come back through the next pass over the namespace.
 #[tokio::test]
 async fn a_step_that_reports_a_deadline_re_arms_its_own_key() {
     let clock = ManualClock::at(1_000_000);
@@ -607,8 +596,6 @@ async fn a_step_that_reports_a_deadline_re_arms_its_own_key() {
     );
 }
 
-/// Publications reach the jobs that asked for them and no others, so a
-/// host wires nothing into the write path on any job's behalf.
 #[tokio::test]
 async fn a_publication_nudges_only_the_jobs_that_subscribe_to_it() {
     let quiet = TestJob::idle();
@@ -811,10 +798,6 @@ async fn drain_surfaces_a_panicked_step() {
     );
 }
 
-/// The interleaving a shutdown must win, ported from the previous
-/// scheduler: work claims its slot, a whole shutdown-and-drain completes
-/// while the registry is still empty, and only then does the claimed work
-/// reach spawn.
 #[tokio::test]
 async fn work_claimed_before_a_shutdown_is_refused_and_gives_its_permit_back() {
     let job = TestJob::idle();
@@ -872,9 +855,6 @@ async fn upload_writer(root: &std::path::Path, clock: Arc<dyn MaintenanceClock>)
         .expect("build writer")
 }
 
-/// The lease-expiry admission decision, end to end: opening a session and
-/// completing one each plant the collection deadline they create, at the
-/// time the collector's own predicate will allow.
 #[tokio::test]
 async fn upload_paths_plant_the_collection_deadlines_they_create() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -942,8 +922,6 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
     );
 }
 
-/// The runtime registers exactly the two jobs it owns, under the ids every
-/// write path nudges.
 #[tokio::test]
 async fn the_runtime_registers_its_metadata_and_gc_jobs() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -992,13 +970,6 @@ fn claim_all(
         .collect()
 }
 
-/// The process limit is what bounds compactions, not the namespace count.
-///
-/// Every namespace that plans one claims its own slot, so the map cannot
-/// bound them: a process serving a hundred namespaces would run a hundred
-/// jobs. The permits are what stop that, and a job that cannot have one is
-/// queued rather than refused — its group is claimed either way, so nothing
-/// re-plans it and nothing merges it underneath.
 #[tokio::test]
 async fn at_most_the_process_limit_of_compactions_run_however_many_namespaces_plan_one() {
     let runner = enabled_runner(TestJob::idle());
@@ -1054,11 +1025,6 @@ async fn at_most_the_process_limit_of_compactions_run_however_many_namespaces_pl
     }
 }
 
-/// One namespace, one job — whether the job is running or still queued.
-///
-/// The plan is in the map from the claim, which is also what leaves the
-/// group alone: a step that read a queued job's group and merged it would
-/// waste that job at finalization.
 #[tokio::test]
 async fn a_queued_job_still_holds_its_namespace_and_still_excludes_its_group() {
     let runner = enabled_runner(TestJob::idle());
@@ -1089,11 +1055,6 @@ async fn a_queued_job_still_holds_its_namespace_and_still_excludes_its_group() {
     );
 }
 
-/// A shutdown stops a job that is waiting for a permit, not only one that is
-/// reading rows.
-///
-/// A queued job has no block fetch to check its token between, so without
-/// this the drain would wait for a permit it is trying to stop needing.
 #[tokio::test]
 async fn cancellation_reaches_a_job_that_is_still_waiting_for_a_permit() {
     let runner = enabled_runner(TestJob::idle());
@@ -1137,16 +1098,6 @@ async fn cancellation_reaches_a_job_that_is_still_waiting_for_a_permit() {
     );
 }
 
-/// A published job puts its namespace's metadata maintenance back in the
-/// queue at once, and gives its slot back first.
-///
-/// A delta run that arrived while the job ran is exactly what a group blocked
-/// behind that job could not fold. Nothing durable reports that it can now,
-/// so without this nudge the fold waits for the next reconciliation sweep —
-/// and a nudge that arrived while the slot was still held would wake a step
-/// that leaves that group alone. A job that ended without publishing is
-/// planned again instead, and waits a sweep's worth of time so it does not
-/// start the same long job at once.
 #[tokio::test]
 async fn a_job_that_ends_frees_its_slot_and_requeues_its_namespace() {
     let job = TestJob::gated([], ScriptedStep::Conclude(MaintenanceStepConclusion::Idle));

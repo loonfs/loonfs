@@ -362,19 +362,14 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Reads size and the stored full-object checksum for one key, returning
     /// `None` when the object is absent.
     ///
-    /// This is exactly one metadata request. S3-family stores issue
-    /// `HeadObject` with checksum mode enabled; `GetObjectAttributes` is
-    /// never used anywhere, because Cloudflare R2 answers it with 501 and
-    /// code that reaches for it passes its tests against S3 and fails in
-    /// production.
+    /// This uses one metadata request. S3-compatible stores use `HeadObject`
+    /// with checksum mode because some providers do not support
+    /// `GetObjectAttributes`.
     ///
-    /// Stores that cannot perform checksum readback return
-    /// [`ObjectStoreError::Unsupported`]. A store that can ask but finds an
-    /// existing object with no stored checksum returns
-    /// [`ObjectStoreError::StoredChecksumMissing`]. That is the same
-    /// capability line as presigned direct uploads: a deployment whose
-    /// provider cannot show the checksum back also cannot offer `direct_put`,
-    /// because completion would have nothing to verify against.
+    /// Stores without checksum readback return [`ObjectStoreError::Unsupported`].
+    /// Existing objects without a stored checksum return
+    /// [`ObjectStoreError::StoredChecksumMissing`]. Direct uploads require
+    /// this capability for completion verification.
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         let _ = key;
         Err(ObjectStoreError::Unsupported(
@@ -448,45 +443,17 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// failed conditions, permission failures, and ambiguous transport failures are returned.
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata>;
 
-    /// Writes a payload of unknown length without holding it whole, and
-    /// reports how many bytes were stored.
+    /// Writes a stream and returns the number of bytes stored.
     ///
-    /// This is for immutable objects at uniquely-named keys — content
-    /// blobs. Two properties define it:
+    /// Implementations consume the complete stream before reporting a failed
+    /// precondition, allowing callers to finish checksums. Multipart providers
+    /// may check `mode` immediately before assembly rather than atomically with
+    /// it, so this method is only safe for immutable, uniquely named keys.
+    /// Failed multipart writes must be aborted.
     ///
-    /// - **Bounded memory.** A store that can write incrementally holds at
-    ///   most one internal buffer at a time, whatever the payload's length.
-    ///   The default implementation cannot, and says so below.
-    /// - **The body is consumed before any precondition is evaluated.** A
-    ///   caller folding a digest over the stream as it forwards it therefore
-    ///   always ends up with a digest over the complete payload, even when
-    ///   the write is refused — which is what lets it tell "these are the
-    ///   same bytes again" from "these are different bytes".
-    ///
-    /// `mode` is enforced by the provider, as part of the write, while the
-    /// payload fits inside one internal part. Beyond that, an implementation
-    /// that uses a provider multipart upload cannot enforce it that way,
-    /// because providers assemble a multipart upload unconditionally. Such
-    /// an implementation evaluates the condition against a separate
-    /// observation of the key, taken after the payload has been consumed and
-    /// immediately before the assembly. A key that was already occupied is
-    /// still refused with [`ObjectStoreError::PreconditionFailed`]; a writer
-    /// that lands between that observation and the assembly is not, and this
-    /// write assembles over it.
-    ///
-    /// That is why this operation is for immutable keys only: on a key whose
-    /// bytes are fixed by its name, the condition is a corruption tripwire
-    /// rather than a concurrency control. A caller that must also detect the
-    /// concurrent case has to check the object again before it relies on it.
-    ///
-    /// A failed or abandoned write leaves no provider state behind: an
-    /// implementation that opened a multipart upload aborts it.
-    ///
-    /// The default implementation **buffers the whole stream** and delegates
-    /// to [`Self::put`]. It exists so a provider without an incremental
-    /// write is honest rather than absent: its memory cost is exactly what
-    /// buffering the payload and calling `put` costs today, and it is
-    /// bounded only by whatever bounds the caller puts on the stream.
+    /// The default implementation buffers the complete stream before calling
+    /// [`Self::put`]. Providers should override it to provide bounded-memory
+    /// streaming.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         let bytes = collect_stream(body).await?;
         let size_bytes = bytes.len() as u64;

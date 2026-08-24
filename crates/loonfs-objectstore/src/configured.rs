@@ -300,17 +300,6 @@ mod tests {
         );
     }
 
-    /// GCS advertises no direct transfer until a credentialed conformance
-    /// run has proven the provider enforces what the signatures bind.
-    ///
-    /// This is the same bar the S3-compatible providers cleared before their
-    /// domains went into the allowlists above. Trusting a signed precondition
-    /// that nothing has watched the provider honour is exactly the failure
-    /// the whole gate exists to prevent, and an implementation passing its
-    /// own unit tests is not that evidence.
-    ///
-    /// Flipping [`GCS_DIRECT_TRANSFERS_PROVEN`] fails this test, which is the
-    /// point: the flip and the run that justifies it land together.
     #[test]
     fn gcs_advertises_the_direct_transfers_its_live_run_proved() {
         let transfers = gcs_store()
@@ -320,10 +309,6 @@ mod tests {
         assert!(transfers.multipart.is_none());
     }
 
-    /// What the live-conformance flip turns on: reads and whole-object
-    /// writes, and no multipart, because this adapter signs none for GCS.
-    /// The checksum and the ceiling come from the issuer, which is the only
-    /// thing that knows them.
     #[test]
     fn a_proven_gcs_deployment_signs_puts_and_gets_and_offers_no_multipart() {
         let transfers = proven_gcs_store()
@@ -339,7 +324,6 @@ mod tests {
         assert_eq!(put.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
     }
 
-    /// GCS signs the configured prefix and create-only precondition.
     #[tokio::test]
     async fn the_gcs_bundle_signs_native_generation_preconditions() {
         let issuer = proven_gcs_store()
@@ -375,8 +359,6 @@ mod tests {
         assert!(!signed.url.contains("X-Amz-"));
     }
 
-    /// Only a provider that can presign, on an endpoint the live conformance
-    /// suite has run against, offers direct transfers at all.
     #[test]
     fn configured_object_store_offers_direct_transfers_only_on_proven_endpoints() {
         let temp_dir = unique_temp_dir("configured-store-kind");
@@ -421,9 +403,6 @@ mod tests {
         assert!(azure.direct_transfers().is_none());
     }
 
-    /// A presigned URL is a bearer capability, so a proven domain reached
-    /// over plain `http` earns no bundle: the capability and its signed
-    /// headers would go out in cleartext.
     #[test]
     fn a_proven_domain_without_tls_offers_no_direct_transfers() {
         assert!(aws_s3_store(Some("http://bucket.s3.amazonaws.com"))
@@ -441,8 +420,6 @@ mod tests {
             .is_some());
     }
 
-    /// The S3-compatible providers sign every direction, and each names its
-    /// own documented single-request ceiling.
     #[test]
     fn s3_compatible_stores_offer_all_three_directions() {
         let s3 = aws_s3_store(None).direct_transfers().expect("s3 transfers");
@@ -469,8 +446,6 @@ mod tests {
         );
     }
 
-    /// A store that signs reads and whole-object writes but has no multipart
-    /// API is expressible: absence is a missing field, not a failing call.
     #[test]
     fn a_bundle_can_offer_put_and_get_without_multipart() {
         let presigner = Arc::new(

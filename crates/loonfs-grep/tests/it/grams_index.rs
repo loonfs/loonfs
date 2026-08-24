@@ -201,8 +201,6 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// Runtime background maintenance is metadata-only: a small publish leaves
-/// grep backfilling until an explicit worker step runs.
 #[tokio::test]
 async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
     let temp_dir = tempdir().expect("tempdir");
@@ -276,13 +274,6 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// A policy passed to the worker bounds each explicit build step: with
-/// `max_files_per_step: 3`, one step consumes
-/// exactly three of the five pending file commits — the watermark lands on
-/// the third put's committed seq — and the next step consumes the rest.
-/// Under the default 256-file budget the first step would have caught up
-/// to the head outright, so the intermediate watermark is exactly the
-/// configured budget observed in effect.
 #[tokio::test]
 async fn a_worker_policy_bounds_each_build_step() {
     let temp_dir = tempdir().expect("tempdir");
@@ -343,10 +334,6 @@ async fn a_worker_policy_bounds_each_build_step() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// A single legal commit can carry thousands of file revisions. The content
-/// budget must split that one WAL record at a durable delta cursor, queries
-/// must combine the indexed prefix with only its unindexed suffix, and a new
-/// worker must resume without reading the prefix again.
 #[tokio::test]
 async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumable() {
     const FILES: usize = 1_000;
@@ -591,8 +578,6 @@ async fn collect_grep_paths(
     }
 }
 
-/// Verifies that reorganizing delta segments into a mid-level run does not
-/// change grep results.
 #[tokio::test]
 async fn grep_answers_identically_across_tiered_reorganizations() {
     let temp_dir = tempdir().expect("tempdir");
@@ -668,9 +653,6 @@ fn index_segment_keys() -> KeyPredicate {
     KeyPredicate::new(|key| key.contains("/extensions/grep/segments/") && key.ends_with(".sst.zst"))
 }
 
-/// Index segment blocks are immutable and keyed by payload checksum, so the
-/// grep-private decoded-block cache must serve a repeated query's posting
-/// probes without re-fetching the segments it already decoded.
 #[tokio::test]
 async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let temp_dir = tempdir().expect("tempdir");
@@ -744,10 +726,6 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// Concurrent candidate content reads keep the serial loop's error
-/// positions: a failed read surfaces only when the in-order walk reaches
-/// that candidate, so a page that fills first still returns its full
-/// matches and a cursor, and the error waits for the next page.
 #[tokio::test]
 async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     let temp_dir = tempdir().expect("tempdir");
@@ -857,10 +835,6 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// An unindexed-tail candidate larger than the index eligibility cap can
-/// never pass verification, so grep must skip it on its declared size
-/// alone: no content GET for it, unchanged page budgets, and a cursor
-/// that resumes past it.
 #[tokio::test]
 async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let temp_dir = tempdir().expect("tempdir");
@@ -985,8 +959,6 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// Verifies that the service reuses blocks loaded by a partial worker
-/// reorganization instead of decoding a second copy.
 #[tokio::test]
 async fn worker_and_service_share_decoded_index_blocks() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1077,11 +1049,6 @@ async fn worker_and_service_share_decoded_index_blocks() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// Verifies that a cold reorganization opens segment cursors concurrently
-/// without exceeding the maintenance I/O limit.
-///
-/// The test adds delta runs until reorganization begins. Because it performs
-/// no queries, every observed segment read belongs to that reorganization.
 #[tokio::test]
 async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     let temp_dir = tempdir().expect("tempdir");

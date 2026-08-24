@@ -481,11 +481,6 @@ mod tests {
         );
     }
 
-    /// The index segment builder is the shared `SegmentBlocksBuilder`, so a
-    /// lost `max_row_key` would surface here as a segment whose row range
-    /// descends — which `GrepManifestState` rejects, parking the reorganize
-    /// step on `InvalidSegmentRange`. Target 1 closes a data block on every
-    /// push, the final one included, which is the case that once lost the key.
     #[test]
     fn segment_max_row_key_survives_a_full_final_block() {
         use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;

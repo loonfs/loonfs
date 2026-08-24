@@ -521,9 +521,6 @@ mod tests {
         }
     }
 
-    /// The characters Windows reserves are rejected the same way its
-    /// trailing dots and device names already were, and the diagnostic names
-    /// the one to fix.
     #[test]
     fn windows_reserved_characters_are_rejected() {
         for (name, character) in [

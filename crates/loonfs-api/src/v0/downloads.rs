@@ -117,8 +117,6 @@ mod tests {
         AbsolutePath::parse("/docs/report.txt").expect("absolute path")
     }
 
-    /// A download request names a path, never an object. Identity belongs
-    /// to the server on the way out exactly as it does on the way in.
     #[test]
     fn a_download_request_names_only_a_path_and_a_revision() {
         let request: BeginDownloadRequest =

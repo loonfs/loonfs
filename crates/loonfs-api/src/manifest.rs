@@ -1076,9 +1076,6 @@ mod tests {
         assert_eq!(decoded.payload.segments[0].run_seq, ChangeSeq(10));
     }
 
-    /// A fork target's first own manifest keeps referencing the source's
-    /// metadata objects: ownership travels with each file reference, not
-    /// with the manifest.
     #[test]
     fn namespace_manifest_codec_round_trips_inherited_source_segments() {
         let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
@@ -1128,7 +1125,6 @@ mod tests {
         );
     }
 
-    /// Compaction segments include a job id; flushed segments omit it.
     #[test]
     fn namespace_manifest_codec_round_trips_a_compaction_job_segment() {
         let compaction_job_id = MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
@@ -1249,9 +1245,6 @@ mod tests {
         );
     }
 
-    /// The attribute family's durable order is newest revision first within
-    /// one inode, and the row key a writer stores must be the exact key a
-    /// reader's prefix selects.
     #[test]
     fn attributes_row_keys_sort_newest_revision_first_under_the_inode_prefix() {
         let row_of =
@@ -1295,8 +1288,6 @@ mod tests {
             .starts_with(&super::lookup_keys::attributes_prefix(InodeId(43))));
     }
 
-    /// Compaction groups rows using the components after each family prefix.
-    /// This test keeps those prefixes consistent with the generated row keys.
     #[test]
     fn row_key_prefixes_match_the_row_keys_they_front() {
         let name_key = NameKey::parse("report.txt").expect("valid name key");

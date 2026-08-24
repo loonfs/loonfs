@@ -17,8 +17,6 @@ fn object_store_calls(scrape: &BTreeMap<String, f64>) -> f64 {
         .sum()
 }
 
-/// The route reports what the process is doing, not whether it is up, so it
-/// authorizes like every other route — unlike `/health` and `/readiness`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scraping_metrics_without_a_token_is_unauthorized() {
     let temp_dir = tempdir().expect("tempdir");
@@ -38,9 +36,6 @@ async fn scraping_metrics_without_a_token_is_unauthorized() {
     harness.server.abort();
 }
 
-/// One scrape has to show all three layers moving: the requests this server
-/// served, the object-store calls they made, and the runtime caches those
-/// reads warmed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     let temp_dir = tempdir().expect("tempdir");
@@ -136,8 +131,6 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     harness.server.abort();
 }
 
-/// A path outside the served surface must not become a label of its own, or
-/// one scanner turns the request metric into a cardinality bomb.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmatched_paths_share_one_route_label() {
     let temp_dir = tempdir().expect("tempdir");

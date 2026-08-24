@@ -664,8 +664,6 @@ mod tests {
             .expect("message limits must not affect identity");
     }
 
-    /// A batch past the operation ceiling is refused before it can occupy
-    /// the publisher.
     #[test]
     fn a_batch_past_the_operation_ceiling_is_rejected() {
         let oversized = CommitCandidate::new(CommitRequest {
@@ -703,8 +701,6 @@ mod tests {
             .expect("a batch at the ceiling is admitted");
     }
 
-    /// A message past the byte ceiling is refused before it can enter the
-    /// durable record or the fingerprint path.
     #[test]
     fn a_message_past_the_byte_ceiling_is_rejected() {
         let operations = vec![FilesystemOperation::CreateDirectory {
@@ -811,9 +807,6 @@ mod tests {
         assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
     }
 
-    /// A takeover that lands while the loser is mid-load is still a fence,
-    /// not a head race. The loser must be told so — `stale_head` would send a
-    /// permanently fenced session back to retry.
     #[tokio::test]
     async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
         use loonfs_test_support::stores::{BlockingStore, KeyPredicate};

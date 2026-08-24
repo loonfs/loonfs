@@ -81,8 +81,6 @@ async fn written_file(
     (namespace_id, watched, reader)
 }
 
-/// A streamed read never holds more of the file than one chunk, and every
-/// byte crosses the store boundary exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_streamed_read_holds_one_chunk_of_its_file() {
     let temp_dir = tempdir().expect("tempdir");
@@ -130,8 +128,6 @@ async fn a_streamed_read_holds_one_chunk_of_its_file() {
     );
 }
 
-/// The control the number above is measured against: the buffered read is
-/// supposed to hold the whole file, and does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_buffered_read_holds_the_whole_file() {
     let temp_dir = tempdir().expect("tempdir");
@@ -151,9 +147,6 @@ async fn a_buffered_read_holds_the_whole_file() {
     );
 }
 
-/// Content that disagrees with its reference fails the read, and fails it at
-/// the end — after the chunks are out, which is exactly why a caller that
-/// installs a file installs it only once the stream has ended cleanly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
     let temp_dir = tempdir().expect("tempdir");

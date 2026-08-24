@@ -324,9 +324,6 @@ fn grep_root_golden_decodes_to_sample() {
     assert_eq!(decoded, expected);
 }
 
-/// The pointer fixture names the manifest fixture: the digest it promises is
-/// that manifest envelope's own `payload_checksum`. A regeneration that moved
-/// one file without the other breaks the pair.
 #[test]
 fn grep_root_golden_carries_the_manifest_golden_checksum() {
     let pointer =
@@ -390,9 +387,6 @@ fn grep_segment_gram_postings_matches_golden_bytes() {
     );
 }
 
-/// The fixture above pins the block's bytes. This names the rows, the keys,
-/// and the postings those bytes hold, so a decoder that stopped reading them
-/// fails even while the encoder still writes the same block.
 #[test]
 fn grep_segment_gram_postings_golden_decodes_to_sample_rows() {
     let rows = sample_gram_postings_rows();

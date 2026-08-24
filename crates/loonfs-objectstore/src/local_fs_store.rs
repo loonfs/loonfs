@@ -938,9 +938,6 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    /// The range contract a chunked reader depends on: ranges answer their
-    /// own bytes, an end past the object is truncated rather than refused,
-    /// and a start past the object or a descending range is refused.
     #[tokio::test]
     async fn ranged_reads_answer_their_range_and_refuse_impossible_ones() {
         let temp_dir = test_dir("ranged-reads");
@@ -1000,7 +997,6 @@ mod tests {
             .is_none());
     }
 
-    /// Readers race each overwrite rename to exercise replacement visibility across runtime workers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_readers_observe_complete_replacement_generations() {
         const PAYLOAD_BYTES: usize = 16 * 1024;

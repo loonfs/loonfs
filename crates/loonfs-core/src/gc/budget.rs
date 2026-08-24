@@ -1,10 +1,8 @@
-//! What `max_objects` meters, and what a pass does when it runs out.
+//! Work limits for a garbage-collection pass.
 
-/// The work one garbage-collection pass is allowed to do, from its first
-/// read to its last. Marking is inside the bound, not before it.
+/// Limits object-store work performed by one garbage-collection pass.
 ///
-/// One unit is one object the pass reads or decides on a candidate's
-/// behalf:
+/// One unit is charged for:
 ///
 /// * the head and the metadata root together — one unit for the pair,
 ///   because they are read concurrently and neither is a root without the
@@ -15,23 +13,13 @@
 /// * one manifest opened, whether to mark its segments or by the content
 ///   reference scan;
 /// * one page of revision rows read out of an opened manifest;
-/// * the retained WAL chain, charged as one block of one unit per request
-///   the load issued for a segment body — a failed request included, since
-///   the store was asked. The pass caps that load at what it has left, so
-///   the chain cannot read past the bound either;
+/// * each request used to read the retained WAL chain, including failed
+///   requests;
 /// * one enumerated candidate key, decided — the original meaning of
 ///   `max_objects`.
 ///
-/// Prefix listing is the one thing not metered: it is how a family finds
-/// candidates at all, and the cursor is what resumes it. Everything else a
-/// pass touches is charged, so no pass can do work proportional to the
-/// namespace while asking for a small budget.
-///
-/// The rule is deliberately coarse — it is a bound, not a cost model. A
-/// page of rows costs more than a manifest header and both count as one.
-/// What matters is that every store round trip inside the pass has a
-/// charge attached to it, and that running out stops the pass instead of
-/// letting it finish "just this one thing" unboundedly.
+/// Prefix listings are not charged. This is a coarse upper bound on store
+/// operations, not a cost model.
 #[derive(Debug)]
 pub struct PassBudget {
     max_objects: Option<u64>,
@@ -47,9 +35,7 @@ impl PassBudget {
         }
     }
 
-    /// True once nothing further may be charged: the caller stops where it
-    /// stands. The sweep returns its cursor; the content reference scan
-    /// gives up on collecting and the pass defers that reclamation.
+    /// Returns `true` when no more work may be charged.
     pub fn exhausted(&self) -> bool {
         self.remaining() == 0
     }
@@ -66,16 +52,13 @@ impl PassBudget {
         self.spent = self.spent.saturating_add(1);
     }
 
-    /// What has been charged so far. Tests price a namespace's roots with
-    /// this, so a bounded case can ask for a budget in candidates rather
-    /// than in a number that has to be kept true by hand.
+    /// Returns the number of charged units.
     #[cfg(test)]
     pub(super) fn spent(&self) -> u64 {
         self.spent
     }
 
-    /// Charges one unit for work about to be done. `false` means the
-    /// budget is spent and the caller must not do it.
+    /// Reserves one unit, returning `false` if the budget is exhausted.
     pub(super) fn try_charge(&mut self) -> bool {
         if self.exhausted() {
             return false;
@@ -84,10 +67,7 @@ impl PassBudget {
         true
     }
 
-    /// Charges `units` for one block of work already done — the requests
-    /// one chain load issued. The caller sizes that load by what
-    /// [`PassBudget::remaining`] reports, so a block never charges more
-    /// than the budget had left.
+    /// Charges several units for completed work.
     pub(super) fn charge_block(&mut self, units: u64) {
         self.spent = self.spent.saturating_add(units);
     }

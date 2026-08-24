@@ -1,25 +1,8 @@
-//! Materialized namespace metadata: append-only row families plus derived
-//! indexes that answer reads over them.
+//! Materialized namespace metadata.
 //!
-//! [`MetadataState`] is one namespace's metadata materialized at one WAL
-//! sequence: committed WAL deltas append immutable rows, and every read is
-//! answered from those rows. Submodules follow that lifecycle:
-//!
-//! - `rows` defines the row records and the append/accounting plumbing that
-//!   keeps the derived indexes and decoded-size totals in step with every
-//!   appended row.
-//! - `apply` maps committed WAL deltas onto row appends — the only WAL-delta
-//!   to metadata-row mapping in the crate, shared by durable replay and
-//!   commit-validation previews.
-//! - `queries` answers seq-gated reads: record lookups, visibility checks,
-//!   and path resolution, routed to the indexes at head and to historical
-//!   row scans below it.
-//! - `indexes` maintains the at-head lookup structures behind those fast
-//!   paths.
-//! - `visibility` holds the single authoritative statement of the
-//!   direntry-visibility rules (binding identity, active bindings, tombstone
-//!   coverage, path resolution) that every storage shape above decides
-//!   through.
+//! `MetadataState` stores append-only rows at a WAL sequence. Derived indexes
+//! accelerate current reads, while historical reads scan the retained rows.
+//! The `visibility` module applies shared direntry rules to every storage view.
 
 mod apply;
 mod durable_cache;
@@ -41,10 +24,7 @@ pub use self::rows::{
 };
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;
-/// The newest-event-wins tombstone rule. Every production reader reaches it
-/// through `metadata::visibility`; the trash listing's differential test
-/// reaches it directly, to model the walk the active-deletions family
-/// replaced.
+/// Newest-event-wins tombstone selection used by differential tests.
 #[cfg(test)]
 pub(crate) use self::rows::active_tombstone_from_records;
 pub(crate) use self::rows::content_ref_evidence_bytes;

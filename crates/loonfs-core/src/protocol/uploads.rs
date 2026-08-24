@@ -1625,8 +1625,6 @@ mod tests {
         .await
     }
 
-    /// The durable session decision, rather than today's process default,
-    /// governs both part signing and completion after a restart.
     #[test]
     fn multipart_validation_uses_the_algorithm_frozen_in_the_session() {
         let session = UploadSessionState {
@@ -1777,10 +1775,6 @@ mod tests {
         assert_eq!(replay, first);
     }
 
-    /// An aborted session is logically absent: it will never select content,
-    /// which is the same thing the eventual physical deletion says. A
-    /// completion arriving afterwards must not resurrect it — and must not
-    /// touch the object the abort already cleaned up.
     #[tokio::test]
     async fn a_completion_after_an_abort_fails_terminally_and_touches_nothing() {
         let temp_dir = tempdir().expect("tempdir");
@@ -1901,9 +1895,6 @@ mod tests {
         assert!(matches!(retry, CoreError::UploadNotFound { .. }));
     }
 
-    /// Completion is terminal in the other direction. An abort cannot
-    /// quietly succeed over it, because by then the content may already be
-    /// published and deleting it would break a live reference.
     #[tokio::test]
     async fn an_abort_after_completion_is_refused_and_keeps_the_content() {
         let temp_dir = tempdir().expect("tempdir");
@@ -1937,8 +1928,6 @@ mod tests {
         );
     }
 
-    /// Aborting twice is a success that reports the abort that stands, so a
-    /// client retrying a lost response learns the same thing both times.
     #[tokio::test]
     async fn a_repeated_abort_reports_the_first_stamp() {
         let temp_dir = tempdir().expect("tempdir");
@@ -1976,7 +1965,6 @@ mod tests {
         assert_eq!(second, first);
     }
 
-    /// Bytes may only be staged into the one live state.
     #[tokio::test]
     async fn staging_into_a_terminal_session_is_refused() {
         let temp_dir = tempdir().expect("tempdir");
@@ -2021,8 +2009,6 @@ mod tests {
         assert!(matches!(error, CoreError::UploadNotFound { .. }));
     }
 
-    /// A receipt exists for exactly one state. An open session has nothing
-    /// durable to attest yet, and an aborted one never will.
     #[tokio::test]
     async fn only_a_completed_session_mints_a_receipt() {
         let temp_dir = tempdir().expect("tempdir");
@@ -2094,10 +2080,6 @@ mod tests {
         assert!(receipt.is_none(), "an aborted session attests nothing");
     }
 
-    /// Re-minting is what makes a lost publish response cheap, and its
-    /// window is what makes content reclamation decidable: the session hands
-    /// out fresh receipts for as long as its content is protected, then
-    /// stops.
     #[tokio::test]
     async fn a_completed_session_keeps_its_content_ref_after_token_minting_closes() {
         let temp_dir = tempdir().expect("tempdir");

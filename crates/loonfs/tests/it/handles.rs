@@ -470,8 +470,6 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
     });
 }
 
-/// A standalone reader carries no actor identity at all: its engines are
-/// reader-built, so there is no writer id on a handle that never mutates.
 #[test]
 fn standalone_reader_builds_without_writer_identity() {
     let temp_dir = tempdir().expect("tempdir");
@@ -524,11 +522,6 @@ fn standalone_reader_builds_without_writer_identity() {
     });
 }
 
-/// Writer-scheduled maintenance runs as an admin over the writer's own
-/// runtime, so its invalidations land on the caches the writer reads
-/// through: after the scheduled step rewrites the namespace's metadata
-/// root, a read on the same runtime observes post-maintenance state
-/// instead of failing on a cached view of reaped objects.
 #[test]
 fn admin_over_writer_core_invalidates_shared_caches() {
     let temp_dir = tempdir().expect("tempdir");
@@ -995,14 +988,6 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
     });
 }
 
-/// Threshold crossings with background work enabled must both bound the
-/// WAL tail and drain the reorganization backlog. The first crossing
-/// publishes the namespace's first manifest as one base run; the next
-/// eight chain one delta run each, and the last of them reaches the fold
-/// trigger (eight delta runs). The writer's own background step then folds
-/// every family group — no admin involvement. Before the drain, background
-/// steps folded at most one unit per crossing, so fold debt outlived the
-/// burst that created it.
 #[test]
 fn enabled_writer_drains_reorganization_backlog_without_admin() {
     let temp_dir = tempdir().expect("tempdir");

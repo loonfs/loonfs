@@ -321,8 +321,6 @@ mod tests {
         );
     }
 
-    /// The mapper still refuses a pattern the reducer never produces, rather
-    /// than reading past the delta it recognizes.
     #[test]
     fn a_delta_pattern_the_reducer_never_produces_is_rejected() {
         let first = append_attributes(0);

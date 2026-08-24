@@ -72,8 +72,6 @@ fn kept_revisions(
         .collect()
 }
 
-/// Rows for one inode sort newest revision first, which is what makes the
-/// first row of a prefix scan the answer.
 #[test]
 fn attribute_rows_sort_newest_first_per_inode() {
     let state = state_from_attributes(vec![
@@ -113,9 +111,6 @@ fn the_fold_keeps_every_revision_above_the_floor_and_the_newest_at_it() {
     );
 }
 
-/// A cleared map is the state a caller asked for. Dropping its row would let
-/// the older non-empty map become the newest one and resurrect attributes the
-/// clear removed.
 #[test]
 fn the_fold_keeps_a_latest_empty_revision() {
     let state = state_from_attributes(vec![
@@ -156,8 +151,6 @@ fn the_fold_keeps_a_latest_empty_revision() {
     );
 }
 
-/// A deleted inode keeps its attributes, which is what makes an undelete give
-/// back the map the inode had.
 #[test]
 fn the_fold_never_drops_attributes_for_being_unreachable() {
     let state = state_from_attributes(vec![attributes_record(
@@ -179,9 +172,6 @@ fn the_fold_never_drops_attributes_for_being_unreachable() {
     assert_eq!(kept_revisions(&rows_by_family), vec![(7, 1)]);
 }
 
-/// One inode's revisions are numbered without repeats, so two rows sharing a
-/// number make "the newest at the floor" arbitrary. Refuse to compact rather
-/// than pick one.
 #[test]
 fn the_fold_refuses_to_compact_repeated_revision_numbers() {
     let state = state_from_attributes(vec![
@@ -205,10 +195,6 @@ fn the_fold_refuses_to_compact_repeated_revision_numbers() {
     assert!(error.to_string().contains("two attribute rows"), "{error}");
 }
 
-/// The published family answers a read at the sequence it asks for: a row
-/// committed after that sequence is skipped, and the newest one at or below
-/// it is the answer. This is what a checkpoint-basis or fork-basis read
-/// depends on.
 #[tokio::test]
 async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
     let temp_dir = tempdir().expect("tempdir");

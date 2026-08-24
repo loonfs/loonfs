@@ -109,9 +109,6 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
     assert_eq!(change.committed_by, actor);
 }
 
-/// The retry that motivates all of this: the same command run twice with
-/// the same `--commit-id`. The second run uploads again, conflicts, and
-/// then reconciles to the commit that already landed.
 #[tokio::test]
 async fn rerunning_a_put_with_the_same_commit_id_replays_on_identical_bytes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -140,8 +137,6 @@ async fn rerunning_a_put_with_the_same_commit_id_replays_on_identical_bytes() {
     );
 }
 
-/// Different bytes under the same commit id are a different operation, not
-/// a retry, and the conflict stands.
 #[tokio::test]
 async fn different_bytes_under_a_used_commit_id_still_conflict() {
     let temp_dir = tempdir().expect("tempdir");
@@ -176,10 +171,6 @@ async fn different_bytes_under_a_used_commit_id_still_conflict() {
     );
 }
 
-/// The same bytes written somewhere else are a different mutation, and no
-/// amount of matching payload makes them the same one. Content evidence
-/// alone would call this a successful retry and leave `/b.txt` unwritten
-/// forever, which is why the proof is the whole request fingerprint.
 #[tokio::test]
 async fn the_same_bytes_at_a_different_path_still_conflict() {
     let temp_dir = tempdir().expect("tempdir");
@@ -225,10 +216,6 @@ async fn the_same_bytes_at_a_different_path_still_conflict() {
     );
 }
 
-/// The replacement behavior is part of what the caller asked for: the same
-/// bytes at the same path under a changed `behavior` is a different
-/// mutation, and a create-only rerun must not report a replacing commit's
-/// success.
 #[tokio::test]
 async fn a_changed_behavior_under_a_used_commit_id_still_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
@@ -264,9 +251,6 @@ async fn a_changed_behavior_under_a_used_commit_id_still_conflicts() {
     );
 }
 
-/// The expected revision is a race guard, and a rerun that adds one asked a
-/// question the original never asked. Replaying the unguarded commit would
-/// answer it without ever checking it.
 #[tokio::test]
 async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
@@ -302,10 +286,6 @@ async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
     );
 }
 
-/// A commit that did more than one thing is not the commit a single put
-/// makes, however well its put half lines up. The operation list is inside
-/// the fingerprint, so the count alone settles this — no comparison of the
-/// other operations is needed or attempted.
 #[tokio::test]
 async fn a_single_put_does_not_replay_a_multi_operation_commit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -361,9 +341,6 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
     );
 }
 
-/// Same length, different bytes. Size alone cannot tell these apart, so
-/// this is the case that proves the comparison reaches the content's
-/// checksum rather than stopping at its length.
 #[tokio::test]
 async fn same_length_different_bytes_conflict() {
     let temp_dir = tempdir().expect("tempdir");
@@ -383,9 +360,6 @@ async fn same_length_different_bytes_conflict() {
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
 }
 
-/// The same bytes under the same message are the same commit, so the rerun
-/// replays the sequence that already landed — the message being present
-/// changes nothing about that.
 #[tokio::test]
 async fn rerunning_a_put_with_the_same_message_replays_on_identical_bytes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -410,11 +384,6 @@ async fn rerunning_a_put_with_the_same_message_replays_on_identical_bytes() {
     );
 }
 
-/// The message is part of a commit's identity, so the same bytes under a
-/// changed message are a different mutation and the conflict stands. The
-/// bytes matching is exactly what makes this worth pinning: content
-/// evidence alone would call this a successful retry and quietly keep the
-/// original annotation.
 #[tokio::test]
 async fn a_changed_message_under_a_used_commit_id_still_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
@@ -457,10 +426,6 @@ async fn a_changed_message_under_a_used_commit_id_still_conflicts() {
     );
 }
 
-/// Absent and empty are different messages: the fingerprint serializes the
-/// annotation as given, so `null` and `""` are different commits. The
-/// reconciliation compares them the same way rather than folding both into
-/// "no message".
 #[tokio::test]
 async fn an_empty_message_does_not_replay_an_absent_one() {
     let temp_dir = tempdir().expect("tempdir");
@@ -494,11 +459,6 @@ async fn an_empty_message_does_not_replay_an_absent_one() {
     );
 }
 
-/// The mutations that never uploaded anything reconcile nothing — the
-/// publisher's own identity check is the whole answer — so a changed
-/// message conflicts there whatever the put path does. This anchors that
-/// the reconciliation added for put did not become the only thing keeping
-/// the contract.
 #[tokio::test]
 async fn a_changed_message_on_mkdir_still_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
@@ -534,9 +494,6 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
 }
 
-/// The same anchor one layer down, where the caller builds the commit
-/// itself: the request that reaches the publisher is identical apart from
-/// its message, and that alone conflicts.
 #[tokio::test]
 async fn a_changed_message_on_a_direct_commit_still_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
@@ -575,11 +532,6 @@ async fn a_changed_message_on_a_direct_commit_still_conflicts() {
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
 }
 
-/// Reconciliation reads the feed at the sequence the conflict reported, so
-/// once retention has surrendered the replay promise below that sequence
-/// there is no committed content left to compare against. Identical bytes
-/// and all, the conflict stands: a comparison that cannot be made is never
-/// reported as success.
 #[tokio::test]
 async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -638,14 +590,6 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     );
 }
 
-/// The idempotency horizon, pinned end to end: once the retention floor
-/// passes a commit AND reorganization drops its receipt, the id no longer
-/// replays — a late retry commits again as a new mutation. That is the
-/// documented contract (api spec, "safe retry"): replay is guaranteed only
-/// while the receipt lives, and receipts live exactly as long as retained
-/// history. This test exists so the behavior stays deliberate; if it ever
-/// starts failing because a late retry replays or errors instead, the spec
-/// and this pin must move together.
 #[tokio::test]
 async fn a_retry_past_the_receipt_horizon_commits_again() {
     let temp_dir = tempdir().expect("tempdir");
@@ -760,8 +704,6 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     );
 }
 
-/// A commit id that never committed anything is not a retry of anything,
-/// so a rerun against an unrelated id behaves like a first run.
 #[tokio::test]
 async fn an_unused_commit_id_is_an_ordinary_commit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -790,10 +732,6 @@ async fn an_unused_commit_id_is_an_ordinary_commit() {
     assert!(second.committed_seq > first.committed_seq);
 }
 
-/// The same reconciliation for a payload nobody held: rerunning a streamed
-/// put with the same commit id and the same bytes replays the commit that
-/// already landed. The evidence is what the pass measured and hashed,
-/// because the bytes themselves are long gone.
 #[tokio::test]
 async fn rerunning_a_streamed_put_with_the_same_commit_id_replays_on_identical_bytes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -838,9 +776,6 @@ async fn rerunning_a_streamed_put_with_the_same_commit_id_replays_on_identical_b
     );
 }
 
-/// Different bytes under the same commit id are a different operation
-/// whether or not anyone held them. Same length, too, so only the digest
-/// can tell them apart.
 #[tokio::test]
 async fn different_streamed_bytes_under_a_used_commit_id_still_conflict() {
     let temp_dir = tempdir().expect("tempdir");
@@ -882,9 +817,6 @@ async fn different_streamed_bytes_under_a_used_commit_id_still_conflict() {
     );
 }
 
-/// A streamed put and a buffered put of the same bytes are the same
-/// operation and reconcile against each other: both hash the whole payload
-/// themselves, so both produce the same trusted digest.
 #[tokio::test]
 async fn a_streamed_rerun_reconciles_against_a_buffered_first_run() {
     let temp_dir = tempdir().expect("tempdir");

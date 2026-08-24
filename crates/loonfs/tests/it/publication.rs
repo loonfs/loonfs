@@ -137,9 +137,6 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     }
 }
 
-/// Cancelling the caller whose publication is mid-flight abandons only its
-/// result: the publication lands, and the caller queued behind it gets its
-/// own durable result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelled_caller_does_not_cancel_admitted_publication() {
     let temp_dir = tempdir().expect("tempdir");
@@ -166,8 +163,6 @@ async fn cancelled_caller_does_not_cancel_admitted_publication() {
         .expect("the queued publication landed");
 }
 
-/// Even with every caller gone, admitted publications land and a drain
-/// settles their tasks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_callers_cancelled_publication_still_lands() {
     let temp_dir = tempdir().expect("tempdir");

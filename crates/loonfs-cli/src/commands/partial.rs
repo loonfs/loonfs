@@ -1,12 +1,4 @@
-//! The file a download writes into before it is installed, and the note
-//! beside it saying which content it holds.
-//!
-//! Both are named from the destination rather than randomly, because a
-//! rerun has to find them: that is the whole of how an interrupted download
-//! picks up where it stopped. Both are deleted once the download reaches a
-//! verdict — installed at the destination, or failed and reported — so the
-//! only run that leaves bytes behind is one that never got to clean up,
-//! which is exactly the run worth resuming.
+//! Partial files and metadata used to resume interrupted downloads.
 
 use crate::backend::FileDownload;
 use crate::error::CliError;
@@ -15,26 +7,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-/// Suffix of the file a download's bytes land in.
+/// Suffix for partial download files.
 const PARTIAL_SUFFIX: &str = ".loonfs-partial";
-/// Suffix of the note beside it.
+/// Suffix for partial download metadata.
 const META_SUFFIX: &str = ".loonfs-partial.meta";
-/// How much of a partial file is read at a time when its bytes are folded
-/// back into a resumed download's verification. Bounded for the same reason
-/// the download itself is: a resumed 50 GiB file must not cost 50 GiB.
+/// Chunk size used to checksum an existing partial file.
 const FOLD_CHUNK_BYTES: usize = 1024 * 1024;
 
-/// What the bytes in a partial file are, so a rerun can tell whether they
-/// are still the bytes it wants.
-///
-/// The content id settles it on its own: content objects are immutable and
-/// randomly identified, so the same id is the same bytes and a different id
-/// is a different file. The rest is recorded because a partial disagreeing
-/// with any of it is not worth resuming either, and because a note this
-/// build cannot read at all is the same answer — start over.
-///
-/// The checksum is the reference's complete-payload evidence whatever
-/// produced it.
+/// Identifies the content stored in a partial download.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PartialMeta {
@@ -65,11 +45,7 @@ impl PartialMeta {
     }
 }
 
-/// How much of a destination's partial file a fresh download of `meta` may
-/// pick up, which is none of it unless everything agrees.
-///
-/// Every disagreement answers zero and says nothing: a stale partial is not
-/// a failure, it is a download that starts over.
+/// Returns the number of reusable bytes when the partial file matches `meta`.
 pub(super) fn resumable_bytes(destination: &Path, meta: &PartialMeta) -> u64 {
     let (Some(partial_path), Some(meta_path)) = (
         sibling(destination, PARTIAL_SUFFIX),
@@ -129,8 +105,6 @@ impl PartialDownload {
                 let encoded = serde_json::to_vec(meta).map_err(std::io::Error::other)?;
                 std::fs::write(&meta_path, encoded)?;
             }
-            // A stale note from an earlier run must not outlive the bytes it
-            // described.
             None => drop(std::fs::remove_file(&meta_path)),
         }
         let meta = tempfile::TempPath::try_from_path(&meta_path)?;
@@ -184,12 +158,7 @@ impl PartialDownload {
         self.file.write_all(bytes)
     }
 
-    /// Installs the completed download at its destination with one rename,
-    /// and takes the note away with it.
-    ///
-    /// Only a download that finished — and, when it was streamed, verified
-    /// — reaches this, so the file at the destination is never a truncated
-    /// or unverified one.
+    /// Installs the completed download with an atomic rename.
     pub(super) fn install(mut self, destination: &Path, force: bool) -> std::io::Result<()> {
         self.file.flush()?;
         let persisted = if force {
@@ -201,9 +170,7 @@ impl PartialDownload {
     }
 }
 
-/// The sibling of `destination` carrying `suffix`, as a hidden file in the
-/// destination's own directory so the rename that installs it never crosses
-/// a filesystem.
+/// Returns a hidden sibling of `destination` with the given suffix.
 fn sibling(destination: &Path, suffix: &str) -> Option<PathBuf> {
     let file_name = destination.file_name()?;
     let mut name = std::ffi::OsString::from(".");
@@ -212,8 +179,7 @@ fn sibling(destination: &Path, suffix: &str) -> Option<PathBuf> {
     Some(parent_of(destination).join(name))
 }
 
-/// The directory a destination's partial file is created in — its own, and
-/// the working directory for a bare file name.
+/// Returns the destination directory, or the working directory for a bare name.
 pub(super) fn parent_of(destination: &Path) -> &Path {
     destination
         .parent()
@@ -230,8 +196,6 @@ mod tests {
         PartialMeta::describe(&ContentRef::blob_v1(ContentId::generate(), bytes), None)
     }
 
-    /// A reference whose only full-object evidence is a CRC-32C, as a direct
-    /// transfer to Google Cloud Storage leaves behind.
     fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
         ContentRef {
             kind: ContentRefKind::BlobV1,
@@ -241,8 +205,6 @@ mod tests {
         }
     }
 
-    /// A partial whose note matches the content being fetched is picked up
-    /// at exactly the length on disk.
     #[test]
     fn a_matching_note_resumes_at_what_is_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -265,9 +227,6 @@ mod tests {
         );
     }
 
-    /// The note is what makes bytes resumable, and it has to describe the
-    /// content this run resolved: a different file, a different revision, or
-    /// a note this build cannot read all start over.
     #[test]
     fn a_note_that_does_not_match_starts_over() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -301,10 +260,6 @@ mod tests {
         assert_eq!(resumable_bytes(&destination, &meta), 0);
     }
 
-    /// A file whose only evidence is a CRC-32C is described and resumed like
-    /// any other: the note carries the reference's own checksum, so content
-    /// nobody hashed for us is still identified on disk rather than being
-    /// content a rerun has to start over on.
     #[test]
     fn a_crc32c_note_describes_and_resumes_its_partial() {
         let dir = tempfile::tempdir().expect("tempdir");

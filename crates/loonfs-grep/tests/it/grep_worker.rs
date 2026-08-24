@@ -666,11 +666,6 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// A backfill whose pin has outlived its ttl but has not been released
-/// keeps enumerating. Nothing on the checkpoint read path consults a clock:
-/// the record is still a garbage-collection root, so the state it pins is
-/// still there. The worker only starts over when a pass actually releases
-/// it — which the suite above covers.
 #[tokio::test]
 async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
     let temp_dir = tempdir().expect("tempdir");
@@ -824,10 +819,6 @@ fn matched_paths(response: &GrepResponse) -> Vec<String> {
         .collect()
 }
 
-/// A backfill of a populated namespace while commits keep landing: the
-/// checkpoint enumeration answers the state it pinned, the change feed
-/// answers everything after it, and the two phases neither miss a file nor
-/// index one twice.
 #[tokio::test]
 async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
     let temp_dir = tempdir().expect("tempdir");
@@ -937,9 +928,6 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// A move changes no content, so it changes no posting: the index is left
-/// exactly as it was and the query answers the file's new path because
-/// verification reads current state.
 #[tokio::test]
 async fn a_move_reindexes_nothing_and_answers_the_new_path() {
     let temp_dir = tempdir().expect("tempdir");
@@ -999,9 +987,6 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// A recursive delete hides every match under it and an undelete brings
-/// them back, both without touching the index: verification against current
-/// state is what decides whether a posting can still produce a match.
 #[tokio::test]
 async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1103,9 +1088,6 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Grep is a projection beside the filesystem, not inside it: a worker step
-/// that fails against unreadable grep state must not disturb a commit
-/// running at the same time.
 #[tokio::test]
 async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1742,14 +1724,6 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// A collection pass that lands in the middle of a publication leaves the
-/// candidate manifest alone.
-///
-/// The grace window is the whole argument: the candidate was written
-/// moments ago under an id nothing has used before, and grep bounds its own
-/// publications by the same budget the runtime bounds its own by, which is
-/// what the derived grace floor is built from. So a pass that examines the
-/// key before the pointer moves must retain it.
 #[tokio::test]
 async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2170,14 +2144,6 @@ fn orphan_keys(namespace_id: &NamespaceId) -> Vec<String> {
         .collect()
 }
 
-/// A budgeted, resumed collection reaches everything one unbudgeted pass
-/// would.
-///
-/// Two identically seeded stores are collected two ways: one whole-prefix
-/// pass, and a cursor loop with a budget small enough that a page cannot
-/// even finish deciding one key. The counters and the surviving keys must
-/// agree — that is what makes the cursor an enumeration shortcut rather
-/// than a second opinion about what is live.
 #[tokio::test]
 async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
     let namespace_id = NamespaceId::parse("gc-budget").expect("namespace id");
@@ -2282,13 +2248,6 @@ async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
     }
 }
 
-/// The budget counts reads, not listed keys.
-///
-/// Deciding one key costs three: its listing, the liveness or root re-read
-/// that authorizes the decision, and the age probe. A deleted namespace is
-/// where that is countable — every key there is decided and deleted — so a
-/// budget of seven reaps exactly two keys, where a budget that only counted
-/// listings would have reaped seven.
 #[tokio::test]
 async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
     let namespace_id = NamespaceId::parse("gc-charge").expect("namespace id");
@@ -2340,8 +2299,6 @@ async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
     );
 }
 
-/// However small the budget, a pass examines one key — otherwise a caller
-/// looping the cursor would never finish.
 #[tokio::test]
 async fn a_budget_too_small_for_one_key_still_advances_the_cursor() {
     let namespace_id = NamespaceId::parse("gc-progress").expect("namespace id");
@@ -2378,8 +2335,6 @@ async fn a_budget_too_small_for_one_key_still_advances_the_cursor() {
     );
 }
 
-/// A cursor is bound to the namespace that minted it and to grep's own
-/// prefix; anything else is refused as an invalid request.
 #[tokio::test]
 async fn a_collection_cursor_is_refused_outside_the_namespace_that_minted_it() {
     let namespace_id = NamespaceId::parse("gc-cursor").expect("namespace id");
@@ -2420,8 +2375,6 @@ async fn a_collection_cursor_is_refused_outside_the_namespace_that_minted_it() {
     }
 }
 
-/// A backfilling root has no watermark, and nothing on the way out invents
-/// one for it.
 #[tokio::test]
 async fn a_backfilling_root_never_reports_a_built_through_sequence() {
     let temp_dir = tempdir().expect("tempdir");

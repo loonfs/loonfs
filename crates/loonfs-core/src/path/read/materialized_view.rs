@@ -987,9 +987,6 @@ mod tests {
         (temp_dir, store, namespace_id)
     }
 
-    /// A stat-shaped build with the projection on carries the grouped
-    /// attribute state; with it off it carries none. The empty map is a
-    /// projected answer, not an absent one.
     #[tokio::test]
     async fn an_entry_build_projects_grouped_attributes_or_none() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
@@ -1038,9 +1035,6 @@ mod tests {
         assert!(omitted.attributes.is_none());
     }
 
-    /// The listing pays for attributes only when it was asked to. The session
-    /// counter is the evidence: an omitted projection never calls the lookup,
-    /// so a wide listing cannot quietly grow a per-entry read.
     #[tokio::test]
     async fn a_listing_reads_attributes_only_when_it_projects_them() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
@@ -1083,9 +1077,6 @@ mod tests {
         }
     }
 
-    /// A projected listing reads every entry's attributes in one wave, so the
-    /// per-entry build runs over cache hits and the page costs one round of
-    /// lookups rather than one per entry.
     #[tokio::test]
     async fn a_projected_listing_reads_its_attributes_in_one_wave() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;

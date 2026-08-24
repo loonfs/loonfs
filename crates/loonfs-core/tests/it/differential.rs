@@ -413,8 +413,6 @@ fn metadata_apply_matches_model_for_attribute_writes_and_removals() {
     ]);
 }
 
-/// A clear is a real revision carrying the empty map, and both sides must
-/// record it rather than dropping the row.
 #[test]
 fn metadata_apply_matches_model_for_a_cleared_attribute_map() {
     assert_states_match(&[
@@ -424,9 +422,6 @@ fn metadata_apply_matches_model_for_a_cleared_attribute_map() {
     ]);
 }
 
-/// The copy path emits the create and the inherited attributes as two
-/// internal operations of one commit, so both sides see them at one sequence
-/// in delta order.
 #[test]
 fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
     assert_states_match(&[
@@ -457,8 +452,6 @@ fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
     ]);
 }
 
-/// A delete keeps the attribute rows and an undelete reveals them again, so
-/// neither side may drop or rewrite a row for an inode that went away.
 #[test]
 fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
     assert_states_match(&[

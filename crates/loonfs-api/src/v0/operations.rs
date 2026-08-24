@@ -1600,9 +1600,6 @@ mod tests {
         }
     }
 
-    /// A guard the server never saw must fail the request, not the
-    /// precondition. Every guard is optional, so a misspelled one used to
-    /// decode to `None` and let the write apply unguarded.
     #[test]
     fn a_misspelled_guard_does_not_decode() {
         let put = |guard: &str| {
@@ -1674,8 +1671,6 @@ mod tests {
         );
     }
 
-    /// The whole commit request tree is strict, not just its root: a typo one
-    /// level down hides the same guards.
     #[test]
     fn a_commit_request_rejects_unknown_fields_at_every_level() {
         let valid = || {
@@ -1819,9 +1814,6 @@ mod tests {
         );
     }
 
-    /// The maintenance bodies are optional selectors and overrides all the
-    /// way down, so a typo would run a different step than the caller asked
-    /// for and report the difference as "nothing to do".
     #[test]
     fn maintenance_request_bodies_reject_unknown_fields() {
         serde_json::from_value::<MaintenanceStepRequest>(serde_json::json!({

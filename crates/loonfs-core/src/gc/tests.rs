@@ -326,8 +326,6 @@ impl<S: ObjectStore> ObjectStore for ListingCursorStore<S> {
     }
 }
 
-/// The derived floor is enforced at validation: a pass configured below
-/// it is rejected as an invalid request before touching the store.
 #[tokio::test]
 async fn gc_rejects_grace_windows_below_the_derived_minimum() {
     let temp_dir = tempdir().expect("tempdir");
@@ -692,9 +690,6 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     assert!(!report.retention_degraded);
 }
 
-/// The whole upload arm end to end: a lease that passes turns into a
-/// durable abort with its provider object gone, and the record itself
-/// survives one more grace so the abort is observable before it is reaped.
 #[tokio::test]
 async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -761,10 +756,6 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     assert_eq!(report.deleted.upload_sessions, 0);
 }
 
-/// A pass knows when the things it retained stop being retained, because
-/// it compared every one of them against its own clock to decide. Saying so
-/// is what lets a scheduler come back exactly once, for exactly that
-/// namespace, with nothing else having to remember.
 #[tokio::test]
 async fn a_pass_reports_the_soonest_deadline_it_retained() {
     let temp_dir = tempdir().expect("tempdir");
@@ -804,10 +795,6 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
     );
 }
 
-/// The abort gap, closed at the source: nothing plants a deadline when a
-/// session is aborted, so the pass that observes the abort reports the one
-/// the abort created. A restart loses every in-memory deadline the same
-/// way, and is covered by the same sentence.
 #[tokio::test]
 async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
     let temp_dir = tempdir().expect("tempdir");
@@ -869,8 +856,6 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
     .expect("complete upload");
 }
 
-/// A session record written straight into the store, never touched by an
-/// upload, still ages out on nothing but its own recorded lease.
 #[tokio::test]
 async fn upload_gc_reaps_a_session_that_never_staged_anything() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1070,9 +1055,6 @@ async fn publish_completed_content<S: ObjectStore>(
         .expect("published");
 }
 
-/// Inside the derived grace a completed session's content is untouchable,
-/// because a receipt could still be minted for it and a commit carrying that
-/// receipt could still be in flight.
 #[tokio::test]
 async fn content_gc_retains_completed_content_inside_its_grace() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1100,9 +1082,6 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
         .is_some());
 }
 
-/// Past the grace, content no metadata references is provably nobody's: no
-/// receipt survives that could admit a commit for it, so the set of
-/// references can no longer grow.
 #[tokio::test]
 async fn content_gc_reclaims_completed_content_nothing_references() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1134,10 +1113,6 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
         .is_none());
 }
 
-/// Published content is metadata's now. The session record still ages out —
-/// it has nothing left to say — but the object it named stays, whether the
-/// commit that referenced it is still only in the WAL or already
-/// materialized into a manifest.
 #[tokio::test]
 async fn content_gc_never_reclaims_published_content() {
     for materialize in [false, true] {
@@ -1363,9 +1338,6 @@ async fn content_reference_scan_retains_content_when_metadata_rows_do_not_read()
         .is_some());
 }
 
-/// If the reference scan exceeds the remaining budget, the pass retains the
-/// session and content, sets `content_reclamation_deferred`, and advances its
-/// cursor. A later pass with enough budget completes the decision.
 #[tokio::test]
 async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1447,12 +1419,6 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
         .is_none());
 }
 
-/// Marking spends out of the same budget as everything else, and it spends
-/// first. One unit buys the head and the metadata root beside it and
-/// nothing more: no floor, no manifest, and above all no retained WAL
-/// chain, which is where the unmetered reading used to be. The pass says it
-/// ran out rather than reporting an empty pass, which is what an operator
-/// would otherwise read as a clean namespace.
 #[tokio::test]
 async fn a_budget_below_the_roots_reads_no_chain_and_says_it_ran_out() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1493,10 +1459,6 @@ async fn a_budget_below_the_roots_reads_no_chain_and_says_it_ran_out() {
     );
 }
 
-/// A pass with nothing left does not start a chain load at all. A budget
-/// sized to everything before the chain stops at that gate. It fetches no
-/// segment and decides no candidate, and a rerun with room does the whole
-/// job.
 #[tokio::test]
 async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1541,11 +1503,6 @@ async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
         .is_none());
 }
 
-/// The chain can be longer than the budget has room for. The pass caps the
-/// load at what it has left, so the loader issues no more requests than the
-/// pass may pay for, and it issues all of them: the head names the whole
-/// tail, and a hint list longer than the cap is cut down to the cap rather
-/// than refused. The pass then decides nothing and reports that it ran out.
 #[tokio::test]
 async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1596,17 +1553,6 @@ async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
     );
 }
 
-/// A collection that reaches the chain with less budget than the chain
-/// costs used to charge nothing for it. The head names every segment of the
-/// retained tail, that hint list was longer than the cap the pass handed
-/// the loader, and the loader refused up front rather than reading the part
-/// the cap covered. The pass then reported that it ran out while its budget
-/// still showed unspent units, which is the wrong account of where the
-/// budget went.
-///
-/// Now every unit the collection has left at the chain is spent on the
-/// chain, at every budget from one unit up to the whole chain, and a budget
-/// that covers the chain collects it.
 #[tokio::test]
 async fn a_chain_the_budget_cannot_cover_still_spends_what_the_budget_had_left() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1655,9 +1601,6 @@ async fn a_chain_the_budget_cannot_cover_still_spends_what_the_budget_had_left()
     );
 }
 
-/// A budget that covers the roots exactly reads the whole chain. The cap on
-/// the load is what the budget has left, and that is the chain's own size,
-/// so nothing is truncated. One more unit than that lets the walk begin.
 #[tokio::test]
 async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1702,9 +1645,6 @@ async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
     );
 }
 
-/// A pass whose roots cost the whole budget decides nothing. It returns the
-/// token it was given, byte for byte, so the runner can tell that the pass
-/// made no progress and park it.
 #[tokio::test]
 async fn a_pass_that_decides_nothing_echoes_its_cursor_verbatim() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1751,11 +1691,6 @@ async fn a_pass_that_decides_nothing_echoes_its_cursor_verbatim() {
     );
 }
 
-/// Marking decodes and validates every retained segment already, so the
-/// content those commits name is read off the same bodies rather than by a
-/// second pass over the same objects. One complete pass, one fetch per
-/// segment — and the reference that only exists in a retained WAL record
-/// still protects its bytes, because that harvest is where it comes from.
 #[tokio::test]
 async fn a_complete_pass_fetches_each_retained_segment_once() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1814,10 +1749,6 @@ async fn a_complete_pass_fetches_each_retained_segment_once() {
         .is_none());
 }
 
-/// Checkpoint records are read one at a time while marking, and each one
-/// costs a unit like everything else. A budget that covers the head-and-root
-/// pair, the floor, and exactly one of six records stops inside that loop:
-/// one record read, nothing marked, nothing decided.
 #[tokio::test]
 async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1861,17 +1792,6 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
     );
 }
 
-/// The only reference keeping this content alive lives in the newest WAL
-/// segment, the very last root the scan reads. A pass that stopped short
-/// and answered from what it had collected would call the content
-/// unreferenced and delete it. The budgets below run from one candidate a
-/// pass up to sixteen, each walk to its end, which leaves no interleaving
-/// where a partial reference set decides anything. The budgets that can
-/// afford the scan still reach the right verdict.
-///
-/// Every budget is priced from what marking this namespace costs, because
-/// marking spends out of the same purse. A budget below that cost buys no
-/// walk at all, which would prove nothing here.
 #[tokio::test]
 async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2062,14 +1982,6 @@ async fn fold_metadata<S: ObjectStore + ?Sized>(
     assert!(folded, "the fold must reach a steady state");
 }
 
-/// The whole point of the reference anchor: a read that pinned its anchor
-/// before a fold is still reading through it afterwards, and the grace
-/// window is what that read is owed.
-///
-/// The segments here are old by write time and unreferenced by the fold, which
-/// is exactly the pair that used to make them collectable on the spot. They
-/// stay until a grace window has passed since the fold, and then they go —
-/// protecting a reader must not turn into never reclaiming.
 #[tokio::test]
 async fn a_read_pinned_before_a_fold_still_reads_after_the_sweep() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2231,12 +2143,6 @@ fn test_metadata_compaction_id() -> loonfs_api::MetadataCompactionId {
         .expect("valid metadata compaction id")
 }
 
-/// A running job's output survives however old it is, because its lease says
-/// the job that wrote it is still running.
-///
-/// This is the case a fixed window could not express: a job publishes nothing
-/// until it finishes and is paced by no budget, so its first segment can be
-/// arbitrarily older than any window a collector applies to it.
 #[tokio::test]
 async fn a_live_jobs_staged_output_survives_however_old_it_is() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2276,8 +2182,6 @@ async fn a_live_jobs_staged_output_survives_however_old_it_is() {
     }
 }
 
-/// A job whose lease went stale loses its prefix: the segments and the lease
-/// are ordinary orphans once the staging window has passed on them.
 #[tokio::test]
 async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2335,8 +2239,6 @@ async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
     }
 }
 
-/// A job that died before writing a lease at all leaves output no lease
-/// claims, and the same window reclaims it.
 #[tokio::test]
 async fn staged_output_with_no_lease_at_all_is_reclaimed() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2362,8 +2264,6 @@ async fn staged_output_with_no_lease_at_all_is_reclaimed() {
         .is_none());
 }
 
-/// A lease that does not decode is corruption, not evidence that the staged
-/// prefix is unowned. The pass stops before deleting either object.
 #[tokio::test]
 async fn a_lease_that_does_not_decode_fails_the_pass() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2399,9 +2299,6 @@ async fn a_lease_that_does_not_decode_fails_the_pass() {
     }
 }
 
-/// Once a pass claims a stale compaction lease, every exit owes that lease a
-/// deletion. A later candidate failure must not strand the claim in `Reaping`
-/// just because the normal end of the prefix was never reached.
 #[tokio::test]
 async fn a_candidate_error_still_finishes_the_claimed_compaction_lease() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2459,9 +2356,6 @@ async fn a_candidate_error_still_finishes_the_claimed_compaction_lease() {
     );
 }
 
-/// A budget stop uses the same settlement boundary as an error. Once the
-/// lease candidate has been decided, the lookahead that notices an empty
-/// budget must close the claim before returning its cursor.
 #[tokio::test]
 async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2525,8 +2419,6 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
     );
 }
 
-/// A published job produces normal referenced segments. Their manifest keeps
-/// them from being collected.
 #[tokio::test]
 async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2582,17 +2474,6 @@ async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
     }
 }
 
-/// A publication that lands mid-pass does not cost the job its output.
-///
-/// This is the handoff a fixed grace window cannot express. A pass collects
-/// its live set, the compaction publishes a manifest naming its staged
-/// segments, and the pass reaches the compaction prefix still holding the
-/// older live set — in which those segments are referenced by nothing and are
-/// older than any window a collector applies. The lease the job leaves behind
-/// is what the pass reads instead, and it says the objects are owned.
-///
-/// The pass is gated at the first listing it makes after collecting its roots,
-/// which is where the whole job runs underneath it on a second store handle.
 #[tokio::test]
 async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2665,13 +2546,6 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
     }
 }
 
-/// A published job's lease outlives it, and the pass that finds it expired
-/// removes the lease and nothing else.
-///
-/// The job stops heartbeating at publication rather than deleting the object,
-/// so a later pass is the one that cleans it up. By then that pass reads a
-/// root that names every staged segment, so the reap it performs has nothing
-/// to take but the lease.
 #[tokio::test]
 async fn a_published_jobs_lease_expires_and_the_pass_removes_only_the_lease() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2751,10 +2625,6 @@ async fn a_published_jobs_lease_expires_and_the_pass_removes_only_the_lease() {
     }
 }
 
-/// The write-time arm is what covers an object the reference manifest
-/// predates: it was written after the anchor, so the anchor cannot be asked
-/// about it, and only its own age says anything. Once that age passes and
-/// neither anchor names it, it goes.
 #[tokio::test]
 async fn an_object_the_anchor_predates_is_kept_by_its_own_age_alone() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2806,10 +2676,6 @@ async fn an_object_the_anchor_predates_is_kept_by_its_own_age_alone() {
         .is_none());
 }
 
-/// A namespace whose manifests are all younger than the window has nothing
-/// that says what it referenced when the window opened. The pass keeps every
-/// aged candidate and names the reason, rather than reaping against evidence
-/// it does not have.
 #[tokio::test]
 async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2864,9 +2730,6 @@ async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
     assert_eq!(report.retained.no_reference_manifest, 0);
 }
 
-/// A budget that runs out while the anchor is still being established buys
-/// nothing at all. Reaping needs both anchors, and half a root set is not a
-/// smaller answer, it is no answer.
 #[tokio::test]
 async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2921,9 +2784,6 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
     assert_eq!(report.deleted.wal_segments, 1);
 }
 
-/// A pass that keeps a checkpoint record says so as a checkpoint decision,
-/// not as an anonymous count — which is the difference between an operator
-/// knowing to look at their pins and knowing nothing.
 #[tokio::test]
 async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2987,9 +2847,6 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .expect("tail commit stays readable");
 }
 
-/// A released record whose basis has aged out loses the record first,
-/// and the basis only on the following pass — never the other way
-/// around.
 #[tokio::test]
 async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3068,8 +2925,6 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     stat_root(&store, &namespace_id).await;
 }
 
-/// Objects whose keys do not name a valid manifest are not proven GC
-/// candidates, so the pass retains their exact bytes.
 #[tokio::test]
 async fn gc_retains_unrecognized_manifest_keys() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3114,9 +2969,6 @@ async fn gc_retains_unrecognized_manifest_keys() {
     }
 }
 
-/// Repeated WAL flushes leave superseded manifests unpinned, so GC
-/// reclaims them once aged. This is what keeps retained metadata
-/// bounded when maintenance runs continuously.
 #[tokio::test]
 async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3210,8 +3062,6 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     }
 }
 
-/// The user release lifecycle end to end: release flips the record,
-/// the record reaps first, and the basis follows one pass later.
 #[tokio::test]
 async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3260,10 +3110,6 @@ async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
     stat_root(&store, &namespace_id).await;
 }
 
-/// Release runs one way to one end state, so a caller and a
-/// garbage-collection pass asking for it at the same moment converge.
-/// Whichever compare-and-swap lands writes the stamp; the other side sees
-/// the end state it wanted and reports success without touching the record.
 #[tokio::test]
 async fn caller_release_and_expiry_release_converge_on_the_winners_stamp() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3343,9 +3189,6 @@ async fn caller_release_and_expiry_release_converge_on_the_winners_stamp() {
     );
 }
 
-/// The same convergence with the two compare-and-swaps genuinely in flight:
-/// the pass's release is held mid-write while the caller's lands, so the
-/// pass loses its etag. Losing is retention, never an error.
 #[tokio::test]
 async fn a_release_that_loses_its_etag_retains_without_erroring() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3401,9 +3244,6 @@ async fn a_release_that_loses_its_etag_retains_without_erroring() {
     );
 }
 
-/// A released record waits out the grace window measured from its own
-/// release stamp — not from any provider timestamp — and is deleted after
-/// it, its basis following on the pass after that.
 #[tokio::test]
 async fn gc_deletes_a_released_record_only_after_its_release_ages() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3467,8 +3307,6 @@ async fn gc_deletes_a_released_record_only_after_its_release_ages() {
     .is_none());
 }
 
-/// An expiring pin protects until its expiry, then is released by the pass
-/// that observes the expiry and follows the ordinary released cascade.
 #[tokio::test]
 async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3557,8 +3395,6 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     stat_root(&store, &namespace_id).await;
 }
 
-/// Two owners of one basis hold two records: releasing one leaves the
-/// other rooting the shared basis.
 #[tokio::test]
 async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3635,8 +3471,6 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     );
 }
 
-/// Fork checkpoints cannot be released through the user operation. Garbage
-/// collection releases them after their target namespace is gone.
 #[tokio::test]
 async fn fork_owned_checkpoints_reject_user_release() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3735,10 +3569,6 @@ async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> Checkpo
     panic!("fork leaves one fork-owned record");
 }
 
-/// The fork-record cascade: a live target keeps the record a root; a
-/// terminal target delete releases the record by compare-and-swap; the
-/// record reaps a grace window after that release, and its basis on the
-/// pass after that.
 #[tokio::test]
 async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3878,10 +3708,6 @@ async fn gc_retains_a_fork_checkpoint_when_the_target_head_does_not_read() {
     );
 }
 
-/// A finished fork owns its source pin for as long as the target lives.
-/// The lease bounds the attempt, not the result: once the target head is
-/// there, no number of passes at any clock past the lease can release the
-/// record or reach the basis behind it.
 #[tokio::test]
 async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3941,10 +3767,6 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .expect("forked file readable");
 }
 
-/// The abandoned-fork arm: an attempt that never installed its target head
-/// is proven abandoned by its own lease, and by nothing else. The source's
-/// basis is safe for the whole lease, and the record then follows the
-/// ordinary released cascade.
 #[tokio::test]
 async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4032,9 +3854,6 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     stat_root(&store, &source).await;
 }
 
-/// A fork retry after an abandoned attempt is simply another attempt: it
-/// takes its own record under its own id, and the abandoned one is left to
-/// age out on its own schedule.
 #[tokio::test]
 async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4080,10 +3899,6 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
         .expect("forked file readable");
 }
 
-/// Only checkpoint records live under the checkpoints prefix, so bytes
-/// there that do not decode as one are corruption. The pass reports it and
-/// stops. It does not retain the object and suppress reclamation on every
-/// pass after this one.
 #[tokio::test]
 async fn gc_fails_the_pass_on_a_corrupt_checkpoint_record() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4128,8 +3943,6 @@ async fn gc_fails_the_pass_on_a_corrupt_checkpoint_record() {
     );
 }
 
-/// A store read failure is retryable and differs from an invalid record. The
-/// error includes the object key and a retryable error code.
 #[tokio::test]
 async fn gc_fails_the_pass_when_a_checkpoint_record_does_not_read() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4243,8 +4056,6 @@ async fn unreadable_reference_anchor_manifest_remains_conservative() {
     assert!(matches!(anchor, ReferenceAnchor::Missing));
 }
 
-/// The manifest arm of the same split: a rooted manifest that reads but
-/// does not decode is corruption, and the pass says so.
 #[tokio::test]
 async fn gc_fails_the_pass_on_a_corrupt_root_manifest() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4293,10 +4104,6 @@ async fn gc_fails_the_pass_on_a_corrupt_root_manifest() {
     );
 }
 
-/// The other half of the manifest arm: a rooted manifest the store will
-/// not hand over says nothing about the bytes, so the pass keeps its old
-/// behavior. It degrades, reclaims no manifests or segments, and counts what
-/// it kept under `degraded_roots`.
 #[tokio::test]
 async fn gc_degrades_when_a_root_manifest_does_not_read() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4337,8 +4144,6 @@ async fn gc_degrades_when_a_root_manifest_does_not_read() {
     );
 }
 
-/// Rule 1's timestamp arm: an object without a provider timestamp reads
-/// as young, so a store that reports none never deletes anything.
 #[tokio::test]
 async fn gc_retains_everything_without_provider_timestamps() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4376,9 +4181,6 @@ async fn gc_retains_everything_without_provider_timestamps() {
     stat_root(&store, &namespace_id).await;
 }
 
-/// The chunked delete-time re-verification path (rule 3) must reach the
-/// same outcomes as a whole-batch sweep; chunk size one re-collects the
-/// live set before every candidate.
 #[tokio::test]
 async fn gc_sweep_reverification_chunks_preserve_outcomes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4414,9 +4216,6 @@ async fn gc_sweep_reverification_chunks_preserve_outcomes() {
     stat_root(&store, &namespace_id).await;
 }
 
-/// A namespace with no head does not exist, so the pass lists nothing and
-/// deletes nothing: the head is every installation's first and only write,
-/// so nothing can be under the prefix without it.
 #[tokio::test]
 async fn gc_of_an_absent_namespace_lists_and_deletes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4436,9 +4235,6 @@ async fn gc_of_an_absent_namespace_lists_and_deletes_nothing() {
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
 }
 
-/// The same rule with a fork pin in the way: a corrupt record is corrupt
-/// whoever owns it. The source's pass fails and the basis the target reads
-/// through is left exactly as it was.
 #[tokio::test]
 async fn gc_fails_the_pass_when_a_fork_pin_record_is_corrupt() {
     let temp_dir = tempdir().expect("tempdir");

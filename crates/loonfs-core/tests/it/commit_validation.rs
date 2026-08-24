@@ -294,8 +294,6 @@ async fn valid_content_admission_skips_durable_content_validation() {
     assert_eq!(store.count(OperationClass::Read), 0);
 }
 
-/// A later candidate in one batch resolves against what the earlier one did,
-/// so a delete of a path the earlier candidate renamed away finds nothing.
 #[tokio::test]
 async fn a_later_batch_candidate_observes_the_earlier_one() {
     let temp_dir = tempdir().expect("tempdir");
@@ -359,8 +357,6 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
     assert_eq!(error.code(), ErrorCode::PathNotFound);
 }
 
-/// The directory-empty rule is evaluated against what the earlier candidate
-/// did, so a delete of a directory a earlier candidate just filled fails.
 #[tokio::test]
 async fn a_directory_delete_observes_an_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
@@ -414,8 +410,6 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
-/// A rejected candidate returns any inode IDs it reserved, so the next
-/// accepted candidate can use them.
 #[tokio::test]
 async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
     let temp_dir = tempdir().expect("tempdir");
@@ -581,9 +575,6 @@ async fn metadata_only_mutation_does_not_validate_content_store_refs() {
     );
 }
 
-/// Validation runs before content coverage. A put with both a stale revision
-/// guard and missing content proof returns the stale revision without reading
-/// from the content store.
 #[tokio::test]
 async fn a_guarded_put_reports_the_stale_revision_before_missing_content_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
@@ -674,9 +665,6 @@ async fn restore_revision_missing_source_is_revision_not_found() {
     assert_eq!(error.code(), ErrorCode::RevisionNotFound);
 }
 
-/// A directory and the files under it land in one commit: the puts resolve
-/// against the directory the first operation creates, and the change feed
-/// reports one committed change whose events follow operation order.
 #[tokio::test]
 async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -739,9 +727,6 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
     assert_eq!(names, vec!["reports", "a.txt", "b.txt"]);
 }
 
-/// A request stops at its first failing operation and nothing it would have
-/// written becomes visible. The same commit id then commits a corrected
-/// batch, because the failed attempt left no receipt behind.
 #[tokio::test]
 async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
     let temp_dir = tempdir().expect("tempdir");
@@ -800,9 +785,6 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
     assert_eq!(response.committed_seq, ChangeSeq(1));
 }
 
-/// Reusing a commit id replays the original receipt for the same request and
-/// conflicts for a different one, and a one-operation request is the same
-/// request as a one-element batch.
 #[tokio::test]
 async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
@@ -870,8 +852,6 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
     assert_eq!(as_batch.committed_seq, convenience.committed_seq);
 }
 
-/// Operation order is the contract: creating then deleting a path leaves it
-/// gone, and deleting then creating leaves it present.
 #[tokio::test]
 async fn operation_order_decides_the_outcome() {
     let temp_dir = tempdir().expect("tempdir");
@@ -930,9 +910,6 @@ async fn operation_order_decides_the_outcome() {
         .expect("the create ran after the delete");
 }
 
-/// A caller's revision guard is evaluated against the state its own
-/// operation sees, which includes the revision an earlier operation of the
-/// same request wrote.
 #[tokio::test]
 async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1014,11 +991,6 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
     );
 }
 
-/// The end-to-end promise: a client that lost its commit response reads the
-/// session again, gets a fresh receipt for bytes that never moved, and
-/// publishes with it. The receipt it was holding is refused at admission
-/// first, so the re-mint is doing real work rather than papering over a
-/// token that would have been accepted anyway.
 #[tokio::test]
 async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     let temp_dir = tempdir().expect("tempdir");

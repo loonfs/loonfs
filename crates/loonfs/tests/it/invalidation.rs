@@ -86,11 +86,6 @@ async fn head_state(store: &SharedObjectStore, namespace_id: &NamespaceId) -> He
         .state
 }
 
-/// A fenced writer session must stay fenced: before this fix, the runtime
-/// dropped the commit engine after every successful publish and maintenance
-/// pass, so a superseded writer forgot its fencing and silently re-acquired
-/// the epoch — two live writers would fence each other back and forth
-/// instead of one surfacing `writer_fenced`.
 #[tokio::test]
 async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
     let temp_dir = tempdir().expect("tempdir");
@@ -170,10 +165,6 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         .expect("live writer is not fenced back");
 }
 
-/// Deleting is a head-advancing write, so a fenced session must be refused
-/// there too. Before this fix the delete acquired an epoch of its own,
-/// bypassing the session entirely: a superseded writer could bump the epoch
-/// back and delete a namespace the live writer owned.
 #[tokio::test]
 async fn fenced_session_cannot_delete_namespace() {
     let temp_dir = tempdir().expect("tempdir");
@@ -244,13 +235,6 @@ async fn fenced_session_cannot_delete_namespace() {
         .expect("live writer keeps publishing after the refused delete");
 }
 
-/// Fencing must survive the eviction that bounds retained publish state.
-/// A writer's publishers hold one WAL-tail projection per namespace, and the
-/// projection budget drops the least recently published of them; only the
-/// projection goes. The epoch this session acquired belongs to the session,
-/// which nothing evicts — before that split, capacity pressure took the
-/// engine whole, and the rebuilt engine's first publish silently re-acquired
-/// the epoch, fencing the legitimate writer back.
 #[tokio::test]
 async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     let temp_dir = tempdir().expect("tempdir");
@@ -384,11 +368,6 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
         .expect("live writer is not fenced back");
 }
 
-/// With runtime caches disabled the publisher's engine still carries the
-/// session's epoch and fencing: no cache configuration disables the
-/// publication service. Before this fix, cache-disabled runs never kept
-/// fencing at all: a superseded writer re-acquired the epoch on every
-/// publish and the two writers fenced each other back and forth.
 #[tokio::test]
 async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
     let temp_dir = tempdir().expect("tempdir");
@@ -465,10 +444,6 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
         .expect("live writer is not fenced back");
 }
 
-/// A landed publish seeds the read caches with the state it just produced,
-/// so read-after-write on the same core issues no store GETs at all: the
-/// anchor, catalog, manifest, tail projection, and segment blocks are all in
-/// memory.
 #[tokio::test]
 async fn read_after_write_is_served_from_seeded_caches() {
     let temp_dir = tempdir().expect("tempdir");

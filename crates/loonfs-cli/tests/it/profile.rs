@@ -207,9 +207,6 @@ root = "{}"
     );
 }
 
-/// The resolution chain, first match wins: `--config`, then
-/// `LOONFS_CONFIG`, then `$XDG_CONFIG_HOME/loonfs/config.toml`, then
-/// `~/.loonfs/config.toml`.
 #[test]
 fn config_resolution_prefers_the_flag_then_the_environment_then_xdg_then_legacy() {
     let harness = Harness::new();
@@ -292,8 +289,6 @@ fn config_resolution_prefers_the_flag_then_the_environment_then_xdg_then_legacy(
     }
 }
 
-/// `config path` is the command that answers "which file is this build even
-/// looking at", so it never reads that file.
 #[test]
 fn config_path_answers_while_the_config_file_is_unreadable() {
     let harness = Harness::new();
@@ -320,8 +315,6 @@ fn config_path_answers_while_the_config_file_is_unreadable() {
     assert!(shown.contains("default location"), "{shown}");
 }
 
-/// The recovery path: an override reaches a config file of its own while
-/// the default file is one this build refuses to read.
 #[test]
 fn profile_create_runs_through_an_override_while_the_default_config_is_unreadable() {
     let harness = Harness::new();
@@ -381,8 +374,6 @@ fn profile_create_runs_through_an_override_while_the_default_config_is_unreadabl
     );
 }
 
-/// A file this build will not read names itself, what in it went wrong, and
-/// the two ways past it.
 #[test]
 fn unreadable_config_errors_name_the_file_the_field_and_the_way_out() {
     let harness = Harness::new();

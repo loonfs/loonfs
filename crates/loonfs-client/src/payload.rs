@@ -196,8 +196,6 @@ mod tests {
         parts
     }
 
-    /// Source chunks and part boundaries are unrelated: a chunk that
-    /// straddles a boundary is split, and its tail opens the next part.
     #[tokio::test]
     async fn parts_are_cut_regardless_of_how_the_source_chunked_them() {
         let mut reader = PartReader::new(source(vec![b"abcde", b"fg", b"hijkl"]), 4);
@@ -207,8 +205,6 @@ mod tests {
         );
     }
 
-    /// A source that ends exactly on a boundary produces no trailing empty
-    /// part, and one that does not ends with a short one.
     #[tokio::test]
     async fn the_last_part_is_whatever_is_left() {
         let mut reader = PartReader::new(source(vec![b"abcdef"]), 4);
@@ -221,8 +217,6 @@ mod tests {
         assert_eq!(cut(&mut reader).await, vec![b"abcd".to_vec()]);
     }
 
-    /// An empty source produces no parts at all, which is what tells a
-    /// one-pass uploader that it has nothing to assemble.
     #[tokio::test]
     async fn an_empty_source_produces_no_parts() {
         let mut reader = PartReader::new(source(vec![]), 4);
@@ -247,8 +241,6 @@ mod tests {
         assert!(reader.next_part().await.expect("cut").is_none());
     }
 
-    /// A reader-backed source declares no length, which is exactly the
-    /// case a pipe presents.
     #[tokio::test]
     async fn a_reader_source_declares_no_length() {
         let source = PayloadSource::reader(std::io::Cursor::new(vec![1u8; 100]));

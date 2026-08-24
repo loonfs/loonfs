@@ -57,8 +57,6 @@ async fn pin_named<S: ObjectStore + ?Sized>(
     .checkpoint_id
 }
 
-/// One label over two calls is two records, and the listing is where their
-/// two ids can be read back — the whole reason it exists.
 #[tokio::test]
 async fn two_pins_under_one_label_list_as_two_records() {
     let temp_dir = tempdir().expect("tempdir");
@@ -106,10 +104,6 @@ async fn two_pins_under_one_label_list_as_two_records() {
     assert_ne!(after_release.checkpoints[0].checkpoint_id, first);
 }
 
-/// A record whose expiry has passed is still active, still roots its basis,
-/// and is still listed. Garbage collection is what turns a passed expiry
-/// into a release; until it does, hiding the record would hide a live root
-/// from the operation whose job is to find live roots.
 #[tokio::test]
 async fn an_expired_record_is_listed_with_its_expiry_until_it_is_released() {
     let temp_dir = tempdir().expect("tempdir");
@@ -138,8 +132,6 @@ async fn an_expired_record_is_listed_with_its_expiry_until_it_is_released() {
     assert_eq!(listed.checkpoints[0].expires_at_ms, Some(expires_at_ms));
 }
 
-/// An inventory that answered "no checkpoints" for a namespace that does not
-/// exist would be indistinguishable from one with none.
 #[tokio::test]
 async fn a_namespace_that_does_not_exist_is_not_a_namespace_without_checkpoints() {
     let temp_dir = tempdir().expect("tempdir");

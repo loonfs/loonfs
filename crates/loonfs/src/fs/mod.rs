@@ -1,6 +1,4 @@
-//! The read core every handle shares, the writer-side state a write-capable
-//! handle owns on top of it, and the operation surface — each method a thin,
-//! cache-aware delegation to `loonfs-core`.
+//! Filesystem operations and shared handle state.
 
 mod core;
 mod maintenance;

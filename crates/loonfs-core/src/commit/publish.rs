@@ -566,10 +566,6 @@ mod tests {
         encode_control_object(&envelope).expect("encode head").len()
     }
 
-    /// The head is the one control object whose size grows with the tail it
-    /// describes, so raising the accelerator's cap is a claim about how big
-    /// the head gets. This measures it at the cap, from both ends of what
-    /// the identifier grammars allow.
     #[test]
     fn a_head_at_the_accelerator_cap_stays_a_small_object() {
         const CEILING_BYTES: usize = 256 * 1024;

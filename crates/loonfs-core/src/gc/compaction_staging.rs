@@ -1,23 +1,9 @@
-//! Determines whether staged output from a streaming compaction can be collected.
+//! Determines whether streaming-compaction output may be collected.
 //!
-//! A job writes its output under `metadata/compactions/{job_id}/` and refreshes
-//! its lease with compare-and-swap while it runs (format spec, "Garbage
-//! collection", rule 12). A current lease means every object under the job's
-//! prefix must be retained. An expired lease is not sufficient evidence for
-//! collection because the job may resume. The collector must first change the
-//! lease from `Active` to `Reaping` with compare-and-swap. After that succeeds,
-//! the job's next heartbeat fails and it can no longer publish the staged
-//! output, so those objects can be treated as unreferenced.
-//!
-//! A job's lease sorts before its `segments/` directory. The collector reads the
-//! lease first and deletes it only after processing the staged segments. If the
-//! pass stops midway through the prefix, the `Reaping` lease remains so a
-//! later pass can safely continue.
-//!
-//! Objects for one job are contiguous in key order. The pass caches the
-//! confirmed ownership result for the current job, reducing lease reads from
-//! one per object to one per job. It caches only a current `Active` lease or a
-//! successful claim, never an expired lease that was only observed.
+//! A current lease protects every object under a compaction job's prefix. To
+//! collect an expired job, the collector first changes its lease from `Active`
+//! to `Reaping` with compare-and-swap. This fences the job from publishing and
+//! lets later passes safely resume collection.
 
 use crate::checkpoint::{claim_compaction_prefix, CompactionPrefixOwner};
 use crate::error::{CoreError, Result};

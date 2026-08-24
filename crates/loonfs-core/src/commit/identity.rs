@@ -1,14 +1,8 @@
-//! Commit identity fingerprints (format spec, "Commit identity
-//! fingerprints"): a stable digest over a mutation's semantic content, used
-//! to decide whether a reused commit id carries the same mutation or a
-//! conflicting one.
+//! Core representation of a commit identity fingerprint.
 //!
-//! The digest itself is computed by
-//! [`loonfs_api::semantic_commit_fingerprint`], because the HTTP client has
-//! to compute the same value and does not depend on this crate. What stays
-//! here is core's name for one: a value that reached this crate through
-//! [`crate::path::write::commit_fingerprint`] and is therefore comparable
-//! against a stored receipt.
+//! [`loonfs_api::semantic_commit_fingerprint`] computes the shared client and
+//! runtime digest. This module wraps a validated fingerprint for comparison
+//! with stored commit receipts.
 
 use serde::{Deserialize, Serialize};
 

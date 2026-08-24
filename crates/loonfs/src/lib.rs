@@ -1,17 +1,8 @@
 //! Embedded LoonFS runtime.
 //!
-//! `loonfs` is the ergonomic runtime layer. It wraps `loonfs-core` with caching,
-//! upload helpers, maintenance hooks, and an optional [`metrics`] surface. Use
-//! it when you want LoonFS in-process, or when building the reference server.
-//!
-//! The runtime is opened through purpose-specific handles, each built
-//! asynchronously inside the Tokio runtime that will own it:
-//!
-//! - [`FsWriter`] for writes, with [`FsBackgroundWork`] controlling whether
-//!   the writer schedules non-destructive maintenance after writes.
-//! - [`FsReader`] for namespace state and read-only latest views.
-//! - [`FsAdmin`] for explicit maintenance: diagnostics, checkpoints,
-//!   retention, and garbage collection.
+//! Use [`FsWriter`] for mutations, [`FsReader`] for reads, and [`FsAdmin`] for
+//! explicit maintenance. [`FsBackgroundWork`] controls whether a writer also
+//! schedules non-destructive maintenance.
 //!
 //! ```no_run
 //! # async fn open(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
@@ -60,12 +51,9 @@
 //! assert_eq!(options.set.len(), 1);
 //! ```
 //!
-//! A writer owns publication and any automatically scheduled maintenance.
-//! One [`MaintenanceJob`] runner schedules work for namespaces touched or
-//! explicitly assigned to this process; it does not discover namespaces.
-//! Jobs run on the writer's Tokio runtime and re-read durable state before
-//! acting. [`FsWriter::shutdown`] drains this work. Readers and admins do not
-//! start background tasks.
+//! Writers schedule maintenance only for namespaces touched by or assigned to
+//! the process. [`FsWriter::shutdown`] drains that work. Readers and admins do
+//! not start background tasks.
 #![warn(missing_docs)]
 
 mod cache;

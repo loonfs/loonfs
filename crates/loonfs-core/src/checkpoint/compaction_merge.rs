@@ -1,10 +1,4 @@
-//! Reading a merge's input: one iterator per run per family, merged in row-key
-//! order, refilled a bounded wave at a time.
-//!
-//! This is what makes a merge's input residency a fixed number rather than a
-//! function of what it merges. An iterator holds the blocks it has not
-//! consumed and nothing else, a refill wave is bounded, and the selection
-//! that decides which iterator goes next compares borrowed key slices.
+//! Streams rows from multiple runs in row-key order with bounded buffering.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::block_load::SessionBlockMemo;
@@ -28,29 +22,11 @@ const BLOCKS_PER_ITERATOR_FETCH: usize = 2;
 /// this is the width of its fan-out at the store.
 const ITERATOR_FETCH_CONCURRENCY: usize = 8;
 
-/// Which rows a retention rule has to see together, and therefore how the
-/// merge interleaves the families of one cluster.
+/// Defines which adjacent rows a retention rule processes together.
 ///
-/// The rules that drop a row read its neighbours, and every one of them reads
-/// neighbours that share a row-key prefix: an unbind cancels the bind of its
-/// own generation, a removal marker repeats its deletion's sequence and root,
-/// and an attribute revision supersedes revisions of its own inode. So the
-/// grouping is read straight off the row-key grammar in
-/// `MetadataRow::row_key_for_family`, and it is the shortest prefix each rule
-/// needs rather than the whole partition the rows happen to share:
-///
-/// | families | grouped by | key components after the family prefix |
-/// | --- | --- | --- |
-/// | binds, unbinds | one binding generation | `{parent}-{name}-{bind_seq}-{bind_delta}` |
-/// | active deletions | one deletion | `{deletion_seq}-{root}` |
-/// | attributes | one inode | `{inode}` |
-/// | everything else | one row | — |
-///
-/// A generation rather than a name slot is what keeps the bindings group
-/// bounded: a slot has no limit on how many times a name is created and
-/// deleted, and a generation holds one bind and the unbind that retires it.
-/// A bind's whole row key *is* its generation, and an unbind's key leads with
-/// the generation it retires, so both families name the same group.
+/// Groups use the shortest shared row-key prefix required by the rule: a
+/// binding generation, deletion identity, inode, or single row. Binding
+/// generations keep memory bounded when a name is reused many times.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalityGrouping {
     /// Every row is judged on its own.
@@ -63,8 +39,7 @@ pub(super) enum LocalityGrouping {
     LeadingKeyComponents(usize),
 }
 
-/// Returns the row's locality group after removing the family prefix. Bind
-/// and unbind rows for the same parent and name therefore share a group.
+/// Returns the row's locality group after removing the family prefix.
 pub(super) fn locality_of(
     family: MetadataRowFamily,
     row_key: &str,
@@ -305,10 +280,6 @@ mod tests {
     /// The grouping the bindings cluster merges by.
     const GENERATION: LocalityGrouping = LocalityGrouping::LeadingKeyComponents(4);
 
-    /// A bind and the unbind that retires it must name the same locality
-    /// group, because the drop rule reads one from the other. They live in
-    /// different families with different row-key prefixes, so this holds only
-    /// because the grouping is read behind the prefix.
     #[test]
     fn a_bind_and_its_unbind_name_one_locality_group() {
         let bound = bind(7, "report.txt", 11);
@@ -344,9 +315,6 @@ mod tests {
         );
     }
 
-    /// Rows of one locality group are contiguous in row-key order, and
-    /// grouping order is row-key order. Without both, a merge would reopen a
-    /// group it had already judged and written.
     #[test]
     fn locality_order_follows_row_key_order() {
         let mut keys: Vec<String> = ["a", "ab", "b", "a-b"]

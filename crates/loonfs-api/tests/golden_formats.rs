@@ -157,13 +157,6 @@ fn sample_crc_content_ref() -> ContentRef {
     }
 }
 
-/// Pins the durable JSON of a content reference for every checksum algorithm
-/// the format defines.
-///
-/// One reference per algorithm in the vocabulary, so the durable bytes of
-/// each are pinned independently of which write path happens to mint it: a
-/// producer arriving for one of them must need no format change, and this
-/// fixture is what fails if someone reshapes the reference on the way.
 #[test]
 fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
     let references = [
@@ -190,8 +183,6 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
     }
 }
 
-/// The reference rejects fields it does not define: an unexpected key is
-/// corruption, not a newer writer's extension.
 #[test]
 fn content_ref_decode_rejects_unknown_fields() {
     let mut document: serde_json::Value =
@@ -455,10 +446,6 @@ fn wal_segment_golden_decodes_to_sample() {
     assert_eq!(decoded, sample_wal_envelope());
 }
 
-/// The 20 digits after `wal_` in a segment id are the segment's start
-/// sequence, and reclamation reads them back out of the object key. A stored
-/// segment whose id disagrees with the sequence beside it does not decode,
-/// and neither does one carrying a chain link that disagrees with itself.
 #[test]
 fn wal_segments_reject_an_id_that_disagrees_with_its_start_seq() {
     let agreeing = encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("encode wal");
@@ -596,8 +583,6 @@ fn head_status_reading_is_fail_closed_on_unknown_statuses() {
     assert!(deleted.contains("\"status\":{\"kind\":\"deleted\"}"));
 }
 
-/// The field is required. A head that omits it is malformed, exactly like a
-/// head that omits its content store, and nothing defaults it to active.
 #[test]
 fn head_without_a_status_is_rejected() {
     let mut document =
@@ -615,8 +600,6 @@ fn head_without_a_status_is_rejected() {
     );
 }
 
-/// The status object holds a tag and nothing else, so a stray field inside
-/// it is corruption a guarded rewrite must not erase.
 #[test]
 fn head_status_rejects_unknown_fields_as_corruption() {
     let mut document =
@@ -853,12 +836,6 @@ fn control_objects_match_golden_bytes() {
     );
 }
 
-/// Every durable record with a lifecycle spells that field `status` and
-/// writes a `kind`-tagged object into it.
-///
-/// The fixtures are the durable bytes, so this reads the committed payloads
-/// rather than a re-encoding. The fifth family, the grep manifest, is
-/// checked the same way in `loonfs-grep`, which owns those bytes.
 #[test]
 fn every_durable_status_is_a_kind_tagged_object() {
     let fixtures = [
@@ -1006,9 +983,6 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
     );
 }
 
-/// The checkpoint status is a tagged object over two variants. A bare
-/// string is not one of them, whatever it spells, and neither is a tag this
-/// format does not define.
 #[test]
 fn checkpoint_records_reject_an_untagged_or_unknown_status() {
     for untagged in ["active", "released", "condemned"] {
@@ -1041,9 +1015,6 @@ fn active_checkpoint_records_reject_release_stamps() {
     );
 }
 
-/// A fork-owned record is the lease over one fork attempt, and its shape
-/// requires the expiry that makes an abandoned attempt collectable. A user
-/// pin without an expiry remains an ordinary permanent pin.
 #[test]
 fn fork_checkpoint_records_reject_a_missing_lease_expiry() {
     let message = assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
@@ -1064,10 +1035,6 @@ fn fork_checkpoint_records_reject_a_missing_lease_expiry() {
     );
 }
 
-/// The upload status is a tagged object over three variants, each carrying
-/// the instant its own transition happened. A bare string is not one of
-/// them, an undefined tag is not one of them, and neither is a defined tag
-/// without its stamp.
 #[test]
 fn upload_sessions_reject_an_untagged_or_incomplete_status() {
     for untagged in ["open", "condemned"] {
@@ -1120,7 +1087,6 @@ fn mutable_control_enums_fail_closed_on_unknown_variants() {
     );
 }
 
-/// Upload sessions reject mode fields outside the tagged `mode` object.
 #[test]
 fn upload_sessions_reject_the_pre_mode_flat_encoding() {
     // Reject a string mode and mode-specific fields at the top level.
@@ -1172,9 +1138,6 @@ fn upload_sessions_reject_the_pre_mode_flat_encoding() {
     );
 }
 
-/// Every reference a record holds names the object the session owns. A
-/// record that disagrees with itself describes two objects and could
-/// publish one while verifying the other, so it is refused at load.
 #[test]
 fn upload_sessions_reject_a_reference_to_another_content_object() {
     let other = serde_json::Value::from("con_99999999999999999999999999999999");
@@ -1230,7 +1193,6 @@ fn completed_direct_put_sessions_require_the_session_algorithm() {
     );
 }
 
-/// Rejects upload sessions that omit required mode fields.
 #[test]
 fn upload_sessions_reject_a_mode_missing_its_own_fields() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
@@ -1267,7 +1229,6 @@ fn upload_sessions_reject_a_mode_missing_its_own_fields() {
     );
 }
 
-/// Multipart sessions reject a part size of zero.
 #[test]
 fn upload_sessions_reject_a_zero_multipart_part_size() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
@@ -1582,7 +1543,6 @@ fn wal_decode_tolerates_additive_payload_fields() {
     assert_eq!(decoded.payload, envelope.payload);
 }
 
-/// Immutable WAL segments accept unknown predecessor-pointer fields.
 #[test]
 fn wal_decode_tolerates_an_additive_field_inside_the_predecessor_pointer() {
     let envelope = sample_wal_envelope();
@@ -1595,7 +1555,6 @@ fn wal_decode_tolerates_an_additive_field_inside_the_predecessor_pointer() {
     assert_eq!(decoded.payload, envelope.payload);
 }
 
-/// Immutable WAL segments accept unknown fields nested in tombstone deltas.
 #[test]
 fn wal_decode_tolerates_additive_fields_inside_tombstone_deltas() {
     let envelope = wal_envelope_with_deltas(vec![
@@ -1634,8 +1593,6 @@ fn wal_decode_tolerates_additive_fields_inside_tombstone_deltas() {
     assert_eq!(decoded.payload, envelope.payload);
 }
 
-/// Actor references reject unknown fields in every context because the same
-/// type is also used in request bodies.
 #[test]
 fn wal_decode_rejects_an_additive_field_inside_the_commit_attribution() {
     let document = wal_document_with_payload_edit(&sample_wal_envelope(), |payload| {
@@ -2155,10 +2112,6 @@ fn sst_block_data_payload_matches_golden_bytes() {
     );
 }
 
-/// The active-deletion family sorts ahead of every other prefix, so both of
-/// its rows — the listing and the removal that cancels it — sit inside the
-/// block the fixture above pins. This says so, the way the guards below say
-/// the same for the attribute and tombstone families.
 #[test]
 fn sst_block_data_first_block_covers_the_active_deletion_prefix() {
     let built = sample_segment_blocks();
@@ -2178,9 +2131,6 @@ fn sst_block_data_first_block_covers_the_active_deletion_prefix() {
     );
 }
 
-/// The fixture above pins the block's bytes. This test names the rows those
-/// bytes hold, so a regeneration that changed the sample cannot pass
-/// unnoticed.
 #[test]
 fn sst_block_data_golden_decodes_to_sample_rows() {
     let block = decode_golden_data_block("sst_block_data.v1.bin");
@@ -2219,7 +2169,6 @@ fn sst_block_data_revision_golden_decodes_to_sample_rows() {
     assert_eq!(block.rows, sample_revision_rows());
 }
 
-/// Covers the encodings for both populated and cleared attribute maps.
 #[test]
 fn sst_block_data_attribute_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden(
@@ -2257,8 +2206,6 @@ fn sst_block_data_commit_receipt_golden_decodes_to_sample_row() {
     assert_eq!(block.rows, [sample_commit_receipt_row()]);
 }
 
-/// Checks the stable encoding of a tombstone and its matching revoke. A
-/// separate fixture keeps block splitting from separating the pair.
 #[test]
 fn sst_block_data_tombstone_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden(
@@ -2340,9 +2287,6 @@ fn commit_receipt_rows_without_committed_by_are_corrupt() {
     );
 }
 
-/// The deleted binding is one value with three required parts. Two of the
-/// three is not a binding anyone can restore or render, and the decoder says
-/// so rather than filling the gap in with a default.
 #[test]
 fn tombstone_rows_reject_a_partial_deleted_direntry() {
     for missing in ["parent_inode_id", "name_key", "display_name"] {
@@ -2357,7 +2301,6 @@ fn tombstone_rows_reject_a_partial_deleted_direntry() {
     }
 }
 
-/// Immutable metadata rows accept unknown tombstone fields at every level.
 #[test]
 fn tombstone_rows_tolerate_additive_fields_at_every_level() {
     let expected = sample_tombstone_set_row();
@@ -2385,7 +2328,6 @@ fn tombstone_rows_tolerate_additive_fields_at_every_level() {
     }
 }
 
-/// A `revoke` ignores `deleted_direntry`, which is valid only for `set`.
 #[test]
 fn tombstone_revoke_rows_ignore_a_deleted_direntry() {
     let expected = sample_tombstone_revoke_row();
@@ -2401,10 +2343,6 @@ fn tombstone_revoke_rows_ignore_a_deleted_direntry() {
     );
 }
 
-/// The pre-grouping layout, exactly as it was written before the generation
-/// and the binding each became a shape of their own: `tombstone_seq` and
-/// `tombstone_delta_index` beside three optional binding fields, and a `set`
-/// with nothing in it.
 #[test]
 fn tombstone_rows_reject_the_pre_grouping_flat_encoding() {
     let row = row_cbor(&sample_tombstone_set_row());
@@ -2433,10 +2371,6 @@ fn tombstone_rows_reject_the_pre_grouping_flat_encoding() {
     );
 }
 
-/// A listed row copies the binding from the tombstone it derives from, so the
-/// same two rules hold on this side: the binding is one value with three
-/// required parts, and a `listed` states the field even when the deletion
-/// recorded no name.
 #[test]
 fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
     for missing in ["parent_inode_id", "name_key", "display_name"] {
@@ -2461,8 +2395,6 @@ fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
     );
 }
 
-/// Version-one provenance rows require a commit ID, actor, and timestamp.
-/// Decoding fails when any required field is missing.
 #[test]
 fn provenance_rows_reject_every_missing_required_field() {
     let cases = [
@@ -2524,8 +2456,6 @@ fn provenance_rows_reject_every_missing_required_field() {
 // Attribute rows: the retired tagged value is not a value
 // ---------------------------------------------------------------------------
 
-/// Attribute values are strings in this format. The retired tagged object is
-/// corruption rather than a shape the reader translates.
 #[test]
 fn attribute_rows_reject_the_retired_tagged_value_shape() {
     let mut row = row_cbor(&MetadataRow::AttributesRevision {
@@ -2554,8 +2484,6 @@ fn attribute_rows_reject_the_retired_tagged_value_shape() {
     );
 }
 
-/// The map's limits are enforced on the way in, so a stored row that breaks
-/// one fails to decode instead of decoding to something within the limits.
 #[test]
 fn attribute_rows_reject_a_map_over_its_limits() {
     let mut row = row_cbor(&MetadataRow::AttributesRevision {

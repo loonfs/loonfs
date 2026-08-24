@@ -1,41 +1,30 @@
-//! Live progress for the transfers that take human time.
+//! Progress output for file transfers.
 //!
-//! Two audiences, one accounting. A terminal gets a single line redrawn in
-//! place; `--json` gets one JSON object per line. Both go to standard error,
-//! because standard output already carries either the result document or the
-//! file's own bytes. Neither is produced when standard error is not a
-//! terminal and nobody asked for events, which is how `curl` behaves and why
-//! a piped `loonfs get` stays silent.
-//!
-//! The event names and field names are a contract: agents parse them.
+//! Human-readable and JSON progress are written to standard error so standard
+//! output remains available for results or file content. Event and field names
+//! are part of the CLI contract.
 
 use crate::args::RuntimeBehavior;
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::io::{IsTerminal, Write};
 use std::sync::Mutex;
 
-/// The shortest gap between two reports of one operation.
-///
-/// Four a second is live enough for a terminal and few enough that an agent
-/// parsing the stream reads less progress than transfer.
+/// Minimum interval between progress reports.
 const MIN_REPORT_INTERVAL_MS: u64 = 250;
 
 /// How a running transfer is described, decided once per invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProgressMode {
-    /// One line on a terminal's standard error, redrawn in place.
+    /// Redraw one line on standard error.
     Human,
-    /// One JSON object per line on standard error, beside the result
-    /// document on standard output.
+    /// Write one JSON object per line to standard error.
     Events,
-    /// Nothing at all.
+    /// Disable progress output.
     Off,
 }
 
 impl ProgressMode {
-    /// Reads the mode off the invocation: `--no-progress` silences it,
-    /// `--json` asks for events, and a terminal on standard error is what
-    /// makes the human line worth drawing.
+    /// Selects the progress mode from CLI flags and terminal detection.
     pub(crate) fn detect(no_progress: bool, json: bool) -> Self {
         if no_progress {
             Self::Off
@@ -71,33 +60,27 @@ impl ProgressOp {
     }
 }
 
-/// What the accounting knows right now.
+/// Current progress counters.
 #[derive(Debug)]
 struct ProgressState {
     bytes_done: u64,
-    /// Bytes this run actually moved, which is what a rate is about. It
-    /// trails `bytes_done` by whatever an interrupted run left behind.
+    /// Bytes transferred during this run, excluding resumed bytes.
     bytes_moved: u64,
     bytes_total: Option<u64>,
     files_done: u64,
     files_total: Option<u64>,
-    /// The file of a tree that started most recently, which is what a
-    /// terminal line names.
+    /// Most recently started file in a recursive transfer.
     current: Option<String>,
-    /// Byte count of the last report, so a report that would say exactly
-    /// what the last one said is skipped.
+    /// Byte count included in the last report.
     reported_bytes: Option<u64>,
     reported_ms: u64,
     reported_percent: Option<u64>,
-    /// Width of the human line currently on screen, so the next one can
-    /// erase what it does not cover.
+    /// Width of the current terminal line.
     drawn_width: usize,
 }
 
 impl ProgressState {
-    /// Whether a report is due: no more often than the interval allows,
-    /// unless the whole-number percentage moved, and never a repeat of what
-    /// the last report already said.
+    /// Returns whether progress changed enough to report.
     fn due(&self, now_ms: u64) -> bool {
         if self.reported_bytes == Some(self.bytes_done) {
             return false;
@@ -116,9 +99,7 @@ impl ProgressState {
         })
     }
 
-    /// Whether this operation covers more than one file — a tree, or an
-    /// operation that never said how many. What one file's progress means
-    /// for the whole depends on it.
+    /// Returns whether this operation may cover more than one file.
     fn many_files(&self) -> bool {
         self.files_total.is_none_or(|total| total > 1)
     }
@@ -558,8 +539,6 @@ mod tests {
         assert_eq!(eta_seconds(10, None, 1_000), None);
     }
 
-    /// One file states what it is and how far along; a tree adds the file
-    /// count and names the file that started last.
     #[test]
     fn a_terminal_line_says_what_a_watcher_needs() {
         let one_file = silent_reporter(ProgressOp::Get, "/docs/big.bin");

@@ -1,38 +1,12 @@
-//! The streaming metadata compactions this process is running, and the
-//! pressure that decides when one has to start.
+//! Tracks background metadata compactions.
 //!
-//! A maintenance step that plans one starts it here. The job is a background
-//! task the runner owns — it takes no admission permit, because it is not a
-//! bounded step and holding one for hours would starve every key behind it —
-//! and it is registered for the same drain every other spawned task is, so a
-//! shutdown cancels it and then waits for it.
+//! Each namespace may have one queued or running compaction. A process-wide
+//! semaphore limits total concurrency. Jobs do not consume bounded-step
+//! permits and are cancelled and joined during writer shutdown.
 //!
-//! Two things admit a job, and they answer different questions. A namespace
-//! slot stops two jobs rebuilding one namespace at once, which would waste
-//! one of them at finalization. A process-wide semaphore stops this process
-//! running one job per namespace it serves: each job holds a probe cache,
-//! decoded blocks for its iterators, and a segment builder per family, so the
-//! aggregate is what has to be capped whatever the per-namespace rule says. A
-//! job claims its slot first and then waits for a permit, and it is queued
-//! rather than refused while it waits.
-//!
-//! What this holds, per namespace, is two things. The one job claiming it:
-//! the plan, so the steps that follow know not to merge the group underneath
-//! it, and the cancellation token, so a shutdown can stop it. The plan is
-//! recorded when the slot is claimed rather than when the job starts reading,
-//! so a queued job's group is left alone exactly as a running job's is — and
-//! because it is left alone, no merge is published for it, so the count below
-//! neither climbs nor resets while the job waits. And a count per family
-//! group of the delta merges that have published over that group's frozen
-//! base, which is the one thing a single step cannot see: under sustained
-//! writes there is always another pair of delta runs to merge, so a planner
-//! deciding from one step's view would take that merge forever and never
-//! start the job that unfreezes the group's base.
-//!
-//! Both are in-memory and single-writer, and both are safe to lose. A restart
-//! forgets the running job, and a later step plans it again. A restart
-//! forgets the counts, and the next two published merges rebuild them, which
-//! delays one cycle and nothing else.
+//! The in-memory state also counts delta merges over each frozen base so the
+//! planner eventually requests a full compaction. Losing this state only
+//! delays replanning after restart.
 
 use super::{MaintenanceJobId, RunnerInner};
 use crate::{FsAdmin, NamespaceId};
@@ -44,16 +18,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-/// Streaming compactions this process runs at once, across every namespace it
-/// serves.
-///
-/// Small and fixed. A job is unpaced by design and holds real memory while it
-/// runs, so the useful question is how many of them a process may hold at
-/// once, and two is enough to keep one namespace's job from stalling every
-/// other namespace while still bounding the total. It is deliberately not a
-/// configuration knob: an operator's lever over maintenance is how often it
-/// runs, and a second concurrency number would only let a deployment raise
-/// this one until its memory answered for it.
+/// Maximum concurrent streaming compactions in one process.
 pub(crate) const MAX_CONCURRENT_COMPACTIONS: usize = 2;
 
 /// The one job a namespace may have, from the moment it claims the slot to
@@ -80,13 +45,7 @@ impl NamespaceCompactions {
     }
 }
 
-/// A handle on this process's running compactions, cloned into every handle
-/// whose maintenance steps may start one.
-///
-/// The map and the permits are held strongly and the runner weakly, which is
-/// the same shape [`super::MaintenanceHandle`] has and for the same reason: a
-/// step may consult the map at any time, and a step that outlives the writer
-/// that owns the runner starts nothing.
+/// Shared access to this process's background compactions.
 #[derive(Clone)]
 pub(crate) struct BackgroundCompactions {
     namespaces: Arc<Mutex<BTreeMap<NamespaceId, NamespaceCompactions>>>,
@@ -311,22 +270,11 @@ impl CompactionClaim {
         &self.cancellation
     }
 
-    /// Gives the claim back and puts the namespace's metadata maintenance
-    /// back in the queue, which is what a job ending is: the moment the
-    /// condition that blocked that maintenance changed.
+    /// Releases the claim and reschedules metadata maintenance.
     ///
-    /// A publication means the group is rebuilt and whatever arrived while
-    /// the job ran can fold now, so the key is nudged at once. Any other
-    /// ending means the job is to be planned again, and immediately would
-    /// only start the same long job again, so the key waits one
-    /// reconciliation interval. The sweep remains the net under both: these
-    /// nudges are hints like every other, and a lost one costs the delay to
-    /// the next sweep.
-    ///
-    /// The claim goes back before the nudge, and that order is the whole
-    /// reason this is one call. A step that reached the planner while the
-    /// slot was still held would leave alone the very group the job just
-    /// rebuilt, and then park.
+    /// Successful publication reschedules immediately. Other outcomes wait
+    /// one reconciliation interval before replanning. The claim is released
+    /// before scheduling so the next step can inspect the group.
     pub(crate) fn finished(self, published: bool) {
         let runner = Weak::clone(&self.slot.runner);
         let namespace_id = self.slot.namespace_id.clone();

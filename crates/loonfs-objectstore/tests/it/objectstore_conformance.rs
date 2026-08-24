@@ -140,10 +140,6 @@ async fn aws_s3_real_provider_conformance() {
     assert_provider_conformance(&store, true).await;
 }
 
-/// The streamed write against live AWS S3. Separate from the conformance
-/// sweep because it moves 24 MiB: it is the one exercise where the
-/// provider's real multipart rules — non-final part sizes, completion,
-/// assembly — meet a payload the server never held.
 #[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_streamed_write_round_trips() {
@@ -165,8 +161,6 @@ async fn aws_s3_streamed_write_round_trips() {
     assert_streamed_write_round_trips(&store).await;
 }
 
-/// The same streamed write against live Cloudflare R2, whose fixed
-/// non-final part size rule is the one this geometry has to satisfy.
 #[tokio::test]
 #[ignore = "requires real Cloudflare R2 credentials"]
 async fn cloudflare_r2_streamed_write_round_trips() {

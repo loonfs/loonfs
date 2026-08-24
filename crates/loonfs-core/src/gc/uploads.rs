@@ -302,23 +302,10 @@ impl ContentReferences {
 /// checkpoints. Other namespaces cannot reference these content IDs because
 /// each namespace publishes content created by its own upload sessions.
 ///
-/// Only the manifest half is read here. The chain's references were
-/// harvested off the bodies marking already decoded, so this half is a set
-/// union rather than a second pass over the same objects.
-///
-/// Every manifest root read costs a budget unit — one per manifest opened,
-/// one per page of revision rows — so this scan is part of the pass's bound
-/// rather than an exception to it. Running out stops the scan where it
-/// stands and reports [`CollectedReferences::Deferred`]; the caller retains
-/// the session that triggered it, marks the pass as having deferred content
-/// reclamation, and carries on. A namespace whose scan never fits therefore
-/// keeps its completed content — `max_objects` has to be at least the
-/// scan's size for content reclamation to happen at all — but the sweep
-/// around it still advances, which is the difference between leaking
-/// content for a while and not collecting anything ever.
-///
-/// Every return is a verdict the memo can hold: an attempt that has run
-/// never comes back as [`CollectedReferences::NotYet`].
+/// WAL references were collected while marking the chain. Manifest reads and
+/// revision pages consume the pass budget. If the budget runs out, the scan
+/// returns [`CollectedReferences::Deferred`] and completed content is retained
+/// until a later pass can finish the scan.
 pub(super) async fn collect_referenced_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

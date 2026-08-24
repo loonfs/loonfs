@@ -698,8 +698,6 @@ mod tests {
             .contains("X-Amz-Security-Token=temporary-session-token"));
     }
 
-    /// The checksum readback rides the signature the same way the write's
-    /// checksum does, so an operator cannot strip it in flight.
     #[tokio::test]
     async fn presigned_head_signs_the_checksum_mode_header() {
         let signed = presigner(Some("tenant-a"), None)
@@ -727,10 +725,6 @@ mod tests {
             .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/content-stores/"));
     }
 
-    /// The read capability signs `host` and nothing else, which is what
-    /// leaves `Range` outside the signature: one issued URL serves ranged,
-    /// resumed, and parallel reads without another round trip to the
-    /// server. The live suite proves the provider agrees.
     #[tokio::test]
     async fn presigned_get_signs_only_the_host_so_range_stays_unsigned() {
         let signed = presigner(Some("tenant-a"), None)
@@ -757,10 +751,6 @@ mod tests {
         assert!(!signed.url.contains("secret"));
     }
 
-    /// Reads and writes of the same object address the same URL: whatever
-    /// the key prefix and endpoint style resolve to for one, they resolve
-    /// to for the other, so a deployment cannot sign a write it is unable
-    /// to sign a read of.
     #[tokio::test]
     async fn presigned_get_addresses_the_same_object_the_write_did() {
         let signer = presigner(
@@ -793,14 +783,6 @@ mod tests {
         assert_eq!(object_of(&read.url), object_of(&written.url));
     }
 
-    /// The signer and the provider client resolve an object key to the same
-    /// string, whatever spelling of a prefix the deployment configured.
-    ///
-    /// A whitespace-only prefix is the case that used to split them: the
-    /// store normalizes it away and works in the unprefixed keyspace, while
-    /// the signer kept it raw and addressed `%20%20%20/...`. An object
-    /// written through such a capability is committed and then invisible to
-    /// every read, listing, and collection the store performs.
     #[tokio::test]
     async fn the_signer_and_the_store_resolve_a_key_to_the_same_string() {
         for raw_prefix in [None, Some("   "), Some(""), Some("tenant-a")] {
@@ -833,8 +815,6 @@ mod tests {
         }
     }
 
-    /// A prefix the store would refuse is refused here too, at construction,
-    /// rather than producing capabilities the store cannot address.
     #[test]
     fn an_unusable_key_prefix_fails_construction() {
         for raw_prefix in ["tenant-a//bad", "../escape"] {

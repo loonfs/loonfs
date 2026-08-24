@@ -628,7 +628,6 @@ mod tests {
         }
     }
 
-    /// Loading a config preserves its credential source without resolving it.
     #[test]
     fn ambient_credential_sources_survive_loading_with_environment_credentials_set() {
         let path = write_config(
@@ -1716,9 +1715,6 @@ root = "/tmp/loonfs-server"
         }
     }
 
-    /// A disk tier smaller than one block holds nothing on disk, and foyer
-    /// says so in a warning rather than an error. The config check is what
-    /// makes it a startup failure with a number in it.
     #[test]
     fn a_local_cache_disk_tier_has_a_floor() {
         let with_disk_bytes = |disk_bytes: u64| {
@@ -2023,8 +2019,6 @@ root = "/tmp/loonfs-server"
         }
     }
 
-    /// Every server example config must keep parsing into [`ServerConfig`]
-    /// (including under `deny_unknown_fields`) and passing field validation.
     #[test]
     fn server_example_configs_parse_and_validate() {
         let configs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config");

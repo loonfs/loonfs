@@ -236,10 +236,6 @@ root = "/tmp/loonfs-check-config-unused"
     );
 }
 
-/// The check loads the TLS identity, so an identity a start could not use
-/// fails the check too. Field validation passes both configs below: each one
-/// names two non-empty paths, which is all the config file can say about
-/// them.
 #[test]
 fn check_config_reports_a_tls_identity_it_cannot_load() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -291,9 +287,6 @@ fn check_config_reports_a_tls_identity_it_cannot_load() {
     );
 }
 
-/// The check opens the local block cache, so a directory a start could not
-/// own fails the check too. A plain file where the directory belongs is one
-/// way to be unable to own it, and it fails whichever user runs the test.
 #[test]
 fn check_config_reports_a_local_cache_it_cannot_open() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -323,12 +316,6 @@ fn check_config_reports_a_local_cache_it_cannot_open() {
     );
 }
 
-/// A configured identity and a configured cache both pass, and the check
-/// leaves the cache directory the way the start that follows it needs to
-/// find it.
-///
-/// The second run is what proves the release: it calls the same open a start
-/// calls, so a lock the first run still held would fail it.
 #[test]
 fn check_config_opens_the_local_cache_and_leaves_it_openable() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -373,8 +360,6 @@ fn check_config_opens_the_local_cache_and_leaves_it_openable() {
     );
 }
 
-/// Holding the configured port during the check proves the check never binds
-/// it: a server that bound would fail with the address already in use.
 #[test]
 fn check_config_does_not_bind_the_port() {
     let dir = tempfile::tempdir().expect("tempdir");
