@@ -67,27 +67,28 @@ impl PublishOutcome {
 /// One reclaimable family: its label, and the count a pass reports for it.
 type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 
-/// Reclaimable object families one collection pass counts, named exactly as
-/// [`GcResponse`] names them.
+/// Reclaimable object families one collection pass counts.
+///
+/// Metric labels remain unchanged even though the API fields are now grouped.
 const GC_CATEGORIES: [GcCategory; 9] = [
-    ("deleted_wal_segments", |gc| gc.deleted_wal_segments),
+    ("deleted_wal_segments", |gc| gc.deleted.wal_segments),
     ("deleted_metadata_segments", |gc| {
-        gc.deleted_metadata_segments
+        gc.deleted.metadata_segments
     }),
-    ("deleted_manifests", |gc| gc.deleted_manifests),
+    ("deleted_manifests", |gc| gc.deleted.manifests),
     ("deleted_checkpoint_records", |gc| {
-        gc.deleted_checkpoint_records
+        gc.deleted.checkpoint_records
     }),
     ("released_fork_checkpoints", |gc| {
-        gc.released_fork_checkpoints
+        gc.released_checkpoints.fork
     }),
     ("released_expired_checkpoints", |gc| {
-        gc.released_expired_checkpoints
+        gc.released_checkpoints.expired
     }),
-    ("deleted_upload_sessions", |gc| gc.deleted_upload_sessions),
-    ("deleted_content_objects", |gc| gc.deleted_content_objects),
+    ("deleted_upload_sessions", |gc| gc.deleted.upload_sessions),
+    ("deleted_content_objects", |gc| gc.deleted.content_objects),
     ("released_missing_basis_checkpoints", |gc| {
-        gc.released_missing_basis_checkpoints
+        gc.released_checkpoints.missing_basis
     }),
 ];
 
@@ -1438,21 +1439,18 @@ mod tests {
         let instruments = RuntimeInstruments::new(Some(recorder.clone()));
         let mut gc = GcResponse {
             namespace_id: loonfs_test_support::ids::namespace_id("demo"),
-            deleted_wal_segments: 3,
-            deleted_metadata_segments: 0,
-            deleted_manifests: 0,
-            deleted_checkpoint_records: 0,
-            released_fork_checkpoints: 0,
-            released_expired_checkpoints: 0,
-            deleted_upload_sessions: 0,
-            deleted_content_objects: 5,
-            released_missing_basis_checkpoints: 0,
+            deleted: loonfs_api::DeletedObjectCounts {
+                wal_segments: 3,
+                content_objects: 5,
+                ..loonfs_api::DeletedObjectCounts::default()
+            },
+            released_checkpoints: loonfs_api::ReleasedCheckpointCounts::default(),
             retained_candidates: 2,
             retained: loonfs_api::RetainedCandidates {
                 referenced: 2,
                 ..loonfs_api::RetainedCandidates::default()
             },
-            degraded_retention: false,
+            retention_degraded: false,
             content_reclamation_deferred: false,
             budget_exhausted: false,
             next_cursor: None,
@@ -1460,7 +1458,7 @@ mod tests {
         };
 
         instruments.gc_pass(&gc);
-        gc.deleted_wal_segments = 1;
+        gc.deleted.wal_segments = 1;
         instruments.gc_pass(&gc);
 
         let snapshot = recorder.snapshot();

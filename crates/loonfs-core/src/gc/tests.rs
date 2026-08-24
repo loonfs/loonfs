@@ -384,8 +384,8 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
         .expect("gc pass");
 
     // The only segment sits at the floor with no replay gap above it.
-    assert_eq!(report.deleted_wal_segments, 1);
-    assert!(!report.degraded_retention);
+    assert_eq!(report.deleted.wal_segments, 1);
+    assert!(!report.retention_degraded);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -515,9 +515,9 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass");
-    assert_eq!(report.released_missing_basis_checkpoints, 1);
+    assert_eq!(report.released_checkpoints.missing_basis, 1);
     assert!(
-        !report.degraded_retention,
+        !report.retention_degraded,
         "a verifiably absent basis is not ambiguity"
     );
     let released = crate::checkpoint::record::load_checkpoint_record(
@@ -542,8 +542,8 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
     let report = gc_namespace(&store, &namespace_id, &config(), &again)
         .await
         .expect("second gc pass");
-    assert_eq!(report.released_missing_basis_checkpoints, 0);
-    assert!(!report.degraded_retention);
+    assert_eq!(report.released_checkpoints.missing_basis, 0);
+    assert!(!report.retention_degraded);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -576,19 +576,19 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass");
-    assert!(report.deleted_wal_segments >= 1);
-    assert!(report.deleted_metadata_segments >= 1);
-    assert!(report.deleted_manifests >= 1);
+    assert!(report.deleted.wal_segments >= 1);
+    assert!(report.deleted.metadata_segments >= 1);
+    assert!(report.deleted.manifests >= 1);
     // The pin on a tombstone has one route out, the same as every other
     // pin: released here, deleted a grace window after that release.
-    assert_eq!(report.released_expired_checkpoints, 1);
-    assert!(!report.degraded_retention);
+    assert_eq!(report.released_checkpoints.expired, 1);
+    assert!(!report.retention_degraded);
     let reaped = context(aged.now_ms + GRACE_MS);
     let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
         .await
         .expect("gc pass past the release grace window");
-    assert!(report.deleted_checkpoint_records >= 1);
-    assert!(!report.degraded_retention);
+    assert!(report.deleted.checkpoint_records >= 1);
+    assert!(!report.retention_degraded);
 
     for prefix in [
         wal_segment_prefix(&namespace_id),
@@ -619,9 +619,9 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     let report = gc_namespace(&store, &namespace_id, &config(), &again)
         .await
         .expect("second gc pass");
-    assert_eq!(report.deleted_wal_segments, 0);
-    assert_eq!(report.deleted_manifests, 0);
-    assert!(!report.degraded_retention);
+    assert_eq!(report.deleted.wal_segments, 0);
+    assert_eq!(report.deleted.manifests, 0);
+    assert!(!report.retention_degraded);
 }
 
 #[tokio::test]
@@ -649,8 +649,8 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect("gc pass with live clone");
-    assert_eq!(report.released_fork_checkpoints, 0);
-    assert!(!report.degraded_retention);
+    assert_eq!(report.released_checkpoints.fork, 0);
+    assert!(!report.retention_degraded);
     assert!(
         store.head(&basis_key).await.expect("head basis").is_some(),
         "fork basis must survive while the clone lives"
@@ -674,8 +674,8 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect("gc pass after clone delete");
-    assert_eq!(report.released_fork_checkpoints, 1);
-    assert!(report.deleted_manifests >= 1);
+    assert_eq!(report.released_checkpoints.fork, 1);
+    assert!(report.deleted.manifests >= 1);
     assert!(
         store.head(&basis_key).await.expect("head basis").is_none(),
         "the basis ages out once no living target needs it"
@@ -687,9 +687,9 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let report = gc_namespace(&store, &source, &config(), &again)
         .await
         .expect("idempotent pass");
-    assert_eq!(report.released_fork_checkpoints, 0);
-    assert_eq!(report.deleted_manifests, 0);
-    assert!(!report.degraded_retention);
+    assert_eq!(report.released_checkpoints.fork, 0);
+    assert_eq!(report.deleted.manifests, 0);
+    assert!(!report.retention_degraded);
 }
 
 /// The whole upload arm end to end: a lease that passes turns into a
@@ -717,7 +717,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let report = gc_namespace(&store, &namespace_id, &config(), &inside)
         .await
         .expect("gc pass inside the lease");
-    assert_eq!(report.deleted_upload_sessions, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
     assert!(store.head(&content_key).await.expect("head").is_some());
 
     // Past the lease plus a grace the session is aborted and the object it
@@ -727,7 +727,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
         .await
         .expect("gc pass past the lease");
     assert_eq!(
-        report.deleted_upload_sessions, 0,
+        report.deleted.upload_sessions, 0,
         "the record outlives its abort"
     );
     let session = read_upload_session(&store, &namespace_id, &upload_id)
@@ -747,9 +747,9 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
         .await
         .expect("gc pass past the abort grace");
-    assert_eq!(report.deleted_upload_sessions, 1);
+    assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(
-        report.deleted_content_objects, 0,
+        report.deleted.content_objects, 0,
         "the abort half's unconditional cleanup is not a reclamation it can count"
     );
     assert!(store.head(&session_key).await.expect("head").is_none());
@@ -758,7 +758,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let report = gc_namespace(&store, &namespace_id, &config(), &again)
         .await
         .expect("gc pass after the sweep");
-    assert_eq!(report.deleted_upload_sessions, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
 }
 
 /// A pass knows when the things it retained stop being retained, because
@@ -826,7 +826,7 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
     let report = gc_namespace(&store, &namespace_id, &config(), &expired)
         .await
         .expect("gc pass past the lease");
-    assert_eq!(report.deleted_upload_sessions, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
     let reclaim_at_ms = report
         .next_reclamation_at_ms
         .expect("the abort this pass performed is a deadline it created");
@@ -838,7 +838,7 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
     let report = gc_namespace(&store, &namespace_id, &config(), &reclaiming)
         .await
         .expect("gc pass at the reported deadline");
-    assert_eq!(report.deleted_upload_sessions, 1);
+    assert_eq!(report.deleted.upload_sessions, 1);
     assert!(store.head(&session_key).await.expect("head").is_none());
     assert_eq!(
         report.next_reclamation_at_ms, None,
@@ -891,7 +891,7 @@ async fn upload_gc_reaps_a_session_that_never_staged_anything() {
         .await
         .expect("gc pass past the abort grace");
 
-    assert_eq!(report.deleted_upload_sessions, 1);
+    assert_eq!(report.deleted.upload_sessions, 1);
     assert!(store.head(&session_key).await.expect("head").is_none());
 }
 
@@ -929,7 +929,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let (report, completion) = tokio::join!(gc, complete);
     completion.expect("completion wins the blocked abort CAS");
     let report = report.expect("gc pass");
-    assert_eq!(report.deleted_upload_sessions, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
     let session = read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .expect("completed session retained");
@@ -1092,8 +1092,8 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
         .await
         .expect("gc pass inside the content grace");
 
-    assert_eq!(report.deleted_upload_sessions, 0);
-    assert_eq!(report.deleted_content_objects, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
+    assert_eq!(report.deleted.content_objects, 0);
     assert!(store.head(&content_key).await.expect("head").is_some());
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
         .await
@@ -1123,8 +1123,8 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
         .await
         .expect("gc pass past the content grace");
 
-    assert_eq!(report.deleted_upload_sessions, 1);
-    assert_eq!(report.deleted_content_objects, 1);
+    assert_eq!(report.deleted.upload_sessions, 1);
+    assert_eq!(report.deleted.content_objects, 1);
     assert!(
         store.head(&content_key).await.expect("head").is_none(),
         "completed content nothing published is reclaimable"
@@ -1178,11 +1178,11 @@ async fn content_gc_never_reclaims_published_content() {
             .expect("gc pass past the content grace");
 
         assert_eq!(
-            report.deleted_upload_sessions, 1,
+            report.deleted.upload_sessions, 1,
             "materialize={materialize}"
         );
         assert_eq!(
-            report.deleted_content_objects, 0,
+            report.deleted.content_objects, 0,
             "materialize={materialize}"
         );
         assert!(
@@ -1192,7 +1192,7 @@ async fn content_gc_never_reclaims_published_content() {
         assert!(read_upload_session(&store, &namespace_id, &upload_id)
             .await
             .is_none());
-        assert!(!report.degraded_retention);
+        assert!(!report.retention_degraded);
     }
 }
 
@@ -1350,8 +1350,8 @@ async fn content_reference_scan_retains_content_when_metadata_rows_do_not_read()
     let report = gc_namespace(&store, &namespace_id, &config(), &past)
         .await
         .expect("a metadata-row store failure retains conservatively");
-    assert_eq!(report.deleted_content_objects, 0);
-    assert_eq!(report.deleted_upload_sessions, 0);
+    assert_eq!(report.deleted.content_objects, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
     assert!(store
         .inner()
         .head(&content_key)
@@ -1402,8 +1402,8 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
         let pass = gc_namespace(&store, &namespace_id, &tiny, &past)
             .await
             .expect("one-object pass");
-        assert_eq!(pass.deleted_upload_sessions, 0);
-        assert_eq!(pass.deleted_content_objects, 0);
+        assert_eq!(pass.deleted.upload_sessions, 0);
+        assert_eq!(pass.deleted.content_objects, 0);
         deferred |= pass.content_reclamation_deferred;
         let Some(next) = pass.next_cursor else {
             break;
@@ -1439,8 +1439,8 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
         .await
         .expect("pass with room for the scan");
     assert!(!resumed.content_reclamation_deferred);
-    assert_eq!(resumed.deleted_upload_sessions, 1);
-    assert_eq!(resumed.deleted_content_objects, 1);
+    assert_eq!(resumed.deleted.upload_sessions, 1);
+    assert_eq!(resumed.deleted.content_objects, 1);
     assert!(store.head(&content_key).await.expect("head").is_none());
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
         .await
@@ -1522,7 +1522,7 @@ async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
     assert!(report.budget_exhausted);
     assert_eq!(report.next_cursor, None);
     assert_eq!(report.retained_candidates, 0, "no candidate was examined");
-    assert_eq!(report.deleted_upload_sessions, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
     assert_eq!(
         store.count(OperationClass::Read),
         0,
@@ -1535,7 +1535,7 @@ async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
         .await
         .expect("unbounded rerun");
     assert!(!resumed.budget_exhausted);
-    assert_eq!(resumed.deleted_upload_sessions, 1);
+    assert_eq!(resumed.deleted.upload_sessions, 1);
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .is_none());
@@ -1585,12 +1585,12 @@ async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
     assert_eq!(report.retained_candidates, 0);
     assert_eq!(
         (
-            report.deleted_wal_segments,
-            report.deleted_metadata_segments,
-            report.deleted_manifests,
-            report.deleted_checkpoint_records,
-            report.deleted_upload_sessions,
-            report.deleted_content_objects,
+            report.deleted.wal_segments,
+            report.deleted.metadata_segments,
+            report.deleted.manifests,
+            report.deleted.checkpoint_records,
+            report.deleted.upload_sessions,
+            report.deleted.content_objects,
         ),
         (0, 0, 0, 0, 0, 0)
     );
@@ -1740,12 +1740,12 @@ async fn a_pass_that_decides_nothing_echoes_its_cursor_verbatim() {
     assert_eq!(parked.retained_candidates, 0);
     assert_eq!(
         (
-            parked.deleted_wal_segments,
-            parked.deleted_metadata_segments,
-            parked.deleted_manifests,
-            parked.deleted_checkpoint_records,
-            parked.deleted_upload_sessions,
-            parked.deleted_content_objects,
+            parked.deleted.wal_segments,
+            parked.deleted.metadata_segments,
+            parked.deleted.manifests,
+            parked.deleted.checkpoint_records,
+            parked.deleted.upload_sessions,
+            parked.deleted.content_objects,
         ),
         (0, 0, 0, 0, 0, 0)
     );
@@ -1801,12 +1801,12 @@ async fn a_complete_pass_fetches_each_retained_segment_once() {
         assert_eq!(*count, 1, "segment `{key}` was fetched {count} times");
     }
     assert_eq!(
-        report.deleted_content_objects, 0,
+        report.deleted.content_objects, 0,
         "a reference that only a retained WAL record carries still protects its bytes"
     );
     assert!(store.head(&content_key).await.expect("head").is_some());
     assert_eq!(
-        report.deleted_upload_sessions, 1,
+        report.deleted.upload_sessions, 1,
         "the session itself has said everything it will say"
     );
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
@@ -1847,10 +1847,10 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
     assert_eq!(report.retained_candidates, 0);
     assert_eq!(
         (
-            report.deleted_wal_segments,
-            report.deleted_metadata_segments,
-            report.deleted_manifests,
-            report.deleted_checkpoint_records,
+            report.deleted.wal_segments,
+            report.deleted.metadata_segments,
+            report.deleted.manifests,
+            report.deleted.checkpoint_records,
         ),
         (0, 0, 0, 0)
     );
@@ -1920,7 +1920,7 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
             let pass = gc_namespace(&store, &namespace_id, &bounded, &past)
                 .await
                 .expect("bounded pass");
-            assert_eq!(pass.deleted_content_objects, 0, "max_objects={max_objects}");
+            assert_eq!(pass.deleted.content_objects, 0, "max_objects={max_objects}");
             assert!(
                 store.head(&content_key).await.expect("head").is_some(),
                 "max_objects={max_objects}: referenced content survives every budget"
@@ -1989,16 +1989,16 @@ async fn gc_retains_everything_inside_the_grace_window() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted_wal_segments, 0);
-    assert_eq!(report.deleted_metadata_segments, 0);
-    assert_eq!(report.deleted_manifests, 0);
+    assert_eq!(report.deleted.wal_segments, 0);
+    assert_eq!(report.deleted.metadata_segments, 0);
+    assert_eq!(report.deleted.manifests, 0);
     assert!(report.retained_candidates > 0);
     // The breakdown is the same total, said in reasons: nothing is counted
     // into one without the other, so the two can never disagree.
     assert_eq!(reason_total(&report), report.retained_candidates);
     // Everything unreachable here is simply young, and the pass says so
     // rather than leaving the operator to guess between age and reachability.
-    assert!(report.retained.grace_window > 0);
+    assert!(report.retained.within_grace_window > 0);
     assert_eq!(report.retained.no_provider_timestamp, 0);
     stat_root(&store, &namespace_id).await;
 }
@@ -2115,7 +2115,7 @@ async fn a_read_pinned_before_a_fold_still_reads_after_the_sweep() {
         .await
         .expect("the pinned anchor still resolves through its own segments");
     assert_eq!(
-        report.deleted_metadata_segments, 0,
+        report.deleted.metadata_segments, 0,
         "the fold unreferenced these segments a moment ago, not a grace window ago"
     );
 
@@ -2126,7 +2126,7 @@ async fn a_read_pinned_before_a_fold_still_reads_after_the_sweep() {
         .await
         .expect("gc pass a grace window after the fold");
     assert!(
-        report.deleted_metadata_segments > 0,
+        report.deleted.metadata_segments > 0,
         "folded-away segments must still be reclaimed, one window later"
     );
     stat_root(&store, &namespace_id).await;
@@ -2260,11 +2260,11 @@ async fn a_live_jobs_staged_output_survives_however_old_it_is() {
         .await
         .expect("gc pass while the job holds its lease");
     assert_eq!(
-        report.deleted_metadata_segments, 0,
+        report.deleted.metadata_segments, 0,
         "a running job's output must not be reaped"
     );
     assert_eq!(
-        report.retained.grace_window, 2,
+        report.retained.within_grace_window, 2,
         "the segment and the lease are both retained by the lease"
     );
     for key in [&staged_key, &lease_key] {
@@ -2301,7 +2301,7 @@ async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
         .await
         .expect("gc pass once the lease expired");
     assert_eq!(
-        report.deleted_metadata_segments, 0,
+        report.deleted.metadata_segments, 0,
         "an expired lease still leaves the objects their own window"
     );
     assert!(store
@@ -2323,7 +2323,7 @@ async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
         .await
         .expect("gc pass once no job could still be running");
     assert_eq!(
-        report.deleted_metadata_segments, 1,
+        report.deleted.metadata_segments, 1,
         "a dead job's orphan must be reaped"
     );
     for key in [&staged_key, &lease_key] {
@@ -2354,7 +2354,7 @@ async fn staged_output_with_no_lease_at_all_is_reclaimed() {
     let report = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
         .await
         .expect("gc pass over an unclaimed prefix");
-    assert_eq!(report.deleted_metadata_segments, 1);
+    assert_eq!(report.deleted.metadata_segments, 1);
     assert!(store
         .head(&staged_key)
         .await
@@ -2567,7 +2567,7 @@ async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
         .await
         .expect("gc pass long after the job published");
     assert!(
-        report.deleted_metadata_segments > 0,
+        report.deleted.metadata_segments > 0,
         "the pass must have reaped the runs the job replaced, or it proves nothing"
     );
     for key in &staged {
@@ -2787,9 +2787,9 @@ async fn an_object_the_anchor_predates_is_kept_by_its_own_age_alone() {
     let report = gc_namespace(&store, &namespace_id, &config(), &young)
         .await
         .expect("gc pass while the orphan is young");
-    assert_eq!(report.deleted_metadata_segments, 0);
+    assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(
-        report.retained.grace_window, 1,
+        report.retained.within_grace_window, 1,
         "the orphan is kept by its own write time, and the pass says so"
     );
     assert_eq!(report.retained.no_reference_manifest, 0);
@@ -2798,7 +2798,7 @@ async fn an_object_the_anchor_predates_is_kept_by_its_own_age_alone() {
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass once the orphan has aged");
-    assert_eq!(report.deleted_metadata_segments, 1);
+    assert_eq!(report.deleted.metadata_segments, 1);
     assert!(store
         .head(&orphan_key)
         .await
@@ -2841,9 +2841,9 @@ async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
         .await
         .expect("gc pass with no aged manifest");
 
-    assert_eq!(report.deleted_metadata_segments, 0);
-    assert_eq!(report.deleted_wal_segments, 0);
-    assert_eq!(report.deleted_manifests, 0);
+    assert_eq!(report.deleted.metadata_segments, 0);
+    assert_eq!(report.deleted.wal_segments, 0);
+    assert_eq!(report.deleted.manifests, 0);
     assert_eq!(
         report.retained.no_reference_manifest, 1,
         "the aged orphan is the one candidate the missing anchor spared"
@@ -2860,7 +2860,7 @@ async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass once a manifest anchors it");
-    assert_eq!(report.deleted_metadata_segments, 1);
+    assert_eq!(report.deleted.metadata_segments, 1);
     assert_eq!(report.retained.no_reference_manifest, 0);
 }
 
@@ -2900,9 +2900,9 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
     assert_eq!(report.retained_candidates, 0, "no candidate was examined");
     assert_eq!(
         (
-            report.deleted_wal_segments,
-            report.deleted_metadata_segments,
-            report.deleted_manifests,
+            report.deleted.wal_segments,
+            report.deleted.metadata_segments,
+            report.deleted.manifests,
         ),
         (0, 0, 0)
     );
@@ -2918,7 +2918,7 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
         .await
         .expect("unbounded rerun");
     assert!(!report.budget_exhausted);
-    assert_eq!(report.deleted_wal_segments, 1);
+    assert_eq!(report.deleted.wal_segments, 1);
 }
 
 /// A pass that keeps a checkpoint record says so as a checkpoint decision,
@@ -2948,7 +2948,7 @@ async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted_checkpoint_records, 0);
+    assert_eq!(report.deleted.checkpoint_records, 0);
     assert_eq!(report.retained.checkpoint_not_releasable, 1);
     assert_eq!(reason_total(&report), report.retained_candidates);
 }
@@ -2977,7 +2977,7 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted_wal_segments, 1);
+    assert_eq!(report.deleted.wal_segments, 1);
     // Latest reads replay the retained tail over the root basis.
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
@@ -3024,8 +3024,8 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
 
     // Pass one deletes the dead record but the record still rooted its
     // basis, so the referenced manifest and segments survive the pass.
-    assert_eq!(first_pass.deleted_checkpoint_records, 1);
-    assert!(!first_pass.degraded_retention);
+    assert_eq!(first_pass.deleted.checkpoint_records, 1);
+    assert!(!first_pass.retention_degraded);
     assert!(
         crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
@@ -3055,7 +3055,7 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
         .await
         .expect("second gc pass");
     assert!(
-        second_pass.deleted_manifests >= 1,
+        second_pass.deleted.manifests >= 1,
         "dead basis manifest reaped once its record is gone"
     );
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
@@ -3103,7 +3103,7 @@ async fn gc_retains_unrecognized_manifest_keys() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted_manifests, 0);
+    assert_eq!(report.deleted.manifests, 0);
     for (key, expected) in foreign_objects {
         let actual = store
             .get(&key, None)
@@ -3158,8 +3158,8 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     // The first flush materialized the namespace's first manifest and the
     // next two superseded it; only the root's manifest is reachable. Its
     // segments are all still referenced (a flush only appends L0 runs).
-    assert_eq!(report.deleted_manifests, 2);
-    assert!(!report.degraded_retention);
+    assert_eq!(report.deleted.manifests, 2);
+    assert!(!report.retention_degraded);
     let manifests_left = store
         .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
@@ -3194,10 +3194,10 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .await
         .expect("gc pass after reorganization");
     assert!(
-        after_fold.deleted_metadata_segments > 0,
+        after_fold.deleted.metadata_segments > 0,
         "folded-away run segments become collectable"
     );
-    assert!(!after_fold.degraded_retention);
+    assert!(!after_fold.retention_degraded);
 
     stat_root(&store, &namespace_id).await;
     let view = load_current_metadata_view(&store, &namespace_id)
@@ -3245,12 +3245,12 @@ async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
     let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("first gc pass");
-    assert_eq!(first_pass.deleted_checkpoint_records, 1);
+    assert_eq!(first_pass.deleted.checkpoint_records, 1);
 
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("second gc pass");
-    assert!(second_pass.deleted_manifests >= 1);
+    assert!(second_pass.deleted.manifests >= 1);
     // Releasing an already-reaped record stays idempotent success.
     let after_reap =
         crate::checkpoint::release_checkpoint(&store, &namespace_id, &pinned.checkpoint_id, &setup)
@@ -3307,7 +3307,7 @@ async fn caller_release_and_expiry_release_converge_on_the_winners_stamp() {
         .await
         .expect("gc pass");
     assert_eq!(
-        report.released_expired_checkpoints, 1,
+        report.released_checkpoints.expired, 1,
         "only the record the caller left alone is released here"
     );
     assert_eq!(
@@ -3393,8 +3393,8 @@ async fn a_release_that_loses_its_etag_retains_without_erroring() {
         pinned.checkpoint_id
     );
     let report = report.expect("the pass finishes");
-    assert_eq!(report.released_expired_checkpoints, 0);
-    assert_eq!(report.deleted_checkpoint_records, 0);
+    assert_eq!(report.released_checkpoints.expired, 0);
+    assert_eq!(report.deleted.checkpoint_records, 0);
     assert_eq!(
         checkpoint_lifecycle(&store, &namespace_id, &pinned.checkpoint_id).await,
         CheckpointStatus::Released {
@@ -3442,7 +3442,7 @@ async fn gc_deletes_a_released_record_only_after_its_release_ages() {
         .await
         .expect("pass inside the release grace window");
     assert_eq!(
-        report.deleted_checkpoint_records, 0,
+        report.deleted.checkpoint_records, 0,
         "an old object with a young release is retained"
     );
     assert!(crate::checkpoint::load_checkpoint_record(
@@ -3458,7 +3458,7 @@ async fn gc_deletes_a_released_record_only_after_its_release_ages() {
     let report = gc_namespace(&store, &namespace_id, &config(), &past_grace)
         .await
         .expect("pass past the release grace window");
-    assert_eq!(report.deleted_checkpoint_records, 1);
+    assert_eq!(report.deleted.checkpoint_records, 1);
     assert!(crate::checkpoint::load_checkpoint_record(
         &store,
         &namespace_id,
@@ -3523,8 +3523,8 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     let first_pass = gc_namespace(&store, &namespace_id, &config(), &expired)
         .await
         .expect("post-expiry pass");
-    assert_eq!(first_pass.released_expired_checkpoints, 1);
-    assert_eq!(first_pass.deleted_checkpoint_records, 0);
+    assert_eq!(first_pass.released_checkpoints.expired, 1);
+    assert_eq!(first_pass.deleted.checkpoint_records, 0);
     assert_eq!(
         checkpoint_lifecycle(&store, &namespace_id, &expiring.checkpoint_id).await,
         CheckpointStatus::Released {
@@ -3535,7 +3535,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged_out)
         .await
         .expect("second post-expiry pass");
-    assert_eq!(second_pass.deleted_checkpoint_records, 1);
+    assert_eq!(second_pass.deleted.checkpoint_records, 1);
     assert!(crate::checkpoint::load_checkpoint_record(
         &store,
         &namespace_id,
@@ -3611,7 +3611,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("first gc pass");
-    assert_eq!(first_pass.deleted_checkpoint_records, 1);
+    assert_eq!(first_pass.deleted.checkpoint_records, 1);
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("second gc pass");
@@ -3699,8 +3699,8 @@ async fn gc_retains_active_checkpoint_bases() {
 
     // Only the unpinned bootstrap manifest is collectable; both active
     // checkpoint bases stay.
-    assert!(report.deleted_manifests <= 1);
-    assert_eq!(report.deleted_checkpoint_records, 0);
+    assert!(report.deleted.manifests <= 1);
+    assert_eq!(report.deleted.checkpoint_records, 0);
     let first_record =
         crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
@@ -3771,7 +3771,7 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     let report = gc_namespace(&store, &source, &config(), &before)
         .await
         .expect("gc with live target");
-    assert_eq!(report.released_fork_checkpoints, 0);
+    assert_eq!(report.released_checkpoints.fork, 0);
 
     delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
         .await
@@ -3782,8 +3782,8 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     let first_pass = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect("first gc pass");
-    assert_eq!(first_pass.released_fork_checkpoints, 1);
-    assert_eq!(first_pass.deleted_checkpoint_records, 0);
+    assert_eq!(first_pass.released_checkpoints.fork, 1);
+    assert_eq!(first_pass.deleted.checkpoint_records, 0);
     assert_eq!(
         checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
         CheckpointStatus::Released {
@@ -3796,7 +3796,7 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     let second_pass = gc_namespace(&store, &source, &config(), &aged_out)
         .await
         .expect("second gc pass");
-    assert_eq!(second_pass.deleted_checkpoint_records, 1);
+    assert_eq!(second_pass.deleted.checkpoint_records, 1);
     assert!(
         crate::checkpoint::load_namespace_manifest_envelope(
             &store,
@@ -3812,7 +3812,7 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     let third_pass = gc_namespace(&store, &source, &config(), &aged_out)
         .await
         .expect("third gc pass");
-    assert!(third_pass.deleted_manifests >= 1);
+    assert!(third_pass.deleted.manifests >= 1);
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &source,
@@ -3877,7 +3877,7 @@ async fn gc_retains_a_fork_checkpoint_when_the_target_head_does_not_read() {
     let report = gc_namespace(&store, &source, &config(), &setup)
         .await
         .expect("an unreadable target is retained conservatively");
-    assert_eq!(report.released_fork_checkpoints, 0);
+    assert_eq!(report.released_checkpoints.fork, 0);
     assert_eq!(
         checkpoint_lifecycle(store.inner(), &source, &fork_record.checkpoint_id).await,
         CheckpointStatus::Active {}
@@ -3924,8 +3924,8 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         let report = gc_namespace(&store, &source, &config(), &context(now_ms))
             .await
             .expect("gc pass with a live target");
-        assert_eq!(report.released_fork_checkpoints, 0, "at {now_ms}");
-        assert_eq!(report.released_expired_checkpoints, 0, "at {now_ms}");
+        assert_eq!(report.released_checkpoints.fork, 0, "at {now_ms}");
+        assert_eq!(report.released_checkpoints.expired, 0, "at {now_ms}");
         assert_eq!(
             checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
             CheckpointStatus::Active {},
@@ -4003,7 +4003,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
         let report = gc_namespace(&store, &source, &tight, &context(now_ms))
             .await
             .expect("gc inside the lease");
-        assert_eq!(report.released_fork_checkpoints, 0, "at {now_ms}");
+        assert_eq!(report.released_checkpoints.fork, 0, "at {now_ms}");
         assert_eq!(
             checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
             CheckpointStatus::Active {}
@@ -4022,7 +4022,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     let report = gc_namespace(&store, &source, &tight, &expired)
         .await
         .expect("gc past the lease");
-    assert_eq!(report.released_fork_checkpoints, 1);
+    assert_eq!(report.released_checkpoints.fork, 1);
     assert_eq!(
         checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
         CheckpointStatus::Released {
@@ -4035,7 +4035,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     let reaping = gc_namespace(&store, &source, &tight, &aged_out)
         .await
         .expect("gc past the release grace window");
-    assert_eq!(reaping.deleted_checkpoint_records, 1);
+    assert_eq!(reaping.deleted.checkpoint_records, 1);
     stat_root(&store, &source).await;
 }
 
@@ -4331,13 +4331,13 @@ async fn gc_degrades_when_a_root_manifest_does_not_read() {
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("a read failure degrades the pass instead of failing it");
-    assert!(report.degraded_retention);
+    assert!(report.retention_degraded);
     assert!(
         report.retained.degraded_roots > 0,
         "the pass counts what the degraded roots made it keep: {report:?}"
     );
-    assert_eq!(report.deleted_manifests, 0);
-    assert_eq!(report.deleted_metadata_segments, 0);
+    assert_eq!(report.deleted.manifests, 0);
+    assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(
         namespace_keys(store.inner(), &namespace_id).await,
         before,
@@ -4375,11 +4375,11 @@ async fn gc_retains_everything_without_provider_timestamps() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted_wal_segments, 0);
-    assert_eq!(report.deleted_metadata_segments, 0);
-    assert_eq!(report.deleted_manifests, 0);
-    assert_eq!(report.deleted_checkpoint_records, 0);
-    assert_eq!(report.released_fork_checkpoints, 0);
+    assert_eq!(report.deleted.wal_segments, 0);
+    assert_eq!(report.deleted.metadata_segments, 0);
+    assert_eq!(report.deleted.manifests, 0);
+    assert_eq!(report.deleted.checkpoint_records, 0);
+    assert_eq!(report.released_checkpoints.fork, 0);
     assert!(report.retained_candidates > 0);
     stat_root(&store, &namespace_id).await;
 }
@@ -4412,13 +4412,13 @@ async fn gc_sweep_reverification_chunks_preserve_outcomes() {
     let first_pass = gc_namespace_with_reverify_chunk(&store, &namespace_id, &config(), &aged, 1)
         .await
         .expect("first gc pass");
-    assert_eq!(first_pass.deleted_checkpoint_records, 1);
-    assert!(!first_pass.degraded_retention);
+    assert_eq!(first_pass.deleted.checkpoint_records, 1);
+    assert!(!first_pass.retention_degraded);
 
     let second_pass = gc_namespace_with_reverify_chunk(&store, &namespace_id, &config(), &aged, 1)
         .await
         .expect("second gc pass");
-    assert!(second_pass.deleted_manifests >= 1);
+    assert!(second_pass.deleted.manifests >= 1);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -4572,18 +4572,11 @@ async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTr
 }
 
 fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
-    total.deleted_wal_segments += pass.deleted_wal_segments;
-    total.deleted_metadata_segments += pass.deleted_metadata_segments;
-    total.deleted_manifests += pass.deleted_manifests;
-    total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
-    total.released_fork_checkpoints += pass.released_fork_checkpoints;
-    total.released_expired_checkpoints += pass.released_expired_checkpoints;
-    total.deleted_upload_sessions += pass.deleted_upload_sessions;
-    total.deleted_content_objects += pass.deleted_content_objects;
-    total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
+    total.deleted.add(&pass.deleted);
+    total.released_checkpoints.add(&pass.released_checkpoints);
     total.retained_candidates += pass.retained_candidates;
     total.retained.add(&pass.retained);
-    total.degraded_retention |= pass.degraded_retention;
+    total.retention_degraded |= pass.retention_degraded;
     total.content_reclamation_deferred |= pass.content_reclamation_deferred;
     total.next_reclamation_at_ms = match (total.next_reclamation_at_ms, pass.next_reclamation_at_ms)
     {
@@ -4656,20 +4649,20 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     );
     assert_eq!(
         (
-            bounded_report.deleted_wal_segments,
-            bounded_report.deleted_metadata_segments,
-            bounded_report.deleted_manifests,
-            bounded_report.deleted_checkpoint_records,
-            bounded_report.deleted_upload_sessions,
-            bounded_report.deleted_content_objects,
+            bounded_report.deleted.wal_segments,
+            bounded_report.deleted.metadata_segments,
+            bounded_report.deleted.manifests,
+            bounded_report.deleted.checkpoint_records,
+            bounded_report.deleted.upload_sessions,
+            bounded_report.deleted.content_objects,
         ),
         (
-            unbounded_report.deleted_wal_segments,
-            unbounded_report.deleted_metadata_segments,
-            unbounded_report.deleted_manifests,
-            unbounded_report.deleted_checkpoint_records,
-            unbounded_report.deleted_upload_sessions,
-            unbounded_report.deleted_content_objects,
+            unbounded_report.deleted.wal_segments,
+            unbounded_report.deleted.metadata_segments,
+            unbounded_report.deleted.manifests,
+            unbounded_report.deleted.checkpoint_records,
+            unbounded_report.deleted.upload_sessions,
+            unbounded_report.deleted.content_objects,
         )
     );
 }
@@ -4712,7 +4705,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     let first = gc_namespace(&store, &namespace_id, &bounded, &aged)
         .await
         .expect("first bounded pass");
-    assert_eq!(first.deleted_wal_segments, 2);
+    assert_eq!(first.deleted.wal_segments, 2);
     assert!(first.next_cursor.is_some());
     assert_eq!(store.snapshot().heads, 2);
     assert_eq!(store.snapshot().deletes, 2);
@@ -4731,7 +4724,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     let second = gc_namespace(&store, &namespace_id, &bounded, &aged)
         .await
         .expect("second bounded pass");
-    assert_eq!(second.deleted_wal_segments, 2);
+    assert_eq!(second.deleted.wal_segments, 2);
     assert!(second.next_cursor.is_some());
     assert_eq!(store.snapshot().heads, 2);
     assert_eq!(store.snapshot().deletes, 2);

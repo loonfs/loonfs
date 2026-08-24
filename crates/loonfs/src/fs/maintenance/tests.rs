@@ -136,20 +136,20 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
         "the admin pass records its retained count exactly once"
     );
     for (category, reclaimed) in [
-        ("deleted_wal_segments", gc.deleted_wal_segments),
-        ("deleted_metadata_segments", gc.deleted_metadata_segments),
-        ("deleted_manifests", gc.deleted_manifests),
-        ("deleted_checkpoint_records", gc.deleted_checkpoint_records),
-        ("released_fork_checkpoints", gc.released_fork_checkpoints),
+        ("deleted_wal_segments", gc.deleted.wal_segments),
+        ("deleted_metadata_segments", gc.deleted.metadata_segments),
+        ("deleted_manifests", gc.deleted.manifests),
+        ("deleted_checkpoint_records", gc.deleted.checkpoint_records),
+        ("released_fork_checkpoints", gc.released_checkpoints.fork),
         (
             "released_expired_checkpoints",
-            gc.released_expired_checkpoints,
+            gc.released_checkpoints.expired,
         ),
-        ("deleted_upload_sessions", gc.deleted_upload_sessions),
-        ("deleted_content_objects", gc.deleted_content_objects),
+        ("deleted_upload_sessions", gc.deleted.upload_sessions),
+        ("deleted_content_objects", gc.deleted.content_objects),
         (
             "released_missing_basis_checkpoints",
-            gc.released_missing_basis_checkpoints,
+            gc.released_checkpoints.missing_basis,
         ),
     ] {
         assert_eq!(

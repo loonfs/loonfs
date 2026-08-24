@@ -200,11 +200,11 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
 pub(super) fn gc_summary(report: &GcResponse) -> String {
     let mut summary = format!(
         "gc deleted {} wal segments, {} metadata segments, {} manifests, {} checkpoint records, {} content objects ({} retained)",
-        report.deleted_wal_segments,
-        report.deleted_metadata_segments,
-        report.deleted_manifests,
-        report.deleted_checkpoint_records,
-        report.deleted_content_objects,
+        report.deleted.wal_segments,
+        report.deleted.metadata_segments,
+        report.deleted.manifests,
+        report.deleted.checkpoint_records,
+        report.deleted.content_objects,
         report.retained_candidates
     );
     // Keep the text summary short by showing only the most common retention
@@ -212,13 +212,13 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
     if let Some((reason, count)) = report.retained.top_reason() {
         summary.push_str(&format!("; mostly {reason}: {count}"));
     }
-    if report.released_fork_checkpoints > 0 {
+    if report.released_checkpoints.fork > 0 {
         summary.push_str(&format!(
             "; released {} fork checkpoints",
-            report.released_fork_checkpoints
+            report.released_checkpoints.fork
         ));
     }
-    if report.degraded_retention {
+    if report.retention_degraded {
         summary.push_str("; retention degraded: ambiguous roots suppressed deletion");
     }
     if report.content_reclamation_deferred {

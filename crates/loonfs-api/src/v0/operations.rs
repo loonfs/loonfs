@@ -659,137 +659,140 @@ pub struct GcRequest {
     pub cursor: Option<String>,
 }
 
-/// Why a pass kept what it kept: `retained_candidates` split by the
-/// decision that spared each candidate.
+/// Candidates inspected but not deleted by one GC pass.
 ///
-/// The reasons are a closed set — one per place the sweep decides against
-/// deleting — so every field is always reported, and a zero is the answer
-/// that nothing was kept for that reason. The counts sum to
-/// `retained_candidates`.
+/// Every field is present, including zero counts. The fields sum to
+/// `retained_candidates` in [`GcResponse`].
 ///
-/// Retention is a decision per candidate examined, not per object in the
-/// namespace: one object examined by two passes is counted by each.
+/// An object inspected by multiple passes is counted once per pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RetainedCandidates {
-    /// Selected as unreachable, then found reachable by the re-verification
-    /// that runs immediately before every deletion. A candidate the pass
-    /// already knew was reachable is never examined at all, so this counts
-    /// the namespace moving underneath the pass rather than the size of its
-    /// live set.
+    /// Candidates found reachable during the final check before deletion.
     pub referenced: u64,
     /// Unreachable, but younger than the grace window by the object's own
     /// provider timestamp. A later pass deletes it.
-    pub grace_window: u64,
-    /// Unreachable, and the provider reported no last-modified time at all,
-    /// so the object's age is unknown and it is treated as young.
+    pub within_grace_window: u64,
+    /// Unreachable candidates with no provider timestamp. Their age is
+    /// unknown, so the pass keeps them.
     pub no_provider_timestamp: u64,
-    /// Unreachable, but this namespace published no manifest old enough to
-    /// say what it referenced when the grace window opened, so nothing
-    /// proves the object was already unreferenced then. A reader that pinned
-    /// its anchor inside the window may still be reading it, and the pass
-    /// keeps it until a manifest ages past the window.
+    /// Unreachable candidates that cannot be checked against a manifest old
+    /// enough to cover the grace window.
     pub no_reference_manifest: u64,
-    /// Root resolution failed somewhere in this pass, so manifest and segment
-    /// deletion was suppressed wholesale (`degraded_retention` is set too).
+    /// Candidates kept because root resolution failed. The response also
+    /// sets `retention_degraded`.
     pub degraded_roots: u64,
-    /// A key under a swept family that this collector does not recognize as
-    /// one of its own. Never deleted, whatever its age.
+    /// Unrecognized keys in a family scanned by GC. These keys are never
+    /// deleted.
     pub unrecognized_key: u64,
-    /// A checkpoint record this pass could have advanced but could not
-    /// prove ready: a lost compare-and-swap, an unreadable record, a fork
-    /// target not provably gone, a released record still inside its grace
-    /// window, or an active pin that is simply doing its job. The pins
-    /// themselves are listed by
-    /// `GET /v0/admin/namespaces/{ns}/checkpoints`.
+    /// Checkpoint records that could not be safely released or deleted.
     pub checkpoint_not_releasable: u64,
-    /// An upload session waiting out a window a clock resolves: an open
-    /// session's lease plus the grace, an aborted session's grace, or a
-    /// completed session's derived content-reclamation grace.
-    /// `next_reclamation_at_ms` reports the soonest of these.
+    /// Upload sessions still protected by a lease or grace window.
     pub upload_session_window: u64,
-    /// An upload session held over for a reason no clock resolves: a lost
-    /// compare-and-swap, a record that vanished mid-pass, or a reference
-    /// set this pass could not establish. Only a later pass answers it.
+    /// Upload sessions kept because the pass could not determine whether
+    /// they were safe to delete.
     pub upload_session_undecided: u64,
-    /// A completed session whose content reclamation was skipped because
-    /// the reference scan did not fit in `max_objects`
-    /// (`content_reclamation_deferred` is set too).
+    /// Completed sessions skipped because the reference scan exceeded
+    /// `max_objects`. The response also sets `content_reclamation_deferred`.
     pub content_scan_deferred: u64,
 }
 
+/// Objects deleted by one GC pass, grouped by object family. Every field is
+/// present, including zero counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DeletedObjectCounts {
+    /// Unreferenced WAL segments deleted.
+    pub wal_segments: u64,
+    /// Unreferenced metadata segments deleted.
+    pub metadata_segments: u64,
+    /// Unreferenced manifests deleted.
+    pub manifests: u64,
+    /// Released checkpoint records deleted after their grace window.
+    pub checkpoint_records: u64,
+    /// Upload-session control objects deleted after the reap window.
+    pub upload_sessions: u64,
+    /// Content objects deleted after their completed upload session passed
+    /// the reclamation grace period and no reachable data referenced them.
+    /// Cleanup of abandoned sessions is not counted here.
+    pub content_objects: u64,
+}
+
+impl DeletedObjectCounts {
+    /// Adds counts from another pass.
+    pub fn add(&mut self, other: &Self) {
+        self.wal_segments += other.wal_segments;
+        self.metadata_segments += other.metadata_segments;
+        self.manifests += other.manifests;
+        self.checkpoint_records += other.checkpoint_records;
+        self.upload_sessions += other.upload_sessions;
+        self.content_objects += other.content_objects;
+    }
+}
+
+/// Checkpoint records released by one GC pass, grouped by reason.
+///
+/// Releasing a record stops it from pinning data. A later pass may delete the
+/// record after its grace window and count that under
+/// [`DeletedObjectCounts::checkpoint_records`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReleasedCheckpointCounts {
+    /// Fork-owned records released because their target namespace is
+    /// provably gone.
+    pub fork: u64,
+    /// Records released because their expiry passed, or because they sit on
+    /// a terminally deleted namespace.
+    pub expired: u64,
+    /// Active records released because their basis manifest is verifiably
+    /// gone.
+    pub missing_basis: u64,
+}
+
+impl ReleasedCheckpointCounts {
+    /// Adds counts from another pass.
+    pub fn add(&mut self, other: &Self) {
+        self.fork += other.fork;
+        self.expired += other.expired;
+        self.missing_basis += other.missing_basis;
+    }
+}
+
 /// Result of one mark-and-sweep garbage-collection pass.
+///
+/// Deletion counts are grouped by object family. Checkpoint releases and
+/// retained candidates are grouped by reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GcResponse {
     /// Namespace the pass ran against.
     pub namespace_id: NamespaceId,
-    /// Unreferenced WAL segments deleted.
-    pub deleted_wal_segments: u64,
-    /// Unreferenced metadata segments deleted.
-    pub deleted_metadata_segments: u64,
-    /// Unreferenced manifests deleted.
-    pub deleted_manifests: u64,
-    /// Released checkpoint records deleted after their grace window.
-    pub deleted_checkpoint_records: u64,
-    /// Fork-owned checkpoint records released because their target namespace
-    /// is provably gone.
-    pub released_fork_checkpoints: u64,
-    /// Checkpoint records released because their expiry passed, or because
-    /// they sit on a terminally deleted namespace.
-    pub released_expired_checkpoints: u64,
-    /// Upload-session control objects deleted after the reap window.
-    pub deleted_upload_sessions: u64,
-    /// Content objects reclaimed because their upload session completed,
-    /// aged past the derived reclamation grace, and nothing the namespace
-    /// can reach references them. The upload half's cleanup of abandoned
-    /// sessions is not counted here: it deletes unconditionally, whether or
-    /// not the session ever wrote anything.
-    pub deleted_content_objects: u64,
-    /// Active checkpoint records released because their basis manifest is
-    /// verifiably gone.
-    pub released_missing_basis_checkpoints: u64,
+    /// Objects the pass deleted, split by object family.
+    pub deleted: DeletedObjectCounts,
+    /// Checkpoint records the pass released, split by the reason each one
+    /// was released.
+    pub released_checkpoints: ReleasedCheckpointCounts,
     /// Candidates retained at delete time (grace window, missing
     /// timestamps, or reachable from the fresh root set).
     pub retained_candidates: u64,
-    /// The same total, split by the decision that spared each candidate.
-    /// The total above stays because it is what every existing consumer
-    /// reads; this says why.
+    /// `retained_candidates` grouped by reason.
     pub retained: RetainedCandidates,
     /// True when ambiguous roots suppressed manifest/segment deletion.
-    pub degraded_retention: bool,
-    /// True when the pass skipped completed-content reclamation because
-    /// what it needs — the namespace's live roots, then the reference
-    /// collection over them — did not fit in `max_objects`. Nothing was
-    /// ever decided from a partial collection; a later pass with room for
-    /// the whole scan reclaims what this one left behind. A pass that had
-    /// room for the roots swept every other candidate normally around the
-    /// skip, and one that did not also reports `budget_exhausted`.
+    pub retention_degraded: bool,
+    /// True when `max_objects` was too small to build the complete reference
+    /// set required for completed-content reclamation.
     pub content_reclamation_deferred: bool,
-    /// True when the pass stopped because `max_objects` ran out before it
-    /// finished. Whatever it did before that is reported here and stands;
-    /// rerun with the returned cursor, or with a larger budget, to
-    /// continue. A budget too small for the namespace's own roots stops a
-    /// pass before it decides anything at all, which is what this says and
-    /// an empty report on its own does not.
+    /// True when the pass reached `max_objects` before it finished. Use
+    /// `next_cursor` to continue or run again with a larger limit.
     pub budget_exhausted: bool,
-    /// Opaque resume token when more candidates remain. Resuming rebuilds
-    /// every safety proof; the token carries enumeration position only and
-    /// is valid only against the same namespace.
+    /// Opaque resume token when more candidates remain. It is valid only for
+    /// the same namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    /// The soonest instant still ahead of this pass at which something it
-    /// retained becomes reclaimable: an open session's lease plus the grace
-    /// window, an aborted session's grace, or a completed session's derived
-    /// content-reclamation grace. A scheduler reads this to decide when to
-    /// come back, so a namespace needs no other side channel to have its
-    /// reclamation happen.
-    ///
-    /// It reports what this pass saw and nothing more. A pass that stopped
-    /// on `next_cursor` examined only part of the keyspace, and candidates
-    /// that age out under a plain grace window on their object timestamps
-    /// carry no deadline here at all, so absence is never a claim that
-    /// nothing is owed.
+    /// Earliest known time when a retained upload session may become
+    /// reclaimable. This covers open-session leases and grace periods for
+    /// aborted or completed sessions. It only reflects candidates inspected
+    /// by this pass, so absence does not mean no future work remains.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_reclamation_at_ms: Option<u64>,
 }
@@ -799,18 +802,11 @@ impl GcResponse {
     pub fn empty(namespace_id: NamespaceId) -> Self {
         Self {
             namespace_id,
-            deleted_wal_segments: 0,
-            deleted_metadata_segments: 0,
-            deleted_manifests: 0,
-            deleted_checkpoint_records: 0,
-            released_fork_checkpoints: 0,
-            released_expired_checkpoints: 0,
-            deleted_upload_sessions: 0,
-            deleted_content_objects: 0,
-            released_missing_basis_checkpoints: 0,
+            deleted: DeletedObjectCounts::default(),
+            released_checkpoints: ReleasedCheckpointCounts::default(),
             retained_candidates: 0,
             retained: RetainedCandidates::default(),
-            degraded_retention: false,
+            retention_degraded: false,
             content_reclamation_deferred: false,
             budget_exhausted: false,
             next_cursor: None,
@@ -836,8 +832,8 @@ impl GcResponse {
 pub enum RetainedReason {
     /// Counts into [`RetainedCandidates::referenced`].
     Referenced,
-    /// Counts into [`RetainedCandidates::grace_window`].
-    GraceWindow,
+    /// Counts into [`RetainedCandidates::within_grace_window`].
+    WithinGraceWindow,
     /// Counts into [`RetainedCandidates::no_provider_timestamp`].
     NoProviderTimestamp,
     /// Counts into [`RetainedCandidates::no_reference_manifest`].
@@ -860,7 +856,7 @@ impl RetainedReason {
     fn counter(self, retained: &mut RetainedCandidates) -> &mut u64 {
         match self {
             Self::Referenced => &mut retained.referenced,
-            Self::GraceWindow => &mut retained.grace_window,
+            Self::WithinGraceWindow => &mut retained.within_grace_window,
             Self::NoProviderTimestamp => &mut retained.no_provider_timestamp,
             Self::NoReferenceManifest => &mut retained.no_reference_manifest,
             Self::DegradedRoots => &mut retained.degraded_roots,
@@ -879,7 +875,7 @@ impl RetainedCandidates {
     pub fn by_reason(&self) -> [(&'static str, u64); 10] {
         [
             ("referenced", self.referenced),
-            ("grace_window", self.grace_window),
+            ("within_grace_window", self.within_grace_window),
             ("no_provider_timestamp", self.no_provider_timestamp),
             ("no_reference_manifest", self.no_reference_manifest),
             ("degraded_roots", self.degraded_roots),
@@ -894,7 +890,7 @@ impl RetainedCandidates {
     /// Folds another pass's breakdown into this one.
     pub fn add(&mut self, other: &Self) {
         self.referenced += other.referenced;
-        self.grace_window += other.grace_window;
+        self.within_grace_window += other.within_grace_window;
         self.no_provider_timestamp += other.no_provider_timestamp;
         self.no_reference_manifest += other.no_reference_manifest;
         self.degraded_roots += other.degraded_roots;

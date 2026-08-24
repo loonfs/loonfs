@@ -1135,9 +1135,9 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let gc_data = json_data(&gc);
         assert_eq!(gc_data["kind"], "garbage_collected");
         assert_eq!(gc_data["namespace_id"], "demo");
-        assert_eq!(gc_data["deleted_wal_segments"], 0);
-        assert_eq!(gc_data["deleted_manifests"], 0);
-        assert_eq!(gc_data["degraded_retention"], false);
+        assert_eq!(gc_data["deleted"]["wal_segments"], 0);
+        assert_eq!(gc_data["deleted"]["manifests"], 0);
+        assert_eq!(gc_data["retention_degraded"], false);
         assert!(gc_data.get("next_cursor").is_none());
         // Every retention reason is reported whether or not it happened, so
         // a consumer reads a field rather than probing for one, and the

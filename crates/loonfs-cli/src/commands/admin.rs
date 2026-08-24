@@ -214,12 +214,12 @@ impl PassProgress {
 /// run needs: what went, what stayed and mostly why, and when the next thing
 /// this pass kept becomes reclaimable.
 fn gc_pass_line(pass: &loonfs_api::GcResponse) -> String {
-    let deleted = pass.deleted_wal_segments
-        + pass.deleted_metadata_segments
-        + pass.deleted_manifests
-        + pass.deleted_checkpoint_records
-        + pass.deleted_upload_sessions
-        + pass.deleted_content_objects;
+    let deleted = pass.deleted.wal_segments
+        + pass.deleted.metadata_segments
+        + pass.deleted.manifests
+        + pass.deleted.checkpoint_records
+        + pass.deleted.upload_sessions
+        + pass.deleted.content_objects;
     let mut line = format!("{deleted} deleted, {} retained", pass.retained_candidates);
     if let Some((reason, count)) = pass.retained.top_reason() {
         line.push_str(&format!(" (mostly {reason}: {count})"));
@@ -231,18 +231,11 @@ fn gc_pass_line(pass: &loonfs_api::GcResponse) -> String {
 }
 
 fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::GcResponse) {
-    total.deleted_wal_segments += pass.deleted_wal_segments;
-    total.deleted_metadata_segments += pass.deleted_metadata_segments;
-    total.deleted_manifests += pass.deleted_manifests;
-    total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
-    total.released_fork_checkpoints += pass.released_fork_checkpoints;
-    total.released_expired_checkpoints += pass.released_expired_checkpoints;
-    total.deleted_upload_sessions += pass.deleted_upload_sessions;
-    total.deleted_content_objects += pass.deleted_content_objects;
-    total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
+    total.deleted.add(&pass.deleted);
+    total.released_checkpoints.add(&pass.released_checkpoints);
     total.retained_candidates += pass.retained_candidates;
     total.retained.add(&pass.retained);
-    total.degraded_retention |= pass.degraded_retention;
+    total.retention_degraded |= pass.retention_degraded;
     total.content_reclamation_deferred |= pass.content_reclamation_deferred;
     total.budget_exhausted |= pass.budget_exhausted;
     // The summary keeps the soonest obligation any pass reported — the same
@@ -807,19 +800,19 @@ mod tests {
         let mut total = GcResponse::empty(namespace.clone());
 
         let mut first = GcResponse::empty(namespace.clone());
-        first.released_expired_checkpoints = 2;
+        first.released_checkpoints.expired = 2;
         first.next_reclamation_at_ms = Some(9_000);
         accumulate_gc_response(&mut total, first);
 
         let mut second = GcResponse::empty(namespace.clone());
-        second.released_expired_checkpoints = 1;
+        second.released_checkpoints.expired = 1;
         accumulate_gc_response(&mut total, second);
 
         let mut third = GcResponse::empty(namespace);
         third.next_reclamation_at_ms = Some(12_000);
         accumulate_gc_response(&mut total, third);
 
-        assert_eq!(total.released_expired_checkpoints, 3);
+        assert_eq!(total.released_checkpoints.expired, 3);
         assert_eq!(total.next_reclamation_at_ms, Some(9_000));
     }
 
@@ -883,17 +876,17 @@ mod tests {
     #[test]
     fn a_pass_line_names_what_stayed_and_mostly_why() {
         let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
-        pass.deleted_wal_segments = 2;
-        pass.deleted_content_objects = 1;
+        pass.deleted.wal_segments = 2;
+        pass.deleted.content_objects = 1;
         for _ in 0..4 {
-            pass.retain(RetainedReason::GraceWindow);
+            pass.retain(RetainedReason::WithinGraceWindow);
         }
         pass.retain(RetainedReason::UploadSessionWindow);
         pass.next_reclamation_at_ms = Some(1_700_000_000_000);
 
         assert_eq!(
             gc_pass_line(&pass),
-            "3 deleted, 5 retained (mostly grace_window: 4); \
+            "3 deleted, 5 retained (mostly within_grace_window: 4); \
              next reclaimable at 2023-11-14 22:13:20Z"
         );
     }
