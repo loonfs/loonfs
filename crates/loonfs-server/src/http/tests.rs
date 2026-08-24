@@ -1444,9 +1444,6 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     harness.server.abort();
 }
 
-/// The four ways a grep root can be unreadable. Each is a different fault
-/// in the durable pointer chain and each must answer with one envelope, so
-/// one server plants all four and asks the same question of each namespace.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1466,7 +1463,6 @@ async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() 
         seed_grep_error_namespace_on(&writer, namespace_id).await;
     }
 
-    // A grep root that is not a grep root at all.
     store
         .put_overwrite(
             &grep_root_key(&corrupt_pointer),
@@ -1475,7 +1471,6 @@ async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() 
         .await
         .expect("write corrupt grep pointer");
 
-    // A well-formed pointer at a manifest nothing ever wrote.
     write_grep_pointer(
         &*store,
         &missing_manifest,
@@ -1485,7 +1480,6 @@ async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() 
     )
     .await;
 
-    // A pointer whose manifest is present and unreadable.
     let manifest_object_id = GrepManifestObjectId::parse("gmf_22222222222222222222222222222222")
         .expect("manifest object id");
     store
@@ -1503,7 +1497,6 @@ async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() 
     )
     .await;
 
-    // A pointer naming another namespace's index.
     write_grep_pointer(
         &*store,
         &identity_mismatch,
@@ -3031,8 +3024,6 @@ async fn seed_grep_error_namespace(
     writer
 }
 
-/// The same seeding against a writer the caller keeps, for the case that
-/// plants several namespaces before one server answers for all of them.
 async fn seed_grep_error_namespace_on(writer: &FsWriter, namespace_id: &NamespaceId) {
     writer
         .create_namespace(namespace_id, CreateNamespaceOptions::default())

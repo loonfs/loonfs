@@ -983,9 +983,7 @@ root = "/tmp/loonfs-server"
 
     #[test]
     fn load_rejects_non_loopback_bind_without_auth_token() {
-        // LOONFS_AUTH_TOKEN in the environment would legitimately fill the
-        // token and make these configs valid, so take it away for the test
-        // rather than letting the run pass without asserting anything.
+        // Remove any ambient token so these configs remain invalid.
         let _auth_token = EnvGuard::unset(AUTH_TOKEN_ENV);
         for bind in ["0.0.0.0:9400", "[::]:9400", "10.1.2.3:9400"] {
             let path = write_config(&format!(
