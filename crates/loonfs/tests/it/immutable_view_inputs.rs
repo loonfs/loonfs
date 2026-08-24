@@ -1,7 +1,4 @@
-//! A namespace's immutable view input — the manifest object its head
-//! resolves to — is loaded once per handle, not once per operation. This
-//! test pins that a warm handle stops re-fetching it entirely, on both the
-//! read and the write path.
+//! Immutable view inputs are cached once per handle.
 
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
@@ -71,8 +68,6 @@ async fn warm_handles_stop_fetching_immutable_view_inputs() {
     let namespace_id = NamespaceId::parse("pins").expect("valid namespace id");
     build_namespace(&store, &namespace_id).await;
 
-    // The read path first. Each handle owns its own copy of the inputs, so
-    // the recorded keys are drained between the two halves.
     let reader = FsReader::builder_with_store(store.clone())
         .build()
         .await
@@ -99,7 +94,6 @@ async fn warm_handles_stop_fetching_immutable_view_inputs() {
          content-store descriptor, or the manifest object"
     );
 
-    // The write path, on a handle of its own.
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("warm-writer")
         .min_publish_interval_ms(0)

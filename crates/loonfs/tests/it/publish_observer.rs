@@ -1,5 +1,4 @@
-//! Publish-observer delivery: what a registered observer is handed, and
-//! which calls do not reach it.
+//! Publish-observer delivery.
 
 use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions, SharedObjectStore};
 use loonfs_api::{ChangeSeq, NamespaceId};

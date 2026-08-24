@@ -729,9 +729,6 @@ fn manual_only_writer_never_schedules_maintenance() {
 
 #[test]
 fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
-    // Once with the caches on and once with them off. Cache configuration
-    // is performance-only, so the Enabled policy schedules the same
-    // post-publish maintenance either way.
     for runtime_cache in [
         RuntimeCacheConfig::default(),
         RuntimeCacheConfig::disabled(),
@@ -867,7 +864,6 @@ fn builders_require_identity_and_a_runtime() {
         Err(other) => panic!("expected config error for missing writer_id, got {other:?}"),
         Ok(_) => panic!("writer_id must be required"),
     }
-    // A writer_id of only whitespace is as absent as no writer_id at all.
     match block_on(
         FsWriter::builder(store_config(temp_dir.path()))
             .writer_id("   ")

@@ -128,9 +128,6 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
 
 #[test]
 fn runtime_publish_and_read_allow_multi_segment_wal_tail() {
-    // Both directions over a tail of more than one WAL segment, each from a
-    // handle that did not seed it, so the projection is built rather than
-    // reused. Pins that the old segment limit is gone.
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));

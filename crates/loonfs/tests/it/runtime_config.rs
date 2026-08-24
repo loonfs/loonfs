@@ -1,5 +1,4 @@
-//! Public handle boundary behavior: the object-store metrics seam, the
-//! filesystem operations, and fork isolation.
+//! Public handle behavior and fork isolation.
 
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.

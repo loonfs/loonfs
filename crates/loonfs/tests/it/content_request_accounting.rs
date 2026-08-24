@@ -613,7 +613,6 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
-/// The two ways a caller hands an external content ref to publication.
 #[derive(Debug, Clone, Copy)]
 enum UnpreparedEntryPoint {
     Publisher,
@@ -622,9 +621,6 @@ enum UnpreparedEntryPoint {
 
 #[tokio::test]
 async fn an_unprepared_external_ref_fails_typed_without_content_io() {
-    // Publication never rescues an unprepared ref by reading the blob. That
-    // holds at both entry points, and an existing destination file does not
-    // change the proof coverage a replacement needs.
     for entry_point in [
         UnpreparedEntryPoint::Publisher,
         UnpreparedEntryPoint::WriterCreateCommit,
@@ -657,7 +653,6 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                     expected_revision_no: None,
                 },
             );
-            // Both entry points answer with the crate's typed error.
             let error: RuntimeError = match entry_point {
                 UnpreparedEntryPoint::Publisher => harness
                     .writer
