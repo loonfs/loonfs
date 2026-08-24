@@ -23,8 +23,8 @@ use loonfs_api::wire::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, string_prefix_upper_bound, BlockHandle,
 };
 use loonfs_api::{
-    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, ErrorCode, GrepMatch, GrepPageCursor,
-    GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId, PaginationPolicy, PathEntry,
+    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EffectiveLimit, ErrorCode, GrepMatch,
+    GrepPageCursor, GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId, PathEntry,
     RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
@@ -654,14 +654,12 @@ impl GrepService {
     pub async fn query<S: ObjectStore>(
         &self,
         request: &GrepRequest,
+        limit: EffectiveLimit,
         reads: &NamespaceReads<'_>,
         store: &S,
     ) -> Result<GrepResponse> {
         let head_seq = reads.head_seq().await?;
-        let limit = PaginationPolicy::default()
-            .resolve_limit(request.limit)
-            .map_err(|error| CoreError::InvalidQuery(error.to_string()))?
-            .as_usize();
+        let limit = limit.as_usize();
         let fingerprint = request.fingerprint();
         let resume = match &request.cursor {
             Some(cursor) => {

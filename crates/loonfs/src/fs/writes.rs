@@ -3,6 +3,7 @@
 use super::core::{ReadCore, WriterBits};
 use crate::maintenance_runner::NamespacePublication;
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
+use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::FsWriter;
 use crate::{
@@ -945,14 +946,7 @@ pub(crate) async fn publish_batch_with_engine(
         engine.invalidate_projection();
     }
     {
-        let _span = tracing::debug_span!(
-            "loonfs.phase",
-            phase = "batch_update_cache",
-            mode = core.trace_mode(),
-            store_kind = core.trace_store_kind(),
-            batch_size
-        )
-        .entered();
+        let _span = phase_span!(core, "batch_update_cache", namespace_id, batch_size).entered();
         match publish.resulting_read_state.take() {
             // A landed publish hands the caches exactly the state a
             // rebuild would recompute; use it instead of dropping.

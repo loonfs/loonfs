@@ -24,8 +24,6 @@ pub struct GrepRequest {
     /// bound to that page's request; each page is evaluated against the
     /// namespace head at page time.
     pub cursor: Option<String>,
-    /// Maximum matches per page.
-    pub limit: Option<u32>,
     /// When the unindexed tail exceeds the scan budget, return
     /// indexed-only results (reported via `tail_scanned: false`) instead
     /// of failing with `index_lagging`.

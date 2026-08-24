@@ -3,7 +3,7 @@
 
 //! GrepWorker lifecycle, rebootstrap, query contracts, and GC boundaries.
 
-use crate::common::{control, grep_with, GrepHost};
+use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use bytes::Bytes;
 use loonfs::{
     CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsReader,
@@ -12,8 +12,8 @@ use loonfs::{
 };
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
 use loonfs_api::{
-    sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId, PageRequest,
-    PaginationPolicy, RunNo, MAX_PUBLIC_INTEGER,
+    sha256_digest, AbsolutePath, ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse,
+    IndexSegmentId, PageRequest, PaginationPolicy, RunNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_grep::keyspace::{
     grep_prefix, manifest_key, manifests_prefix, root_key, segment_key, segments_prefix,
@@ -50,7 +50,6 @@ fn request(pattern: &str) -> GrepRequest {
         case_insensitive: false,
         path_prefix: None,
         cursor: None,
-        limit: None,
         allow_stale: false,
         allow_scan: false,
     }
@@ -90,6 +89,15 @@ async fn new_query(
     namespace_id: &NamespaceId,
     grep_request: &GrepRequest,
 ) -> loonfs_grep::Result<GrepResponse> {
+    new_query_page(store, namespace_id, grep_request, default_page_limit()).await
+}
+
+async fn new_query_page(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    grep_request: &GrepRequest,
+    limit: EffectiveLimit,
+) -> loonfs_grep::Result<GrepResponse> {
     let reader = FsReader::builder_with_store(store.clone())
         .build()
         .await
@@ -100,6 +108,7 @@ async fn new_query(
         store,
         namespace_id,
         grep_request,
+        limit,
     )
     .await
 }
@@ -1536,11 +1545,10 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     assert_eq!(error.code(), ErrorCode::PathNotFound);
 
     let mut page_request = request("shared needle");
-    page_request.limit = Some(1);
     let mut found_matches = BTreeSet::new();
     let mut cursors = BTreeSet::new();
     loop {
-        let page = new_query(&store, &namespace_id, &page_request)
+        let page = new_query_page(&store, &namespace_id, &page_request, page_limit(1))
             .await
             .expect("query page");
         assert_eq!(page.namespace_id, namespace_id);

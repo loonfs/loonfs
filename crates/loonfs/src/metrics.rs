@@ -22,6 +22,15 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// `result` label for a successful operation.
+pub const RESULT_OK: &str = "ok";
+/// `result` label for an operation that failed.
+pub const RESULT_ERROR: &str = "error";
+/// `result` label for a lookup served from the cache.
+pub const RESULT_HIT: &str = "hit";
+/// `result` label for a lookup the cache did not hold.
+pub const RESULT_MISS: &str = "miss";
+
 /// Bucket upper bounds for a latency histogram, in seconds.
 ///
 /// Covers latencies from one millisecond to two minutes.

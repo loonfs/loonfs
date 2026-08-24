@@ -10,7 +10,7 @@ mod jobs;
 #[cfg(test)]
 mod tests;
 
-use crate::metrics::RuntimeInstruments;
+use crate::metrics::{RuntimeInstruments, RESULT_ERROR};
 use crate::{ChangeSeq, NamespaceId, Result, RuntimeError};
 use admission::{Admission, MaintenanceDispatch, MaintenanceKey, StepOutcome};
 pub(crate) use compaction::{BackgroundCompactions, CompactionStart};
@@ -797,7 +797,7 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
             tracing::info!(
                 job = %key.job,
                 namespace_id = %key.namespace_id,
-                result = "error",
+                result = RESULT_ERROR,
                 error = %error,
                 queued_ms,
                 backoff_scheduled = RunnerCounters::bump(&inner.counters.backoff_scheduled),
@@ -947,7 +947,7 @@ async fn reconcile(inner: &Arc<RunnerInner>) {
                 tracing::info!(
                     job = %key.job,
                     namespace_id = %key.namespace_id,
-                    result = "error",
+                    result = RESULT_ERROR,
                     error = %error,
                     "reconciliation probe failed; the key stays admitted"
                 );

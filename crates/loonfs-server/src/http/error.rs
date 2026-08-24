@@ -21,9 +21,9 @@ pub(super) struct ApiResponseError {
 }
 
 impl ApiResponseError {
-    pub(super) fn new(status: StatusCode, code: ErrorCode, message: &str) -> Self {
+    pub(super) fn new(code: ErrorCode, message: &str) -> Self {
         let response = Self {
-            status,
+            status: status_for_core_error_code(code),
             code,
             body: Box::new(ApiError {
                 code: code.as_str().to_owned(),
@@ -43,11 +43,7 @@ impl ApiResponseError {
     }
 
     pub(super) fn not_supported(feature: &str, message: &str) -> Self {
-        let mut response = Self::new(
-            StatusCode::NOT_IMPLEMENTED,
-            ErrorCode::NotSupported,
-            message,
-        );
+        let mut response = Self::new(ErrorCode::NotSupported, message);
         response.body.feature = Some(feature.to_owned());
         response
     }
@@ -94,19 +90,14 @@ impl ApiResponseError {
     }
 
     pub(super) fn invalid_namespace_id(error: NamespaceIdValidationError) -> Self {
-        Self::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            &error.to_string(),
-        )
-        .with_param("namespace_id")
+        Self::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("namespace_id")
     }
 
     pub(super) fn runtime(error: RuntimeError) -> Self {
         let code = error.code();
         let details = error.details();
         let message = error.public_message();
-        let mut response = Self::new(status_for_core_error_code(code), code, &message);
+        let mut response = Self::new(code, &message);
         response.body.details = details.map(Box::new);
         response
     }
@@ -114,7 +105,6 @@ impl ApiResponseError {
     pub(super) fn runtime_for_namespace(namespace_id: &NamespaceId, error: RuntimeError) -> Self {
         if error.code() == ErrorCode::NamespaceNotFound {
             return Self::new(
-                StatusCode::NOT_FOUND,
                 ErrorCode::NamespaceNotFound,
                 &format!("namespace `{}` does not exist", namespace_id.as_str()),
             );
@@ -189,9 +179,7 @@ mod tests {
     #[test]
     fn every_immediately_retryable_code_answers_with_retry_after() {
         for code in ErrorCode::ALL {
-            let response =
-                ApiResponseError::new(status_for_core_error_code(code), code, "test response")
-                    .into_response();
+            let response = ApiResponseError::new(code, "test response").into_response();
             assert_eq!(
                 response.extensions().get::<ServedErrorCode>(),
                 Some(&ServedErrorCode(code)),

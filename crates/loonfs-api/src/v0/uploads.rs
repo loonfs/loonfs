@@ -32,6 +32,17 @@ pub enum UploadMode {
     DirectMultipart,
 }
 
+impl UploadMode {
+    /// Returns the serialized value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ServiceProxied => "service_proxied",
+            Self::DirectPut => "direct_put",
+            Self::DirectMultipart => "direct_multipart",
+        }
+    }
+}
+
 /// Request to start an upload session, tagged by transport mode.
 ///
 /// Each variant contains only fields valid for that transport, so invalid

@@ -9,7 +9,9 @@
 
 use loonfs::{FsAdmin, FsReader, MaintenanceJob, MaintenanceStepConclusion, SharedObjectStore};
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
-use loonfs_api::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId, RunNo};
+use loonfs_api::{
+    ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse, NamespaceId, PaginationPolicy, RunNo,
+};
 use loonfs_grep::root::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
@@ -60,6 +62,7 @@ impl GrepHost {
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
+        limit: EffectiveLimit,
     ) -> Result<GrepResponse, GrepError> {
         grep_with(
             &self.service,
@@ -67,6 +70,7 @@ impl GrepHost {
             &self.store,
             namespace_id,
             request,
+            limit,
         )
         .await
     }
@@ -239,9 +243,22 @@ pub(crate) async fn grep_with(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
     request: &GrepRequest,
+    limit: EffectiveLimit,
 ) -> Result<GrepResponse, GrepError> {
     let reads = NamespaceReads::new(reader, namespace_id);
-    service.query(request, &reads, store).await
+    service.query(request, limit, &reads, store).await
+}
+
+pub(crate) fn default_page_limit() -> EffectiveLimit {
+    PaginationPolicy::default()
+        .resolve_limit(None)
+        .expect("the pagination policy should accept its own default")
+}
+
+pub(crate) fn page_limit(matches: u32) -> EffectiveLimit {
+    PaginationPolicy::default()
+        .resolve_limit(Some(matches))
+        .expect("test page limits should be within the pagination policy")
 }
 
 /// Classifies a key by durable family instead of by its spelling, so the

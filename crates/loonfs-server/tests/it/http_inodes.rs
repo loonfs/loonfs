@@ -371,7 +371,9 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
                 .expect("decode malformed-inode error");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
             assert!(
-                error.message.starts_with("path.inode_id"),
+                error
+                    .message
+                    .starts_with(&format!("invalid inode_id {malformed:?}")),
                 "{}",
                 error.message
             );

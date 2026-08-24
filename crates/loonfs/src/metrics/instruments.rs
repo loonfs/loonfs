@@ -8,7 +8,9 @@ use super::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, ObjectStoreMetricSample,
     ObjectStoreMetricsRecorder, SMALL_COUNT_BOUNDARIES,
 };
-use crate::metrics::LATENCY_SECONDS_BOUNDARIES;
+use crate::metrics::{
+    LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_HIT, RESULT_MISS, RESULT_OK,
+};
 use crate::{
     GcResponse, MaintenanceJobId, MaintenanceStepConclusion, MetadataCompactionJobOutcome,
 };
@@ -48,8 +50,8 @@ pub(crate) enum PublishOutcome {
 impl PublishOutcome {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::Ok => "ok",
-            Self::Error => "error",
+            Self::Ok => RESULT_OK,
+            Self::Error => RESULT_ERROR,
         }
     }
 }
@@ -613,8 +615,8 @@ impl MetadataSegmentCacheInstruments {
             )
         };
         Self {
-            hits: get("hit"),
-            misses: get("miss"),
+            hits: get(RESULT_HIT),
+            misses: get(RESULT_MISS),
             inserts: recorder.register_counter(
                 "loonfs.metadata_segment_cache.inserts",
                 "Blocks inserted into the decoded metadata-segment cache",
@@ -675,8 +677,8 @@ impl WalTailProjectionCacheInstruments {
             )
         };
         Self {
-            hits: get("hit"),
-            misses: get("miss"),
+            hits: get(RESULT_HIT),
+            misses: get(RESULT_MISS),
             inserts: recorder.register_counter(
                 "loonfs.wal_tail_projection_cache.inserts",
                 "WAL-tail projections inserted into the cache",

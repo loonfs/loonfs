@@ -8,9 +8,9 @@ use super::{
     handlers_filesystem::{parse_boolean_query_param, required_query_param, resolve_page_limit},
     AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson,
 };
-use crate::http::error::{status_for_core_error_code, ApiResponseError};
+use crate::http::error::ApiResponseError;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::Json;
 use loonfs_api::v0::{GrepGcRequest, GrepGcResponse, GrepIndex};
 #[cfg(feature = "openapi")]
@@ -74,7 +74,9 @@ pub(super) async fn grep(
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
-    let request = grep_request(query.into_params()?)?;
+    let mut query = query.into_params()?;
+    let limit = resolve_page_limit(query.limit.take())?;
+    let request = grep_request(query)?;
     // First touch: on a deployment that maintains this index, a search is
     // also the hint that someone cares about this namespace again — after a
     // restart, nothing else has said so.
@@ -88,7 +90,7 @@ pub(super) async fn grep(
     let store = state.writer.object_store();
     let reads = NamespaceReads::new(&state.reader, &namespace_id);
     let response = service
-        .query(&request, &reads, &store)
+        .query(&request, limit, &reads, &store)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
     Ok(Json(response))
@@ -98,7 +100,6 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
     let pattern = required_query_param(query.pattern, "pattern")?;
     if pattern.len() > MAX_GREP_PATTERN_BYTES {
         return Err(ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
             loonfs_api::ErrorCode::InvalidRequest,
             &format!(
                 "grep pattern is {} bytes; the maximum is {MAX_GREP_PATTERN_BYTES} bytes",
@@ -111,25 +112,16 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
         .path_prefix
         .map(|value| {
             loonfs_api::AbsolutePath::parse(&value).map_err(|error| {
-                ApiResponseError::new(
-                    StatusCode::BAD_REQUEST,
-                    loonfs_api::ErrorCode::InvalidRequest,
-                    &error.to_string(),
-                )
-                .with_param("path_prefix")
+                ApiResponseError::new(loonfs_api::ErrorCode::InvalidRequest, &error.to_string())
+                    .with_param("path_prefix")
             })
         })
-        .transpose()?;
-    let limit = query
-        .limit
-        .map(|value| resolve_page_limit(Some(value)).map(|limit| limit.get()))
         .transpose()?;
     Ok(GrepRequest {
         pattern,
         case_insensitive: parse_optional_boolean(query.case_insensitive, "case_insensitive")?,
         path_prefix,
         cursor: query.cursor,
-        limit,
         allow_stale: parse_optional_boolean(query.allow_stale, "allow_stale")?,
         allow_scan: parse_optional_boolean(query.allow_scan, "allow_scan")?,
     })
@@ -390,11 +382,7 @@ fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> A
                 response
             }
         }
-        error => ApiResponseError::new(
-            status_for_core_error_code(code),
-            code,
-            &error.public_message(),
-        ),
+        error => ApiResponseError::new(code, &error.public_message()),
     }
 }
 

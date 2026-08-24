@@ -8,7 +8,10 @@ use super::{
 };
 use crate::config::{LocalCacheConfig, ServerConfigError};
 use bytes::Bytes;
-use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot, NoopMetricsRecorder};
+use loonfs::metrics::{
+    DefaultMetricsRecorder, MetricValue, MetricsSnapshot, NoopMetricsRecorder, RESULT_HIT,
+    RESULT_MISS, RESULT_OK,
+};
 use loonfs::{StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind};
 use mixtrics::metrics::RegistryOps;
 use std::path::Path;
@@ -109,9 +112,15 @@ async fn a_kept_block_survives_a_reopen() {
     // The instruments are registered at construction and carry a closed
     // label set, so one hit and one miss are already two named series.
     let snapshot = recorder.snapshot();
-    assert_eq!(counter(&snapshot, "loonfs.local_cache.gets", "hit"), 1);
-    assert_eq!(counter(&snapshot, "loonfs.local_cache.gets", "miss"), 1);
-    assert_eq!(counter(&snapshot, "loonfs.local_cache.closes", "clean"), 1);
+    assert_eq!(counter(&snapshot, "loonfs.local_cache.gets", RESULT_HIT), 1);
+    assert_eq!(
+        counter(&snapshot, "loonfs.local_cache.gets", RESULT_MISS),
+        1
+    );
+    assert_eq!(
+        counter(&snapshot, "loonfs.local_cache.closes", RESULT_OK),
+        1
+    );
 
     let reopened = open(temp_dir.path()).await;
     assert_eq!(
