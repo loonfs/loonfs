@@ -339,6 +339,10 @@ Six control-object kinds are registered: `wal_head`, `wal_floor`,
 `compaction_lease`. A control-object envelope carrying any other kind string
 is rejected, not skipped.
 
+The WAL floor and the metadata root are the only control objects that carry
+`updated_at_ms`. That field records when the object's last rewrite succeeded,
+and nothing reads it for ordering or validity.
+
 Mutable control-object decoders reject unknown fields in both the envelope and
 the complete nested payload. Otherwise, an older binary could tolerate a
 newer field, erase it during read-modify-write, and still report a successful
@@ -969,8 +973,8 @@ Chain links remain the history authority. The tip plus hints may prefetch or
 count the bounded tail; hints never become GC roots by themselves.
 
 `wal/floor.json` is the symmetrical pair to the head — the earliest retained
-commit boundary next to the latest visible one. It records `floor_seq` and
-verification and update stamps. It is updated only by monotonic compare-and-swap on its
+commit boundary next to the latest visible one. It records `floor_seq` and an
+update stamp. It is updated only by monotonic compare-and-swap on its
 own etag by floor advancement, which is a GC-family operation: it never
 touches the WAL head, so the head changes only when commits land. A missing,
 stale, or unverifiable floor means "retain more history", never less, and the
@@ -1608,7 +1612,7 @@ A namespace with no `metadata/root.json` has nothing to derive a target from,
 so its floor never advances; it retains from its birth sequence until a flush
 publishes a root (section 2.9).
 
-Advancement updates only `wal/floor.json` with compare-and-swap, creating the object on the first advance. The update stores `floor_seq` with its verification stamp and never lowers the floor. `floor_seq <= metadata/root.manifest.manifest_head_seq` must hold. Being below the floor makes an object a deletion candidate, but deletion also requires verification at delete time. If the floor passes an active checkpoint's basis, retention wins ("Garbage collection").
+Advancement updates only `wal/floor.json` with compare-and-swap, creating the object on the first advance. The update stores `floor_seq` and never lowers the floor. `floor_seq <= metadata/root.manifest.manifest_head_seq` must hold. Being below the floor makes an object a deletion candidate, but deletion also requires verification at delete time. If the floor passes an active checkpoint's basis, retention wins ("Garbage collection").
 
 A WAL flush materializes the current durable namespace
 file-set version: if there is no manifest for the current head, the

@@ -654,7 +654,6 @@ fn control_objects_match_golden_bytes() {
         WalFloorState {
             namespace_id: namespace_id(),
             floor_seq: ChangeSeq(1),
-            verified_at_ms: 3_000,
             updated_at_ms: 3_000,
         },
     );

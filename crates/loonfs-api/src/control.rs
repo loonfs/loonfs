@@ -94,9 +94,8 @@ pub struct WalFloorState {
     pub namespace_id: NamespaceId,
     /// Earliest sequence at which incremental replay remains promised.
     pub floor_seq: ChangeSeq,
-    /// Unix-millisecond wall-clock time when the referenced manifest basis was last verified.
-    pub verified_at_ms: u64,
-    /// Unix-millisecond wall-clock time stamped by the successful floor update attempt.
+    /// Unix-millisecond stamp of the successful floor update, for
+    /// observability only and never an ordering or validity input.
     pub updated_at_ms: u64,
 }
 
