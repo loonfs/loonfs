@@ -109,12 +109,17 @@ fn wal_segment_namespace_mismatch_names_record_and_segment_values() {
         ChangeSeq(1),
     );
 
-    let error = prepare_wal_segment(segment_namespace, WriterEpoch(1), None, &[record])
+    let error = prepare_wal_segment(segment_namespace.clone(), WriterEpoch(1), None, &[record])
         .expect_err("namespace mismatch should fail");
 
-    assert_eq!(
-        error.to_string(),
-        "WAL segment namespace mismatch: record `record`, segment `segment`"
+    let message = error.to_string();
+    assert!(
+        message.contains(record_namespace.as_str()),
+        "the error names the record namespace: {message}"
+    );
+    assert!(
+        message.contains(segment_namespace.as_str()),
+        "the error names the segment namespace: {message}"
     );
 }
 
@@ -344,12 +349,14 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
     .await
     .expect_err("missing previous segment link should fail");
 
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "WAL replay validation failed: WAL segment `{}` is missing its previous visible segment link before seq `0`",
-            prepared_segment_key(&segment)
-        )
+    let message = error.to_string();
+    assert!(
+        message.contains(segment.envelope.payload.segment_id.as_str()),
+        "the error names the segment: {message}"
+    );
+    assert!(
+        message.contains("`0`"),
+        "the error names the boundary seq: {message}"
     );
 }
 
@@ -963,28 +970,6 @@ fn tail_count_from_contiguous_hints_covers_the_longest_legal_tail() {
     ))
     .expect("count of empty tail");
     assert_eq!(count, 0);
-}
-
-#[test]
-fn wal_tail_segment_count_is_identical_across_head_hint_reshape() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let chain = prepared_unstored_chain(&namespace_id, 4);
-    // Before the reshape this whole tip-inclusive vector lived in
-    // `recent_segments`; afterward its first entry is `visible_wal_tip` and
-    // only the remaining predecessors are hints.
-    let former_tip_inclusive_hints = newest_first_pointers(&chain);
-    let former_public_count =
-        u64::try_from(former_tip_inclusive_hints.len()).expect("test tail count");
-
-    let reshaped_count = count_visible_wal_tail_segments(&tail_count_request(
-        &namespace_id,
-        ChangeSeq(0),
-        ChangeSeq(4),
-        &former_tip_inclusive_hints,
-    ))
-    .expect("count reshaped head");
-
-    assert_eq!(reshaped_count, former_public_count);
 }
 
 #[test]

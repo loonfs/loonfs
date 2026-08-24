@@ -524,6 +524,40 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
         &materialization_after.metadata_state,
         &second_materialized.metadata_state
     ));
+
+    let mut checkpoint_seqs = vec![first.checkpoint_seq, second.checkpoint_seq];
+    let mut latest = second;
+    for index in 3..=4u64 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{index}.txt"),
+            format!("file {index}\n").as_bytes(),
+            &context,
+            None,
+        )
+        .await
+        .expect("write file");
+        latest = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        checkpoint_seqs.push(latest.checkpoint_seq);
+    }
+    let latest_materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, latest.manifest_no)
+            .await
+            .expect("load chained manifest");
+    assert_eq!(
+        latest_materialized.manifest.payload.base_seq,
+        ChangeSeq(0),
+        "always-append checkpoints keep the first published base"
+    );
+    let chained_delta_runs = super::delta_runs(&latest_materialized.manifest);
+    assert_eq!(chained_delta_runs.len(), checkpoint_seqs.len());
+    for (run, checkpoint_seq) in chained_delta_runs.iter().zip(&checkpoint_seqs) {
+        assert_eq!(run.run_seq, *checkpoint_seq);
+        assert_eq!(run.level, CHECKPOINT_DELTA_RUN_LEVEL);
+    }
 }
 
 #[tokio::test]
@@ -668,36 +702,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             assert!(message.contains("after expected max"));
         }
         other => panic!("expected row range mismatch, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn manifest_delta_runs_chain_across_successive_manifests() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-
-    for index in 1..=4 {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
-    }
-
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestNo(5))
-            .await
-            .expect("load chained manifest");
-    // Always-append checkpoints keep the first published base (seq 0) and
-    // chain one delta run per checkpoint, the first included.
-    assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(0));
-    let delta_runs = delta_runs(&materialized.manifest);
-    assert_eq!(delta_runs.len(), 4);
-    for (offset, run) in delta_runs.iter().enumerate() {
-        let seq = ChangeSeq(offset as u64 + 1);
-        assert_eq!(run.run_seq, seq);
-        assert_eq!(run.level, CHECKPOINT_DELTA_RUN_LEVEL);
     }
 }
 

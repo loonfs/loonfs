@@ -2,19 +2,17 @@
 
 use super::*;
 
-#[tokio::test]
-async fn byte_budgeted_cache_admits_large_segment_scans() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> ManifestNo {
+    bootstrap_namespace(store, namespace_id, context, false)
         .await
         .expect("bootstrap");
     for index in 0..8 {
         let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+        write_file_bytes(store, namespace_id, &path, b"file\n", context, None)
             .await
             .expect("write file");
     }
@@ -22,7 +20,17 @@ async fn byte_budgeted_cache_admits_large_segment_scans() {
         max_rows_per_segment: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
-    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
+    checkpoint_then_reorganize(store, namespace_id, context, policy).await
+}
+
+#[tokio::test]
+async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     // The default cache config carries a decoded-byte budget, so a scan wider
     // than the small-scan limit populates the cache instead of reading through.
@@ -71,6 +79,71 @@ async fn byte_budgeted_cache_admits_large_segment_scans() {
         "a warm wide scan should be served entirely from the cache"
     );
     assert!(after_repeat.hits > after_first.hits);
+
+    let docs_inode_id = InodeId(2);
+    let lower_bound = format!("direntry-bind-{:020}-", docs_inode_id.0);
+    let upper_bound = super::string_prefix_upper_bound(&lower_bound);
+    let before_range = cache.stats();
+    let page = segments
+        .scan_range_page(
+            ApiMetadataRowFamily::DirentryBinds,
+            &lower_bound,
+            upper_bound.as_deref(),
+            8,
+        )
+        .await
+        .expect("scan range page");
+    assert_eq!(page.len(), 8);
+    assert!(
+        cache.stats().inserts > before_range.inserts + 4,
+        "a wide range scan should admit its segments to the cache"
+    );
+
+    let fresh_segments = super::load_verified_manifest_segments_with_cache(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load fresh segments");
+    store.reset();
+    let repeated_page = fresh_segments
+        .scan_range_page(
+            ApiMetadataRowFamily::DirentryBinds,
+            &lower_bound,
+            upper_bound.as_deref(),
+            8,
+        )
+        .await
+        .expect("repeated scan range page");
+    assert_eq!(repeated_page, page);
+    assert_eq!(
+        store.count(OperationClass::Read),
+        0,
+        "a warm range scan should be served entirely from the cache"
+    );
+
+    let degenerate = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
+        max_decoded_bytes: 1,
+    });
+    let degenerate_segments = super::load_verified_manifest_segments_with_cache(
+        &store,
+        Some(&degenerate),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load segments against a degenerate budget");
+    let root_inode_key = "inode-00000000000000000001";
+    assert!(degenerate_segments
+        .get_for_lookup(ApiMetadataRowFamily::Inodes, root_inode_key, root_inode_key)
+        .await
+        .expect("get inode")
+        .is_some());
+    let degenerate_stats = degenerate.stats();
+    assert!(degenerate_stats.inserts > 0);
+    assert!(degenerate_stats.evictions > 0);
 }
 
 #[tokio::test]
@@ -80,20 +153,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
         CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    for index in 0..8 {
-        let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
-            .await
-            .expect("write file");
-    }
-    let policy = MetadataLsmPolicy {
-        max_rows_per_segment: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
-    };
-    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
+    eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     // Concurrent scans over one shared cache must not multiply fetches:
     // single-flight covers blocks racing before the first insert lands, and
@@ -277,105 +337,12 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
 }
 
 #[tokio::test]
-async fn byte_budgeted_cache_admits_large_range_scans() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    for index in 0..8 {
-        let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
-            .await
-            .expect("write file");
-    }
-    let policy = MetadataLsmPolicy {
-        max_rows_per_segment: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
-    };
-    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let cache = super::MetadataSegmentCache::new(Default::default());
-    let segments = super::load_verified_manifest_segments_with_cache(
-        &store,
-        Some(&cache),
-        &namespace_id,
-        &manifest_object_id,
-    )
-    .await
-    .expect("load segments");
-
-    // The list preload path: one page-shaped range scan over a directory
-    // whose bind rows span more segments than the small-scan limit.
-    let docs_inode_id = InodeId(2);
-    let lower_bound = format!("direntry-bind-{:020}-", docs_inode_id.0);
-    let upper_bound = super::string_prefix_upper_bound(&lower_bound);
-    let page = segments
-        .scan_range_page(
-            ApiMetadataRowFamily::DirentryBinds,
-            &lower_bound,
-            upper_bound.as_deref(),
-            8,
-        )
-        .await
-        .expect("scan range page");
-    let after_first = cache.stats();
-    assert_eq!(page.len(), 8);
-    assert!(
-        after_first.inserts > 4,
-        "a wide range scan should admit its segments to the cache"
-    );
-
-    let fresh_segments = super::load_verified_manifest_segments_with_cache(
-        &store,
-        Some(&cache),
-        &namespace_id,
-        &manifest_object_id,
-    )
-    .await
-    .expect("load fresh segments");
-    store.reset();
-    let repeated = fresh_segments
-        .scan_range_page(
-            ApiMetadataRowFamily::DirentryBinds,
-            &lower_bound,
-            upper_bound.as_deref(),
-            8,
-        )
-        .await
-        .expect("repeated scan range page");
-
-    assert_eq!(repeated, page);
-    assert_eq!(
-        store.count(OperationClass::Read),
-        0,
-        "a warm range scan should be served entirely from the cache"
-    );
-}
-
-#[tokio::test]
 async fn maintenance_materialization_does_not_populate_metadata_segment_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    for index in 0..8 {
-        let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
-            .await
-            .expect("write file");
-    }
-    let policy = MetadataLsmPolicy {
-        max_rows_per_segment: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
-    };
-    let manifest_no = checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
+    let manifest_no = eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
     let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
     let before = cache.stats();
 
@@ -486,53 +453,6 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         stats.filter_skips >= 1,
         "the delta bind segment should be skipped by its filter, stats: {stats:?}"
     );
-}
-
-#[tokio::test]
-async fn metadata_cache_budget_counts_decoded_blocks() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file.txt",
-        b"file\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write file");
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("checkpoint");
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-        max_decoded_bytes: 1,
-    });
-    let segments = super::load_verified_manifest_segments_with_cache(
-        &store,
-        Some(&cache),
-        &namespace_id,
-        &manifest_object_id,
-    )
-    .await
-    .expect("load segments");
-
-    let key = "inode-00000000000000000001";
-    assert!(segments
-        .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
-        .await
-        .expect("get inode")
-        .is_some());
-
-    let stats = cache.stats();
-    assert!(stats.inserts > 0);
-    assert!(stats.evictions > 0);
 }
 
 #[tokio::test]

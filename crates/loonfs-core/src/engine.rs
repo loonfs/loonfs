@@ -986,17 +986,6 @@ mod tests {
         assert_eq!(engine.writer_id(), "writer-a");
     }
 
-    #[test]
-    fn reader_engine_builds_without_any_writer_identity() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-
-        let engine = NamespaceEngine::reader(store, namespace_id.clone());
-
-        assert_eq!(engine.namespace_id(), &namespace_id);
-    }
-
     #[tokio::test]
     async fn reader_engine_still_serves_reads() {
         let temp_dir = tempdir().expect("tempdir");

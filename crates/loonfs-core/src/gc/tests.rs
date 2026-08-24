@@ -29,7 +29,9 @@ use loonfs_api::wire::control::{
     ControlObjectKind, ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus,
     UploadSessionState,
 };
-use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
+use loonfs_api::{
+    CheckpointId, ContentRef, ContentStoreId, ManifestObjectId, NamespaceId, UploadId,
+};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_compaction_lease, metadata_compaction_segment,
     metadata_manifest_object, metadata_manifest_prefix, metadata_root, metadata_segment,
@@ -109,7 +111,7 @@ async fn marked<S: ObjectStore + ?Sized>(
 async fn checkpoint_lifecycle<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &loonfs_api::CheckpointId,
+    checkpoint_id: &CheckpointId,
 ) -> CheckpointStatus {
     crate::checkpoint::load_checkpoint_record(store, namespace_id, checkpoint_id)
         .await
@@ -1208,21 +1210,34 @@ async fn namespace_with_a_scan_worth_bounding(
 }
 
 #[tokio::test]
-async fn content_reference_scan_surfaces_a_manifest_corrupted_after_marking() {
+async fn a_corrupt_marked_manifest_fails_the_scan_and_an_unreadable_one_makes_it_unavailable() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationClass::Read,
+        InjectedError::Transport("marked manifest timed out".to_owned()),
+    );
     let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
-    let live = live_set(&store, &namespace_id, &setup).await;
+    namespace_with_a_scan_worth_bounding(store.inner(), &namespace_id, &setup).await;
+    let live = live_set(store.inner(), &namespace_id, &setup).await;
     let manifest_object_id = live.manifests.iter().next().expect("live manifest").clone();
     let manifest_key = metadata_manifest_object(&namespace_id, &manifest_object_id);
+
+    store.fail_all();
+    let mut budget = PassBudget::new(None);
+    let references = collect_referenced_content(&store, &namespace_id, &live, &mut budget)
+        .await
+        .expect("a manifest store failure remains conservative");
+    assert!(matches!(references, CollectedReferences::Unavailable));
+
+    store.clear();
     store
         .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
         .await
         .expect("corrupt marked manifest");
     let mut budget = PassBudget::new(None);
-
     let error = collect_referenced_content(&store, &namespace_id, &live, &mut budget)
         .await
         .expect_err("corruption after marking must still surface");
@@ -1231,38 +1246,23 @@ async fn content_reference_scan_surfaces_a_manifest_corrupted_after_marking() {
 }
 
 #[tokio::test]
-async fn content_reference_scan_is_unavailable_when_a_marked_manifest_does_not_read() {
+async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_content() {
     let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
-    let live = live_set(&inner, &namespace_id, &setup).await;
     let store = FailStore::new(
-        inner,
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_segment_prefix(&namespace_id)),
         OperationClass::Read,
-        InjectedError::Transport("marked manifest timed out".to_owned()),
+        InjectedError::Transport("metadata rows timed out".to_owned()),
     );
-    store.fail_all();
-    let mut budget = PassBudget::new(None);
-
-    let references = collect_referenced_content(&store, &namespace_id, &live, &mut budget)
-        .await
-        .expect("a manifest store failure remains conservative");
-    assert!(matches!(references, CollectedReferences::Unavailable));
-}
-
-#[tokio::test]
-async fn content_reference_scan_surfaces_corrupt_metadata_rows() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
+    namespace_with_a_scan_worth_bounding(store.inner(), &namespace_id, &setup).await;
     let (upload_id, content_ref, content_store_id, _) =
-        complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
+        complete_upload_for_gc(store.inner(), &namespace_id, b"unpublished\n", &setup).await;
+    let content_key =
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let segment_keys = store
+        .inner()
         .list_prefix(&metadata_segment_prefix(&namespace_id))
         .await
         .expect("list metadata segments");
@@ -1270,6 +1270,25 @@ async fn content_reference_scan_surfaces_corrupt_metadata_rows() {
         !segment_keys.is_empty(),
         "the fixture must publish metadata segments"
     );
+    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+
+    store.fail_all();
+    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+        .await
+        .expect("a metadata-row store failure retains conservatively");
+    assert_eq!(report.deleted.content_objects, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
+    assert!(store
+        .inner()
+        .head(&content_key)
+        .await
+        .expect("head content")
+        .is_some());
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_some());
+
+    store.clear();
     for key in &segment_keys {
         let mut bytes = store
             .get(key, None)
@@ -1283,50 +1302,11 @@ async fn content_reference_scan_surfaces_corrupt_metadata_rows() {
             .await
             .expect("corrupt metadata segment");
     }
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
-    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-
     let error = gc_namespace(&store, &namespace_id, &config(), &past)
         .await
         .expect_err("corrupt content-reference rows must fail the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
     assert!(segment_keys.iter().any(|key| error.message().contains(key)));
-    assert!(store
-        .head(&content_key)
-        .await
-        .expect("head content")
-        .is_some());
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
-        .await
-        .is_some());
-}
-
-#[tokio::test]
-async fn content_reference_scan_retains_content_when_metadata_rows_do_not_read() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
-    let (upload_id, content_ref, content_store_id, _) =
-        complete_upload_for_gc(&inner, &namespace_id, b"unpublished\n", &setup).await;
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
-    let store = FailStore::new(
-        inner,
-        KeyPredicate::prefix(metadata_segment_prefix(&namespace_id)),
-        OperationClass::Read,
-        InjectedError::Transport("metadata rows timed out".to_owned()),
-    );
-    store.fail_all();
-    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-
-    let report = gc_namespace(&store, &namespace_id, &config(), &past)
-        .await
-        .expect("a metadata-row store failure retains conservatively");
-    assert_eq!(report.deleted.content_objects, 0);
-    assert_eq!(report.deleted.upload_sessions, 0);
     assert!(store
         .inner()
         .head(&content_key)
@@ -2847,8 +2827,86 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .expect("tail commit stays readable");
 }
 
+async fn gc_pass(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    config: &GcConfig,
+    context: &MutationContext,
+    reverify_chunk: Option<usize>,
+) -> Result<GcResponse, CoreError> {
+    match reverify_chunk {
+        None => gc_namespace(store, namespace_id, config, context).await,
+        Some(chunk) => {
+            gc_namespace_with_reverify_chunk(store, namespace_id, config, context, chunk).await
+        }
+    }
+}
+
+async fn assert_record_reaped_and_basis_kept(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    pass: &GcResponse,
+    checkpoint_id: &loonfs_api::CheckpointId,
+    manifest_object_id: &ManifestObjectId,
+) {
+    assert_eq!(pass.deleted.checkpoint_records, 1);
+    assert!(!pass.retention_degraded);
+    assert!(
+        crate::checkpoint::load_checkpoint_record(store, namespace_id, checkpoint_id)
+            .await
+            .expect("read record")
+            .is_none(),
+        "the released record goes on the pass that decides it"
+    );
+    let basis = crate::checkpoint::load_namespace_manifest_envelope(
+        store,
+        namespace_id,
+        manifest_object_id,
+    )
+    .await
+    .expect("the basis manifest survives its record");
+    for descriptor in &basis.payload.segments {
+        assert!(
+            store
+                .head(&metadata_segment_object_key(descriptor))
+                .await
+                .expect("head segment")
+                .is_some(),
+            "the basis segments survive the record too"
+        );
+    }
+}
+
+async fn assert_basis_reaped(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    pass: &GcResponse,
+    manifest_object_id: &ManifestObjectId,
+) {
+    assert!(
+        pass.deleted.manifests >= 1,
+        "the basis manifest is reaped once its record is gone"
+    );
+    assert!(crate::checkpoint::load_namespace_manifest_envelope(
+        store,
+        namespace_id,
+        manifest_object_id
+    )
+    .await
+    .is_err());
+}
+
 #[tokio::test]
 async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
+    assert_a_dead_records_cascade(None).await;
+}
+
+#[tokio::test]
+async fn a_chunked_sweep_reaches_the_same_dead_record_cascade() {
+    assert_a_dead_records_cascade(Some(1)).await;
+}
+
+async fn assert_a_dead_records_cascade(reverify_chunk: Option<usize>) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -2875,56 +2933,30 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
         .expect("mark first dead");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let first_pass = gc_pass(&store, &namespace_id, &config(), &aged, reverify_chunk)
         .await
         .expect("first gc pass");
-
-    // Pass one deletes the dead record but the record still rooted its
-    // basis, so the referenced manifest and segments survive the pass.
-    assert_eq!(first_pass.deleted.checkpoint_records, 1);
-    assert!(!first_pass.retention_degraded);
-    assert!(
-        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
-            .await
-            .expect("read record")
-            .is_none()
-    );
-    let basis = crate::checkpoint::load_namespace_manifest_envelope(
+    assert_record_reaped_and_basis_kept(
         &store,
         &namespace_id,
+        &first_pass,
+        &first.checkpoint_id,
         &first_record.manifest.manifest_object_id,
     )
-    .await
-    .expect("dead basis manifest survives its record");
-    for descriptor in &basis.payload.segments {
-        assert!(
-            store
-                .head(&metadata_segment_object_key(descriptor))
-                .await
-                .expect("head segment")
-                .is_some(),
-            "dead basis segment survives its record"
-        );
-    }
+    .await;
 
-    // Pass two finds the basis unreferenced and aged, and reaps it.
-    let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let second_pass = gc_pass(&store, &namespace_id, &config(), &aged, reverify_chunk)
         .await
         .expect("second gc pass");
-    assert!(
-        second_pass.deleted.manifests >= 1,
-        "dead basis manifest reaped once its record is gone"
-    );
-    assert!(crate::checkpoint::load_namespace_manifest_envelope(
+    assert_basis_reaped(
         &store,
         &namespace_id,
+        &second_pass,
         &first_record.manifest.manifest_object_id,
     )
-    .await
-    .is_err());
+    .await;
     stat_root(&store, &namespace_id).await;
 }
-
 #[tokio::test]
 async fn gc_retains_unrecognized_manifest_keys() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3091,16 +3123,35 @@ async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
             .expect("repeat release");
     assert_eq!(repeat_release.checkpoint_id, pinned.checkpoint_id);
 
+    let pinned_record =
+        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &pinned.checkpoint_id)
+            .await
+            .expect("read pinned record")
+            .expect("pinned record exists")
+            .state;
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("first gc pass");
-    assert_eq!(first_pass.deleted.checkpoint_records, 1);
+    assert_record_reaped_and_basis_kept(
+        &store,
+        &namespace_id,
+        &first_pass,
+        &pinned.checkpoint_id,
+        &pinned_record.manifest.manifest_object_id,
+    )
+    .await;
 
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("second gc pass");
-    assert!(second_pass.deleted.manifests >= 1);
+    assert_basis_reaped(
+        &store,
+        &namespace_id,
+        &second_pass,
+        &pinned_record.manifest.manifest_object_id,
+    )
+    .await;
     // Releasing an already-reaped record stays idempotent success.
     let after_reap =
         crate::checkpoint::release_checkpoint(&store, &namespace_id, &pinned.checkpoint_id, &setup)
@@ -3365,19 +3416,24 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
             released_at_ms: expired.now_ms
         }
     );
+    let expiring_record =
+        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &expiring.checkpoint_id)
+            .await
+            .expect("read expiring record")
+            .expect("the released record is still there to read")
+            .state;
     let aged_out = context(expired.now_ms + GRACE_MS);
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged_out)
         .await
         .expect("second post-expiry pass");
-    assert_eq!(second_pass.deleted.checkpoint_records, 1);
-    assert!(crate::checkpoint::load_checkpoint_record(
+    assert_record_reaped_and_basis_kept(
         &store,
         &namespace_id,
-        &expiring.checkpoint_id
+        &second_pass,
+        &expiring.checkpoint_id,
+        &expiring_record.manifest.manifest_object_id,
     )
-    .await
-    .expect("read record")
-    .is_none());
+    .await;
     // The unexpired pin — same basis, different owner — still roots it.
     let survivor =
         crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &lasting.checkpoint_id)
@@ -3442,22 +3498,18 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .await
         .expect("first gc pass");
     assert_eq!(first_pass.deleted.checkpoint_records, 1);
+
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("second gc pass");
-    let _ = second_pass;
-    assert!(
-        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
-            .await
-            .expect("read keeper record")
-            .is_some(),
-        "the surviving owner's record stays"
-    );
+    assert_eq!(second_pass.deleted.manifests, 0);
+    assert_eq!(second_pass.deleted.checkpoint_records, 0);
+
     let keeper =
         crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
             .expect("read keeper record")
-            .expect("keeper record exists")
+            .expect("the surviving owner's record stays")
             .state;
     assert!(
         crate::checkpoint::load_namespace_manifest_envelope(
@@ -3620,39 +3672,40 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     let second_pass = gc_namespace(&store, &source, &config(), &aged_out)
         .await
         .expect("second gc pass");
-    assert_eq!(second_pass.deleted.checkpoint_records, 1);
-    assert!(
-        crate::checkpoint::load_namespace_manifest_envelope(
-            &store,
-            &source,
-            &fork_record.manifest.manifest_object_id,
-        )
-        .await
-        .is_ok(),
-        "basis survives the pass that deletes its record"
-    );
+    assert_record_reaped_and_basis_kept(
+        &store,
+        &source,
+        &second_pass,
+        &fork_record.checkpoint_id,
+        &fork_record.manifest.manifest_object_id,
+    )
+    .await;
 
     // Pass three reaps the unreferenced basis.
     let third_pass = gc_namespace(&store, &source, &config(), &aged_out)
         .await
         .expect("third gc pass");
-    assert!(third_pass.deleted.manifests >= 1);
-    assert!(crate::checkpoint::load_namespace_manifest_envelope(
+    assert_basis_reaped(
         &store,
         &source,
+        &third_pass,
         &fork_record.manifest.manifest_object_id,
     )
-    .await
-    .is_err());
+    .await;
     stat_root(&store, &source).await;
 }
 
 #[tokio::test]
-async fn gc_surfaces_a_corrupt_fork_target_head() {
+async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains_the_record() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("source").expect("namespace id");
     let clone = NamespaceId::parse("clone").expect("namespace id");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(wal_head(&clone)),
+        OperationClass::Read,
+        InjectedError::Transport("target head timed out".to_owned()),
+    );
     let setup = context(1_000);
     bootstrap_namespace(&store, &source, &setup, false)
         .await
@@ -3661,43 +3714,9 @@ async fn gc_surfaces_a_corrupt_fork_target_head() {
     fork_namespace(&store, &source, &clone, &setup)
         .await
         .expect("fork");
-    store
-        .put_overwrite(&wal_head(&clone), Bytes::from_static(b"not json"))
-        .await
-        .expect("corrupt target head");
-    let before = namespace_keys(&store, &source).await;
+    let fork_record = read_fork_record(store.inner(), &source).await;
 
-    let error = gc_namespace(&store, &source, &config(), &setup)
-        .await
-        .expect_err("a corrupt target head must fail the source pass");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(error.message().contains(&wal_head(&clone)));
-    assert_eq!(namespace_keys(&store, &source).await, before);
-}
-
-#[tokio::test]
-async fn gc_retains_a_fork_checkpoint_when_the_target_head_does_not_read() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let source = NamespaceId::parse("source").expect("namespace id");
-    let clone = NamespaceId::parse("clone").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&inner, &source, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&inner, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&inner, &source, &clone, &setup)
-        .await
-        .expect("fork");
-    let fork_record = read_fork_record(&inner, &source).await;
-    let store = FailStore::new(
-        inner,
-        KeyPredicate::exact(wal_head(&clone)),
-        OperationClass::Read,
-        InjectedError::Transport("target head timed out".to_owned()),
-    );
     store.fail_all();
-
     let report = gc_namespace(&store, &source, &config(), &setup)
         .await
         .expect("an unreadable target is retained conservatively");
@@ -3706,6 +3725,19 @@ async fn gc_retains_a_fork_checkpoint_when_the_target_head_does_not_read() {
         checkpoint_lifecycle(store.inner(), &source, &fork_record.checkpoint_id).await,
         CheckpointStatus::Active {}
     );
+
+    store.clear();
+    store
+        .put_overwrite(&wal_head(&clone), Bytes::from_static(b"not json"))
+        .await
+        .expect("corrupt target head");
+    let before = namespace_keys(store.inner(), &source).await;
+    let error = gc_namespace(&store, &source, &config(), &setup)
+        .await
+        .expect_err("a corrupt target head must fail the source pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(error.message().contains(&wal_head(&clone)));
+    assert_eq!(namespace_keys(store.inner(), &source).await, before);
 }
 
 #[tokio::test]
@@ -3850,7 +3882,14 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     let reaping = gc_namespace(&store, &source, &tight, &aged_out)
         .await
         .expect("gc past the release grace window");
-    assert_eq!(reaping.deleted.checkpoint_records, 1);
+    assert_record_reaped_and_basis_kept(
+        &store,
+        &source,
+        &reaping,
+        &abandoned.checkpoint_id,
+        &fork_record.manifest.manifest_object_id,
+    )
+    .await;
     stat_root(&store, &source).await;
 }
 
@@ -3900,51 +3939,7 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
 }
 
 #[tokio::test]
-async fn gc_fails_the_pass_on_a_corrupt_checkpoint_record() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("checkpoint");
-
-    let record_keys = store
-        .list_prefix(&checkpoint_prefix(&namespace_id))
-        .await
-        .expect("list checkpoints");
-    let corrupt_key = record_keys
-        .first()
-        .expect("the checkpoint wrote a record")
-        .clone();
-    store
-        .put_overwrite(&corrupt_key, Bytes::from_static(b"not json"))
-        .await
-        .expect("corrupt record");
-
-    let before = namespace_keys(&store, &namespace_id).await;
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect_err("a corrupt record fails the pass");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(
-        error.message().contains(&corrupt_key),
-        "the error names the object: {error}"
-    );
-    assert_eq!(
-        namespace_keys(&store, &namespace_id).await,
-        before,
-        "a failed pass deletes nothing"
-    );
-}
-
-#[tokio::test]
-async fn gc_fails_the_pass_when_a_checkpoint_record_does_not_read() {
+async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = FailStore::new(
@@ -3962,19 +3957,18 @@ async fn gc_fails_the_pass_when_a_checkpoint_record_does_not_read() {
         .await
         .expect("checkpoint");
 
-    let record_keys = store
+    let record_key = store
         .inner()
         .list_prefix(&checkpoint_prefix(&namespace_id))
         .await
-        .expect("list checkpoints");
-    let record_key = record_keys
+        .expect("list checkpoints")
         .first()
         .expect("the checkpoint wrote a record")
         .clone();
     let before = namespace_keys(store.inner(), &namespace_id).await;
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    store.fail_all();
 
+    store.fail_all();
     let error = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect_err("a record the store will not read fails the pass");
@@ -3988,13 +3982,38 @@ async fn gc_fails_the_pass_when_a_checkpoint_record_does_not_read() {
         before,
         "a failed pass deletes nothing"
     );
+
+    store.clear();
+    store
+        .put_overwrite(&record_key, Bytes::from_static(b"not json"))
+        .await
+        .expect("corrupt record");
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect_err("a corrupt record fails the pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(
+        error.message().contains(&record_key),
+        "the error names the object: {error}"
+    );
+    assert_eq!(
+        namespace_keys(store.inner(), &namespace_id).await,
+        before,
+        "a failed pass deletes nothing"
+    );
 }
 
 #[tokio::test]
-async fn corrupt_reference_anchor_manifest_fails_instead_of_becoming_missing() {
+async fn a_corrupt_reference_anchor_fails_and_an_unreadable_one_reads_as_missing() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationClass::Read,
+        InjectedError::Transport("reference manifest timed out".to_owned()),
+    );
     let setup = context(1_000);
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
@@ -4003,7 +4022,18 @@ async fn corrupt_reference_anchor_manifest_fails_instead_of_becoming_missing() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+
+    store.fail_all();
+    let mut budget = PassBudget::new(None);
+    let anchor = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
+        .await
+        .expect("a store failure keeps a missing anchor");
+    assert!(matches!(anchor, ReferenceAnchor::Missing));
+
+    store.clear();
     let manifest_key = store
+        .inner()
         .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
         .expect("list manifests")
@@ -4014,9 +4044,8 @@ async fn corrupt_reference_anchor_manifest_fails_instead_of_becoming_missing() {
         .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
         .await
         .expect("corrupt reference manifest");
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
     let mut budget = PassBudget::new(None);
-
     let error = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
         .await
         .expect_err("a corrupt reference anchor must surface");
@@ -4028,84 +4057,7 @@ async fn corrupt_reference_anchor_manifest_fails_instead_of_becoming_missing() {
 }
 
 #[tokio::test]
-async fn unreadable_reference_anchor_manifest_remains_conservative() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&inner, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    create_checkpoint(&inner, &namespace_id, &setup)
-        .await
-        .expect("checkpoint");
-    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
-    let store = FailStore::new(
-        inner,
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-        OperationClass::Read,
-        InjectedError::Transport("reference manifest timed out".to_owned()),
-    );
-    store.fail_all();
-    let mut budget = PassBudget::new(None);
-
-    let anchor = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
-        .await
-        .expect("a store failure keeps a missing anchor");
-    assert!(matches!(anchor, ReferenceAnchor::Missing));
-}
-
-#[tokio::test]
-async fn gc_fails_the_pass_on_a_corrupt_root_manifest() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("checkpoint");
-
-    let manifest_keys = store
-        .list_prefix(&metadata_manifest_prefix(&namespace_id))
-        .await
-        .expect("list manifests");
-    assert!(
-        !manifest_keys.is_empty(),
-        "the checkpoint published a manifest"
-    );
-    for key in &manifest_keys {
-        store
-            .put_overwrite(key, Bytes::from_static(b"not json"))
-            .await
-            .expect("corrupt manifest");
-    }
-
-    let before = namespace_keys(&store, &namespace_id).await;
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect_err("a corrupt root manifest fails the pass");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(
-        manifest_keys
-            .iter()
-            .any(|key| error.message().contains(key)),
-        "the error names the object: {error}"
-    );
-    assert_eq!(
-        namespace_keys(&store, &namespace_id).await,
-        before,
-        "a failed pass deletes nothing"
-    );
-}
-
-#[tokio::test]
-async fn gc_degrades_when_a_root_manifest_does_not_read() {
+async fn a_corrupt_root_manifest_fails_the_pass_and_an_unreadable_one_degrades_it() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = FailStore::new(
@@ -4123,10 +4075,19 @@ async fn gc_degrades_when_a_root_manifest_does_not_read() {
         .await
         .expect("checkpoint");
 
+    let manifest_keys = store
+        .inner()
+        .list_prefix(&metadata_manifest_prefix(&namespace_id))
+        .await
+        .expect("list manifests");
+    assert!(
+        !manifest_keys.is_empty(),
+        "the checkpoint published a manifest"
+    );
     let before = namespace_keys(store.inner(), &namespace_id).await;
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    store.fail_all();
 
+    store.fail_all();
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("a read failure degrades the pass instead of failing it");
@@ -4141,6 +4102,30 @@ async fn gc_degrades_when_a_root_manifest_does_not_read() {
         namespace_keys(store.inner(), &namespace_id).await,
         before,
         "a degraded pass reclaims nothing in the affected families"
+    );
+
+    store.clear();
+    for key in &manifest_keys {
+        store
+            .put_overwrite(key, Bytes::from_static(b"not json"))
+            .await
+            .expect("corrupt manifest");
+    }
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect_err("a corrupt root manifest fails the pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(
+        manifest_keys
+            .iter()
+            .any(|key| error.message().contains(key)),
+        "the error names the object: {error}"
+    );
+    assert_eq!(
+        namespace_keys(store.inner(), &namespace_id).await,
+        before,
+        "a failed pass deletes nothing"
     );
 }
 
@@ -4182,41 +4167,6 @@ async fn gc_retains_everything_without_provider_timestamps() {
 }
 
 #[tokio::test]
-async fn gc_sweep_reverification_chunks_preserve_outcomes() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let first = create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("first checkpoint");
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("second checkpoint");
-    release_checkpoint_record(&store, &namespace_id, &first.checkpoint_id, setup.now_ms)
-        .await
-        .expect("mark first dead");
-
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let first_pass = gc_namespace_with_reverify_chunk(&store, &namespace_id, &config(), &aged, 1)
-        .await
-        .expect("first gc pass");
-    assert_eq!(first_pass.deleted.checkpoint_records, 1);
-    assert!(!first_pass.retention_degraded);
-
-    let second_pass = gc_namespace_with_reverify_chunk(&store, &namespace_id, &config(), &aged, 1)
-        .await
-        .expect("second gc pass");
-    assert!(second_pass.deleted.manifests >= 1);
-    stat_root(&store, &namespace_id).await;
-}
-
-#[tokio::test]
 async fn gc_of_an_absent_namespace_lists_and_deletes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -4233,48 +4183,6 @@ async fn gc_of_an_absent_namespace_lists_and_deletes_nothing() {
     assert_eq!(report, GcResponse::empty(namespace_id.clone()));
     assert_eq!(store.lists.load(Ordering::SeqCst), 0);
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn gc_fails_the_pass_when_a_fork_pin_record_is_corrupt() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let source = NamespaceId::parse("source").expect("namespace id");
-    let clone = NamespaceId::parse("clone").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, &setup)
-        .await
-        .expect("fork");
-
-    let record_keys = store
-        .list_prefix(&checkpoint_prefix(&source))
-        .await
-        .expect("list checkpoints");
-    let corrupt_key = record_keys.first().expect("the fork pinned").clone();
-    store
-        .put_overwrite(&corrupt_key, Bytes::from_static(b"not json"))
-        .await
-        .expect("corrupt record");
-
-    let before = namespace_keys(&store, &source).await;
-    let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let error = gc_namespace(&store, &source, &config(), &aged)
-        .await
-        .expect_err("a corrupt pin record fails the pass");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(
-        error.message().contains(&corrupt_key),
-        "the error names the object: {error}"
-    );
-    assert_eq!(
-        namespace_keys(&store, &source).await,
-        before,
-        "a failed pass deletes nothing"
-    );
 }
 
 async fn add_bounded_gc_fixture(

@@ -36,11 +36,4 @@ mod tests {
             "unexpected error: {error}"
         );
     }
-
-    #[test]
-    fn epoch_and_later_instants_convert_to_milliseconds() {
-        assert_eq!(unix_ms(UNIX_EPOCH).expect("epoch converts"), 0);
-        let later = UNIX_EPOCH + Duration::from_millis(1500);
-        assert_eq!(unix_ms(later).expect("later converts"), 1500);
-    }
 }

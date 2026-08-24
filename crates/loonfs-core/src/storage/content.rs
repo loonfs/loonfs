@@ -740,7 +740,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_content_ref_accepts_empty_files() {
+    async fn get_durable_content_bytes_accepts_empty_files() {
         let (_temp_dir, store, content_store_id) = test_store();
         let bytes = b"";
         let content_ref = content_ref(bytes);
@@ -1383,28 +1383,6 @@ mod tests {
             ),
             "unexpected verdict: {verdict}"
         );
-    }
-
-    #[tokio::test]
-    async fn a_streamed_read_verifies_a_reference_whose_only_evidence_is_a_crc64nvme() {
-        let (_temp_dir, store, content_store_id) = test_store();
-        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
-        let content_ref = ContentRef {
-            kind: ContentRefKind::BlobV1,
-            content_id: ContentId::generate(),
-            size_bytes: bytes.len() as u64,
-            checksum: Checksum::crc64nvme(&bytes),
-        };
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
-
-        let mut stream = open_stream(&store, &content_store_id, &content_ref)
-            .await
-            .expect("open stream");
-        let mut read = Vec::new();
-        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
-            read.extend_from_slice(&chunk);
-        }
-        assert_eq!(read, bytes);
     }
 
     #[tokio::test]

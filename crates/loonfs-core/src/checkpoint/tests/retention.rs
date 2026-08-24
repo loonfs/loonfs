@@ -1045,12 +1045,11 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         .await
         .expect("bootstrap");
 
-    for index in 1..=4 {
+    let rounds = DEFAULT_MAX_CHECKPOINT_DELTA_RUNS + 2;
+    for index in 1..=u64::try_from(rounds).expect("round count fits") {
         write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
 
-    // Checkpoints never compact: well past the policy threshold every
-    // delta run is still chained and the base is still the seed's.
     let appended = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
@@ -1058,7 +1057,8 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     )
     .await
     .expect("load appended manifest");
-    assert_eq!(delta_runs(&appended.manifest).len(), 4);
+    assert_eq!(delta_runs(&appended.manifest).len(), rounds);
+    assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_CHECKPOINT_DELTA_RUNS);
     assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
 
     // Reorganization folds one family group per unit, each publishing its
@@ -1105,7 +1105,10 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         .await
         .expect("materialization");
     assert!(delta_runs(&drained.manifest).is_empty());
-    assert_eq!(drained.manifest.payload.base_seq, ChangeSeq(4));
+    assert_eq!(
+        drained.manifest.payload.base_seq,
+        ChangeSeq(u64::try_from(rounds).expect("round count fits"))
+    );
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
         &drained.metadata_state
@@ -1619,32 +1622,6 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
         &materialization_after.metadata_state,
         &drained.metadata_state
     ));
-}
-
-#[tokio::test]
-async fn checkpoints_chain_delta_runs_past_the_default_cap() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    for index in 1..=10 {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
-    }
-
-    // The default cap is a reorganization trigger, never a checkpoint
-    // behavior: publication keeps appending regardless.
-    let appended = load_manifest_materialization_for_inspection(
-        &store,
-        &namespace_id,
-        current_manifest_no(&store, &namespace_id).await,
-    )
-    .await
-    .expect("load appended manifest");
-    assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_CHECKPOINT_DELTA_RUNS);
-    assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
 }
 
 #[tokio::test]

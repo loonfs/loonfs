@@ -2233,50 +2233,6 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
 }
 
 #[tokio::test]
-async fn a_cancelled_job_leaves_its_claim_standing() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    seed_bindings_workload(
-        &LocalFsStore::new(temp_dir.path()).expect("store"),
-        &namespace_id,
-    )
-    .await;
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let group = MetadataFamilyGroup::Bindings;
-    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
-    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
-    let lease_key = metadata_compaction_lease(&namespace_id, spec.job_id());
-
-    let cancellation = MetadataCompactionCancellation::default();
-    let dying_store = CancelAfterReadsStore {
-        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-        cancellation: cancellation.clone(),
-        reads_before_cancel: 8,
-        reads: AtomicUsize::new(0),
-    };
-    let outcome = run_metadata_compaction_job(
-        &dying_store,
-        &namespace_id,
-        &context,
-        &spec,
-        policy,
-        &cancellation,
-    )
-    .await
-    .expect("run the job");
-    assert_eq!(outcome, MetadataCompactionJobOutcome::Cancelled);
-    assert!(
-        store
-            .head(&lease_key)
-            .await
-            .expect("head the lease")
-            .is_some(),
-        "a cancelled job's claim stands until it expires"
-    );
-}
-
-#[tokio::test]
 async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3021,6 +2977,14 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
             outcome,
             MetadataCompactionJobOutcome::Cancelled,
             "the cancellation must land before the job finishes"
+        );
+        assert!(
+            store
+                .head(&metadata_compaction_lease(&namespace_id, spec.job_id()))
+                .await
+                .expect("head the lease")
+                .is_some(),
+            "a cancelled job's claim stands until it expires"
         );
         assert_eq!(
             current_manifest_object_id(&store, &namespace_id).await,

@@ -38,6 +38,14 @@ fn path(value: &str) -> AbsolutePath {
     AbsolutePath::parse(value).expect("valid path")
 }
 
+fn assert_invalid_commit_request(error: &CoreError, label: &str) {
+    assert!(
+        matches!(error, CoreError::InvalidCommitRequest(_)),
+        "for `{label}`: {error:?}"
+    );
+    assert_eq!(error.code(), ErrorCode::InvalidRequest, "for `{label}`");
+}
+
 fn key(value: &str) -> AttributeKey {
     AttributeKey::parse(value).expect("valid attribute key")
 }
@@ -297,7 +305,7 @@ async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
     .await
     .expect("seed file");
 
-    let cases: Vec<(&str, FilesystemOperation, &str)> = vec![
+    let cases: Vec<(&str, FilesystemOperation)> = vec![
         (
             "overlap",
             FilesystemOperation::UpdateAttributes {
@@ -307,7 +315,6 @@ async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
                 expected_inode_id: None,
                 expected_attributes_revision_no: None,
             },
-            "both set and removed",
         ),
         (
             "duplicate-remove",
@@ -318,7 +325,6 @@ async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
                 expected_inode_id: None,
                 expected_attributes_revision_no: None,
             },
-            "removed more than once",
         ),
         (
             "empty",
@@ -329,30 +335,23 @@ async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
                 expected_inode_id: None,
                 expected_attributes_revision_no: None,
             },
-            "sets no attribute and removes none",
         ),
         (
             "reserved-set",
             set_attributes("/docs/a.txt", &[("loonfs.kind", "file")]),
-            "system-owned",
         ),
         (
             "reserved-remove",
             remove_attributes("/docs/a.txt", &["loonfs.kind"]),
-            "system-owned",
         ),
     ];
 
-    for (label, operation, expected_message) in cases {
+    for (label, operation) in cases {
         let error = match update(&store, &namespace_id, label, operation, &context).await {
             Ok(_) => panic!("`{label}` must be rejected"),
             Err(error) => error,
         };
-        assert_eq!(error.code(), ErrorCode::InvalidRequest, "for `{label}`");
-        assert!(
-            error.to_string().contains(expected_message),
-            "for `{label}`: {error}"
-        );
+        assert_invalid_commit_request(&error, label);
     }
 }
 
@@ -394,11 +393,7 @@ async fn an_update_that_changes_nothing_is_rejected() {
             Ok(_) => panic!("`{label}` must be rejected"),
             Err(error) => error,
         };
-        assert_eq!(error.code(), ErrorCode::InvalidRequest, "for `{label}`");
-        assert!(
-            error.to_string().contains("unchanged"),
-            "for `{label}`: {error}"
-        );
+        assert_invalid_commit_request(&error, label);
     }
 
     // A first write on an inode that has no attributes is not a no-op even
@@ -749,7 +744,7 @@ async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
     )
     .await
     .expect_err("the flushed map is unchanged by this update");
-    assert!(no_op.to_string().contains("unchanged"), "{no_op}");
+    assert_invalid_commit_request(&no_op, "repeat-after-flush");
 
     update(
         &store,
@@ -816,7 +811,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
     )
     .await
     .expect_err("the fork already holds the source's map");
-    assert!(inherited.to_string().contains("unchanged"), "{inherited}");
+    assert_invalid_commit_request(&inherited, "repeat-in-fork");
 
     update(
         &store,
@@ -1016,7 +1011,7 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
     )
     .await
     .expect_err("undelete revealed the same map");
-    assert!(no_op.to_string().contains("unchanged"), "{no_op}");
+    assert_invalid_commit_request(&no_op, "repeat-after-undelete");
 }
 
 #[tokio::test]
@@ -1230,7 +1225,7 @@ async fn clearing_every_attribute_publishes_the_empty_map() {
     )
     .await
     .expect_err("the map is already empty");
-    assert!(no_op.to_string().contains("unchanged"), "{no_op}");
+    assert_invalid_commit_request(&no_op, "clear-again");
 
     // A cleared map is a real state that survives a flush.
     namespace_engine(&store, &namespace_id, &context)

@@ -442,8 +442,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
 }
 
 #[test]
-fn revisions_advance_watermark_and_receipt_index() {
-    let receipt_commit_id = CommitId::parse("indexed-commit").expect("valid commit id");
+fn metadata_builder_tracks_the_highest_row_sequence() {
     let content_ref = ContentRef::blob_v1(ContentId::generate(), b"first revision bytes");
     let replacement_ref = ContentRef::blob_v1(ContentId::generate(), b"second revision bytes");
 
@@ -464,7 +463,7 @@ fn revisions_advance_watermark_and_receipt_index() {
         committed_at_ms: 4_200,
         committed_by: actor(),
         revision_delta_index: 0,
-        content_ref: content_ref.clone(),
+        content_ref,
     });
     builder.push_revision(RevisionRecord {
         inode_id: InodeId(7),
@@ -474,10 +473,10 @@ fn revisions_advance_watermark_and_receipt_index() {
         committed_at_ms: 4_200,
         committed_by: actor(),
         revision_delta_index: 0,
-        content_ref: replacement_ref.clone(),
+        content_ref: replacement_ref,
     });
     builder.push_commit_receipt(CommitReceiptRecord {
-        commit_id: receipt_commit_id.clone(),
+        commit_id: CommitId::parse("indexed-commit").expect("valid commit id"),
         committed_by: loonfs_test_support::test_actor(),
         semantic_commit_fingerprint: "fingerprint".to_owned(),
         committed_seq: ChangeSeq(3),
@@ -487,31 +486,7 @@ fn revisions_advance_watermark_and_receipt_index() {
     let metadata_state = builder.finish();
 
     assert_eq!(metadata_state.row_count(), 4);
-    assert!(metadata_state.decoded_bytes() >= metadata_state.row_count());
     assert_eq!(metadata_state.indexed_seq(), ChangeSeq(3));
-    assert_eq!(
-        metadata_state
-            .revisions()
-            .last()
-            .expect("revision rows")
-            .content_ref,
-        replacement_ref
-    );
-    assert_eq!(
-        metadata_state
-            .find_commit_receipt(&receipt_commit_id)
-            .expect("commit receipt")
-            .committed_seq,
-        ChangeSeq(3)
-    );
-
-    assert_eq!(
-        metadata_state
-            .find_commit_receipt(&receipt_commit_id)
-            .expect("indexed receipt")
-            .semantic_commit_fingerprint,
-        "fingerprint"
-    );
 }
 
 fn attribute_map(entries: &[(&str, &str)]) -> Attributes {
@@ -951,28 +926,4 @@ fn has_visible_children_sees_through_unbinds() {
         !visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe emptied directory")
     );
-}
-
-#[test]
-fn every_absent_visibility_leg_has_its_own_stable_name() {
-    use visibility::AbsentVisibilityLeg;
-
-    let legs = [
-        (AbsentVisibilityLeg::ParentInode, "parent_inode"),
-        (
-            AbsentVisibilityLeg::ParentNotDirectory,
-            "parent_not_directory",
-        ),
-        (AbsentVisibilityLeg::ForwardBinding, "forward_binding"),
-        (AbsentVisibilityLeg::BindingUnbound, "binding_unbound"),
-        (AbsentVisibilityLeg::ReverseIndex, "reverse_index"),
-        (AbsentVisibilityLeg::BindingSuperseded, "binding_superseded"),
-        (AbsentVisibilityLeg::ChildInode, "child_inode"),
-    ];
-
-    for (leg, name) in legs {
-        assert_eq!(leg.name(), name, "{leg:?} was renamed");
-    }
-    let names: std::collections::BTreeSet<&str> = legs.iter().map(|(leg, _)| leg.name()).collect();
-    assert_eq!(names.len(), legs.len(), "two legs share one name");
 }

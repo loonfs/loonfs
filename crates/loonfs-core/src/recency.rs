@@ -162,13 +162,19 @@ mod tests {
         touch(&mut recency, &mut entries, "a");
         assert_eq!(recency.positions(), 1);
 
-        // Under the floor nothing is dropped, so the ghosts stay visible.
-        for _ in 0..15 {
+        let mut previous = recency.positions();
+        let mut compacted = false;
+        for _ in 0..1_024 {
             touch(&mut recency, &mut entries, "a");
+            let positions = recency.positions();
+            if positions < previous {
+                assert_eq!(positions, 1, "crossing the floor drops every ghost");
+                compacted = true;
+                break;
+            }
+            assert_eq!(positions, previous + 1, "a ghost stays until compaction");
+            previous = positions;
         }
-        assert_eq!(recency.positions(), 16);
-
-        touch(&mut recency, &mut entries, "a");
-        assert_eq!(recency.positions(), 1, "crossing the floor drops ghosts");
+        assert!(compacted, "the queue must compact within the bound");
     }
 }
