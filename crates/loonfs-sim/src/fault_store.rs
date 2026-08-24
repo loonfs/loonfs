@@ -827,8 +827,7 @@ mod tests {
     #[tokio::test]
     async fn list_omission_fault_is_deterministic_on_both_paths_and_traced() {
         let (_temp_dir, store) = temp_store();
-        // Steps 3 and 4 are the buffered list and the streaming list below,
-        // so both list paths meet the same fault over the same two writes.
+        // Writes use steps 1 and 2; the list calls use steps 3 and 4.
         let omit_recent = |step| ScheduledFault {
             step,
             op_kind: Some(ObjectOperationKind::ListPrefix),

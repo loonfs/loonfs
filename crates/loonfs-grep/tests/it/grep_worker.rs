@@ -2270,10 +2270,7 @@ async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
         .expect("list keys");
     assert!(keys_before.len() > 2, "{keys_before:?}");
 
-    // Every key the pass reclaims costs reads of its own beyond the listing
-    // that named it. How many it costs is bookkeeping; that it costs more
-    // than the one listing read is the rule, so this budget bounds the pass
-    // at half its reads rather than at all seven keys it could list.
+    // Stop the pass before it can reclaim every key.
     const BUDGET: u64 = 7;
     let pass = worker(&store)
         .await
