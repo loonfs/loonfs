@@ -522,9 +522,11 @@ An illustrative inode row:
 
 ```json
 {
+  "kind": "inode",
   "inode_id": 42,
   "inode_kind": "file",
   "created_seq": 17,
+  "commit_id": "c_1f0a3b5c7d9e11223344556677889900",
   "created_by": { "kind": "user", "id": "usr_8f3c" },
   "created_at_ms": 1752624000000
 }
@@ -534,11 +536,13 @@ The bind row that places that inode in the tree:
 
 ```json
 {
+  "kind": "direntry_bind",
   "parent_inode_id": 9,
   "name_key": "report.txt",
   "display_name": "Report.txt",
   "child_inode_id": 42,
-  "bind_seq": 17
+  "bind_seq": 17,
+  "bind_delta_index": 1
 }
 ```
 
@@ -546,8 +550,10 @@ The unbind row that removes one exact prior binding:
 
 ```json
 {
+  "kind": "direntry_unbind",
   "parent_inode_id": 9,
   "name_key": "report.txt",
+  "display_name": "Report.txt",
   "child_inode_id": 42,
   "bind_seq": 17,
   "bind_delta_index": 1,
@@ -560,11 +566,14 @@ The revision row for the current file contents:
 
 ```json
 {
+  "kind": "file_revision",
   "inode_id": 42,
   "revision_no": 7,
   "committed_seq": 91,
+  "commit_id": "c_2b4d6f8a0c1e33445566778899aabbcc",
   "committed_at_ms": 1752625000000,
   "committed_by": { "kind": "service", "id": "render-worker" },
+  "delta_index": 0,
   "content_ref": {
     "kind": "blob_v1",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
@@ -939,8 +948,9 @@ and segment predecessor links:
 The head stores the tip once. `recent_segments` is a bounded newest-first
 list of pointers strictly below `visible_wal_tip`: publication replaces it
 with the old tip followed by the old predecessor hints, truncated to the
-limit. A head before its first commit carries neither. A head after its first
-commit carries a tip and may have no predecessor hints. For example:
+limit. A head before its first commit omits the tip and lists no predecessor
+hints. A head after its first commit carries a tip and may still list no
+predecessor hints. For example:
 
 ```json
 {
