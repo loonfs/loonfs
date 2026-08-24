@@ -1,6 +1,6 @@
 //! Dispatches each resolved operation to its embedded or remote implementation.
 
-use super::progress::{rest_between_status_checks, wait_for_grep_index, GrepWaitAdvance};
+use super::progress::{rest_between_status_checks, wait_for_grep_index, GrepWaitStep};
 use super::{FileDownload, GrepWaitProgress, MaintenanceDrainProgress, StepBudget};
 use crate::backend_error::{map_namespace_scoped_runtime_error, BackendError};
 use crate::payload::LocalPayload;
@@ -412,11 +412,9 @@ impl ResolvedTarget {
                         let index = target.client.get_grep_index(namespace_id).await?;
                         Ok(index.lifecycle)
                     },
-                    // A status check is this arm's step: the server advances
-                    // the index, so the wait only asks again.
                     || async {
                         rest_between_status_checks().await;
-                        Ok(GrepWaitAdvance::Advanced)
+                        Ok(GrepWaitStep::Continue)
                     },
                 )
                 .await

@@ -18,8 +18,7 @@ pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
     }
 }
 
-/// How a store probe came out. An unsupported check did not pass, so it is
-/// its own outcome rather than a quiet success.
+/// Overall result of an object-store probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoreProbeVerdict {
     Failed { checks: usize },
@@ -27,8 +26,6 @@ pub(crate) enum StoreProbeVerdict {
     Passed,
 }
 
-/// Decides how one probe came out. The doctor status, the summary sentence,
-/// and the exit code all read this answer rather than counting again.
 pub(crate) fn store_probe_verdict(
     response: &loonfs_api::v0::StoreProbeResponse,
 ) -> StoreProbeVerdict {
@@ -49,8 +46,6 @@ pub(crate) fn store_probe_verdict(
     }
 }
 
-/// The one sentence that says how a probe came out, for `admin store probe`
-/// and for the `doctor --write-check` line.
 pub(crate) fn store_probe_summary_line(response: &loonfs_api::v0::StoreProbeResponse) -> String {
     let run_id = &response.run_id;
     let total = response.checks.len();
@@ -65,8 +60,6 @@ pub(crate) fn store_probe_summary_line(response: &loonfs_api::v0::StoreProbeResp
     }
 }
 
-/// Formats the object-store probe for `admin store probe`: every check, then
-/// the verdict.
 pub(super) fn store_probe_report_lines(
     response: &loonfs_api::v0::StoreProbeResponse,
 ) -> Vec<String> {
@@ -227,8 +220,6 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     }
 }
 
-/// Every family a collection pass deletes, in the order the summary names
-/// them. One list, so a total and an enumeration cannot disagree.
 fn gc_deleted_counts(deleted: &loonfs_api::DeletedObjectCounts) -> [(&'static str, u64); 6] {
     [
         ("wal segments", deleted.wal_segments),
@@ -240,18 +231,12 @@ fn gc_deleted_counts(deleted: &loonfs_api::DeletedObjectCounts) -> [(&'static st
     ]
 }
 
-/// Names the retention reason that dominates, where one does. The per-pass
-/// line and the run summary say it the same way; `--json` carries the
-/// complete breakdown.
 fn push_top_retention_reason(summary: &mut String, response: &GcResponse) {
     if let Some((reason, count)) = response.retained.top_reason() {
         summary.push_str(&format!("; mostly {reason}: {count}"));
     }
 }
 
-/// What one collection pass did, in the terms an operator watching a long
-/// run needs: what went, what stayed and mostly why, and when the next thing
-/// this pass kept becomes reclaimable.
 pub(crate) fn gc_pass_line(pass: &GcResponse) -> String {
     let deleted: u64 = gc_deleted_counts(&pass.deleted)
         .iter()

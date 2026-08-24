@@ -203,7 +203,7 @@ impl ProfileConfig {
                 ca_cert_path,
             } => {
                 validate_actor_and_default_namespace(name, actor, default_namespace.as_deref())?;
-                validate_remote_client_config(
+                validate_stored_remote_client_config(
                     name,
                     server_url,
                     auth_token.as_ref(),
@@ -649,12 +649,7 @@ fn validate_default_namespace(field: &str, value: &str) -> Result<(), CliError> 
         .map_err(|err| CliError::invalid_config(format!("invalid `{field}`: {err}")))
 }
 
-/// The client configuration a remote profile resolves to under the current
-/// environment.
-///
-/// Validation and request setup both build it here, so a profile that
-/// `profile create` accepts is one a request can open a client from: the
-/// environment token counts at both ends.
+/// Builds the client configuration used by a remote profile.
 pub(crate) fn remote_client_config(
     server_url: &str,
     auth_token: Option<&SecretString>,
@@ -679,7 +674,6 @@ fn remote_client_config_from(
 ) -> ClientConfig {
     ClientConfig {
         server_url: server_url.to_owned(),
-        // A stored token wins over the environment, matching the server.
         auth_token: auth_token.cloned().or_else(|| {
             lookup(AUTH_TOKEN_ENV)
                 .filter(|token| !token.trim().is_empty())
@@ -697,21 +691,35 @@ pub(crate) fn validate_remote_client_config(
     auth_token: Option<&SecretString>,
     ca_cert_path: Option<&str>,
 ) -> Result<(), CliError> {
-    // Retry is a per-invocation behavior and never decides validity, so this
-    // asks whether a plain request could use the profile at all.
-    remote_client_config(server_url, auth_token, ca_cert_path, false)
-        .validate()
-        .map_err(|error| match error {
-            ClientError::MissingConfigField { field } => CliError::invalid_config(format!(
-                "missing `{}`",
-                profile_field(profile_name, field)
-            )),
-            ClientError::ConfigValidation { field, reason } => CliError::invalid_config(format!(
-                "invalid `{}`: {reason}",
-                profile_field(profile_name, field)
-            )),
-            error => CliError::invalid_config(error.to_string()),
-        })
+    validate_client_config(
+        profile_name,
+        remote_client_config(server_url, auth_token, ca_cert_path, false),
+    )
+}
+
+fn validate_stored_remote_client_config(
+    profile_name: &str,
+    server_url: &str,
+    auth_token: Option<&SecretString>,
+    ca_cert_path: Option<&str>,
+) -> Result<(), CliError> {
+    validate_client_config(
+        profile_name,
+        remote_client_config_from(server_url, auth_token, ca_cert_path, false, |_| None),
+    )
+}
+
+fn validate_client_config(profile_name: &str, config: ClientConfig) -> Result<(), CliError> {
+    config.validate().map_err(|error| match error {
+        ClientError::MissingConfigField { field } => {
+            CliError::invalid_config(format!("missing `{}`", profile_field(profile_name, field)))
+        }
+        ClientError::ConfigValidation { field, reason } => CliError::invalid_config(format!(
+            "invalid `{}`: {reason}",
+            profile_field(profile_name, field)
+        )),
+        error => CliError::invalid_config(error.to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -761,27 +769,6 @@ mod tests {
                 Some("  ".to_owned())
             });
         assert!(blank.auth_token.is_none());
-    }
-
-    #[test]
-    fn the_environment_token_is_what_validation_judges() {
-        // The same profile a request would build: validation must see the
-        // environment token, or it accepts what every request then rejects.
-        let config =
-            remote_client_config_from("http://example.internal", None, None, false, |_| {
-                Some("env-token".to_owned())
-            });
-        let reason = match config.validate() {
-            Err(loonfs_client::ClientError::ConfigValidation { field, reason }) => {
-                assert_eq!(field, "server_url");
-                reason
-            }
-            other => panic!("expected a config validation failure, got {other:?}"),
-        };
-        assert!(
-            reason.contains("bearer tokens require https except for loopback http URLs"),
-            "{reason}"
-        );
     }
 
     fn parse(contents: &str) -> Result<CliConfig, toml::de::Error> {

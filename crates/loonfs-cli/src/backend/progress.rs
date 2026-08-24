@@ -77,40 +77,30 @@ impl MaintenanceDrainProgress {
 /// Result of waiting for a grep index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrepWaitProgress {
-    /// Number of status checks or maintenance steps performed.
+    /// Number of polling intervals or maintenance steps completed.
     pub steps: u64,
     /// True when the index reached the target sequence.
     pub reached: bool,
 }
 
-/// What one turn of a grep-index wait did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GrepWaitAdvance {
-    /// The arm did something the next reading may reflect.
-    Advanced,
-    /// The arm has nothing more to do; repeating the turn would only spin.
+pub(super) enum GrepWaitStep {
+    Continue,
     Settled,
 }
 
-/// Waits for one namespace's grep index to reach `target_seq`.
-///
-/// `read` reports where the index is; `advance` moves it one step, in
-/// whatever a step means for the arm — a bounded index step where the
-/// profile is embedded, a status check where it is remote. The wait returns
-/// when the target is reached, when the lifecycle has stopped where it is,
-/// when the arm settles, or when the budget is spent, and reports how far it
-/// got either way.
-pub(super) async fn wait_for_grep_index<Read, ReadTurn, Advance, AdvanceTurn>(
+/// Waits until the grep index reaches the target, stops, or exhausts the budget.
+pub(super) async fn wait_for_grep_index<Read, ReadTurn, Step, StepTurn>(
     target_seq: ChangeSeq,
     budget: StepBudget,
     read: Read,
-    advance: Advance,
+    step: Step,
 ) -> Result<GrepWaitProgress, BackendError>
 where
     Read: Fn() -> ReadTurn,
     ReadTurn: Future<Output = Result<GrepIndexLifecycle, BackendError>>,
-    Advance: Fn() -> AdvanceTurn,
-    AdvanceTurn: Future<Output = Result<GrepWaitAdvance, BackendError>>,
+    Step: Fn() -> StepTurn,
+    StepTurn: Future<Output = Result<GrepWaitStep, BackendError>>,
 {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
@@ -123,14 +113,11 @@ where
         if reached || settled || lifecycle_stopped(&lifecycle) || budget.spent(steps, elapsed_ms) {
             return Ok(GrepWaitProgress { steps, reached });
         }
-        settled = advance().await? == GrepWaitAdvance::Settled;
+        settled = step().await? == GrepWaitStep::Settled;
         steps += 1;
     }
 }
 
-/// Whether a lifecycle has stopped where it is. Nobody builds a disabled
-/// index, so a wait on one reports where it stopped rather than asking
-/// again forever.
 fn lifecycle_stopped(lifecycle: &GrepIndexLifecycle) -> bool {
     match lifecycle {
         GrepIndexLifecycle::Disabled => true,
@@ -149,12 +136,11 @@ pub(super) async fn rest_between_status_checks() {
 
 #[cfg(test)]
 mod tests {
-    use super::{wait_for_grep_index, GrepWaitAdvance, GrepWaitProgress, StepBudget};
+    use super::{wait_for_grep_index, GrepWaitProgress, GrepWaitStep, StepBudget};
     use loonfs_api::v0::GrepIndexLifecycle;
     use loonfs_api::ChangeSeq;
     use std::cell::Cell;
 
-    /// A wait with no budget: only settling can end it.
     #[tokio::test]
     async fn an_unbudgeted_wait_stops_where_the_index_stops() {
         let turns = Cell::new(0u64);
@@ -165,7 +151,7 @@ mod tests {
             || async {
                 turns.set(turns.get() + 1);
                 assert!(turns.get() < 4, "a disabled index must end the wait");
-                Ok(GrepWaitAdvance::Advanced)
+                Ok(GrepWaitStep::Continue)
             },
         )
         .await
@@ -191,7 +177,7 @@ mod tests {
                     .expect("checkpoint id"),
                 })
             },
-            || async { Ok(GrepWaitAdvance::Settled) },
+            || async { Ok(GrepWaitStep::Settled) },
         )
         .await
         .expect("wait over an index that settles short");

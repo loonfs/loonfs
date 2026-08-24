@@ -1016,8 +1016,6 @@ fn profile_create_rejects_token_over_non_loopback_http_before_writing() {
         "unsafe profile must be rejected before creating the config file"
     );
 
-    // A token from the environment is the token every request would carry,
-    // so creation judges the profile the same way.
     let ambient = harness.run_with_env(
         &[("LOONFS_AUTH_TOKEN", "ambient-auth-token")],
         &[
@@ -1044,6 +1042,26 @@ fn profile_create_rejects_token_over_non_loopback_http_before_writing() {
         !harness.config_path.exists(),
         "a profile no request could use must not be written"
     );
+}
+
+#[test]
+fn an_ambient_token_does_not_invalidate_an_unselected_profile() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&[
+        "profile",
+        "create",
+        "remote",
+        "unused",
+        "--server-url",
+        "http://example.internal",
+    ]));
+
+    let listed = harness.run_with_env(
+        &[("LOONFS_AUTH_TOKEN", "ambient-auth-token")],
+        &["profile", "list"],
+    );
+    assert_success(&listed);
 }
 
 #[test]

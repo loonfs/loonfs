@@ -33,7 +33,6 @@ struct FileJob {
     content_ref: Option<loonfs_api::ContentRef>,
 }
 
-/// Whether a destination directory came into being in this transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectoryOutcome {
     Created,
@@ -64,9 +63,6 @@ impl TreeTally {
         }
     }
 
-    /// Counts a destination directory this transfer created. `put -r`,
-    /// `get -r`, and `cp -r` all report the same number: directories this
-    /// run added, never ones that were already there.
     fn record_directory(&mut self, outcome: DirectoryOutcome) {
         if outcome == DirectoryOutcome::Created {
             self.directories += 1;
@@ -81,8 +77,6 @@ impl TreeTally {
     }
 }
 
-/// Creates one local destination directory, saying whether this transfer is
-/// what created it.
 fn create_local_directory(path: &Path) -> std::io::Result<DirectoryOutcome> {
     if path.is_dir() {
         return Ok(DirectoryOutcome::AlreadyExists);

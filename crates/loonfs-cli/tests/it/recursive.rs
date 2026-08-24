@@ -570,8 +570,6 @@ fn recursive_get_names_only_the_paths_it_could_not_write_in_both_modes() {
         assert_failure(&get);
         let data = json_data(&get);
         assert_eq!(data["files"], 2, "{data}");
-        // `other` alone: the destination root was already there, and `docs`
-        // is the one that failed.
         assert_eq!(data["directories"], 1, "{data}");
 
         // The blocked directory is named by the local path that failed, the

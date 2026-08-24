@@ -37,7 +37,7 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, Sto
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
 
-use super::progress::{wait_for_grep_index, GrepWaitAdvance};
+use super::progress::{wait_for_grep_index, GrepWaitStep};
 use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, StepBudget};
 
 /// Purpose-specific handles over one shared store client: reads go through
@@ -391,15 +391,12 @@ impl EmbeddedBackend {
                     .await
                     .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?
                     .conclusion;
-                // A step that settled short of the target says the index has
-                // nothing more to do — blocked on a budget of its own, or
-                // not enabled. Repeating it would only spin.
                 Ok(match conclusion {
                     MaintenanceStepConclusion::Progressed
-                    | MaintenanceStepConclusion::Superseded => GrepWaitAdvance::Advanced,
+                    | MaintenanceStepConclusion::Superseded => GrepWaitStep::Continue,
                     MaintenanceStepConclusion::Idle
                     | MaintenanceStepConclusion::Blocked
-                    | MaintenanceStepConclusion::NotEnabled => GrepWaitAdvance::Settled,
+                    | MaintenanceStepConclusion::NotEnabled => GrepWaitStep::Settled,
                 })
             },
         )

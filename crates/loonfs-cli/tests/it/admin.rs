@@ -412,8 +412,6 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
     assert_success(&active);
     assert_eq!(json_data(&active)["built_through_seq"], 1);
 
-    // The same wait the embedded arm runs: an index already at the target
-    // returns without a single status check.
     let caught_up = harness.run(&["--json", "admin", "index", "enable"]);
     assert_success(&caught_up);
     assert_eq!(json_data(&caught_up)["waited_for_seq"], 1);

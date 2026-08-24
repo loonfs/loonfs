@@ -618,8 +618,6 @@ fn human_doctor(checks: &[DoctorCheck]) -> String {
             ));
         }
         if let Some(response) = &check.store_probe {
-            // The check line above already carries the verdict this probe
-            // reached, so the indented report stays per-check.
             lines.extend(
                 response
                     .checks
