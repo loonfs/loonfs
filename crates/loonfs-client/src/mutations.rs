@@ -424,8 +424,6 @@ mod tests {
         ContentRef::blob_v1(ContentId::generate(), bytes)
     }
 
-    /// `Client::new` runs the same validation as `ClientConfig::load`, so a
-    /// directly built config cannot bypass it.
     #[test]
     fn construction_validates_config_like_load_does() {
         let error = super::Client::new(super::ClientConfig {
@@ -469,9 +467,6 @@ mod tests {
         assert!(client_debug.contains("<redacted>"), "{client_debug}");
     }
 
-    /// A CA bundle that cannot be read or is not PEM fails at construction,
-    /// naming the path. Falling back to the platform roots would move the
-    /// failure to the first request and blame the server for it.
     #[test]
     fn an_unusable_ca_bundle_fails_construction_and_names_the_path() {
         let dir = tempdir().expect("tempdir");
@@ -502,9 +497,6 @@ mod tests {
         }
     }
 
-    /// Configs are strict like everywhere else in the workspace: a typo'd
-    /// key fails decode instead of silently producing an unauthenticated
-    /// client.
     #[test]
     fn client_config_rejects_unknown_keys() {
         let error = toml::from_str::<ClientConfig>(
@@ -517,10 +509,6 @@ mod tests {
             toml::from_str("server_url = \"http://localhost:1\"\n").expect("minimal config");
         assert!(config.auth_token.is_none());
     }
-    /// The retry policy in one place: network-level transport failures and
-    /// the retryable-unavailability codes resend; everything else — including
-    /// a served status whose body was not the error envelope — surfaces
-    /// immediately.
     #[test]
     fn retryable_transport_failure_covers_transport_and_unavailability_only() {
         let api = |code: &str| ClientError::Api {
@@ -564,8 +552,6 @@ mod tests {
         ));
     }
 
-    /// A network-level transport failure resends up to the attempt cap when
-    /// retry is enabled; with it disabled the first failure surfaces.
     #[tokio::test]
     async fn transport_failures_resend_up_to_the_attempt_cap() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -897,9 +883,6 @@ mod tests {
         }
     }
 
-    /// An intermediary answering with a non-envelope body (a load balancer's
-    /// HTML 502) must keep its status in the surfaced error — the status is
-    /// the only signal the response carried.
     #[test]
     fn status_errors_keep_the_status_when_the_body_is_not_the_envelope() {
         let error = crate::transport::map_status_error(502, b"<html>upstream error</html>");
@@ -1013,9 +996,6 @@ auth_token = "   "
         }
     }
 
-    /// Construction is the only door: the fields are private, so a bad id
-    /// or a bad path fails `parse` with the same error the string-shuttling
-    /// client surfaced before the fields were typed.
     #[test]
     fn namespace_path_parse_rejects_invalid_paths() {
         for path in ["notes.txt", "", "/docs/../a.txt", "/docs/./a.txt"] {

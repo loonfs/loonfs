@@ -760,12 +760,6 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
     );
 }
 
-/// Pins what nesting means for the trash, because it is the case the family
-/// most easily gets wrong. Deletions are per root, not per subtree: a child
-/// deleted before its parent keeps its own entry while the parent's deletion
-/// covers it, and recovering the parent leaves the child's own deletion
-/// listed. The differential test is the authority that this equals the old
-/// walk; this names the behavior.
 #[tokio::test]
 async fn nested_deletions_each_keep_their_own_entry() {
     let temp = tempdir().expect("tempdir");

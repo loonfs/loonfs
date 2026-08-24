@@ -48,8 +48,6 @@ fn edited_document(
     .into_bytes()
 }
 
-/// A manifest's identity is minted, never read out of its bytes, so two
-/// candidates over identical state are two distinct objects.
 #[test]
 fn identical_manifest_state_mints_distinct_ids() {
     let first = GrepManifestObjectId::generate();
@@ -63,9 +61,6 @@ fn identical_manifest_state_mints_distinct_ids() {
     );
 }
 
-/// Every phase survives a round trip carrying exactly its own fields, and
-/// the encoded bytes never name the other phase's sequence. The active case
-/// rides at event index zero, which the format writes like any other value.
 #[test]
 fn every_status_round_trips_carrying_only_its_own_position() {
     for (state, absent_field) in [
@@ -93,9 +88,6 @@ fn every_status_round_trips_carrying_only_its_own_position() {
     }
 }
 
-/// The manifest spells its lifecycle field `status` and writes a
-/// `kind`-tagged object into it, exactly as every durable control object
-/// does. The control families are checked the same way in `loonfs-api`.
 #[test]
 fn the_manifest_status_is_a_kind_tagged_object() {
     for fixture in [
@@ -121,9 +113,6 @@ fn the_manifest_status_is_a_kind_tagged_object() {
     }
 }
 
-/// A manifest is immutable, so nothing rewrites its bytes and this reader
-/// keeps decoding one a later version wrote. The probe adds a field at every
-/// level the payload nests, and one beside the payload itself.
 #[test]
 fn immutable_manifest_decoder_reads_frozen_bytes_with_additive_fields() {
     let additive = edited_document(ACTIVE_MANIFEST_FIXTURE, UNKNOWN_ENVELOPE_FIELD, |payload| {
@@ -167,9 +156,6 @@ fn mutable_pointer_envelope_rejects_unknown_fields_as_corruption() {
     ));
 }
 
-/// The envelope version is a number, like every other durable family's.
-/// The string spelling grep used to write is not an older version to be
-/// tolerated. It is not a version at all, and the probe says so.
 #[test]
 fn decoder_rejects_the_string_format_version_without_a_shim() {
     let manifest = String::from_utf8(read_golden(DISABLED_MANIFEST_FIXTURE))
@@ -194,8 +180,6 @@ fn decoder_rejects_the_string_format_version_without_a_shim() {
     ));
 }
 
-/// An `active` status writes `next_event_index` at every position, zero
-/// included, so bytes that omit it are not bytes this format wrote.
 #[test]
 fn decoder_rejects_an_active_status_that_omits_its_event_index() {
     let edited = edited_document(ACTIVE_MANIFEST_FIXTURE, "", |payload| {

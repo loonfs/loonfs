@@ -1,12 +1,7 @@
 //! Core LoonFS namespace operations.
 //!
-//! `loonfs-core` is the low-level API for building directly on the LoonFS
-//! metadata protocol. Most callers should start with [`NamespaceEngine`].
-//!
-//! A namespace is one durable filesystem history. File bytes are written to
-//! object storage first, then metadata is published as a committed namespace
-//! mutation. Reads rebuild or reuse a verified view of the namespace before
-//! walking paths.
+//! Most callers should use the higher-level `loonfs` crate. Use
+//! [`NamespaceEngine`] when working directly with the metadata protocol.
 //!
 //! # Example
 //!
@@ -57,14 +52,6 @@
 //! );
 //! ```
 
-// This crate has two supported consumers:
-// - `loonfs`, which wraps the core API with runtime caching and batching.
-// - `loonfs-core` integration tests, which inspect durable layout and replay.
-//
-// Application code should depend on `loonfs`, not `loonfs-core`. Modules are
-// private unless one of these consumers needs them to be public.
-
-// Internal engine modules. Public APIs below expose the supported entry points.
 mod checkpoint;
 mod commit_engine;
 mod context;
@@ -80,7 +67,6 @@ mod recency;
 mod storage;
 mod wal;
 
-// Public modules required by `loonfs` or this crate's integration tests.
 /// Commit planning, validation, and materialization. Consumed by the `loonfs`
 /// publisher and by this crate's commit-validation integration tests.
 pub mod commit;

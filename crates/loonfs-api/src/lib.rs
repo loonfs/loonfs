@@ -1,26 +1,8 @@
 //! Wire types and durable-format codecs for LoonFS.
 //!
-//! Everything that crosses a process or storage boundary is defined here:
-//! validated identifier and path types at the crate root, the versioned HTTP
-//! protocol shapes in [`v0`], and the durable storage formats in [`wire`]
-//! (WAL segments, metadata segments, namespace manifests, and control objects).
-//! Other LoonFS crates depend on this one for vocabulary; it depends on none
-//! of them.
-//!
-//! One module here is deliberately not a boundary format: [`options`] holds
-//! the per-operation argument structs that the embedded runtime and the HTTP
-//! client both expose. They parameterize the same semantic operations on both
-//! surfaces, so this crate — the shared vocabulary — owns the single
-//! definition rather than each surface keeping its own copy to drift.
-//!
-//! The `commit_identity` module contains shared logic rather than wire types.
-//! It computes durable mutation fingerprints and verifies retried PUT requests
-//! against existing commit receipts. Keeping this logic here ensures that the
-//! embedded runtime and HTTP client apply the same identity and content checks.
-//!
-//! Module rule: v0 HTTP shapes live in [`v0`]; the crate root keeps the
-//! ids/paths/errors/wire-format modules and re-exports the common v0
-//! surface as a curated explicit list below.
+//! The crate defines validated identifiers and paths, HTTP protocol shapes in
+//! [`v0`], durable storage formats in [`wire`], and shared operation options in
+//! [`options`].
 
 #![warn(missing_docs)]
 
@@ -69,13 +51,7 @@ pub mod wire {
     }
 
     pub mod envelope {
-        //! The shared durable envelope codec: probe, validation rules, JSON
-        //! codec, and the one error vocabulary every family reports through.
-        //!
-        //! Published so a durable format outside this crate — a first-party
-        //! extension's own objects — parameterizes the same codec instead of
-        //! copying it and drifting from the rules in section 4 of the format
-        //! spec.
+        //! Shared durable envelope codec and validation errors.
 
         pub use crate::envelope::*;
     }

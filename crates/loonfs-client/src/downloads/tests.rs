@@ -38,7 +38,6 @@ fn capabilities(direct_get: bool, proxy_cap_bytes: Option<u64>) -> Outcome {
     Outcome::Success(serde_json::to_vec(&document).expect("serialize capability document"))
 }
 
-/// Files above the proxy limit use direct access; smaller files remain proxied.
 #[tokio::test]
 async fn a_file_past_the_default_proxy_cap_takes_the_grant() {
     let client = client();
@@ -59,7 +58,6 @@ async fn a_file_past_the_default_proxy_cap_takes_the_grant() {
         .expect("cached capabilities"));
 }
 
-/// Without direct-read support, every file remains on the proxied path.
 #[tokio::test]
 async fn a_deployment_without_the_capability_never_takes_the_grant() {
     let client = client();
@@ -71,7 +69,6 @@ async fn a_deployment_without_the_capability_never_takes_the_grant() {
         .expect("capabilities"));
 }
 
-/// Without an advertised proxy limit, the client keeps the proxied path.
 #[tokio::test]
 async fn a_deployment_that_advertises_no_cap_stays_proxied() {
     let client = client();
@@ -109,9 +106,6 @@ fn grant(content_ref: ContentRef, url: &str) -> BeginDownloadResponse {
     }
 }
 
-/// A grant's reference is the check on the bytes, not a description of
-/// them: an object store that answers with anything else fails the
-/// download rather than reaching the caller's sink as if it were the file.
 #[tokio::test]
 async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named() {
     let payload = b"the bytes the grant described".to_vec();
@@ -145,9 +139,6 @@ fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
     }
 }
 
-/// An object nobody hashed for us is described only by the provider's own
-/// CRC, and that is what the download checks it against. A grant carrying
-/// one is not a grant whose bytes go unchecked.
 #[tokio::test]
 async fn a_crc32c_only_grant_verifies_the_bytes_it_receives() {
     let payload = b"transferred straight to the provider".to_vec();
@@ -185,9 +176,6 @@ async fn a_crc32c_only_grant_verifies_the_bytes_it_receives() {
     );
 }
 
-/// A CRC folds forward from a running value, so a resumed download of a
-/// CRC-32C-only grant closes over the prefix it never received exactly as a
-/// hashed one does.
 #[tokio::test]
 async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
     let payload = b"the first half and then the second half".to_vec();
@@ -232,8 +220,6 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
     );
 }
 
-/// The successful path through the same transport: the declared length and
-/// digest both hold, every byte reaches the sink, and the count comes back.
 #[tokio::test]
 async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     let payload = b"exactly the bytes the grant described".to_vec();
@@ -254,9 +240,6 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     assert_eq!(sink, payload);
 }
 
-/// A resumed download uses `Range` with the existing grant. The signature
-/// does not cover that header, and checksum verification includes the prefix
-/// already held by the caller.
 #[tokio::test]
 async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
     let payload = b"the first half and then the second half".to_vec();
@@ -292,8 +275,6 @@ async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
     );
 }
 
-/// Complete downloads omit `Range`. Resumed downloads require their prefix
-/// before reading new bytes.
 #[tokio::test]
 async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     let payload = b"a whole object".to_vec();
@@ -328,8 +309,6 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     );
 }
 
-/// A capability is a URL and a method, and this client sends the method it
-/// was given rather than assuming one.
 #[tokio::test]
 async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() {
     let payload = b"unused".to_vec();

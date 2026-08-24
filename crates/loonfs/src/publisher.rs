@@ -1,25 +1,12 @@
 //! Runtime publication service for namespace mutations.
 //!
-//! Each namespace has one publisher and one worker queue. The publisher:
+//! Each namespace has one queue. Concurrent commits may share a WAL segment
+//! and head update. Duplicate commit IDs join in flight, conflicting reuse is
+//! rejected, and namespace deletion is ordered with other mutations.
 //!
-//! - batches concurrent commits into one WAL segment and one head CAS,
-//! - joins duplicate in-flight commit IDs and rejects conflicting reuse,
-//! - orders namespace deletion after earlier work and before later work,
-//! - retries stale or unknown CAS outcomes with the same commit IDs, and
-//! - enforces the configured minimum interval between head CAS attempts.
-//!
-//! A publisher keeps one commit engine and writer session for its lifetime.
-//! The writer session is small and cannot be reconstructed after fencing.
-//! The WAL-tail projection is rebuildable, so the registry evicts projections
-//! when the shared cache budget is exceeded.
-//!
-//! The first request for an idle namespace publishes immediately. Requests
-//! that arrive during a publish or its pacing interval join the next batch.
-//! Cancelling a caller does not cancel admitted work.
-//!
-//! Shutdown first closes admission and then drains admitted work. Use
-//! [`FsWriter::shutdown`](crate::FsWriter::shutdown), which also coordinates
-//! shutdown with the maintenance runner.
+//! Admitted work continues if its caller is cancelled. Shutdown closes
+//! admission and drains the queues through
+//! [`FsWriter::shutdown`](crate::FsWriter::shutdown).
 
 use crate::fs::{ReadCore, WriterBits};
 use crate::metrics::PublishOutcome;
@@ -31,7 +18,6 @@ use futures::FutureExt;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
-// Publisher head-CAS races use the core-wide bounded contention retry limit.
 use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
 use loonfs_core::publish::{NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState};
 use std::collections::{HashMap, VecDeque};

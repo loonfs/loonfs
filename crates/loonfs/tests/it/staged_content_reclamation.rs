@@ -98,9 +98,6 @@ async fn session_keys(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
         .expect("list upload sessions")
 }
 
-/// A prepared reference that never reaches a commit is not a leak. It is a
-/// completed session's content that no metadata names, which is the one
-/// thing content collection exists to reclaim.
 #[tokio::test]
 async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
     let temp_dir = tempdir().expect("tempdir");
@@ -154,8 +151,6 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
     assert!(session_keys(&store, &namespace_id).await.is_empty());
 }
 
-/// Published content answers to metadata from then on. Its session record
-/// still ages out, and taking that record must not take the bytes with it.
 #[tokio::test]
 async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     let temp_dir = tempdir().expect("tempdir");
@@ -206,10 +201,6 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     );
 }
 
-/// Re-running a put under a commit id that already committed stages a
-/// second object and then reconciles against the first. The duplicate is
-/// referenced by nothing, and this is what "not a leak" has to mean: it
-/// goes, and the object the commit actually named stays.
 #[tokio::test]
 async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survives() {
     let temp_dir = tempdir().expect("tempdir");
@@ -280,10 +271,6 @@ async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survi
     );
 }
 
-/// The session record is durable before the content write is attempted, so
-/// a staging write that dies mid-flight leaves an owner behind rather than
-/// nothing. What the owner buys is the expiry sweep: the record ages out of
-/// its lease and takes whatever it was writing with it.
 #[tokio::test]
 async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
     let temp_dir = tempdir().expect("tempdir");
@@ -336,10 +323,6 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
     assert!(session_keys(&store, &namespace_id).await.is_empty());
 }
 
-/// What ownership costs, pinned so it stays deliberate: one create-if-absent
-/// for the record that claims the content id, and one compare-and-swap to
-/// freeze what was written under it. Reading the record for that swap's etag
-/// is the third and last control operation a put adds.
 #[tokio::test]
 async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
     let temp_dir = tempdir().expect("tempdir");

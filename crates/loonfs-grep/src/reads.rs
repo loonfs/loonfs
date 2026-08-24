@@ -1,16 +1,7 @@
-//! Every filesystem read grep performs, as calls on a runtime read handle.
+//! Filesystem reads used by grep indexing and query verification.
 //!
-//! Grep owns an index, not a filesystem: it learns what to index from the
-//! checkpointed file enumeration and the semantic change feed, and it
-//! verifies query candidates against current state — resolving inodes,
-//! paths, directories, and content by reference. Every one of those is a
-//! published [`FsReader`] operation any consumer could call, and this module
-//! is the one place grep calls them, so the surface it depends on stays
-//! countable.
-//!
-//! Reads of grep's own durable state (segments, manifests, the root
-//! pointer, all under `namespaces/{namespace}/extensions/grep/`) do not come
-//! through here: that keyspace is grep's, and it reads it directly.
+//! Grep reads filesystem state through [`FsReader`] and reads its own index
+//! objects directly from the extension keyspace.
 
 use crate::{GrepError, Result};
 use loonfs::{
@@ -24,16 +15,11 @@ use loonfs_api::{
     PathEntry, RevisionNo, MAX_PUBLIC_INTEGER,
 };
 
-/// One namespace's filesystem reads, borrowed from a reader handle.
+/// Filesystem reads for one namespace.
 ///
-/// Each call is its own internally-consistent read: the runtime pins a
-/// snapshot per call, so a page of checkpoint files, a batch of resolved
-/// inodes, and the content read that follows them may observe different
-/// heads. The verification model already tolerates that — a query treats
-/// index and feed output as candidates and re-verifies every one against
-/// current state before emitting a match, and the worker keys postings by
-/// durable `(inode_id, revision_no)` — so nothing here needs a snapshot
-/// held across calls.
+/// Each call uses an internally consistent snapshot, but consecutive calls
+/// may observe different heads. Query candidates are reverified against
+/// current state, so a snapshot does not need to span calls.
 pub struct NamespaceReads<'a> {
     reader: &'a FsReader,
     namespace_id: &'a NamespaceId,
@@ -91,9 +77,8 @@ impl<'a> NamespaceReads<'a> {
 
     /// Reads committed changes after `after_seq` as semantic events.
     ///
-    /// A cursor below the namespace's retention floor answers
-    /// `rebootstrap_required`: the history grep would need to catch up is
-    /// gone, so it rebuilds from a fresh checkpoint instead.
+    /// Returns `rebootstrap_required` when `after_seq` is below the retention
+    /// floor.
     pub async fn list_changes_after(
         &self,
         after_seq: ChangeSeq,
@@ -111,11 +96,9 @@ impl<'a> NamespaceReads<'a> {
             .await?)
     }
 
-    /// Answers what each inode looks like now: visible, its current
-    /// revision, and its current path, in input order.
+    /// Resolves current visibility, revision, and path in input order.
     ///
-    /// At most [`MAX_RESOLVE_CURRENT_FILES`] ids per call; callers chunk
-    /// with [`resolve_batch_size`].
+    /// At most [`MAX_RESOLVE_CURRENT_FILES`] IDs are accepted per call.
     pub async fn resolve_current_files(
         &self,
         inode_ids: &[InodeId],

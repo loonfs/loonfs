@@ -710,7 +710,6 @@ async fn replacing_put_fails_unprepared_without_content_io() {
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
-/// The spawned preparations exercise concurrent use of one cloned writer before one commit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn prepared_commit_after_concurrent_preparations_uses_no_publication_content_io() {
     let harness = TestHarness::new("prepared-explicit-many").await;
@@ -953,7 +952,6 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
-/// Exercises duplicate admission while the primary publication is stalled at its head CAS.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn in_flight_duplicate_performs_no_additional_content_operations() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1062,8 +1060,6 @@ async fn stale_head_retry_preserves_content_admission() {
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 }
 
-/// Holds one publication at its head CAS so the next two candidates are
-/// deterministically collected into the same batch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_content_io() {
     let temp_dir = tempdir().expect("tempdir");

@@ -86,8 +86,6 @@ fn assert_projection(entry: &serde_json::Value, projected: bool) {
     );
 }
 
-/// Stat projects attributes by default and drops the siblings on request;
-/// listing does the opposite.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_reads_project_flat_attribute_siblings_together() {
     let temp_dir = tempdir().expect("tempdir");
@@ -148,8 +146,6 @@ async fn http_reads_project_flat_attribute_siblings_together() {
     }
 }
 
-/// The parameter accepts the two spellings it documents and rejects the rest,
-/// on both read endpoints.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_include_attributes_accepts_true_and_false_and_nothing_else() {
     let temp_dir = tempdir().expect("tempdir");
@@ -204,8 +200,6 @@ async fn http_include_attributes_accepts_true_and_false_and_nothing_else() {
     );
 }
 
-/// The client sends the options it was given, and its defaults are the
-/// server's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_client_round_trips_the_read_options() {
     let temp_dir = tempdir().expect("tempdir");
@@ -275,8 +269,6 @@ async fn the_client_round_trips_the_read_options() {
         .all(|entry| entry.attributes.is_some()));
 }
 
-/// A served deployment advertises attributes as a core feature, the way the
-/// embedded runtime does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_served_capability_document_advertises_attributes() {
     let temp_dir = tempdir().expect("tempdir");

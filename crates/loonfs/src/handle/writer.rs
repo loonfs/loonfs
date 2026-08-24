@@ -163,18 +163,11 @@ impl FsWriter {
         self.bits.maintenance.job(job)
     }
 
-    /// Waits for currently scheduled maintenance to finish without closing
-    /// admission.
+    /// Waits for scheduled maintenance to reach a quiet point.
     ///
-    /// New work may still be scheduled while this method runs, so it waits for a
-    /// quiet point rather than performing terminal shutdown. Task panics are
-    /// returned as runtime errors.
-    ///
-    /// One task this waits for is not a bounded step. A family group that has
-    /// outgrown one step is rebuilt by a streaming compaction paced by no
-    /// budget, and this waits for that to finish rather than stopping it.
-    /// [`Self::shutdown`] cancels it instead, which is what makes a shutdown
-    /// short.
+    /// Admission remains open, so new work may be scheduled while this method
+    /// runs. Streaming compactions are allowed to finish; [`Self::shutdown`]
+    /// cancels them. Task panics are returned as runtime errors.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.flush_background",
@@ -193,25 +186,13 @@ impl FsWriter {
         self.bits.maintenance.drain().await
     }
 
-    /// Gracefully shuts down writer-owned background work.
+    /// Stops publication and writer-owned background work.
     ///
-    /// Shutdown closes maintenance admission before its first await, then
-    /// closes publication admission, drains accepted publications, and waits
-    /// for maintenance tasks that were already running. Closing maintenance
-    /// first prevents completed publications from scheduling new work during
-    /// the drain. Maintenance jobs publish through [`FsAdmin`](crate::FsAdmin),
-    /// not the publication service, so the publication queue can only shrink.
-    ///
-    /// Closing maintenance admission also cancels streaming metadata
-    /// compactions. These jobs check for cancellation between block reads and
-    /// publish only after the complete merge finishes, so cancellation leaves
-    /// the current manifest unchanged. A later maintenance step can plan the
-    /// compaction again.
-    ///
-    /// After shutdown, mutations return `shutting_down`, maintenance nudges
-    /// are ignored, and reads continue to work. The method is idempotent and
-    /// may be called from any clone because all clones share the same shutdown
-    /// state. Task panics are returned as runtime errors.
+    /// Accepted publications and running maintenance steps are drained.
+    /// Streaming metadata compactions are cancelled before publication, so a
+    /// later step may safely plan them again. After shutdown, mutations return
+    /// `shutting_down`, maintenance triggers are ignored, and reads continue.
+    /// This method is idempotent across clones.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.shutdown",
@@ -328,17 +309,10 @@ impl FsWriterBuilder {
         self
     }
 
-    /// Installs a node-local cache of encoded metadata blocks beneath this
-    /// writer's decoded block cache.
+    /// Installs a node-local encoded-block cache beneath the decoded cache.
     ///
-    /// The handle rides on the decoded cache, so every handle built from
-    /// this writer's cache reaches the same local cache — the reader this
-    /// writer derives, and an admin handle sharing the cache through
-    /// [`FsAdminBuilder::shared_metadata_segment_cache`]. Nothing else
-    /// reaches it: paths that carry no decoded cache carry neither tier.
-    ///
-    /// Unset by default. The host owns the cache and closes it, and object
-    /// storage stays the authority for every read either way.
+    /// Handles that share this writer's decoded cache also share this local
+    /// cache. The host owns and closes it; object storage remains authoritative.
     ///
     /// [`FsAdminBuilder::shared_metadata_segment_cache`]: crate::FsAdminBuilder::shared_metadata_segment_cache
     pub fn stored_metadata_block_cache(
@@ -494,10 +468,6 @@ mod tests {
             .is_none());
     }
 
-    /// The handle rides on the decoded block cache, which is what puts the
-    /// two tiers in the same places: every handle built from this cache
-    /// reaches the local cache, and every path that carries no decoded cache
-    /// reaches neither tier.
     #[tokio::test]
     async fn the_builder_installs_the_stored_block_cache_on_the_decoded_cache() {
         let temp_dir = tempdir().expect("tempdir");
@@ -546,13 +516,6 @@ mod tests {
         (writer, blocking)
     }
 
-    /// Both admissions must close on the shutdown's first poll, before it
-    /// starts draining publications. The drain is a wait, and the runner
-    /// stays live across it: a queue still open here lets a nudge landing in
-    /// that window be admitted, and lets a finishing step hand its slot on
-    /// and spawn work the shutdown already decided to drop. Asserting on the
-    /// first poll pins the order on every machine; the integration coverage
-    /// in `tests/it/handles.rs` only loses the race on some.
     #[tokio::test]
     async fn shutdown_closes_both_admissions_before_draining_publications() {
         let temp_dir = tempdir().expect("tempdir");
@@ -622,9 +585,6 @@ mod tests {
         shutdown.await.expect("shut down the writer");
     }
 
-    /// Shutdown is a state of the shared runtime, not a token one handle
-    /// holds: a clone that shuts down is observable from every other clone,
-    /// and a second shutdown settles rather than panicking or wedging.
     #[tokio::test]
     async fn a_clone_observes_a_shutdown_and_may_repeat_it() {
         let temp_dir = tempdir().expect("tempdir");

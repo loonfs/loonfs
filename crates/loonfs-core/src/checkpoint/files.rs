@@ -65,25 +65,13 @@ pub struct CheckpointFilesPage {
     pub next_cursor: Option<CheckpointFilesPageCursor>,
 }
 
-/// Reads one page of the files visible in the state `checkpoint_id` pins.
+/// Lists files visible in the state pinned by `checkpoint_id`.
 ///
-/// The checkpoint's own manifest is the only state read: no WAL tail is
-/// replayed over it, and no later manifest is consulted, so the answer is
-/// the namespace exactly as of `checkpoint_seq`. Visibility is the same rule
-/// every read applies — the inode exists, and no subtree tombstone covers it
-/// or any of its ancestors — evaluated against that manifest. Directories
-/// are not returned.
-///
-/// A record that is missing or released answers `checkpoint_unavailable`,
-/// and so does a pinned manifest that is already gone. There is no fallback
-/// to current state: a consumer that lost its checkpoint takes a new one and
-/// starts over.
-///
-/// Release is the whole authority here — no clock. An active record whose
-/// expiry has passed still pins its basis and still serves: garbage
-/// collection is what turns a passed expiry into a release, and until it
-/// does, the record is a root, so answering from it is answering from state
-/// that is provably still there.
+/// The checkpoint manifest is read without replaying later WAL entries.
+/// Visibility rules match current reads, and directories are omitted. Missing
+/// or released records and missing pinned manifests return
+/// `checkpoint_unavailable` without falling back to current state. Expiry is
+/// enforced when garbage collection releases the record, not during reads.
 pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,

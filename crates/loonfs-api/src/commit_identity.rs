@@ -476,10 +476,6 @@ mod tests {
         }
     }
 
-    /// Pins the exact stored fingerprint for a guarded attribute update.
-    ///
-    /// The literal covers the frozen preimage: the variant name, the field
-    /// order, the canonical attribute-value spelling, and both guards.
     #[test]
     fn update_attributes_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -503,8 +499,6 @@ mod tests {
         );
     }
 
-    /// The set is a map, so the order the caller wrote its keys in is not
-    /// part of what was asked for.
     #[test]
     fn json_map_order_does_not_change_attribute_update_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -527,10 +521,6 @@ mod tests {
         );
     }
 
-    /// Removing two keys asks for the same thing whichever order they are
-    /// listed in, and asking twice for one removal asks for the same thing
-    /// as asking once. Canonicalization inside the translation is what makes
-    /// both true.
     #[test]
     fn remove_order_and_repeats_do_not_change_attribute_update_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -556,7 +546,6 @@ mod tests {
         }
     }
 
-    /// Everything the update asks for is inside the value.
     #[test]
     fn attribute_update_fingerprint_changes_with_every_request_field() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -605,12 +594,6 @@ mod tests {
         }
     }
 
-    /// Pins the exact stored fingerprint for a fixed one-operation request.
-    ///
-    /// If this fails, the canonical preimage changed (format spec, "Commit
-    /// identity fingerprints") and every persisted fingerprint would disagree
-    /// with recomputed ones, breaking retry idempotency across versions. Do
-    /// not update the literal without bumping the fingerprint scheme tag.
     #[test]
     fn commit_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -646,7 +629,6 @@ mod tests {
         assert_ne!(fingerprint(&user_x), fingerprint(&service_x));
     }
 
-    /// Pins the exact stored fingerprint encoding for a guarded delete.
     #[test]
     fn guarded_delete_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -669,12 +651,6 @@ mod tests {
         );
     }
 
-    /// Pins the exact stored fingerprint for an undelete with a destination
-    /// path.
-    ///
-    /// This literal is what proves the in-place form was preimage-additive:
-    /// the path became optional and this value did not move, because a
-    /// present path serializes as the bare string it always was.
     #[test]
     fn undelete_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -704,9 +680,6 @@ mod tests {
         );
     }
 
-    /// Pins the exact stored fingerprint for an in-place undelete, whose
-    /// absent path serializes as `null` — a distinct preimage from every
-    /// pathed form.
     #[test]
     fn in_place_undelete_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -729,13 +702,6 @@ mod tests {
         );
     }
 
-    /// Pins the exact stored fingerprint for a put, which is the only
-    /// operation whose preimage embeds a content reference.
-    ///
-    /// The literal covers the canonical content-ref form — kind, content id,
-    /// size, and nothing else. Adding a checksum to that form, or reordering
-    /// it, would change this value and silently break replay for every
-    /// already-published put.
     #[test]
     fn put_file_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -762,15 +728,6 @@ mod tests {
         );
     }
 
-    /// The retry leg, over the pinned value above: whatever algorithm the
-    /// original commit's reference landed with, a retry reading it back
-    /// recomputes the same fingerprint.
-    ///
-    /// This is what lets a retry prove sameness in two independent steps —
-    /// the fingerprint says the two requests are the same mutation, and the
-    /// digest evidence says the two payloads are the same bytes. A checksum
-    /// inside the preimage would collapse them into one weaker check and
-    /// make a CRC-only commit unreplayable.
     #[test]
     fn a_put_retry_reaches_the_pinned_fingerprint_under_every_checksum_algorithm() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -825,9 +782,6 @@ mod tests {
         }
     }
 
-    /// Two references to the same object with different checksum evidence
-    /// are the same mutation: identity is which object a put attaches, and
-    /// the checksum is pinned to that object by verification elsewhere.
     #[test]
     fn checksum_evidence_is_outside_mutation_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -858,8 +812,6 @@ mod tests {
         );
     }
 
-    /// A different content object is a different mutation, which is what
-    /// makes a re-upload under a used commit id conflict instead of replay.
     #[test]
     fn a_different_content_object_changes_mutation_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -922,8 +874,6 @@ mod tests {
         assert_ne!(baseline, changed);
     }
 
-    /// Operation order is part of the request: reordering is a different
-    /// logical mutation, so it must not replay the first one's receipt.
     #[test]
     fn operation_order_changes_mutation_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -946,9 +896,6 @@ mod tests {
         );
     }
 
-    /// The retry helper is not a second spelling of the preimage: it builds
-    /// the same single-put request a caller would have sent and hands it to
-    /// the same function.
     #[test]
     fn put_retry_fingerprint_matches_the_equivalent_single_operation_request() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -986,9 +933,6 @@ mod tests {
         );
     }
 
-    /// Everything a put can ask for beyond its content is inside the value,
-    /// which is what makes comparing the whole fingerprint a complete proof
-    /// rather than a partial one.
     #[test]
     fn put_retry_fingerprint_changes_with_every_request_field() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1075,8 +1019,6 @@ mod tests {
         }
     }
 
-    /// Tests the shared retry logic without using the HTTP or embedded-runtime
-    /// adapters.
     #[test]
     fn put_retry_reconciliation_agrees_on_receipt_mismatch_and_unavailable_evidence() {
         #[derive(Debug, Clone, PartialEq, Eq)]

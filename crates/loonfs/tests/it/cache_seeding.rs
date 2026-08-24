@@ -455,7 +455,6 @@ fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_read
     assert_eq!(raw_store.count(OperationClass::Read), 0);
 }
 
-/// Concurrent stat and list race through the shared async metadata-view cache.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_materialized_stat_and_list_share_async_store() {
     let temp_dir = tempdir().expect("tempdir");
@@ -700,9 +699,6 @@ fn separate_runtime_instances_share_object_store_state() {
     assert_eq!(file.bytes, b"shared");
 }
 
-/// A runtime fills the stored-block cache while reading. A second runtime with
-/// an empty decoded cache then reads a segment section from the stored cache.
-/// The decoded-cache assertion confirms that both reads use this cache path.
 #[test]
 fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     let temp_dir = tempdir().expect("tempdir");
@@ -787,11 +783,6 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     );
 }
 
-/// Maintenance reads through no metadata segment cache, so the local tier
-/// beneath it never sees a maintenance read. Reorganization is the widest
-/// read maintenance has — it decodes every row of the runs it folds — and
-/// this pins the structural argument end to end: not one block offered, and
-/// not one probe either.
 #[test]
 fn metadata_maintenance_offers_nothing_to_the_local_block_cache() {
     let temp_dir = tempdir().expect("tempdir");

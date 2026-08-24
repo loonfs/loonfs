@@ -439,8 +439,6 @@ mod tests {
             .starts_with(&prefix));
     }
 
-    /// Staged compaction segments use a separate prefix so metadata segment
-    /// garbage collection does not treat active job output as unreferenced.
     #[test]
     fn staged_compaction_segments_live_outside_the_segment_listing_prefix() {
         let layout = ObjectLayout::new();
@@ -470,7 +468,6 @@ mod tests {
             .starts_with(&staging));
     }
 
-    /// Sorting places a job's lease before its staged segments.
     #[test]
     fn a_jobs_lease_sorts_before_its_staged_segments() {
         let layout = ObjectLayout::new();
@@ -488,7 +485,6 @@ mod tests {
         );
     }
 
-    /// Recognized lease and segment keys return their compaction job id.
     #[test]
     fn compaction_keys_report_the_job_that_owns_them() {
         let layout = ObjectLayout::new();
@@ -632,8 +628,6 @@ mod tests {
         assert!(parse_object_key("namespaces/ns-1/unknown/file").is_none());
     }
 
-    /// One content layout exists. Anything else under `content-stores/`
-    /// classifies as nothing at all rather than as content.
     #[test]
     fn parser_admits_exactly_one_content_layout() {
         for foreign in [

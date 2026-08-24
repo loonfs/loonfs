@@ -252,22 +252,16 @@ fn metadata_has_nothing_to_maintain(error: &RuntimeError) -> bool {
     )
 }
 
-/// Combines WAL-flush and reorganization outcomes into one scheduling
-/// conclusion.
+/// Combines WAL flush and reorganization results for scheduling.
 ///
 /// Progress takes precedence over a lost race, and a lost race takes
 /// precedence over a budget block. A step that changed durable state should
 /// run again even when its second operation was blocked.
 ///
-/// Starting a streaming compaction is progress of the useful kind: the step
-/// that started it did no folding, and the steps behind it now have the
-/// group's peers to fold while the job runs. A job queued behind the process
-/// compaction limit reads the same way — the group is claimed, so the steps
-/// behind it have the same peers to fold, and nothing is needed to make the
-/// job run. A group waiting on a job already running, and a group needing one
-/// this handle cannot run at all, are blocks: there is work and this step
-/// cannot make it, so the key parks and comes back on the next nudge or
-/// sweep. The job's own ending nudges the key back when it lands.
+/// Starting or queueing a streaming compaction counts as progress because the
+/// group is claimed and other groups may still be merged. Waiting for an
+/// existing compaction, or requiring one that this handle cannot run, is
+/// blocked.
 fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceStepConclusion {
     let flush = match step.wal_flush {
         WalFlushStepOutcome::Flushed { .. } => Some(MaintenanceStepConclusion::Progressed),
@@ -438,10 +432,6 @@ mod tests {
         );
     }
 
-    /// Starting a background rebuild is progress: the step that started it
-    /// folded nothing, and the steps behind it have the group's peers to fold
-    /// while the job runs. A job queued behind the process limit reads the
-    /// same way, because the group is claimed either way.
     #[test]
     fn a_started_or_queued_compaction_progresses_and_the_other_two_block() {
         let started = step_response(
@@ -549,9 +539,6 @@ mod tests {
         );
     }
 
-    /// A budget that ran out before the pass finished is a park, not an
-    /// idle: idle clears the stored continuation, and a pass that never got
-    /// to the keyspace has nothing to show for itself but that.
     #[test]
     fn a_pass_that_ran_out_of_budget_parks_unless_it_got_somewhere_first() {
         let namespace = namespace_id("demo");
@@ -591,8 +578,6 @@ mod tests {
         );
     }
 
-    /// The runner owns the cursor. The step receives it as its continuation
-    /// and returns it in the result without storing a job-local copy.
     #[test]
     fn a_collection_pass_hands_its_cursor_back_to_the_runner() {
         let mut walked = GcResponse::empty(namespace_id("demo"));
@@ -627,8 +612,6 @@ mod tests {
         );
     }
 
-    /// The deadline a pass reports for what it retained becomes the key's
-    /// own, which is what makes a pass schedule its own successor.
     #[test]
     fn a_collection_pass_hands_its_soonest_retained_deadline_to_the_runner() {
         let mut retained = GcResponse::empty(namespace_id("demo"));

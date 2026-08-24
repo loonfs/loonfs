@@ -640,7 +640,6 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
     assert_eq!(duplicate_error.to_string(), primary_error.to_string());
 }
 
-/// Admission races a blocked active publication with a pending batch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_admits_pending_batch_while_active_publish_blocks() {
     let temp_dir = tempdir().expect("tempdir");
@@ -685,7 +684,6 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
     assert_eq!(wal_keys.len(), 2);
 }
 
-/// Duplicate and conflicting admissions race an active publication.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
     let temp_dir = tempdir().expect("tempdir");
@@ -731,7 +729,6 @@ async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
     assert_eq!(duplicate_response.committed_seq, ChangeSeq(1));
 }
 
-/// Distinct and duplicate admissions race a full pending batch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
     let temp_dir = tempdir().expect("tempdir");
@@ -802,9 +799,6 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
     );
 }
 
-/// A cold namespace takes whatever has batched — here a full batch
-/// admitted before the publish task first runs — immediately, with no
-/// coalescing wait in front of the first publication.
 #[tokio::test(flavor = "current_thread")]
 async fn publisher_takes_a_cold_full_batch_immediately() {
     let temp_dir = tempdir().expect("tempdir");
@@ -840,9 +834,6 @@ async fn publisher_takes_a_cold_full_batch_immediately() {
     }
 }
 
-/// A submission to a cold namespace is taken immediately: after one
-/// poll of the publish task there is no open batch parked behind a
-/// timer, so a lone candidate never waits out a coalescing window.
 #[tokio::test(flavor = "current_thread")]
 async fn cold_submission_publishes_without_a_coalescing_delay() {
     let temp_dir = tempdir().expect("tempdir");
@@ -866,9 +857,6 @@ async fn cold_submission_publishes_without_a_coalescing_delay() {
     assert_eq!(response.committed_seq, ChangeSeq(1));
 }
 
-/// Follow-up submissions inside the pacing interval coalesce and
-/// publish no earlier than the interval boundary — the timer gives a
-/// deterministic lower bound.
 #[tokio::test]
 async fn hot_submissions_wait_out_the_pacing_interval() {
     tokio::time::pause();
@@ -915,7 +903,6 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
         .expect("hot commit");
 }
 
-/// Receipt replay races a lost head compare-and-swap acknowledgement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     let temp_dir = tempdir().expect("tempdir");
@@ -956,7 +943,6 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     assert_eq!(response.committed_seq, ChangeSeq(2));
 }
 
-/// Queued publication races a publication whose panic the worker contains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_survives_publish_panic_and_keeps_serving() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1008,7 +994,6 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
     );
 }
 
-/// Delete admission races active, pending, and later mutation work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1083,12 +1068,6 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
     assert!(matches!(fast_fail, Err(CoreError::NamespaceDeleted { .. })));
 }
 
-/// A second delete races the first one's head compare-and-swap.
-///
-/// Both callers must be answered. The second delete is a queue item of its
-/// own, so the tombstone sweep settles it exactly like any other work that
-/// queued behind a landed delete — where the sealed-batch design stranded
-/// its waiters forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_delete_during_inflight_delete_settles_both() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1160,8 +1139,6 @@ async fn second_delete_during_inflight_delete_settles_both() {
     assert_eq!(orphan_error.code(), ErrorCode::NamespaceDeleted);
 }
 
-/// Two deletes pending at the queue tail with equal options are one
-/// request: one queue item, and both callers share its outcome.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn identical_pending_deletes_coalesce_into_one_outcome() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1217,8 +1194,6 @@ async fn identical_pending_deletes_coalesce_into_one_outcome() {
     assert_eq!(second.head_seq, ChangeSeq(2));
 }
 
-/// Deletes with different preconditions are different requests: each is
-/// its own queue item, and each settles against its own options.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_deletes_with_different_preconditions_settle_separately() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1274,8 +1249,6 @@ async fn pending_deletes_with_different_preconditions_settle_separately() {
     assert_eq!(deleted.head_seq, ChangeSeq(2));
 }
 
-/// A stale delete queued behind a valid one settles as
-/// `namespace_deleted` — it never inherits the other delete's success.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1331,8 +1304,6 @@ async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
     assert_eq!(stale_error.code(), ErrorCode::NamespaceDeleted);
 }
 
-/// Commit admission races a delete already queued behind an in-flight
-/// publication.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1383,7 +1354,6 @@ async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
     assert_eq!(after_error.code(), ErrorCode::NamespaceDeleted);
 }
 
-/// Concurrent submissions race to share one pending publication batch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1507,8 +1477,6 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     assert_eq!(feed_actors.get("req-b"), Some(&actor_b));
 }
 
-/// A content-free submission and a submission carrying prepared content
-/// race to share one publication batch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_batches_plain_and_prepared_mutations_together() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1635,7 +1603,6 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     assert_eq!(record_counts, vec![1, 2]);
 }
 
-/// Admission closure races an already-blocked publication draining.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1707,7 +1674,6 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         .all(|publisher| publisher_state(publisher).worker.is_none()));
 }
 
-/// Registry drain races a contained panic and the queue behind it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_survives_panic_and_processes_later_queue_items() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1783,7 +1749,6 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     );
 }
 
-/// Publisher eviction races the delete barrier's terminal transition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn successful_delete_evicts_the_namespace_publisher() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1854,10 +1819,6 @@ async fn close_admission_refuses_without_creating_publishers() {
     registry.drain().await.expect("nothing to drain");
 }
 
-/// A delete admitted before the shutdown sweep is the worker's to finish, so
-/// it still lands after admission closes — and it lands terminally. Deleted
-/// outranks closed: the publisher answers later work with the namespace's
-/// tombstone, not with the shutdown that raced it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delete_admitted_before_close_admission_lands_terminal() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2043,11 +2004,6 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     registry.drain().await.expect("drain settles both units");
 }
 
-/// Retained publish-tail projections are bounded across namespaces, not only
-/// one at a time: a writer that publishes to far more namespaces than the
-/// budget admits keeps a projection for the most recently published ones and
-/// nothing for the rest. The publishers stay — each one carries the writer
-/// session that nothing may evict — but they carry no tail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retained_tail_projections_stay_within_the_namespace_count_cap() {
     const NAMESPACES: usize = 12;
@@ -2107,10 +2063,6 @@ async fn retained_tail_projections_stay_within_the_namespace_count_cap() {
         .expect("drain settles every publisher");
 }
 
-/// The row and decoded-byte budgets bound the publish side in aggregate, the
-/// same meaning the read-side projection cache gives them. A projection that
-/// fits the per-projection ceiling on its own is still evicted once the
-/// namespaces together outgrow the budget.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
     const NAMESPACES: usize = 8;
@@ -2167,9 +2119,6 @@ async fn one_projection_decoded_bytes() -> usize {
     totals.decoded_bytes
 }
 
-/// Caches off is the one mode that keeps nothing: every publish drops its
-/// projection where it was built, so the registry has none to account for
-/// and none to evict.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disabled_runtime_caches_retain_no_tail_projections() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2201,9 +2150,6 @@ async fn disabled_runtime_caches_retain_no_tail_projections() {
         .expect("drain settles every publisher");
 }
 
-/// A landed delete takes its namespace's projection out of the accounting
-/// with the publisher itself: nothing stays charged to an id that can never
-/// rebind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_landed_delete_forgets_the_namespace_projection() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2236,10 +2182,6 @@ async fn a_landed_delete_forgets_the_namespace_projection() {
         .expect("drain settles every publisher");
 }
 
-/// A namespace that is publishing keeps its engine, so a sweep skips it —
-/// and must keep it accounted rather than record an eviction that never
-/// happened. The next publish sweeps again and the skipped namespace loses
-/// its projection then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_skipped_eviction_leaves_the_namespace_accounted() {
     let temp_dir = tempdir().expect("tempdir");

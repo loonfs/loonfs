@@ -175,9 +175,6 @@ mod tests {
         assert!(GcCursor::decode(&wrong_family_prefix, &namespace_id).is_err());
     }
 
-    /// Core and grep collect the same namespace under two cursors of the
-    /// same shape. The kind is what stops one job resuming the other's
-    /// position.
     #[test]
     fn a_cursor_from_another_job_is_refused() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");

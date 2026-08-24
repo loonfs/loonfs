@@ -90,12 +90,6 @@ fn key(offset: u64) -> StoredMetadataBlockKey {
     }
 }
 
-/// The cache keeps what it is given and finds it again after a restart.
-///
-/// The reopen is the point. An insert reaches disk, closing flushes what the
-/// memory tier still held, and a fresh cache over the same directory serves
-/// both; without that this would be an in-memory cache with a directory
-/// beside it.
 #[tokio::test]
 async fn a_kept_block_survives_a_reopen() {
     let temp_dir = tempdir().expect("tempdir");
@@ -128,7 +122,6 @@ async fn a_kept_block_survives_a_reopen() {
     reopened.close().await.expect("close reopened cache");
 }
 
-/// One directory belongs to one server.
 #[tokio::test]
 async fn a_second_open_of_one_directory_is_refused() {
     let temp_dir = tempdir().expect("tempdir");
@@ -148,7 +141,6 @@ async fn a_second_open_of_one_directory_is_refused() {
     held.close().await.expect("close local cache");
 }
 
-/// A closed cache is inert, and closing it again is not an error.
 #[tokio::test]
 async fn a_closed_cache_answers_nothing_and_keeps_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -174,7 +166,6 @@ async fn a_closed_cache_answers_nothing_and_keeps_nothing() {
         .expect("closing a closed cache does nothing further and succeeds");
 }
 
-/// A root the process cannot make a directory of fails startup.
 #[tokio::test]
 async fn an_unusable_path_fails_startup() {
     let temp_dir = tempdir().expect("tempdir");
@@ -191,14 +182,6 @@ async fn an_unusable_path_fails_startup() {
     }
 }
 
-/// The disk tier writes beneath the versioned directory, in one open file
-/// per block.
-///
-/// The file count is what bounds [`DISK_BLOCK_BYTES`] from below: the tier
-/// claims the whole capacity as blocks at startup and holds every block file
-/// open, so a smaller block means proportionally more descriptors for the
-/// same `disk_bytes`. The assertion is here so that relationship cannot
-/// change without someone noticing.
 #[tokio::test]
 async fn the_disk_tier_claims_the_capacity_as_block_files() {
     let temp_dir = tempdir().expect("tempdir");
@@ -226,13 +209,6 @@ async fn the_disk_tier_claims_the_capacity_as_block_files() {
     );
 }
 
-/// A tier that shrinks starts over rather than leaving blocks behind.
-///
-/// foyer names block files from a counter and never reads the directory, so
-/// a smaller capacity would reopen the low-numbered files and abandon the
-/// rest: cached bytes on disk that nothing opens, nothing counts, and
-/// nothing reclaims, holding the tier above the size it was configured for.
-/// The file count is the assertion because it is the thing that leaks.
 #[tokio::test]
 async fn a_shrunk_disk_tier_starts_over() {
     let temp_dir = tempdir().expect("tempdir");
@@ -268,12 +244,6 @@ async fn a_shrunk_disk_tier_starts_over() {
     reopened.close().await.expect("close reopened cache");
 }
 
-/// A tier that grows keeps what it had.
-///
-/// The files foyer already wrote are the ones it reopens, so a bigger
-/// capacity is the one geometry change that costs nothing: it adds files
-/// above the ones that are there. Discarding here would throw away a warm
-/// cache for no reason.
 #[tokio::test]
 async fn a_grown_disk_tier_keeps_what_it_had() {
     let temp_dir = tempdir().expect("tempdir");
@@ -307,12 +277,6 @@ async fn a_grown_disk_tier_keeps_what_it_had() {
     reopened.close().await.expect("close reopened cache");
 }
 
-/// A directory whose marker says nothing readable is discarded.
-///
-/// The marker is the only account of how many block files are down there.
-/// One this process cannot parse is no account at all, and a directory of
-/// unknown geometry is exactly the one that leaks, so it is treated like a
-/// shrink rather than trusted.
 #[tokio::test]
 async fn an_unreadable_geometry_marker_starts_over() {
     let temp_dir = tempdir().expect("tempdir");
@@ -352,17 +316,6 @@ async fn an_unreadable_geometry_marker_starts_over() {
     reopened.close().await.expect("close reopened cache");
 }
 
-/// A marker that exists and cannot be read fails startup.
-///
-/// The recovery for an unreadable marker is to delete the directory it
-/// describes, so the two cases have to stay apart: a marker that is not
-/// there says the directory is new, while one that is there and answers an
-/// error says nothing at all about how many block files are below it. The
-/// second is a permission or device problem, and deleting on the strength of
-/// it would discard a warm cache — or fail to — for a reason nobody could
-/// see. The path is made a directory here because that produces a real
-/// read error on every platform these tests run on, without depending on
-/// which user is running them.
 #[tokio::test]
 async fn an_unreadable_geometry_marker_fails_startup() {
     let temp_dir = tempdir().expect("tempdir");
@@ -391,12 +344,6 @@ async fn an_unreadable_geometry_marker_fails_startup() {
     );
 }
 
-/// foyer's overflow counters reach this process's numbers.
-///
-/// The bridge is one metric name and two label values agreed with foyer, and
-/// nothing in the type system holds the agreement together, so it is
-/// asserted here: the registry hands back the counters foyer increments, and
-/// what foyer increments is what a scrape reads.
 #[test]
 fn the_registry_keeps_foyers_two_overflow_counters() {
     let counters = FoyerOverflowCounters::default();

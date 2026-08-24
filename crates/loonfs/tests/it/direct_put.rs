@@ -210,9 +210,6 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
     );
 }
 
-/// Bytes that do not match the claim are refused at completion and the
-/// object is removed. The id was never published, so nothing can reference
-/// what gets deleted.
 #[test]
 fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim() {
     let temp_dir = tempdir().expect("tempdir");
@@ -251,9 +248,6 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
     );
 }
 
-/// A read-back that could not run is not evidence about the bytes. The
-/// completion reports the store failure it hit, keeps the object the client
-/// uploaded and the session that owns it, and the retry completes.
 #[test]
 fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
     let temp_dir = tempdir().expect("tempdir");
@@ -758,8 +752,6 @@ fn begin_upload_validates_controls_without_replay_reads() {
     assert_eq!(raw_store.manifest_get_count(), 0);
 }
 
-/// Upload admission is the head: absent means the namespace was never
-/// created, and an unreadable head is corruption, not absence.
 #[test]
 fn begin_upload_rejects_missing_and_unreadable_namespaces() {
     let temp_dir = tempdir().expect("tempdir");

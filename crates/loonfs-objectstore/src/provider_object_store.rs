@@ -1189,9 +1189,6 @@ mod tests {
         .expect("provider store")
     }
 
-    /// The epoch stamp an AWS-compatible client synthesizes for a response
-    /// with no `Last-Modified` header is not an age, and grace protection is
-    /// exactly what reading it as one would cost.
     #[test]
     fn a_synthesized_epoch_stamp_reads_as_no_timestamp_at_all() {
         assert_eq!(last_modified_ms(0), None);
@@ -2091,8 +2088,6 @@ mod tests {
         assert!(store.head(transient_key).await.expect("head").is_none());
     }
 
-    /// The metrics wrapper sits above this store's retry loops, so without
-    /// the attempt tally a retried call and a slow one make the same sample.
     #[tokio::test]
     async fn a_retried_call_reports_its_attempts_to_the_metrics_wrapper() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2283,9 +2278,6 @@ mod tests {
         );
     }
 
-    /// Cancellation has no error arm to run. The upload id must therefore
-    /// be guarded from the instant creation returns, including for the
-    /// buffered multipart path.
     #[tokio::test]
     async fn dropping_a_buffered_multipart_write_aborts_its_provider_upload() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2342,9 +2334,6 @@ mod tests {
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 
-    /// Conditional modes never ride multipart: providers complete multipart
-    /// uploads as unconditional overwrites, so create-if-absent keeps its
-    /// real provider precondition on the single-request path at any size.
     #[tokio::test]
     async fn large_create_if_absent_stays_single_request() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2380,8 +2369,6 @@ mod tests {
         stream::iter(chunks.into_iter().map(Ok)).boxed()
     }
 
-    /// The streamed write's whole job: regroup whatever arrives into fixed
-    /// parts, upload them one at a time, and assemble exactly the payload.
     #[tokio::test]
     async fn a_streamed_put_cuts_the_stream_into_parts_and_preserves_bytes() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2417,9 +2404,6 @@ mod tests {
         );
     }
 
-    /// A payload that ends inside the first buffered part is an ordinary
-    /// put, with the caller's mode intact — the same size line `put` itself
-    /// draws, so a small streamed write behaves like a small buffered one.
     #[tokio::test]
     async fn a_short_streamed_put_is_one_request_that_keeps_its_precondition() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2452,10 +2436,6 @@ mod tests {
         );
     }
 
-    /// Create-only means the same thing past one part as it does inside
-    /// one. The provider assembles a multipart upload unconditionally, so
-    /// the store evaluates the condition itself, and the object already at
-    /// the key survives.
     #[tokio::test]
     async fn a_streamed_multipart_put_refuses_an_occupied_key() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2496,7 +2476,6 @@ mod tests {
         );
     }
 
-    /// An overwrite has no condition to evaluate, so it costs no read.
     #[tokio::test]
     async fn a_streamed_multipart_overwrite_reads_nothing() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2512,8 +2491,6 @@ mod tests {
         assert_eq!(flaky.gets.load(Ordering::SeqCst), 0);
     }
 
-    /// An empty stream still writes an object, and still writes it the way
-    /// its mode asks for.
     #[tokio::test]
     async fn an_empty_streamed_put_writes_an_empty_object() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2536,9 +2513,6 @@ mod tests {
         );
     }
 
-    /// A payload that stops mid-transfer leaves nothing behind: the
-    /// provider upload is abandoned rather than left holding parts, and no
-    /// object appears at the key.
     #[tokio::test]
     async fn a_streamed_put_that_fails_mid_stream_abandons_its_upload() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2705,10 +2679,6 @@ mod tests {
         assert!(store.head(MULTIPART_KEY).await.expect("head").is_none());
     }
 
-    /// The regression this fix exists for: an unproven completion must
-    /// never adopt a pre-existing object of the same size. The pre-fix code
-    /// reconciled by size identity and reported success for bytes that were
-    /// never written.
     #[tokio::test]
     async fn multipart_complete_rejects_stale_same_size_object() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2745,10 +2715,6 @@ mod tests {
         );
     }
 
-    /// The content-addressed re-put shape: when the object already holds
-    /// exactly the payload bytes, byte identity proves the put's
-    /// postcondition even though this upload's completion never landed —
-    /// and the dangling upload is reclaimed rather than stranded.
     #[tokio::test]
     async fn multipart_complete_accepts_identical_object_and_aborts() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2775,9 +2741,6 @@ mod tests {
         );
     }
 
-    /// The lifecycle-abort race: the upload vanishes while the completion's
-    /// outcome is ambiguous and a stale object sits at the key. The stale
-    /// object is never accepted as this write.
     #[tokio::test]
     async fn multipart_complete_gone_upload_with_stale_object_fails_as_transport() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2802,8 +2765,6 @@ mod tests {
         );
     }
 
-    /// A first-attempt refusal is definite: nothing can have landed, so no
-    /// read-back runs and the refusal surfaces directly.
     #[tokio::test]
     async fn multipart_complete_first_attempt_rejection_skips_verification() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2821,9 +2782,6 @@ mod tests {
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }
 
-    /// When the read-back itself fails, the outcome stays unknown and
-    /// surfaces as a transport error carrying both failures — never as a
-    /// success the store cannot prove.
     #[tokio::test]
     async fn multipart_complete_unverifiable_outcome_surfaces_both_failures() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2850,9 +2808,6 @@ mod tests {
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }
 
-    /// Multipart transfers carry no whole-operation clock: with a stepping
-    /// timer that would spend the single-request deadline almost instantly,
-    /// part retries still run to their full count budget.
     #[tokio::test]
     async fn multipart_part_retries_are_count_bounded_not_clock_bounded() {
         let flaky = Arc::new(FlakyStore::default());

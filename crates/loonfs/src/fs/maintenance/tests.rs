@@ -342,16 +342,6 @@ async fn bindings_runs<S: ObjectStore + ?Sized>(
         })
 }
 
-/// An explicit compaction runs the long job while a delta-only merge is still
-/// available, and a writer's own upkeep takes that merge instead.
-///
-/// The two policies are the whole point. Automatic upkeep amortizes: it takes
-/// the delta merge because it will run the job itself soon enough, and
-/// rebuilding a whole group for every batch of delta runs would reread
-/// megabytes to fold in a sliver. An explicit call cannot amortize against
-/// anything — under sustained writes there is always another pair of delta
-/// runs, so a call that took the merge would postpone the rebuild its caller
-/// asked for forever.
 #[tokio::test]
 async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available() {
     let temp_dir = tempdir().expect("tempdir");
@@ -443,12 +433,6 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
     }
 }
 
-/// A standalone bounded step reports the compaction it cannot run, and the
-/// explicit call runs it.
-///
-/// Those are the two halves of a `ManualOnly` deployment's metadata upkeep. A
-/// step reports promptly rather than publishing delta merges that never reach
-/// the rebuild, and the operator's answer to that report is one call.
 #[tokio::test]
 async fn a_standalone_step_reports_the_compaction_the_explicit_call_runs() {
     let temp_dir = tempdir().expect("tempdir");

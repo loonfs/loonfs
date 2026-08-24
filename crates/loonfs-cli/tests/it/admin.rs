@@ -228,8 +228,6 @@ fn index_enable_leaves_core_maintenance_decoupled() {
     assert!(json_data(&retried).get("backfill_step").is_none());
 }
 
-/// The index reports its lifecycle status, and statuses do not share a
-/// field: a backfill names its target, an active index names its watermark.
 #[test]
 fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     let harness = Harness::new();
@@ -279,8 +277,6 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     assert_eq!(json_data(&disabled_again)["status"], "disabled");
 }
 
-/// The wait stops at the sequence it captured, even while a writer keeps
-/// committing past it.
 #[test]
 fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
     let harness = Harness::new();
@@ -321,8 +317,6 @@ fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
     );
 }
 
-/// A wait that runs out of budget reports where the index got to and exits
-/// nonzero — real progress, not an error-shaped lie.
 #[test]
 fn index_enable_budgets_exit_nonzero_and_report_progress() {
     let harness = Harness::new();
@@ -354,8 +348,6 @@ fn index_enable_budgets_exit_nonzero_and_report_progress() {
     assert_success(&found);
 }
 
-/// Remote and embedded profiles report the same index state. Remote waiting
-/// polls status while the server runs index maintenance.
 #[test]
 fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
     let harness = Harness::new();
@@ -412,7 +404,6 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
     assert_eq!(json_data(&collected)["namespace_reaped"], false);
 }
 
-/// Verifies that `index gc` follows every page and reports aggregate totals.
 #[test]
 fn index_gc_loops_its_cursor_and_accumulates() {
     let harness = Harness::new();
@@ -464,8 +455,6 @@ fn index_gc_loops_its_cursor_and_accumulates() {
     );
 }
 
-/// Verifies that `admin maintenance run --drain` completes its assignments
-/// and persists the resulting work.
 #[test]
 fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
     let harness = Harness::new();
@@ -538,8 +527,6 @@ fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
     }
 }
 
-/// A drain that runs out of budget reports where every key got to — the one
-/// it stopped inside and the ones it never reached — and exits nonzero.
 #[test]
 fn admin_run_budgets_exit_nonzero_and_report_per_key_progress() {
     let harness = Harness::new();
@@ -592,8 +579,6 @@ fn admin_run_budgets_exit_nonzero_and_report_per_key_progress() {
     assert!(rendered.contains("gave up"), "{rendered}");
 }
 
-/// The assignment is explicit and the job names are a closed set: neither is
-/// something the command guesses at.
 #[test]
 fn admin_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
     let harness = Harness::new();
@@ -626,8 +611,6 @@ fn admin_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
     }
 }
 
-/// Hosted runs accept a poll interval with a minimum value. Drains do not
-/// wait between assignments, so the setting does not affect them.
 #[test]
 fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     let harness = Harness::new();
@@ -696,8 +679,6 @@ fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     );
 }
 
-/// The store probe is store-scoped: it needs no namespace, renders every
-/// returned check, and exits zero only because they all passed.
 #[test]
 fn admin_store_probe_renders_the_profile_stores_report() {
     let harness = Harness::new();
@@ -737,9 +718,6 @@ fn admin_store_probe_renders_the_profile_stores_report() {
     );
 }
 
-/// A remote profile's server hosts its own runner. Hosting another one here
-/// would be a second scheduler over the same namespaces, so the command
-/// refuses instead of pretending it can.
 #[test]
 fn admin_run_refuses_a_remote_profile() {
     let harness = Harness::new();
@@ -773,8 +751,6 @@ fn admin_run_refuses_a_remote_profile() {
         .contains("requires an embedded profile"));
 }
 
-/// Verifies matching JSON fields and errors for admin and change-feed
-/// commands through embedded and remote profiles.
 #[test]
 fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
     let harness = Harness::new();

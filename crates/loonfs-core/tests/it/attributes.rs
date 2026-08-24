@@ -356,9 +356,6 @@ async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
     }
 }
 
-/// An update that leaves the map exactly as it was publishes nothing. This is
-/// the rule that differs from put: an identical-content put appends a
-/// revision because a file's revisions are its history.
 #[tokio::test]
 async fn an_update_that_changes_nothing_is_rejected() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -414,8 +411,6 @@ async fn an_update_that_changes_nothing_is_rejected() {
     );
 }
 
-/// The limits are checked against the map the update produces, not against
-/// what it carries: one small value can push an already-large map over a cap.
 #[tokio::test]
 async fn an_update_is_rejected_when_the_resulting_map_breaks_a_limit() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -530,8 +525,6 @@ async fn a_caller_supplied_stale_expectation_reports_expected_and_actual() {
     );
 }
 
-/// A caller that names the inode it means gets the same protection without
-/// waiting for the commit guards.
 #[tokio::test]
 async fn a_wrong_expected_inode_is_rejected() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -569,8 +562,6 @@ async fn a_wrong_expected_inode_is_rejected() {
 // Multi-operation requests
 // ---------------------------------------------------------------------------
 
-/// The update resolves against what the put in the same request did, and both
-/// land at one sequence.
 #[tokio::test]
 async fn a_put_and_an_update_of_the_new_path_commit_together() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -608,8 +599,6 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
     );
 }
 
-/// Two updates of one key in one request advance the counter twice, so the
-/// second observed what the first wrote.
 #[tokio::test]
 async fn two_updates_in_one_request_advance_the_revision_twice() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -711,9 +700,6 @@ async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
 // Durability: across a flush, and across a fork
 // ---------------------------------------------------------------------------
 
-/// After a flush the attributes live in metadata segments rather than in the
-/// replayed WAL tail. The next update's revision number is what says the
-/// write path read them from there: a lost map would restart the counter.
 #[tokio::test]
 async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -786,8 +772,6 @@ async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
     );
 }
 
-/// A fork reads its source's basis until it publishes a manifest of its own,
-/// and its first flush carries the inherited rows forward.
 #[tokio::test]
 async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() {
     let (_temp_dir, store, source, context) = setup().await;
@@ -880,8 +864,6 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
 // What every other operation does to attributes
 // ---------------------------------------------------------------------------
 
-/// Attributes travel with inode identity, so nothing that moves an inode or
-/// changes its content touches them.
 #[tokio::test]
 async fn move_rename_replace_and_restore_preserve_attributes() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -955,8 +937,6 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
     );
 }
 
-/// A delete hides an inode without touching its attributes, and an undelete
-/// gives back the same map at the same revision.
 #[tokio::test]
 async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -1039,9 +1019,6 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
     assert!(no_op.to_string().contains("unchanged"), "{no_op}");
 }
 
-/// A copy to a vacant destination is a new resource standing for the source,
-/// so it starts with the source's attributes — as its own internal operation
-/// with its own event.
 #[tokio::test]
 async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -1109,7 +1086,6 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
     assert_eq!(copy_events, vec!["file_created", "attributes_changed"]);
 }
 
-/// A copy with nothing to inherit publishes no attribute event at all.
 #[tokio::test]
 async fn a_copy_of_a_file_without_attributes_publishes_no_attribute_event() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -1145,8 +1121,6 @@ async fn a_copy_of_a_file_without_attributes_publishes_no_attribute_event() {
     );
 }
 
-/// Copying over an existing file changes its content and nothing else: the
-/// destination is a resource that already exists and keeps what it holds.
 #[tokio::test]
 async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -1207,8 +1181,6 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
     );
 }
 
-/// Removing every key is a real update publishing the empty map, and the
-/// counter advances for it.
 #[tokio::test]
 async fn clearing_every_attribute_publishes_the_empty_map() {
     let (_temp_dir, store, namespace_id, context) = setup().await;

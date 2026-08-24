@@ -1,32 +1,9 @@
-//! The single authoritative implementation of direntry visibility.
+//! Shared direntry visibility rules.
 //!
-//! "Which binding is visible/active" is the most safety-critical rule in the
-//! system, and it must be decided identically no matter which storage shape
-//! answers the underlying lookups (in-memory rows, at-head indexes, paged
-//! manifest segments merged with a WAL tail, or commit-preview overlays). This
-//! module expresses each composite rule exactly once:
-//!
-//! - [`BindingIdentity`] is the identity key of a binding event; every
-//!   binding-identity comparison in the crate goes through it (via
-//!   [`DirentryBindRecord::same_binding`] or [`unbind_matches_binding`]).
-//! - [`MetadataVisibilityReads`] is the storage contract: five primitive
-//!   lookups a storage shape must answer, plus provided composite methods
-//!   that implementors may override only to reuse a cache or an index fast
-//!   path — never to re-derive the rules.
-//! - The free functions ([`active_child_binding`],
-//!   [`current_parent_binding_for_child`], [`covering_subtree_tombstone`],
-//!   [`visible_inode`], [`visible_child`],
-//!   [`would_create_directory_cycle`], [`resolve_visible_path`]) are the
-//!   canonical rule bodies that both the provided trait methods and every
-//!   caching/gating override delegate to.
-//! - [`AbsentVisibilityLeg`] names the lookup a walk stopped on when it
-//!   answers "no child". The rules decide nothing differently for it; it
-//!   only makes an absence say which of the agreeing lookups was empty.
-//!
-//! The at-head indexes ([`super::MetadataState`]'s `indexes`) are a
-//! materialization of these same rules, maintained incrementally. The
-//! metadata unit tests and the mutation-guard suite check that they always
-//! agree with the scan implementations.
+//! [`MetadataVisibilityReads`] defines the required storage lookups. The
+//! composite methods and free functions apply the same visibility rules to
+//! in-memory state, manifest-backed views, and mutation previews.
+//! [`BindingIdentity`] provides the common bind/unbind comparison.
 
 use super::queries::{ResolvedVisiblePath, VisiblePathError};
 use super::{
@@ -91,16 +68,11 @@ pub(crate) fn unbind_matches_binding(
     BindingIdentity::from(unbind) == BindingIdentity::from(direntry)
 }
 
-/// The storage lookups the visibility rules are decided over, all scoped to
-/// one read sequence chosen by the implementor (a `base_seq`, a head, or a
-/// preview overlay's view of either).
+/// Storage lookups scoped to one read sequence.
 ///
-/// The `find_*` primitives are required and answer raw questions about the
-/// stored rows; they apply no visibility policy beyond "latest at the read
-/// seq". The provided methods are the composite rules; implementors override
-/// them only to route through a cache or an equivalent index fast path, and
-/// every such override must delegate back to the canonical free functions in
-/// this module on the slow path.
+/// Required `find_*` methods return raw rows. Provided methods apply
+/// visibility rules and may be overridden only for equivalent cached or
+/// indexed paths.
 pub(crate) trait MetadataVisibilityReads {
     type Error;
 

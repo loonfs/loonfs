@@ -539,12 +539,6 @@ mod tests {
         }
     }
 
-    /// Unknown checksum algorithms are rejected during decoding.
-    ///
-    /// Content kinds may be preserved by readers without interpretation, but a
-    /// checksum is accepted only when this build can verify it. This guarantees
-    /// that every decoded `ChecksumAlgorithm` is supported by buffered, streamed,
-    /// and resumed verification.
     #[test]
     fn an_unknown_checksum_algorithm_fails_to_decode() {
         assert!(serde_json::from_str::<ChecksumAlgorithm>("\"md5\"").is_err());
@@ -657,10 +651,6 @@ mod tests {
         }
     }
 
-    /// The catalog check value for CRC-64/NVME. This is the one thing that
-    /// has to agree with the provider bit for bit: a completion compares our
-    /// value against the one S3 computed over the assembled object, so a
-    /// wrong polynomial or byte order would fail every multipart upload.
     #[test]
     fn crc64nvme_matches_its_catalog_check_value() {
         assert_eq!(Checksum::crc64nvme(b"123456789").value, "ae8b14860a799888");
@@ -671,12 +661,6 @@ mod tests {
         );
     }
 
-    /// The catalog check value for CRC-32C (Castagnoli), the one the RFC
-    /// 3720 iSCSI CRC and Google Cloud Storage both mean by "crc32c". Like
-    /// the CRC-64/NVME vector above it is an external anchor: it fixes the
-    /// polynomial and the big-endian byte order of the canonical hex against
-    /// a published value rather than against whatever this build happens to
-    /// compute, so a GCS-minted reference and one produced here agree.
     #[test]
     fn crc32c_matches_its_catalog_check_value() {
         assert_eq!(Checksum::crc32c(b"123456789").value, "e3069283");
@@ -687,9 +671,6 @@ mod tests {
         );
     }
 
-    /// The streaming form exists so parts can be hashed on the way past
-    /// without the whole object ever being held, so it must agree with the
-    /// one-shot form over the same bytes.
     #[test]
     fn a_streamed_crc64nvme_equals_the_whole_payload_at_once() {
         let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
@@ -701,9 +682,6 @@ mod tests {
         assert_eq!(streamed.finish(), Checksum::crc64nvme(&payload));
     }
 
-    /// A resumed read folds a prefix it already holds and then the bytes it
-    /// fetches, so a CRC has to close over the two halves exactly as it
-    /// closes over the whole.
     #[test]
     fn a_crc32c_folded_over_a_prefix_and_the_rest_equals_the_whole_payload() {
         let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
@@ -714,10 +692,6 @@ mod tests {
         assert_eq!(streamed.finish(), Checksum::crc32c(&payload));
     }
 
-    /// A verifying reader folds the same checksum the one-shot check
-    /// computes, for every algorithm the vocabulary has — a reader that
-    /// disagreed with [`Checksum::matches`] would accept or reject
-    /// objects the buffered read would not.
     #[test]
     fn a_streamed_checksum_agrees_with_the_whole_payload_at_once() {
         let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
@@ -734,8 +708,6 @@ mod tests {
         }
     }
 
-    /// Every algorithm in the vocabulary is comparable, so a checksum in
-    /// hand is always a question with an answer.
     #[test]
     fn every_algorithm_compares_bytes_against_the_checksum_they_produce() {
         for algorithm in [

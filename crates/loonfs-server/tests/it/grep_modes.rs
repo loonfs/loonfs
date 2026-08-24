@@ -554,9 +554,6 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     server.shutdown().await.expect("settle the server writer");
 }
 
-/// `maintenance = "manual"` registers no automatic job — the grep index's
-/// included, whatever the grep mode says — and changes nothing an operator
-/// may ask for. Who schedules is the only difference.
 #[tokio::test]
 async fn manual_maintenance_registers_no_index_job_and_still_administers_one() {
     let temp_dir = tempdir().expect("store tempdir");

@@ -1,14 +1,9 @@
 //! Checkpoint records stored under `checkpoints/`.
 //!
-//! A checkpoint record pins one metadata manifest (its "basis") so that
-//! garbage collection keeps everything the manifest references. Creation is
-//! write-then-verify: the record is written as `active`, then the basis is
-//! checked against the live retention floor, and the record flips to
-//! `released` if the check fails. Release is the one state change a record
-//! ever makes and it is one-way; garbage collection deletes the released
-//! record outright once it has aged. Records never decide what readers see
-//! as latest, and they are stored as standalone objects, never inside
-//! manifests.
+//! A checkpoint record pins one metadata manifest for garbage collection.
+//! Creation writes an active record and then verifies its basis against the
+//! retention floor. Failed verification releases the record. Release is
+//! one-way, and garbage collection later removes aged released records.
 
 use super::load::load_namespace_manifest_envelope;
 use super::ManifestLoadError;
@@ -355,7 +350,6 @@ mod tests {
         ));
     }
 
-    /// A checkpoint record cannot pin another namespace's manifest.
     #[tokio::test]
     async fn loader_rejects_a_record_pinning_another_namespaces_manifest() {
         let (_directory, store) = local_store();

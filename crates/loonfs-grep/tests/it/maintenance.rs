@@ -99,9 +99,6 @@ async fn a_tombstoned_namespace_concludes_not_enabled() {
     );
 }
 
-/// Disabling the index is one durable compare-and-swap, and the next step
-/// is where a scheduler finds out — with the conclusion that makes the
-/// runner forget the namespace.
 #[tokio::test]
 async fn a_disabled_root_concludes_not_enabled_on_the_next_step() {
     let temp_dir = tempdir().expect("tempdir");
@@ -128,8 +125,6 @@ async fn a_disabled_root_concludes_not_enabled_on_the_next_step() {
     );
 }
 
-/// The runner is what turns a nudge into an indexed namespace, and a
-/// poisoned root must not stop the namespaces beside it.
 #[tokio::test]
 async fn a_nudge_indexes_a_namespace_while_a_poisoned_sibling_backs_off() {
     let temp_dir = tempdir().expect("tempdir");
@@ -178,9 +173,6 @@ async fn a_nudge_indexes_a_namespace_while_a_poisoned_sibling_backs_off() {
     host.shutdown().await.expect("settle host maintenance");
 }
 
-/// One writer, one permit pool: the runner's cap is what bounds grep steps
-/// now, so blocking each namespace's sole backfill content read makes the
-/// number of simultaneously executing steps directly visible.
 #[tokio::test]
 async fn the_runners_one_permit_pool_caps_grep_steps_across_namespaces() {
     const NAMESPACES: usize = 8;
@@ -267,8 +259,6 @@ async fn catch_up<S: ObjectStore + Clone + Send + Sync + 'static>(
     panic!("the grep job did not catch up");
 }
 
-/// The collection job is the reclaiming half the index job deliberately
-/// leaves undone, and a nudge is what asks for it.
 #[tokio::test]
 async fn a_nudge_collects_what_indexing_left_behind() {
     let temp_dir = tempdir().expect("tempdir");
@@ -304,9 +294,6 @@ async fn a_nudge_collects_what_indexing_left_behind() {
     host.shutdown().await.expect("settle host maintenance");
 }
 
-/// A resume position the collector refuses restarts the pass instead of
-/// failing the key: every pass rebuilds its own safety proof, so starting
-/// over is always sound.
 #[tokio::test]
 async fn a_refused_resume_position_restarts_the_collection_pass() {
     let temp_dir = tempdir().expect("tempdir");

@@ -354,9 +354,6 @@ mod tests {
         );
     }
 
-    /// Where the enumeration got to is the whole conclusion, so a pass that
-    /// hands back the position it was given has nothing to gain from being
-    /// run again at once.
     #[test]
     fn a_collection_pass_concludes_on_where_its_enumeration_reached() {
         let stopped = grep_gc_step_result(
@@ -382,8 +379,6 @@ mod tests {
         );
     }
 
-    /// A finished walk reports what it freed, and a namespace it could not
-    /// read parks rather than passing for idle.
     #[test]
     fn a_finished_pass_separates_reclamation_from_an_unreadable_namespace() {
         assert_eq!(

@@ -1,6 +1,4 @@
-//! [`ReadCore`]: the read-side runtime state every handle shares, and the
-//! writer-side state — actor identity, background work, publish observer —
-//! that only a write-capable handle owns on top of it.
+//! Shared read state and additional state used by writers.
 
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::{validate_writer_id, ReadConfig};
@@ -30,14 +28,7 @@ use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine}
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Shared read-side runtime state: the object-store client and the read
-/// caches. [`FsWriter`](crate::FsWriter), [`FsReader`](crate::FsReader), and
-/// [`FsAdmin`](crate::FsAdmin) each hold one; handles built from the same
-/// core share its caches and store.
-///
-/// A read core carries no actor identity, owns no publisher, and starts no
-/// background work — it is what a read needs and nothing more. `ReadCore` is
-/// cheap to clone.
+/// Shared object-store client, read configuration, caches, and metrics.
 #[derive(Clone)]
 pub(crate) struct ReadCore {
     pub(crate) inner: Arc<ReadCoreInner>,
@@ -50,28 +41,20 @@ pub(crate) struct ReadCoreInner {
     pub(crate) metadata_segment_cache: Arc<MetadataSegmentCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
-    /// Where this runtime's publication, maintenance, and collection
-    /// numbers go. Reports nothing unless the handle was built with a
-    /// metrics recorder.
+    /// Publication, maintenance, and collection metrics.
     pub(crate) instruments: Arc<RuntimeInstruments>,
 }
 
-/// The actor identity a write-capable handle publishes under: immutable
-/// plain data, minted once when the handle is built.
+/// Actor identity used by a writer.
 #[derive(Clone)]
 pub(crate) struct WriterIdentity {
     pub(crate) writer_id: String,
 }
 
-/// What a publisher worker needs from the writer that owns it, in one
-/// allocation the worker can hold weakly: dropping the writer drops these,
-/// and admitted work then settles as `shutting_down` instead of publishing
-/// under an identity nobody owns any more.
+/// Writer state shared weakly with the publisher worker.
 pub(crate) struct WriterBits {
     pub(crate) identity: WriterIdentity,
-    /// Admission for every background maintenance step this writer
-    /// schedules. Write paths reach it through a nudge-only handle; only
-    /// the writer shuts it down.
+    /// Background maintenance owned by this writer.
     pub(crate) maintenance: MaintenanceRunner,
     /// Optional synchronous notification after a mutation batch durably
     /// advances a namespace. Callers promise that it does not block.
@@ -177,16 +160,9 @@ impl ReadCore {
         span.record("store_kind", self.trace_store_kind());
     }
 
-    /// Returns the capability document for this embedded build (API spec,
-    /// "Capability discovery").
+    /// Returns capabilities implemented by the embedded runtime.
     ///
-    /// The runtime implements the core and admin planes, so the answer is a
-    /// constant. It describes this crate and nothing else: a host that
-    /// composes an extension — the reference server composing `loonfs-grep`,
-    /// for one — merges that extension's profile, features, and limits into
-    /// this document before serving it. Callers should still gate on the
-    /// document rather than on the backend kind, so the same logic works
-    /// against remote deployments that implement more or less.
+    /// A host may add extension capabilities before serving this document.
     pub(crate) fn get_capabilities(&self) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),

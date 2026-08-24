@@ -84,8 +84,6 @@ fn replay_read_guard_store(root: impl AsRef<Path>, namespace: &str) -> FailStore
     store
 }
 
-/// Upload admission is exactly the head: absent means the namespace was
-/// never created, and the deletion tombstone refuses.
 #[tokio::test]
 async fn begin_upload_rejects_missing_and_deleted_namespaces() {
     let temp_dir = tempdir().expect("tempdir");
@@ -121,8 +119,6 @@ async fn begin_upload_rejects_missing_and_deleted_namespaces() {
     assert_eq!(deleted_error.code(), ErrorCode::NamespaceDeleted);
 }
 
-/// The server, not the client, names the object a direct upload writes,
-/// and it names it before any byte moves.
 #[tokio::test]
 async fn begin_direct_put_mints_the_target_object_up_front() {
     let temp_dir = tempdir().expect("tempdir");
@@ -228,13 +224,6 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     assert_eq!(store.count(OperationClass::Read), 0);
 }
 
-/// A direct-put session that never recorded the reference its write was
-/// signed against used to be a record this test could write and complete
-/// against. The transport variant carries that reference, so there is no
-/// such record to write any more — in Rust or on the wire. What is left of
-/// this case lives where the durable bytes are read: see
-/// `upload_sessions_reject_a_transport_missing_its_own_fields` in
-/// loonfs-api's golden format tests.
 #[tokio::test]
 async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     let temp_dir = tempdir().expect("tempdir");
@@ -292,9 +281,6 @@ mod streamed_content {
             .await
     }
 
-    /// A streamed upload produces exactly the reference the buffered one
-    /// would, because the same digest is computed over the same bytes — the
-    /// only difference is that they were never all in memory at once.
     #[tokio::test]
     async fn a_streamed_upload_produces_the_reference_the_buffered_one_would() {
         let temp_dir = tempdir().expect("tempdir");
@@ -327,10 +313,6 @@ mod streamed_content {
         assert_eq!(completed.content_ref(), Some(&staged.content_ref));
     }
 
-    /// Re-sending a body is the case that forces the shape: the digest only
-    /// exists once the payload has been read, so the decision comes after
-    /// the read — and the object the session already owns must survive it
-    /// either way.
     #[tokio::test]
     async fn a_repeated_body_replays_and_a_different_one_conflicts_without_rewriting() {
         let temp_dir = tempdir().expect("tempdir");
@@ -381,19 +363,6 @@ mod streamed_content {
         );
     }
 
-    /// Two staging requests against one session, overlapped so the second
-    /// starts while the first is still writing the object.
-    ///
-    /// This is the shape that used to corrupt the session. Both requests
-    /// would find the key absent, both would assemble over it, and the one
-    /// that lost the record compare-and-swap would leave its bytes behind
-    /// under the winner's digest. The payloads here are the same length and
-    /// different bytes, which is exactly the pair a size comparison cannot
-    /// tell apart, so nothing downstream could have caught it.
-    ///
-    /// The staging claim is what settles it: exactly one request writes, the
-    /// other is refused before it touches the object, and the reference the
-    /// session recorded describes the object byte for byte.
     #[tokio::test]
     async fn one_session_admits_one_writer_and_records_what_that_writer_wrote() {
         let temp_dir = tempdir().expect("tempdir");
@@ -623,9 +592,6 @@ mod direct_multipart {
             .await
     }
 
-    /// The whole point of the transport: parts go straight to the provider,
-    /// the server assembles them, and it believes the assembly only after
-    /// reading the object's own checksum back.
     #[tokio::test]
     async fn a_multipart_upload_completes_against_the_assembled_object() {
         let temp_dir = tempdir().expect("tempdir");
@@ -701,8 +667,6 @@ mod direct_multipart {
         assert!(error.to_string().contains("at least one uploaded part"));
     }
 
-    /// Re-uploading a part is how a client retries one. The last write wins
-    /// and the assembled object follows it.
     #[tokio::test]
     async fn a_re_uploaded_part_is_the_one_that_lands() {
         let temp_dir = tempdir().expect("tempdir");
@@ -736,10 +700,6 @@ mod direct_multipart {
         );
     }
 
-    /// A completion whose response was lost. The provider has consumed the
-    /// upload, so replaying it reports an upload nobody has heard of — but
-    /// the durable session says what was promised and the object says what
-    /// landed, and those two settle it on every provider identically.
     #[tokio::test]
     async fn a_lost_completion_reconciles_from_the_session_and_the_object() {
         let temp_dir = tempdir().expect("tempdir");
@@ -781,10 +741,6 @@ mod direct_multipart {
         );
     }
 
-    /// An assembly that is not what was promised. There are no parts left to
-    /// retry against — completion consumed them — so the session ends rather
-    /// than waiting for a retry that could never work, and the wrong object
-    /// goes with it.
     #[tokio::test]
     async fn a_completion_that_does_not_verify_ends_the_session_and_deletes_the_object() {
         let temp_dir = tempdir().expect("tempdir");
@@ -852,13 +808,6 @@ mod direct_multipart {
         assert_eq!(error.code(), ErrorCode::UploadNotFound);
     }
 
-    /// A provider that treats the whole-object checksum as a precondition
-    /// refuses the assembly outright. A refusal and a completion whose
-    /// response was lost arrive as the same transport failure, so the first
-    /// attempt reports the store failure and leaves the session open. The
-    /// object ends the session instead: the retry finds the upload consumed
-    /// and nothing at the key, and the completion contract already calls
-    /// that terminal.
     #[tokio::test]
     async fn a_refused_assembly_is_a_store_failure_and_the_retry_is_terminal() {
         let temp_dir = tempdir().expect("tempdir");
@@ -922,11 +871,6 @@ mod direct_multipart {
             .is_none());
     }
 
-    /// A read-back the store refuses to answer says nothing about the object
-    /// the provider assembled. The completion reports the store failure, and
-    /// the object and the session survive it. The retry then completes from
-    /// the object: the provider reports an upload it no longer knows, and
-    /// the read-back settles the rest.
     #[tokio::test]
     async fn a_verification_the_store_refuses_leaves_the_completion_retryable() {
         let temp_dir = tempdir().expect("tempdir");
@@ -990,9 +934,6 @@ mod direct_multipart {
         );
     }
 
-    /// A session abandoned mid-upload leaves parts sitting at the provider.
-    /// Upload collection abandons them along with the object, because the
-    /// session record is where the provider's upload id lives.
     #[tokio::test]
     async fn upload_collection_abandons_the_provider_upload_of_an_expired_session() {
         let temp_dir = tempdir().expect("tempdir");
@@ -1040,9 +981,6 @@ mod direct_multipart {
             .is_none());
     }
 
-    /// The geometry is the one thing a begin request may choose, and it is
-    /// bounded by what every supported provider accepts for a non-final
-    /// part. The size it settles on is what bounds the object, too.
     #[tokio::test]
     async fn a_multipart_session_takes_a_part_size_inside_the_providers_bounds() {
         let temp_dir = tempdir().expect("tempdir");

@@ -400,9 +400,6 @@ mod tests {
         }
     }
 
-    /// A bind that is older than the child's active binding must not evict
-    /// it. WAL apply never produces this order; the guard covers a future
-    /// caller that does.
     #[test]
     fn an_out_of_order_bind_does_not_evict_the_childs_newer_binding() {
         let mut indexes = MetadataIndexes::default();
@@ -430,8 +427,6 @@ mod tests {
             .is_none());
     }
 
-    /// A stale bind must mutate nothing: rejecting it after evicting the
-    /// name slot would orphan whichever child currently holds that name.
     #[test]
     fn a_stale_bind_does_not_orphan_the_name_slots_current_child() {
         let mut indexes = MetadataIndexes::default();

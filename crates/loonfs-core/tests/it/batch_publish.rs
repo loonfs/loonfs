@@ -700,13 +700,6 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
     );
 }
 
-/// A batch where the WAL write fails must report that failure for every
-/// outcome that depended on the batch publishing: the accepted candidate and
-/// the rejection decided against its speculative in-batch state. Before this
-/// contract the speculative rejection surfaced as a definitive `PathConflict`
-/// derived from a create that never became durable, so its client gave up
-/// instead of retrying. Rejections decided against the durable materialization alone
-/// stand regardless of the batch outcome.
 #[tokio::test]
 async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let temp_dir = tempdir().expect("tempdir");
@@ -827,10 +820,6 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     );
 }
 
-/// Same contract when the batch dies at the head CAS instead of the WAL
-/// write: the stale-head error replaces the rejection decided against the
-/// accepted candidate's speculative state, while the materialization-decided rejection
-/// stands.
 #[tokio::test]
 async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
     let temp_dir = tempdir().expect("tempdir");

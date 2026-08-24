@@ -83,8 +83,6 @@ fn batch(first: &ContentRef, second: &ContentRef) -> Vec<FilesystemOperation> {
     ]
 }
 
-/// One batch, two transports: the same three operations submitted over HTTP
-/// and embedded produce the same single commit and the same ordered events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     let temp_dir = tempdir().expect("tempdir");
@@ -214,9 +212,6 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     harness.server.abort();
 }
 
-/// A commit answers with the change it committed, so a caller reads the
-/// inode id its put created out of the response instead of stating the path
-/// afterward. A replay of the same request answers with that same row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -321,10 +316,6 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     harness.server.abort();
 }
 
-/// Retirement is the one case where a replay cannot report events. Once the
-/// retention floor passes a commit, the record holding its events is no
-/// longer readable while the commit receipt still is, so the replay answers
-/// from the receipt and omits `events`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replay_below_the_retention_floor_omits_its_events() {
     let temp_dir = tempdir().expect("tempdir");
@@ -416,8 +407,6 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
     harness.server.abort();
 }
 
-/// A batch is all-or-nothing: the operation that stops it names its own
-/// position, and nothing the batch would have written is visible.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failing_operation_names_its_position_and_commits_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -517,8 +506,6 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
     harness.server.abort();
 }
 
-/// An empty operation list is the one shape the language does not accept;
-/// the wire surfaces core's own classification for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_operation_list_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
@@ -570,12 +557,6 @@ async fn an_empty_operation_list_is_rejected() {
     harness.server.abort();
 }
 
-/// The root is readable but never a mutation target, alone or inside a
-/// batch, and rejecting it commits nothing.
-///
-/// The planners own the rule, so the rejection is attributed exactly like
-/// every other planning failure: a batch names the operation that stopped
-/// it, a one-operation request names nothing, and both echo the commit id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_root_path_is_rejected_as_a_mutation_target() {
     let temp_dir = tempdir().expect("tempdir");
@@ -724,8 +705,6 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
     harness.server.abort();
 }
 
-/// Replay over the wire: the same id with the same batch returns the
-/// original receipt, and the same id with a different batch conflicts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_batch_replays_under_its_commit_id() {
     let temp_dir = tempdir().expect("tempdir");
@@ -800,9 +779,6 @@ async fn a_batch_replays_under_its_commit_id() {
     harness.server.abort();
 }
 
-/// One fingerprint domain across transports: a batch committed embedded
-/// replays over HTTP under the same commit id, and a different batch under
-/// that id conflicts over HTTP just as it would embedded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commit_id_used_embedded_replays_over_http() {
     let temp_dir = tempdir().expect("tempdir");
@@ -936,12 +912,6 @@ async fn a_commit_id_used_embedded_replays_over_http() {
     harness.server.abort();
 }
 
-/// A misspelled guard fails the request rather than the precondition.
-///
-/// Every optimistic-concurrency guard on a commit is an optional field, so
-/// before the commit body rejected unknown fields a typo decoded to `None`
-/// and the write applied unguarded — a lost update reported as a 200. The two
-/// bodies below differ only in how `expected_revision_no` is spelled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
     let temp_dir = tempdir().expect("tempdir");

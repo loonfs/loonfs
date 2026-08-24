@@ -1,36 +1,12 @@
-//! The lease one streaming metadata compaction holds over its own output.
+//! Lease for a streaming compaction's staged output.
 //!
-//! A job writes every output segment under `metadata/compactions/{job_id}/`
-//! and writes this object beside them. It carries lifecycle ownership and
-//! nothing else — job, namespace, owner, status, start, last heartbeat —
-//! because the one question it answers is who owns the objects under its
-//! prefix. There is no cursor here, no output descriptor, no offset, and no
-//! progress: a crashed job still loses its work, exactly as the design says
-//! it does.
+//! A job creates and refreshes an `Active` lease with compare-and-swap.
+//! Garbage collection may claim an expired lease by changing it to `Reaping`.
+//! A failed heartbeat then prevents the job from publishing.
 //!
-//! The lease is a fence, not a timestamp. Every write after the first is a
-//! compare-and-swap on the etag the writer last observed, so the job and the
-//! collector cannot both believe they own the prefix. The job creates the
-//! lease with `put_if_absent` and refreshes it by compare-and-swap; garbage
-//! collection claims an expired lease by compare-and-swapping it from
-//! `Active` to `Reaping` and only then treats the prefix as orphaned (format
-//! spec, "Garbage collection", rule 12). Exactly one of those two
-//! compare-and-swaps can win:
-//!
-//! - the job's heartbeat wins, so the collector keeps the prefix; or
-//! - the collector's claim wins, so the job is fenced, aborts, and publishes
-//!   nothing.
-//!
-//! A published job stops heartbeating and leaves its final lease in place. It
-//! is not deleted, because deleting it would open the one hole a lease exists
-//! to close: a collection pass that captured its live set before the
-//! publication would find output objects far older than any grace window and
-//! no lease saying who owns them. The lease expires on its own, and the pass
-//! that finds it expired reads a root that already names the segments.
-//!
-//! A malformed lease is corruption rather than evidence that its prefix is
-//! unowned; collection stops before it can race a job whose fence it cannot
-//! verify.
+//! Completed jobs leave the lease in place so a collection pass that started
+//! before publication cannot mistake old output for garbage. Malformed leases
+//! stop collection because ownership cannot be verified.
 
 use crate::control_object::{
     core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
@@ -67,17 +43,14 @@ pub(crate) enum CompactionPrefixOwner {
     NoOne,
 }
 
-/// Reads the lease of one job and says who owns that job's prefix, claiming
-/// an expired lease on the way.
+/// Returns the current prefix owner, claiming an expired lease when possible.
 ///
 /// A collector parses `metadata_compaction_id` from the key it is deciding.
 /// A lease naming a different job or namespace is corrupt because the key
 /// and embedded fence disagree.
 ///
-/// The claim is the whole point of reading it. An expired `Active` lease
-/// alone proves nothing — the job may be resuming from a long stall right
-/// now — so the prefix is orphaned only once this compare-and-swap has landed
-/// and the job's next heartbeat is guaranteed to fail.
+/// An expired lease is not collectable until the compare-and-swap succeeds;
+/// the job may still resume and refresh it first.
 pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

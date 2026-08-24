@@ -450,9 +450,6 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
     );
 }
 
-/// A large file and a pipe both round-trip through an embedded profile,
-/// and the retry contract holds for them exactly as it does for a payload
-/// small enough to hold.
 #[test]
 fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
     let harness = Harness::new();
@@ -529,8 +526,6 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
     assert_eq!(json_error(&no_destination)["code"], "invalid_request");
 }
 
-/// A file many chunks long round-trips through an embedded profile to a
-/// local file and to standard output, byte for byte.
 #[test]
 fn a_multi_chunk_file_round_trips_to_a_file_and_to_stdout() {
     let harness = Harness::new();
@@ -557,10 +552,6 @@ fn a_multi_chunk_file_round_trips_to_a_file_and_to_stdout() {
     );
 }
 
-/// Content that no longer matches its reference fails the download, and
-/// fails it without leaving anything at the destination: no file, and no
-/// partial file beside it. A verified-looking local copy of unverified bytes
-/// is the outcome the temp-file-then-rename order exists to prevent.
 #[test]
 fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
     let harness = Harness::new();
@@ -604,9 +595,6 @@ fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
     );
 }
 
-/// A download that stopped part way is picked up rather than started over:
-/// the bytes already on disk are fetched again by nobody, and the file that
-/// lands is still verified as a whole.
 #[test]
 fn an_interrupted_download_resumes_from_what_it_already_has() {
     let harness = Harness::new();
@@ -651,9 +639,6 @@ fn an_interrupted_download_resumes_from_what_it_already_has() {
     assert!(!meta.exists(), "and takes its note with it");
 }
 
-/// The note is what makes leftover bytes resumable. Bytes belonging to
-/// other content, and bytes with nothing vouching for them, are dropped
-/// without a word and the download starts over.
 #[test]
 fn a_partial_that_does_not_describe_this_file_is_started_over() {
     let harness = Harness::new();
@@ -701,10 +686,6 @@ fn a_partial_that_does_not_describe_this_file_is_started_over() {
     assert!(events_of_kind(&get, "phase").is_empty());
 }
 
-/// The same two payloads over the remote transport. This deployment stores
-/// to a local filesystem, so it cannot authorize direct part uploads and
-/// the payload streams through the server instead — the fallback the client
-/// picks from the capability document rather than from a guess.
 #[test]
 fn large_and_piped_puts_round_trip_over_the_remote_transport() {
     let harness = Harness::new();
@@ -741,9 +722,6 @@ fn large_and_piped_puts_round_trip_over_the_remote_transport() {
     assert_eq!(download(&harness, "/piped.bin", "piped-back.bin"), payload);
 }
 
-/// Every mutating command takes `-m`, and each one lands its annotation on
-/// its own commit. Reading the feed back through `loonfs changes` covers the
-/// flag, the threading, and the rendering in a single pass.
 #[test]
 fn every_mutating_command_records_its_message() {
     let harness = Harness::new();
@@ -810,8 +788,6 @@ fn every_mutating_command_records_its_message() {
     );
 }
 
-/// The remote arm has to hand the message to the client's mutation options,
-/// not just the embedded arm. Same flag, same feed rows, over HTTP.
 #[test]
 fn commit_messages_ride_the_feed_over_the_remote_transport() {
     let harness = Harness::new();
@@ -972,9 +948,6 @@ fn naming_strictness_and_directory_intent_hold_end_to_end() {
     }
 }
 
-/// One file into a directory that does not exist fails, exactly as `cp` into
-/// a missing parent fails: only `-r`, which owns the destination tree it is
-/// asked to build, creates directories.
 #[test]
 fn single_file_get_refuses_a_missing_parent_directory() {
     let harness = Harness::new();
@@ -1410,10 +1383,6 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     assert_eq!(json_error(&again)["code"], "not_deleted");
 }
 
-/// A pathless undelete restores in place: it re-binds under the parent
-/// inode and name the deletion recorded. Renaming the parent between the
-/// delete and the recovery is the proof that the anchor is identity, not a
-/// remembered path — the entry comes back inside the parent's new name.
 #[test]
 fn an_undelete_without_a_path_restores_in_place() {
     let harness = Harness::new();
@@ -1639,8 +1608,6 @@ fn namespace_delete_without_yes_fails_cleanly_when_not_interactive() {
     assert_success(&deleted);
 }
 
-/// A refused precondition has to say what it wanted and what it found, or
-/// the caller cannot tell a raced delete from a mistyped sequence.
 #[test]
 fn namespace_delete_reports_both_head_sequences_when_the_precondition_fails() {
     let harness = Harness::new();
@@ -1686,8 +1653,6 @@ fn namespace_delete_reports_both_head_sequences_when_the_precondition_fails() {
     assert_success(&harness.run(&["--json", "ls", "/"]));
 }
 
-/// `annotate` writes and removes attributes, and `stat` shows what the inode
-/// holds — over both transports, from the same command line.
 #[test]
 fn annotate_writes_and_removes_attributes_in_both_modes() {
     let harness = Harness::new();
@@ -1826,8 +1791,6 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
     }
 }
 
-/// The argument errors `annotate` reports about its own flags, before it
-/// commits anything.
 #[test]
 fn annotate_rejects_a_set_without_an_equals_and_a_document_beside_the_flags() {
     let harness = Harness::new();
@@ -1886,8 +1849,6 @@ fn annotate_rejects_a_set_without_an_equals_and_a_document_beside_the_flags() {
     assert_eq!(error["param"], "--attributes-json");
 }
 
-/// `mkdir -p` on a directory that is already there succeeds, the way Unix
-/// does, and still fails on a file — in both profile modes.
 #[test]
 fn mkdir_parents_is_idempotent_over_an_existing_directory_in_both_modes() {
     let harness = Harness::new();
@@ -1948,8 +1909,6 @@ fn mkdir_parents_is_idempotent_over_an_existing_directory_in_both_modes() {
     }
 }
 
-/// `cp` and `mv` land inside a destination that is already a directory, the
-/// way Unix does; a destination that is a file keeps its overwrite rules.
 #[test]
 fn cp_and_mv_land_inside_an_existing_directory_in_both_modes() {
     let harness = Harness::new();

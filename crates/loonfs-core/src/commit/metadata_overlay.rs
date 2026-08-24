@@ -335,8 +335,6 @@ mod tests {
         );
     }
 
-    /// A clear is a real revision carrying the empty map, so the overlay and
-    /// replay must both hold a row for it.
     #[test]
     fn cleared_attributes_overlay_rows_match_replayed_wal_deltas() {
         assert_overlay_matches_replay(

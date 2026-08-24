@@ -124,9 +124,6 @@ fn truncate_recent_segments(store: &SharedObjectStore, namespace_id: &NamespaceI
     block_on(store.put_overwrite(&key, bytes::Bytes::from(encoded))).expect("rewrite head");
 }
 
-/// The documented escape for a namespace whose WAL tail already outran the
-/// pointer window the head was published with: status refuses to answer,
-/// and an explicit flush is what repairs it.
 #[test]
 fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
     let temp_dir = tempdir().expect("tempdir");
@@ -202,8 +199,6 @@ fn namespace_diagnostics_and_step_reject_missing_namespace() {
     );
 }
 
-/// A namespace whose head is gone is a namespace that does not exist:
-/// there is no third answer between present and absent.
 #[test]
 fn namespace_diagnostics_and_step_reject_a_namespace_whose_head_is_gone() {
     let temp_dir = tempdir().expect("tempdir");
@@ -379,7 +374,6 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
     );
 }
 
-/// A plan that names nothing is not a step, whichever surface built it.
 #[test]
 fn a_plan_that_names_nothing_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
@@ -401,9 +395,6 @@ fn a_plan_that_names_nothing_is_rejected() {
     }
 }
 
-/// The typed names are one name each over the one step path: what they do
-/// is exactly the step with that one action named, and what they report
-/// agrees with it.
 #[test]
 fn the_typed_wrappers_are_single_action_steps() {
     let temp_dir = tempdir().expect("tempdir");
@@ -564,13 +555,6 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         .any(|descriptor| descriptor.run_seq == ChangeSeq(2)));
 }
 
-/// A handle with no background work behind it can still run the one piece of
-/// upkeep a bounded step cannot do itself.
-///
-/// This is the manual deployment story: an operator drives bounded steps and
-/// then drives this, and neither needs a scheduler. The call plans exactly as
-/// a step does — including folding one bounded unit when that is what the
-/// namespace needs — and reports what it ran.
 #[test]
 fn a_standalone_admin_drives_metadata_compaction_itself() {
     let temp_dir = tempdir().expect("tempdir");

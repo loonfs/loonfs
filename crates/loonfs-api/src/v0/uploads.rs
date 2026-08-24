@@ -401,8 +401,6 @@ mod tests {
         );
     }
 
-    /// A begin request says how it means to move its bytes, or it is not a
-    /// request. Nothing is inferred from what the body left out.
     #[test]
     fn a_begin_request_without_a_mode_does_not_decode() {
         assert!(serde_json::from_str::<BeginUploadRequest>("{}").is_err());
@@ -413,8 +411,6 @@ mod tests {
         );
     }
 
-    /// The combinations a flat begin request could spell are refused where
-    /// the body is read, not by a handler comparing fields afterwards.
     #[test]
     fn a_begin_request_carrying_another_modes_fields_does_not_decode() {
         for body in [
@@ -432,8 +428,6 @@ mod tests {
         }
     }
 
-    /// Multipart options are fields beside `mode`; an omitted part size uses
-    /// the server default.
     #[test]
     fn a_multipart_begin_names_its_part_size_beside_the_mode() {
         assert_eq!(
@@ -461,7 +455,6 @@ mod tests {
         );
     }
 
-    /// Each completion request includes only the fields for its upload mode.
     #[test]
     fn completion_requests_are_tagged_and_mode_specific() {
         assert_eq!(
@@ -543,7 +536,6 @@ mod tests {
         assert!(!json.contains("object_key"));
     }
 
-    /// Pins the response shape for each upload mode.
     #[test]
     fn a_begin_response_carries_only_its_transports_fields() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -607,8 +599,6 @@ mod tests {
         );
     }
 
-    /// The request refuses fields it does not know; the response must not.
-    /// A reader that rejected them could not talk to a later server.
     #[test]
     fn a_begin_response_carrying_a_later_servers_field_still_decodes() {
         assert_eq!(
@@ -624,7 +614,6 @@ mod tests {
         );
     }
 
-    /// A direct-put begin may carry an advisory length but no content claim.
     #[test]
     fn an_upload_content_claim_names_only_size_and_checksum() {
         let request: BeginUploadRequest =
@@ -651,8 +640,6 @@ mod tests {
         );
     }
 
-    /// The claim names its algorithm, so a provider that enforces something
-    /// other than SHA-256 is expressible without a wire change.
     #[test]
     fn an_upload_content_claim_carries_the_operations_required_algorithm() {
         let claim: UploadContentClaim = serde_json::from_str(

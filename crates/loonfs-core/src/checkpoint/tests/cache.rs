@@ -873,9 +873,6 @@ async fn warm_local_block_cache(
         .expect("warm the index")
 }
 
-/// A cold local cache is probed, answers nothing, and is then offered every
-/// section the one fetch produced: the filter that was asked for, the index
-/// beside it, and the data blocks a small segment brings along.
 #[tokio::test]
 async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
     let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
@@ -950,9 +947,6 @@ async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
     }
 }
 
-/// A warm local cache answers both sections with no segment bytes read: the
-/// decoded cache and the view memo are fresh, as a restarted process's are,
-/// so only the local tier can be answering.
 #[tokio::test]
 async fn a_warm_local_block_cache_answers_index_and_filter_without_the_store() {
     let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
@@ -997,9 +991,6 @@ async fn a_warm_local_block_cache_answers_index_and_filter_without_the_store() {
     }
 }
 
-/// A local entry that no longer decodes is dropped and refetched exactly
-/// once. What it held was a copy; object storage still holds the authority,
-/// so the read succeeds rather than reporting a corrupt segment.
 #[tokio::test]
 async fn a_local_block_cache_entry_that_does_not_decode_is_dropped_and_refetched() {
     let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
@@ -1039,7 +1030,6 @@ async fn a_local_block_cache_entry_that_does_not_decode_is_dropped_and_refetched
     );
 }
 
-/// A closed cache is a miss, and a miss is only ever a fetch.
 #[tokio::test]
 async fn a_closed_local_block_cache_reads_as_a_miss() {
     let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
@@ -1254,9 +1244,6 @@ async fn wide_read(
     (blocks, store.count(OperationClass::Read))
 }
 
-/// A narrow data-block load probes the local cache, misses, pays one fetch,
-/// and offers what it fetched. A second load whose decoded caches are fresh
-/// — a restarted process's shape — is answered without reading the store.
 #[tokio::test]
 async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
@@ -1328,7 +1315,6 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
     );
 }
 
-/// Decoded blocks split a wide selection into coalesced spans around them.
 #[tokio::test]
 async fn a_wide_read_coalesces_the_blocks_the_decoded_cache_did_not_answer() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
@@ -1348,8 +1334,6 @@ async fn a_wide_read_coalesces_the_blocks_the_decoded_cache_did_not_answer() {
     );
 }
 
-/// A span load ignores the local stored-block tier in both directions, even
-/// when that tier already holds every selected block.
 #[tokio::test]
 async fn a_span_load_never_reads_or_writes_the_local_block_cache() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
@@ -1373,8 +1357,6 @@ async fn a_span_load_never_reads_or_writes_the_local_block_cache() {
     );
 }
 
-/// A corrupt local entry on the narrow path is dropped and refetched once.
-/// What it held was a copy; object storage still holds the authority.
 #[tokio::test]
 async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;

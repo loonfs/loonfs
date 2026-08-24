@@ -1,14 +1,6 @@
-//! Checkpoint inventory: every active record a namespace still carries.
+//! Lists active checkpoint records for a namespace.
 //!
-//! A checkpoint record is a garbage-collection root, and the creation
-//! response is the only place its id ever appears. An operator who lost that
-//! response — or who never saw it, because a duplicate label produced a
-//! second record under a second id — has no other way to find the pin and
-//! release it. This enumeration is that way.
-//!
-//! It reads the `checkpoints/` prefix and nothing else. Records that were
-//! released are gone from the answer: a release is what stops a record
-//! pinning anything, and a released record awaiting its reap pins nothing.
+//! The listing reads the `checkpoints/` prefix and excludes released records.
 
 use super::record::load_checkpoint_record_at_key;
 use crate::control_object::{core_control_load_error, ControlObjectLoadError};

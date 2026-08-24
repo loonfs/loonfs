@@ -1,44 +1,13 @@
-//! The merge engine both reorganization paths run, and the background job
-//! that is one of them.
+//! Streaming metadata merge engine.
 //!
-//! [`GroupMerge`] merges one family group. It opens one iterator per run per
-//! family and merges them in row-key order ([`super::compaction_merge`]),
-//! feeds the merged rows through streaming retention operators
-//! ([`super::compaction_retention`]), and writes each output segment as it
-//! fills ([`super::compaction_output`]). What it holds at any instant is a
-//! fixed number of decoded input blocks per iterator, the fixed state of one
-//! retention operator, and one segment builder per family of the group. No
-//! family, no partition, no directory, no inode's history, and no name slot's
-//! generations are ever collected whole, so nothing it holds follows the size
-//! of what it merges.
+//! [`GroupMerge`] merges runs in row-key order, applies retention rules, and
+//! writes bounded output segments. It buffers only input blocks, retention
+//! state, and one segment builder per family.
 //!
-//! Rows are dropped when, and only when, the merge's [`MergePlacement`] is
-//! `Base`. That is the placement rule already: a window that starts at the
-//! group's oldest run holds every row a drop could need to read, and a window
-//! above the base does not, so a merge above the base is a pure rewrite.
-//!
-//! Two callers drive the engine, and they differ in orchestration rather than
-//! in merging.
-//!
-//! [`merge_group_in_step`] runs it synchronously inside one maintenance step.
-//! The step's budgets chose the window and the step publishes the result, so
-//! the segments go to `metadata/segments/` and there is no lease, no job, no
-//! registry, and no admission.
-//!
-//! [`run_metadata_compaction_job`] runs it as a background task the
-//! maintenance runner owns, for a group whose bottom-anchored window no longer
-//! fits one step's budgets — a group whose base is frozen and whose retention
-//! has stopped ([`super::reorganize`] reports that, loudly). Nothing paces that
-//! work, so it needs everything the step-contained merge does not: admission, a
-//! staging prefix, and a lease over what it writes there. Its segments go to
-//! the job's own prefix (format spec, "Compaction") because a job outlives the
-//! collector's grace window, so its output would otherwise look exactly like
-//! the unreferenced aged objects the collector reaps; the lease beside them
-//! ([`super::compaction_lease`]) is what tells the collector the difference. It
-//! publishes nothing until it is finished, and a cancelled or crashed job
-//! leaves staged objects nothing references and the old manifest still valid.
-//! The step that plans it starts it and returns; the runner cancels it on
-//! shutdown and joins it with the rest of its background work.
+//! [`merge_group_in_step`] runs within a bounded maintenance step.
+//! [`run_metadata_compaction_job`] handles full background compactions using a
+//! staging prefix and lease. Only base merges may remove rows below the
+//! retention floor; delta merges preserve every row.
 
 use super::block_fetch::{load_segment_filter, segment_object_len};
 use super::block_load::SessionBlockMemo;
@@ -111,9 +80,8 @@ const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 /// the same durable state produces the same rows, which is what makes a
 /// cancelled attempt free to throw away.
 ///
-/// The runtime holds one of these per running job and hands it back to
-/// [`super::reorganize_metadata_step`], which is how a step knows not to
-/// merge the group a job is rebuilding.
+/// The runtime holds one per running job so maintenance steps skip the group
+/// being rebuilt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataCompactionSpec {
     /// This job's identity, and the prefix its output and its lease live
@@ -605,27 +573,13 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
 
 /// Swaps the rebuilt run in for the snapshot it replaces.
 ///
-/// Reload the root and manifest, check that every segment the job read is
-/// still exactly what the manifest holds for the group in those runs, replace
-/// those descriptors with the output run's, keep everything else — including
-/// the runs that arrived while the job ran — and publish through the ordinary
-/// compare-and-swap. An unrelated publication winning that race is a reload
-/// and another attempt; a snapshot that moved is an abandon, because this
-/// output no longer stands in for what the manifest holds.
+/// The current manifest must still contain the segments used by the job. New
+/// runs are preserved. Unrelated compare-and-swap conflicts are retried, while
+/// changes to the job's input abandon the output.
 ///
-/// The publication budget covers this publication and not the job: what it
-/// protects against is a root compare-and-swap landing after the objects it
-/// names could have aged into the collector's window, which is a property of
-/// the last few seconds and not of however long the rebuild took. That is the
-/// same span the lease has to cover, so both are measured off the lease's own
-/// clock.
-///
-/// The root is stamped with the wall clock each attempt reads rather than the
-/// one the job started under. A job that ran for hours would otherwise stamp
-/// the root with its start time, and a job rebasing over a newer flush would
-/// move the root's `updated_at_ms` backwards. The job's identity is the other
-/// half of what a publication carries, and that stays frozen: the writer this
-/// job runs as is the writer that planned it.
+/// The publication budget starts during finalization rather than at the start
+/// of the potentially long rebuild. Each attempt uses a current wall-clock
+/// timestamp so `updated_at_ms` cannot move backward.
 pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -637,19 +591,12 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
 ) -> Result<Finalization> {
     let timer = lease.timer();
     for attempt in 1..=MAX_FINALIZATION_ATTEMPTS {
-        // Checked at the top of every attempt, not only the first: the
-        // attempts after a lost race are exactly the wait a shutdown must not
-        // sit through.
+        // Check cancellation again after every publication conflict.
         if cancellation.is_cancelled() {
             return Ok(Finalization::Cancelled);
         }
-        // The claim is refreshed at the top of every attempt, and losing that
-        // compare-and-swap ends the job here. This is the check that makes
-        // the fence complete: the span from here to the root compare-and-swap
-        // below is one publication budget, which is shorter than the lease
-        // expiry, so a job that gets past this line cannot have its prefix
-        // claimed before the swap that makes its output referenced
-        // (`limits::METADATA_COMPACTION_LEASE_EXPIRY_MS`).
+        // Refresh the lease before publishing. Its expiry exceeds the
+        // publication budget, so GC cannot claim the prefix before the CAS.
         if lease.heartbeat(store).await? == LeaseHold::Fenced {
             return Ok(Finalization::Fenced);
         }
@@ -801,46 +748,15 @@ pub(super) fn snapshot_segment_keys<S: ObjectStore + ?Sized>(
     Some(keys)
 }
 
-/// How a merge decides whether a reverse bind row survives the frozen floor.
+/// Source used to determine whether a reverse bind survives the frozen floor.
 ///
-/// The reverse index is keyed by child while the unbind that retires a bind is
-/// keyed by parent, so no grouping of the merged stream holds a reverse row
-/// together with its unbind. Both answers below come from the same rule
-/// ([`bind_survives_frozen_floor`]) against the same set
-/// ([`unbinding_at_or_below_floor`]); they differ only in where the set comes
-/// from, because the two orchestrations have different resource contracts.
-///
-/// This parameterizes the lookup and nothing else. Iteration, retention,
-/// segment writing, parity, and publication are the same code either way.
+/// Reverse binds and unbinds have different key prefixes. Background jobs use
+/// point reads to keep memory bounded. Step-contained merges reuse a bounded
+/// set collected while processing forward binds.
 enum ReverseBindResolution {
-    /// Read the unbinds of one binding out of the snapshot, one probe per
-    /// reverse row at or below the floor.
-    ///
-    /// What a background job uses. A job has no bound on the group it
-    /// rebuilds, so it must not hold a set that follows the group's size; a
-    /// bounded cache in front of the reads is the most it can keep.
+    /// Probe the snapshot for each reverse row, with a bounded cache.
     PointProbeSnapshot,
-    /// Consult the below-floor unbound generations the forward cluster already
-    /// streamed past.
-    ///
-    /// What a merge inside a maintenance step uses. Its input is capped by the
-    /// step's row and decoded-byte budgets, so this set is capped by the same
-    /// budgets — it holds one generation identity per below-floor unbind in
-    /// the window, and never more than the window itself.
-    ///
-    /// The alternative costs one store round trip per reverse row once the
-    /// probe cache can no longer hold the window's unbind family. The row
-    /// budget admits about 43,000 unbind rows, which reaches the 16 MiB cache
-    /// at an ordinary name length, and the decoded-byte budget allows four
-    /// times that. Measured on a window whose unbind family just fills the
-    /// cache, with the reverse index walking it out of order: 65,536 reverse
-    /// rows cost 27,427 data reads and 309 MB transferred for 16 MB of priced
-    /// input, and doubling the family doubled both. This set is also the
-    /// smaller resident structure — one identity per below-floor unbind, well
-    /// under the cache it replaces.
-    ///
-    /// This is filled by the forward cluster, which
-    /// [`BINDINGS_CLUSTERS`] runs first for exactly that reason.
+    /// Use unbound generations collected from the bounded forward-bind input.
     CollectedUnbinds(BTreeSet<BindingGeneration>),
 }
 
@@ -1096,29 +1012,10 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         Ok(Ok(self.result))
     }
 
-    /// Refuses a family that hands the merge one row key twice, and refuses a
-    /// merge that hands itself a family out of order.
+    /// Rejects duplicate or out-of-order input keys within a family.
     ///
-    /// A metadata row key identifies one row. Nothing downstream re-checks
-    /// that: reads concatenate runs rather than deduplicating them, and the
-    /// segment builder rejects only a descending key, so two equal adjacent
-    /// keys travel into a published run and make the same logical event
-    /// answerable twice.
-    ///
-    /// This runs over the merge's input rather than its output, which is what
-    /// makes it see a duplicate retention would otherwise drop, a duplicate
-    /// split across two runs, and a duplicate split across two segments.
-    ///
-    /// It stands beside the output digests
-    /// ([`Self::refuse_a_run_whose_index_disagrees`]) because the two prove
-    /// different things. The digests say the two families of an index pair hold
-    /// the same rows as each other; a duplicate present on both sides passes
-    /// them, because both multisets still match. This says no family holds one
-    /// row key twice, whatever the other family holds.
-    ///
-    /// A key that goes backwards is not corruption in the store — the k-way
-    /// merge emits one family in row-key order — so that case is an internal
-    /// error against the merge itself.
+    /// This checks input before retention can drop a duplicate. Output parity
+    /// digests cannot detect duplicates present in both paired families.
     fn refuse_a_repeated_input_key(
         &mut self,
         family: MetadataRowFamily,
@@ -1613,9 +1510,6 @@ mod tests {
         }
     }
 
-    /// The digest compares two families written in different orders and, for
-    /// the bind pair, in different passes. So it must ignore order and still
-    /// notice one row differing in one field.
     #[test]
     fn the_row_digest_ignores_order_and_notices_one_changed_field() {
         let rows = [

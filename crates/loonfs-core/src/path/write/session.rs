@@ -210,9 +210,6 @@ mod tests {
         CommitFingerprint::new_unchecked("v1:sha256:test".to_owned())
     }
 
-    /// Two plans through one session share the durable-layer memo: the
-    /// second plan's path walk answers from cache instead of re-scanning
-    /// the manifest for the components both paths share.
     #[tokio::test]
     async fn second_plan_in_a_session_hits_the_durable_cache() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
@@ -300,9 +297,6 @@ mod tests {
         );
     }
 
-    /// The first candidate implicitly creates `/wide`; the second must plan
-    /// against the session state that already contains it, or its own
-    /// duplicate `CreateDirectory` would fail child-name-absent validation.
     #[tokio::test]
     async fn batch_creates_under_one_new_parent_share_session_state() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;

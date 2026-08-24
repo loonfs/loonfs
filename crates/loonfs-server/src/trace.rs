@@ -80,8 +80,6 @@ fn trace_config_from_env(
 mod tests {
     use super::{trace_config_from_env, DEFAULT_TRACE_FILTER};
 
-    /// An unset or blank `LOONFS_TRACE` logs, and logs exactly what `json`
-    /// logs.
     #[test]
     fn tracing_is_enabled_without_env() {
         let unset = trace_config_from_env(None, None)
@@ -110,9 +108,6 @@ mod tests {
             .is_none());
     }
 
-    /// `off` silences the output whatever `RUST_LOG` says, because the two
-    /// answer different questions: one turns logging off and the other picks
-    /// the filter.
     #[test]
     fn off_wins_over_rust_log() {
         assert!(trace_config_from_env(
@@ -134,8 +129,6 @@ mod tests {
         assert_eq!(config.filter, "loonfs_core=debug");
     }
 
-    /// `RUST_LOG` still picks the filter when `LOONFS_TRACE` is unset, which
-    /// is the mode most deployments run in.
     #[test]
     fn default_tracing_uses_rust_log_when_present() {
         let config = trace_config_from_env(None, Some("loonfs_core=debug".to_owned()))

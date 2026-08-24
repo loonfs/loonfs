@@ -1724,11 +1724,6 @@ async fn no_replace_put_rejects_casefold_and_normalization_equivalent_name() {
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-/// Listings decide visibility during child enumeration and then look up
-/// revision heads without re-deriving it, so this pins both halves of that
-/// contract: a recursively deleted subtree stays out of listings and
-/// resolution entirely, while entries the enumeration does admit still
-/// surface their real revision data (revision_no, size, content ref).
 #[tokio::test]
 async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data() {
     let temp_dir = tempdir().expect("tempdir");

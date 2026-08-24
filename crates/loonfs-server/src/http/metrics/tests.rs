@@ -42,8 +42,6 @@ fn a_gauge_renders_without_a_suffix() {
     );
 }
 
-/// Prometheus buckets are cumulative and must end at `+Inf`; the runtime's
-/// are per-bucket, so this is where the running sum happens.
 #[test]
 fn a_histogram_renders_cumulative_buckets_ending_at_infinity() {
     const BOUNDARIES: &[f64] = &[1.0, 2.0];
@@ -70,7 +68,6 @@ fn a_histogram_renders_cumulative_buckets_ending_at_infinity() {
     );
 }
 
-/// One name, one header pair, however many label sets it carries.
 #[test]
 fn label_sets_of_one_name_share_a_single_header_pair() {
     let recorder = DefaultMetricsRecorder::new();
@@ -96,8 +93,6 @@ fn label_sets_of_one_name_share_a_single_header_pair() {
     );
 }
 
-/// A scrape that reads the same numbers twice must produce the same bytes,
-/// or a diffing operator sees changes that did not happen.
 #[test]
 fn rendering_the_same_readings_twice_produces_the_same_bytes() {
     let recorder = DefaultMetricsRecorder::new();
@@ -166,8 +161,6 @@ fn a_scrape_reports_positive_process_resident_bytes() {
     assert!(resident_bytes > 0);
 }
 
-/// The whole reason the label is the matched template: a route seen twice is
-/// one label, and a path that matched nothing never becomes one.
 #[test]
 fn route_labels_intern_once_and_refuse_to_grow_without_bound() {
     let mut routes = RouteLabels::default();

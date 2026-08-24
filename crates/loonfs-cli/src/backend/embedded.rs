@@ -1026,8 +1026,6 @@ mod tests {
         (config, store)
     }
 
-    /// Verifies that a drain settles every assigned job and namespace. One
-    /// namespace has an index to build, and the other does not.
     #[tokio::test]
     async fn a_drain_settles_every_assigned_key_and_does_the_work_it_finds() {
         let temp_dir = tempdir().expect("create temp dir");
@@ -1109,9 +1107,6 @@ mod tests {
         );
     }
 
-    /// A budget that runs out mid-assignment reports where every key got to
-    /// — including the ones it never reached — instead of claiming the
-    /// assignment is caught up.
     #[tokio::test]
     async fn a_spent_drain_budget_reports_the_keys_it_left_unsettled() {
         let temp_dir = tempdir().expect("create temp dir");
@@ -1156,9 +1151,6 @@ mod tests {
         assert!(!collection.settled());
     }
 
-    /// Hosting is the other half: the runner runs the steps, the assignment
-    /// is what admits them, and the signal is what stops it. Nothing here
-    /// discovered the namespace — the assignment did.
     #[tokio::test]
     async fn hosting_an_assignment_maintains_a_cold_namespace_until_the_signal() {
         let temp_dir = tempdir().expect("create temp dir");

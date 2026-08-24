@@ -272,9 +272,6 @@ async fn build_commit_plan(
     .finish(resulting_next_inode_id))
 }
 
-/// Every attribute update carries its own revision guard, whether or not the
-/// caller stated an expectation. A plan built against a revision that is no
-/// longer current is rejected here, not merged.
 #[tokio::test]
 async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() {
     let metadata_state = metadata_state_after(&[
@@ -310,8 +307,6 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() 
     );
 }
 
-/// An inode with no attribute row is at revision 0, so a first write states
-/// zero — and a second first write of the same inode conflicts.
 #[tokio::test]
 async fn a_first_attribute_write_states_revision_zero() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
@@ -348,8 +343,6 @@ async fn a_first_attribute_write_states_revision_zero() {
     );
 }
 
-/// Attributes belong to the resource, so an inode nothing binds has none to
-/// write.
 #[tokio::test]
 async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let metadata_state = metadata_state_after(&[]);
@@ -407,9 +400,6 @@ async fn stale_revision_precondition_is_rejected() {
     ));
 }
 
-/// The validator independently refuses a create whose name is already
-/// bound, whatever compiled it: the check does not lean on planning having
-/// looked first.
 #[tokio::test]
 async fn a_create_for_a_bound_name_is_rejected() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
@@ -438,8 +428,6 @@ async fn a_create_for_a_bound_name_is_rejected() {
     ));
 }
 
-/// A `BindingIs` race check whose observed binding no longer exists is
-/// refused before the operation that carries it runs.
 #[tokio::test]
 async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
@@ -517,12 +505,6 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         .is_none());
 }
 
-/// The rows here are deliberately corrupt: the tombstone lands without the
-/// unbind a real delete emits with it, so `readme.txt` stays bound under a
-/// tombstoned directory. No client history produces that — planning resolves
-/// through visible bindings, and a visible inode is one no tombstone covers
-/// — so the guards fire only on self-contradicting stored state and classify
-/// as corruption.
 #[tokio::test]
 async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     let metadata_state = metadata_state_after(&[
@@ -786,9 +768,6 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     ));
 }
 
-/// Same corrupt shape as the create/replace guards above: a tombstone with
-/// no matching unbind leaves a live binding under it, which is the only way
-/// this guard can fire.
 #[tokio::test]
 async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     let metadata_state = metadata_state_after(&[

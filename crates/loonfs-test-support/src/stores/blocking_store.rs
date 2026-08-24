@@ -335,10 +335,6 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
-    /// The gate carries no wall-clock budget of its own: a parked operation
-    /// waits for the release however long the test takes to reach it. Time is
-    /// paused, so the hold below costs nothing to run while being longer than
-    /// any deadline this helper could plausibly have carried.
     #[tokio::test(start_paused = true)]
     async fn a_parked_operation_waits_for_the_release_however_long_it_takes() {
         let temp_dir = tempdir().expect("tempdir");

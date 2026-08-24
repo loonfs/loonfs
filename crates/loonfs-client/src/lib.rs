@@ -1,16 +1,9 @@
 //! Async HTTP client for a LoonFS server.
 //!
-//! Use this crate when your process should talk to a hosted LoonFS runtime
-//! instead of embedding the runtime directly. The client keeps paths simple:
-//! pass a [`NamespacePath`] for filesystem operations and use explicit commit
-//! helpers when you need retry control.
-//!
-//! The public surface is [`Client`] and the values it takes: [`ClientConfig`],
-//! [`ClientError`], [`NamespacePath`], and the per-operation option structs
-//! re-exported below. There is no transport abstraction to implement — a
-//! process that wants the runtime in-process uses the `loonfs` crate instead,
-//! and the two surfaces share one definition of every option struct (they
-//! live in `loonfs-api`) so their arguments cannot drift apart.
+//! Use [`Client`] with [`ClientConfig`] and [`NamespacePath`] to access a
+//! hosted LoonFS server. Applications that embed the runtime directly should
+//! use the `loonfs` crate. Both crates share operation options from
+//! `loonfs-api`.
 
 #![warn(missing_docs)]
 #![allow(

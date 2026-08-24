@@ -380,9 +380,6 @@ mod tests {
             .to_owned()
     }
 
-    /// Attribute values are the first user-written text this CLI prints. A
-    /// newline in one must not forge an output line, and an escape sequence
-    /// must not reach the terminal as a command.
     #[test]
     fn human_stat_escapes_control_characters_in_attribute_values() {
         let newline = stat_with_attribute(
@@ -408,8 +405,6 @@ mod tests {
         assert_eq!(attribute_line(&tabbed), "attr.note: a\\tb\\rc");
     }
 
-    /// Only control characters are rewritten, so ordinary text prints as
-    /// itself.
     #[test]
     fn human_stat_leaves_ordinary_unicode_alone() {
         let unicode = stat_with_attribute(
@@ -418,8 +413,6 @@ mod tests {
         assert_eq!(attribute_line(&unicode), "attr.note: café ☃ 日本語 🙂");
     }
 
-    /// JSON output needs no escaping of its own: serde emits an escaped
-    /// string, and the value round-trips through a decode unchanged.
     #[test]
     fn json_stat_flattens_the_attribute_projection_and_preserves_values() {
         let newline =

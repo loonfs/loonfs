@@ -124,8 +124,6 @@ mod tests {
         assert_eq!(evicted, "a", "the stale position for a must not evict b");
     }
 
-    /// An eviction loop asks for a key it can drop; a queue holding only
-    /// ghosts has none, and saying so is what stops the loop spinning.
     #[test]
     fn eviction_reports_a_queue_of_ghosts_as_empty() {
         let mut recency = Recency::default();

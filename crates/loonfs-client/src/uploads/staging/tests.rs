@@ -385,10 +385,6 @@ fn resumed_script(missing: &[u32], uploaded: ContentRef) -> Vec<Outcome> {
     script
 }
 
-/// An upload interrupted after some parts landed picks the session back up
-/// and sends only what is missing. Every byte is still read — the assembly
-/// is verified against a checksum over the whole object — but the parts
-/// already in object storage are not sent a second time.
 #[tokio::test]
 async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     let payload = payload(TEST_PAYLOAD_BYTES);
@@ -471,9 +467,6 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     assert_eq!(transport.attempts(), 1 + 1 + missing.len() + 2);
 }
 
-/// A resumed upload obeys the algorithm recorded beside its durable session,
-/// even when it differs from the algorithm a new multipart session receives
-/// today. The payload is still read once while that recorded digest is folded.
 #[tokio::test]
 async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
     let payload = payload(TEST_PAYLOAD_BYTES);
@@ -515,8 +508,6 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
     assert_eq!(transport.attempts(), 1 + signing_waves + missing.len() + 2);
 }
 
-/// A large put reads its source once and never holds more of it than the
-/// window it uploads in.
 #[tokio::test]
 async fn a_direct_multipart_put_holds_only_its_window() {
     let payload = payload(TEST_PAYLOAD_BYTES);
@@ -551,8 +542,6 @@ async fn a_direct_multipart_put_holds_only_its_window() {
     );
 }
 
-/// A deployment that cannot authorize part uploads gets the same source as
-/// a request body, and the client accumulates none of it.
 #[tokio::test]
 async fn a_proxied_put_streams_its_body() {
     let payload = payload(TEST_PAYLOAD_BYTES);
@@ -592,10 +581,6 @@ async fn a_proxied_put_streams_its_body() {
     );
 }
 
-/// A small source goes through the server — but because the deployment's
-/// advertised cap says it fits, not because the client assumed it would.
-/// The document is read once and cached, so the round trip is paid at most
-/// once per client however many puts follow.
 #[tokio::test]
 async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
     let payload = payload(1_000);
@@ -637,7 +622,6 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
     );
 }
 
-/// A payload above the proxy limit uses direct PUT when multipart is absent.
 #[tokio::test]
 async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
     let payload = payload(1_025);
@@ -673,7 +657,6 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
     assert_eq!(object_write.body_bytes(), payload.len());
 }
 
-/// An unknown-length payload can use direct PUT without multipart support.
 #[tokio::test]
 async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     let payload = payload(64 * 1024);
@@ -718,8 +701,6 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     );
 }
 
-/// An unknown length cannot be routed by its eventual size. Direct PUT is
-/// selected without a preflight read and observes the size during transfer.
 #[tokio::test]
 async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
     let payload = payload(1_000);
@@ -757,7 +738,6 @@ async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
     assert_eq!(object_write.body_bytes(), payload.len());
 }
 
-/// Direct PUT streams, counts, and hashes a payload in one pass.
 #[tokio::test]
 async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
     let payload = payload(TEST_PAYLOAD_BYTES);
@@ -826,8 +806,6 @@ async fn a_capability_failure_does_not_downgrade_a_measured_upload_to_the_proxy(
     assert_eq!(transport.attempts(), 1);
 }
 
-/// A file-backed direct PUT reads the source once without copying it to a
-/// spool file.
 #[tokio::test]
 async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
     let payload = payload(TEST_PAYLOAD_BYTES);
@@ -904,8 +882,6 @@ async fn request_head_for(source: PayloadSource) -> String {
     served.await.expect("probe task")
 }
 
-/// A source that knows its length declares it, so the server can refuse an
-/// oversized body before reading it.
 #[tokio::test]
 async fn a_sized_source_frames_its_body_with_a_content_length() {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -921,8 +897,6 @@ async fn a_sized_source_frames_its_body_with_a_content_length() {
     );
 }
 
-/// A source with unknown length uses chunked transfer encoding so the server
-/// can enforce its incremental size limit.
 #[tokio::test]
 async fn an_unsized_source_frames_its_body_chunked() {
     let stream = futures::stream::iter(vec![Ok(Bytes::from_static(b"0123456789"))]).boxed();

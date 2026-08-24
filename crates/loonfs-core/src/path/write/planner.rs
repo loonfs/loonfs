@@ -240,9 +240,6 @@ mod tests {
         }
     }
 
-    /// The commit id is the key, not the identity: two requests that differ
-    /// only in the id they are filed under are the same mutation, which is
-    /// what makes a reused id comparable against a receipt at all.
     #[test]
     fn commit_fingerprint_is_stable_for_canonical_paths() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -270,8 +267,6 @@ mod tests {
         assert_eq!(left, right);
     }
 
-    /// A one-operation convenience call and a one-element batch are the same
-    /// request, so they cannot fingerprint differently.
     #[test]
     fn one_operation_request_and_one_element_batch_share_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -458,9 +453,6 @@ mod tests {
         .expect("recreating a deleted subtree plans as fresh state");
     }
 
-    /// A batch resolves each operation against what the earlier ones did:
-    /// the put walks into a directory that only exists because of the
-    /// create ahead of it, and both land in one commit.
     #[tokio::test]
     async fn later_operations_resolve_against_earlier_ones() {
         let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
@@ -511,8 +503,6 @@ mod tests {
         assert_eq!(planned.allocation.resulting_next_inode_id(), InodeId(4));
     }
 
-    /// A batch that deletes a path and recreates it resolves the create
-    /// against the delete, not against the state the request started from.
     #[tokio::test]
     async fn delete_then_create_resolves_against_the_delete() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
@@ -564,8 +554,6 @@ mod tests {
         ));
     }
 
-    /// The first failing operation aborts the request and names its own
-    /// position.
     #[tokio::test]
     async fn a_failing_operation_names_its_position() {
         let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;

@@ -1,16 +1,9 @@
 //! The atomic grep root pointer, immutable manifests, and publication boundary.
 //!
-//! One immutable manifest pairs the query-visible segment set with its
-//! `(built_through_seq, next_event_index)` cursor, lifecycle, in-progress
-//! reorganization, and run number allocation. Publication writes that manifest
-//! create-if-absent, then updates its pointer with one object-store
-//! compare-and-swap. Readers therefore see the cursor and its segments
-//! together.
-//!
-//! Segment and manifest objects are immutable derived data written before
-//! the pointer CAS. A CAS loser therefore leaks only unreachable derived
-//! objects; it never changes visible grep state. [`crate::GrepWorker`]
-//! garbage collection reclaims those objects after its grace window.
+//! A manifest stores the visible segment set, change cursor, lifecycle state,
+//! and run allocation. Publication writes an immutable manifest and then
+//! updates the root pointer with compare-and-swap. Failed publications leave
+//! only unreachable derived objects for grep garbage collection.
 
 mod codec;
 mod error;

@@ -2,8 +2,6 @@
 
 use super::common::*;
 
-/// A tree is measured as a tree: one operation's bytes and files, plus a
-/// start and a finish for every file inside it.
 #[test]
 fn a_recursive_transfer_counts_files_and_bytes_for_the_whole_tree() {
     let harness = Harness::new();
@@ -65,10 +63,6 @@ fn a_recursive_transfer_counts_files_and_bytes_for_the_whole_tree() {
     assert_eq!(last["files_total"], 3);
 }
 
-/// A tree's large file is read once, a piece at a time, exactly as a single
-/// `put` of it is. So the tree's byte count moves through that file rather
-/// than jumping over it once the whole thing has been read — which is what
-/// an upload that held each file whole could only ever report.
 #[test]
 fn a_recursive_put_counts_a_large_file_as_it_is_read() {
     let harness = Harness::new();
@@ -115,10 +109,6 @@ fn a_recursive_put_counts_a_large_file_as_it_is_read() {
     );
 }
 
-/// The same tree over the remote transport, where a large file is the one
-/// upload with parts to lose. Each file keeps its own resume record, named
-/// by the profile, namespace, remote path, and local file that decide which
-/// upload it is — and a run that committed leaves none of them behind.
 #[test]
 fn a_recursive_put_streams_a_large_file_over_the_remote_transport() {
     let harness = Harness::new();
@@ -179,9 +169,6 @@ fn a_recursive_put_streams_a_large_file_over_the_remote_transport() {
     );
 }
 
-/// What a tree holds that is neither a file nor a directory is named and
-/// skipped rather than silently dropped, and the walk carries on around it.
-/// Unix only: nothing else in the suite can make one.
 #[cfg(unix)]
 #[test]
 fn a_recursive_put_names_what_it_will_not_transfer() {
@@ -421,10 +408,6 @@ fn recursive_put_reuses_existing_directories_but_rejects_files() {
     assert_eq!(data["failures"][0]["error"]["code"], "path_conflict");
 }
 
-/// A recursive get creates the destination it was handed, parents included,
-/// the way `cp -r` creates its target. The shape that used to fail on every
-/// file is a remote directory holding nothing but files: no subdirectory
-/// existed to create the root as a side effect of its own `mkdir`.
 #[test]
 fn recursive_get_creates_an_absent_destination_root_in_both_modes() {
     let harness = Harness::new();
@@ -525,9 +508,6 @@ fn recursive_get_creates_an_absent_destination_root_in_both_modes() {
     }
 }
 
-/// One unwritable destination path fails alone. A local file sitting where a
-/// directory has to go takes down that directory and the files under it —
-/// each named on its own — while every sibling still lands.
 #[test]
 fn recursive_get_names_only_the_paths_it_could_not_write_in_both_modes() {
     let harness = Harness::new();

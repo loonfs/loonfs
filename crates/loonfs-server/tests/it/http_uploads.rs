@@ -55,10 +55,6 @@ async fn http_upload_content_rejects_invalid_upload_id() {
     harness.server.abort();
 }
 
-/// A begin body that mixes two transports, or names none, is refused where
-/// it is read. These used to reach a handler that compared the fields back
-/// against the mode; the tagged request means there is nothing to compare,
-/// and the standard 400 envelope is what the client sees either way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
     let temp_dir = tempdir().expect("tempdir");
@@ -399,9 +395,6 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     harness.server.abort();
 }
 
-/// The two new surfaces over HTTP: reading a session, and ending one
-/// without content. The status read is what re-mints, so a client that lost
-/// its commit response gets a usable token back without sending a byte.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_upload_status_re_mints_and_abort_is_terminal() {
     let temp_dir = tempdir().expect("tempdir");
@@ -516,10 +509,6 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     harness.server.abort();
 }
 
-/// Cross-process recovery through the Rust client alone: the upload id is
-/// the only thing that has to survive. Reading the session back names the
-/// exact content that landed and hands over a token that admits it, so the
-/// retry commits without re-uploading anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
     let temp_dir = tempdir().expect("tempdir");

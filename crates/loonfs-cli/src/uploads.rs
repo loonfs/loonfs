@@ -1,15 +1,4 @@
-//! Where an interrupted upload's bookkeeping lives between runs.
-//!
-//! An upload session records the geometry it was opened with and nothing
-//! per part — parts are the uploading client's own account, deliberately —
-//! so the only record of what landed is the one this CLI keeps. It keeps it
-//! under the user's state directory, keyed by the upload it describes, and
-//! deletes it the moment the upload commits or is abandoned.
-//!
-//! Only a remote profile's direct multipart upload has anything to record.
-//! An embedded profile stages through its own runtime with no session to
-//! rejoin, and a payload small enough to travel in one request has no parts
-//! to have half-finished.
+//! Local journals used to resume interrupted multipart uploads.
 
 use loonfs_api::v0::CompletedUploadPart;
 use loonfs_api::{Checksum, ChecksumAlgorithm, UploadId};
@@ -20,13 +9,12 @@ use std::sync::Mutex;
 
 /// Directory under `$XDG_STATE_HOME`.
 const XDG_STATE_SUBDIR: &str = "loonfs";
-/// Directory under `$HOME`, matching where a config file lives when XDG
-/// says nothing.
+/// Legacy state directory under `$HOME`.
 const LEGACY_STATE_SUBDIR: &str = ".loonfs/state";
-/// Directory both roots hold the per-upload files in.
+/// Per-upload journal directory.
 const UPLOADS_SUBDIR: &str = "uploads";
 
-/// What one interrupted upload got through.
+/// State required to resume one upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UploadState {
@@ -37,7 +25,7 @@ struct UploadState {
     source: SourceIdentity,
 }
 
-/// One part already in object storage, as the provider acknowledged it.
+/// A completed multipart upload part.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StatePart {
@@ -46,13 +34,7 @@ struct StatePart {
     checksum: Checksum,
 }
 
-/// Enough of the local file to notice it is not the same file any more.
-///
-/// A payload that changed under a half-finished upload cannot be resumed
-/// into: the parts already in object storage came from bytes that no longer
-/// exist, and completing the assembly would produce an object matching
-/// neither version. Length and modification time are what a filesystem
-/// offers cheaply, and disagreeing on either is enough to start over.
+/// File properties used to detect changes before resuming an upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourceIdentity {
@@ -62,9 +44,7 @@ pub(crate) struct SourceIdentity {
 }
 
 impl SourceIdentity {
-    /// Reads a local file's identity. A modification time the filesystem
-    /// will not state leaves the length as the whole check, which is weaker
-    /// and still better than nothing.
+    /// Reads a file's length and optional modification time.
     pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
         let metadata = std::fs::metadata(path)?;
         let modified_ms = metadata.modified().ok().and_then(|modified| {
@@ -80,28 +60,17 @@ impl SourceIdentity {
     }
 }
 
-/// The record of one upload, and where it is kept.
-///
-/// Named by a digest of everything that decides which upload this is: two
-/// puts of different files, to different paths, in different namespaces, or
-/// through different profiles are different uploads and never share a
-/// record.
+/// Local journal for one upload.
 #[derive(Debug)]
 pub(crate) struct UploadJournal {
     path: PathBuf,
     source: SourceIdentity,
-    /// What this run has been told, held until it is written down. Every
-    /// change is flushed immediately: a record that lags the object store
-    /// makes a rerun send parts that already landed, which is wasteful, and
-    /// a record that leads it makes a rerun claim parts that did not, which
-    /// fails the assembly.
+    /// Latest state, flushed after every change.
     state: Mutex<Option<UploadState>>,
 }
 
 impl UploadJournal {
-    /// The journal for one upload, or nothing when there is nowhere to keep
-    /// it. A resume nobody can record is not a failure; it is an upload that
-    /// starts over if it is interrupted.
+    /// Returns a journal when a writable state directory is available.
     pub(crate) fn for_upload(
         profile: &str,
         namespace: &str,
@@ -124,12 +93,7 @@ impl UploadJournal {
         })
     }
 
-    /// What an earlier run of this upload got through, when its record is
-    /// still about the same bytes.
-    ///
-    /// Every disagreement answers nothing and takes the record away with
-    /// it: a stale record is not a failure, it is an upload that starts
-    /// over.
+    /// Returns valid state from an earlier run, deleting stale state.
     pub(crate) fn resume(&self) -> Option<MultipartUploadResume> {
         let recorded = std::fs::read(&self.path).ok()?;
         let recorded: UploadState = serde_json::from_slice(&recorded).ok().or_else(|| {
@@ -158,9 +122,7 @@ impl UploadJournal {
                 })
                 .collect(),
         };
-        // The run that picks this up appends to it: a resumed upload that is
-        // itself interrupted must leave a record of everything that landed,
-        // not only of what landed before it started.
+        // Preserve earlier parts when this run appends new ones.
         *self.lock() = Some(recorded);
         Some(resume)
     }
@@ -172,8 +134,7 @@ impl UploadJournal {
         *self.lock() = None;
     }
 
-    /// Writes the record down. Nothing surfaces a failure: an upload that
-    /// cannot be recorded still uploads, it just cannot be resumed.
+    /// Writes the journal. Failure only disables future resumption.
     fn flush(&self, state: &UploadState) {
         let Some(parent) = self.path.parent() else {
             return;
@@ -277,8 +238,6 @@ mod tests {
         UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id")
     }
 
-    /// What a run records is exactly what the next one picks up, part by
-    /// part, and committing takes the record away.
     #[test]
     fn a_record_hands_the_next_run_the_parts_that_landed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -325,8 +284,6 @@ mod tests {
         assert_eq!(journal.resume(), None, "a committed upload keeps nothing");
     }
 
-    /// A payload that changed under a half-finished upload cannot be
-    /// resumed into: the parts already stored came from bytes that are gone.
     #[test]
     fn a_source_that_changed_invalidates_its_record() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -345,8 +302,6 @@ mod tests {
         assert_eq!(resized.resume(), None, "a longer file is a different file");
     }
 
-    /// A record this build cannot read is no record at all, and does not
-    /// survive to confuse the next run either.
     #[test]
     fn an_unreadable_record_is_discarded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -373,8 +328,6 @@ mod tests {
         assert!(!journal.path.exists());
     }
 
-    /// Two uploads are the same upload only when everything that names one
-    /// agrees.
     #[test]
     fn the_record_is_named_by_what_decides_which_upload_it_is() {
         let source = identity(1024, 7);

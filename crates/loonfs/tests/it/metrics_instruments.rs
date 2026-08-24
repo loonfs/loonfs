@@ -37,9 +37,6 @@ fn histogram_count(snapshot: &MetricsSnapshot, name: &str) -> u64 {
         .sum()
 }
 
-/// One writer's ordinary work has to reach the recorder through three
-/// separate paths: the store wrapper the builder installed, the publisher,
-/// and the maintenance runner.
 #[test]
 fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
     let temp_dir = tempdir().expect("tempdir");
@@ -140,8 +137,6 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
     assert!(histogram_count(&snapshot, "loonfs.maintenance.queue_wait_seconds") > 0);
 }
 
-/// The automatic collection path reads a pass as one conclusion; these are
-/// the counts that would otherwise be dropped with the response.
 #[test]
 fn a_collection_step_reports_what_the_pass_retained() {
     let temp_dir = tempdir().expect("tempdir");
@@ -181,8 +176,6 @@ fn a_collection_step_reports_what_the_pass_retained() {
     );
 }
 
-/// A handle built without a recorder must be exactly the handle it was
-/// before: no wrapper on its store, and nothing registered anywhere.
 #[test]
 fn a_writer_without_a_recorder_registers_nothing() {
     let temp_dir = tempdir().expect("tempdir");

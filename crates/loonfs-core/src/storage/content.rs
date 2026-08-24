@@ -229,69 +229,40 @@ pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Bytes one ranged read of a content object fetches, and therefore the most
-/// of that object a streaming read holds at once.
-///
-/// The same 8 MiB the write path moves a large payload in
-/// ([`loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES`]): one transfer unit
-/// for both directions, large enough that per-request overhead disappears
-/// against the payload on a large object, small enough that a read's memory
-/// is a fixed few megabytes whatever the object's size.
+/// Bytes fetched by each ranged content read.
 pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 
-/// One file's current content, read as fixed-size ranged chunks.
+/// Reads file content in fixed-size chunks while verifying its size and
+/// checksum.
 ///
-/// This is the streaming twin of the buffered content read, for a reader that
-/// must not hold what it reads: chunks are fetched one range at a time and
-/// the verifying digest is folded as they go, so a 50 GiB object costs one
-/// chunk of memory rather than 50 GiB. It verifies exactly what the buffered
-/// read verifies: the declared size and the reference's full-object checksum.
-///
-/// The object is immutable and named by a random content id, so nothing can
-/// rewrite it under a reader: chunk *n* and chunk *n+1* are always from the
-/// same object, and no revalidation between them is needed or done.
-///
-/// Verification lands on the final [`Self::next_chunk`] call — the one that
-/// reports the end of the content. A caller that stops early stops with
-/// unverified bytes, which is what streaming means and why the buffered read
-/// stays for callers that want the whole answer or none of it.
+/// Verification completes when [`Self::next_chunk`] returns `None`. A caller
+/// that stops earlier has not verified the complete object.
 pub struct FileContentStream<S> {
     store: S,
     entry: PathEntry,
     object_key: String,
     content_ref: ContentRef,
     chunk_bytes: NonZeroU64,
-    /// Offset the next ranged read starts at; also how much has been read.
+    /// Start offset of the next ranged read.
     next_offset: u64,
-    /// Offset this stream was opened at. Zero for a read of the whole
-    /// object, and the length of what the caller already holds for a
-    /// resumed one.
+    /// Offset where this stream started.
     resumed_from: u64,
-    /// How much of that head start the caller has folded in so far. The
-    /// stream fetches nothing until this reaches `resumed_from`, because
-    /// the verdict is over the whole object either way.
+    /// Number of bytes before `resumed_from` included in the checksum.
     prefix_folded: u64,
-    /// The checksum the complete object must produce, folded so far.
+    /// Checksum state for bytes processed so far.
     digest: StreamingChecksum,
-    /// The value `digest` is closed against.
+    /// Expected checksum.
     expected: Checksum,
-    /// The verdict on the complete object, once there is one. Kept because a
-    /// digest can only be closed once: without it, asking again after the end
-    /// would fold a second, empty digest and report a mismatch that is not
-    /// one.
+    /// Cached result because the checksum can only be finalized once.
     completion: Option<Result<(), DurableContentValidationError>>,
 }
 
 impl<S: ObjectStore> FileContentStream<S> {
     /// Opens a streaming read of the object `content_ref` names.
     ///
-    /// One `HeadObject` proves the object exists and is exactly as long as
-    /// the reference claims before any payload moves, which is what lets a
-    /// wrong-sized object fail without a partial answer having been handed
-    /// out.
-    /// `start_offset` is where the caller already is: bytes below it are
-    /// never fetched, and [`Self::fold_resumed_prefix`] is how they still
-    /// reach the digest.
+    /// The object size is validated before content is returned. For resumed
+    /// reads, `start_offset` skips bytes that the caller supplies through
+    /// [`Self::fold_resumed_prefix`].
     pub(crate) async fn open(
         store: S,
         content_store_id: &ContentStoreId,
@@ -319,20 +290,10 @@ impl<S: ObjectStore> FileContentStream<S> {
         })
     }
 
-    /// Hands the stream part of what the caller already holds, in order,
-    /// from the object's first byte.
+    /// Adds already-downloaded prefix bytes to a resumed read's checksum.
     ///
-    /// A resumed read still reports on the whole object, so the bytes it
-    /// will never fetch have to be folded into the same digest that closes
-    /// over the ones it does. Feeding the wrong bytes fails verification at
-    /// the end, which is exactly right: the reference is the authority on
-    /// what the object holds, not the partial copy on the caller's disk.
-    ///
-    /// Feeding the wrong *number* of bytes, or feeding them at the wrong
-    /// time, is refused here instead. A digest is order-dependent and closes
-    /// once, so those could only ever surface as a corruption verdict at the
-    /// end — a report about the object, for a mistake that was never the
-    /// object's.
+    /// Bytes must be supplied in order before fetching new chunks. Incorrect
+    /// bytes cause checksum verification to fail at the end of the stream.
     pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), CoreError> {
         if self.completion.is_some() {
             return Err(CoreError::Internal(format!(
@@ -377,12 +338,8 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// arrive in order from wherever the stream started, and every one but
     /// the last is exactly the chunk size this stream was opened with.
     ///
-    /// This is the method callers outside this crate hold, so it speaks the
-    /// crate's error type: a content object that disagrees with its reference
-    /// is namespace corruption, and it is classified as such here rather than
-    /// at every call site. A resumed stream that has not been told what it
-    /// skipped is the caller's own mistake instead, and says so before
-    /// anything is fetched.
+    /// A resumed stream must receive its complete prefix before this method is
+    /// called.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, CoreError> {
         if self.prefix_folded != self.resumed_from {
             return Err(CoreError::ResumePrefixIncomplete {
@@ -612,44 +569,20 @@ pub(crate) async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized
     stage_bytes_under_content_id(store, content_store_id, ContentId::generate(), bytes).await
 }
 
-/// What a streamed staging write established about the content object.
+/// Result of staging streamed content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StagedStream {
-    /// Identity, length, and the digest folded over the payload on its way
-    /// through. The digest is always over the complete stream: the store
-    /// consumes the body before it evaluates any precondition.
+    /// Identity, length, and checksum of the complete payload.
     pub content_ref: ContentRef,
-    /// Whether the key was already occupied when the write tried to create
-    /// it. Only this session can have written there — the identity is
-    /// random and belongs to one session — so the caller decides whether
-    /// this is its own earlier attempt replayed or a conflicting one, by
-    /// comparing `content_ref` against what the session recorded.
+    /// Whether the object existed before this write.
     pub already_present: bool,
 }
 
-/// Stages a payload that arrives as a stream, hashing it on the way through.
+/// Stages and hashes a payload without buffering the complete stream.
 ///
-/// The bytes are never held whole: the digest is folded chunk by chunk as
-/// they are forwarded to the store, and the reference is built from that
-/// digest and the length the store reports back. The constructor guarantees
-/// that the checksum covers the complete payload.
-///
-/// The write is create-only, exactly like the buffered staging write. Past
-/// the store's multipart threshold the store cannot make that condition part
-/// of the write — a provider assembles a multipart object unconditionally —
-/// so it reads the key instead, immediately before the assembly. That read
-/// is not atomic with the assembly, so `already_present` answers for a key
-/// that was occupied before this write started and not for one occupied
-/// during it.
-///
-/// The only writer that could occupy the key during the write is another
-/// request against the same upload session, because the key is named by 128
-/// random bits one session owns. The staging claim in
-/// [`crate::protocol::upload_streamed_content`] is what keeps that writer
-/// away: exactly one request holds the claim, so `already_present` is exact
-/// for every caller that takes it. A caller that stages under a freshly
-/// minted identity nobody else holds — [`crate::protocol::stage_owned_stream`]
-/// — needs no claim for the same reason.
+/// The write is create-only. Multipart providers may check for an existing
+/// object immediately before assembly rather than atomically with it. Upload
+/// session claims prevent concurrent writes to the same random content ID.
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,
@@ -683,8 +616,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
             )))
         }
         Ok(_) => false,
-        // The key is occupied. Only this session can name it, so the caller
-        // decides from the digest whether that was its own earlier attempt.
+        // The caller compares the checksum with the session's recorded value.
         Err(ObjectStoreError::PreconditionFailed { .. }) => true,
         Err(err) => return Err(CoreError::store(&object_key, &err)),
     };
@@ -695,12 +627,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Reads a payload without writing it anywhere, and reports what it was.
-///
-/// This is how a session that has already staged content answers a repeated
-/// upload: the only way to tell "the same bytes again" from "different
-/// bytes" is to hash them, and the object it already owns must not be
-/// touched while that is decided.
+/// Reads and hashes a stream without storing it.
 pub(crate) async fn identify_streamed_payload(
     content_id: ContentId,
     mut body: ByteStream,
@@ -718,7 +645,7 @@ pub(crate) async fn identify_streamed_payload(
     ))
 }
 
-/// What a streamed payload amounted to, folded as it passed through.
+/// Size and checksum state for a streamed payload.
 #[derive(Debug, Default)]
 struct StreamedPayload {
     digest: Sha256,
@@ -873,9 +800,6 @@ mod tests {
         ));
     }
 
-    /// A direct transfer to Google Cloud Storage produces a reference whose
-    /// only evidence is the CRC-32C that provider computed. Reads verify it
-    /// like any other full-object evidence, and a wrong object fails on it.
     #[tokio::test]
     async fn read_verifies_a_reference_whose_only_evidence_is_a_crc32c() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -908,10 +832,6 @@ mod tests {
         ));
     }
 
-    /// A direct multipart upload produces a reference whose only evidence is
-    /// the CRC-64/NVME the provider computed over the assembly. Reads must
-    /// verify it — the alternative is a whole write path whose bytes are
-    /// never checked on the way back out.
     #[tokio::test]
     async fn read_verifies_a_reference_whose_only_evidence_is_a_crc64nvme() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1017,8 +937,6 @@ mod tests {
         ));
     }
 
-    /// Two writers staging the same bytes get two objects. There is no
-    /// shared key to coalesce on, so neither can observe the other.
     #[tokio::test]
     async fn staging_identical_bytes_twice_mints_two_distinct_objects() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1112,8 +1030,6 @@ mod tests {
         .await
     }
 
-    /// A streamed read hands back the object in chunks of the size it was
-    /// opened with, in order, and ends only after verifying the whole thing.
     #[tokio::test]
     async fn a_streamed_read_returns_the_object_one_chunk_at_a_time() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1137,9 +1053,6 @@ mod tests {
         assert_eq!(chunks.concat(), bytes, "the object arrives byte-identical");
     }
 
-    /// The end is an answer, not an event: a caller that asks again after it
-    /// gets the same verdict rather than a digest closed a second time over
-    /// nothing.
     #[tokio::test]
     async fn a_finished_stream_repeats_its_verdict() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1155,8 +1068,6 @@ mod tests {
         assert!(stream.next_chunk().await.expect("verified end").is_none());
     }
 
-    /// A resumed read fetches only what it does not already have, and still
-    /// closes its verdict over the whole object.
     #[tokio::test]
     async fn a_resumed_read_fetches_only_the_rest_and_verifies_all_of_it() {
         let (_temp_dir, inner, content_store_id) = test_store();
@@ -1189,9 +1100,6 @@ mod tests {
         );
     }
 
-    /// The prefix is part of the verdict, not a formality: bytes that are
-    /// not the object's fail the read at its end, and a stream driven before
-    /// it has them refuses to fetch anything at all.
     #[tokio::test]
     async fn a_resumed_read_holds_the_prefix_to_the_same_verdict() {
         let (_temp_dir, inner, content_store_id) = test_store();
@@ -1249,9 +1157,6 @@ mod tests {
         );
     }
 
-    /// A prefix handed over in pieces is the ordinary case, and the fold
-    /// accepts every one of them: the digest only cares that the bytes
-    /// arrive in order.
     #[tokio::test]
     async fn a_resumed_prefix_may_be_folded_in_pieces() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1273,9 +1178,6 @@ mod tests {
         assert_eq!(fetched, bytes[held..]);
     }
 
-    /// A partial longer than the content it claims to resume is the caller's
-    /// own file being wrong, and it is refused where that is still visible
-    /// — not folded in to reappear as a corruption verdict about the object.
     #[tokio::test]
     async fn a_prefix_longer_than_the_content_is_refused() {
         let (_temp_dir, inner, content_store_id) = test_store();
@@ -1306,9 +1208,6 @@ mod tests {
         assert_eq!(store.count(OperationClass::Read), 0, "nothing was fetched");
     }
 
-    /// The digest folds in one direction, so a prefix offered after the
-    /// stream has already fetched content could only ever land in the wrong
-    /// place. Saying so beats folding it and blaming the object.
     #[tokio::test]
     async fn a_prefix_offered_after_a_fetch_is_refused() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1329,8 +1228,6 @@ mod tests {
         );
     }
 
-    /// The verdict is closed once. A prefix offered after it exists cannot
-    /// change it, so the fold refuses rather than pretending to.
     #[tokio::test]
     async fn a_prefix_offered_after_the_end_is_refused() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1352,8 +1249,6 @@ mod tests {
         );
     }
 
-    /// An empty file has nothing to fetch and still verifies: the digest of
-    /// no bytes is the digest its reference carries.
     #[tokio::test]
     async fn a_streamed_read_of_an_empty_object_verifies_without_fetching() {
         let (_temp_dir, inner, content_store_id) = test_store();
@@ -1373,10 +1268,6 @@ mod tests {
         );
     }
 
-    /// A CRC-32C-only reference is what a direct transfer to Google Cloud
-    /// Storage leaves behind, and a streamed read of one is verified like any
-    /// other: folded chunk by chunk, closed at the end, and failed when the
-    /// object is not what the reference says.
     #[tokio::test]
     async fn a_streamed_read_verifies_a_reference_whose_only_evidence_is_a_crc32c() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1426,16 +1317,11 @@ mod tests {
         );
     }
 
-    /// A CRC folds forward from a running value, so a resumed read of a
-    /// CRC-32C-only reference closes over the prefix it never fetched
-    /// exactly as a hashed one does.
     #[tokio::test]
     async fn a_resumed_crc32c_read_folds_the_prefix_into_the_same_verdict() {
         assert_resumed_checksum_verification(Checksum::crc32c).await;
     }
 
-    /// A multipart CRC obeys the same resumed-read contract: the retained
-    /// prefix and fetched suffix close one CRC-64/NVME verdict.
     #[tokio::test]
     async fn a_resumed_crc64nvme_read_folds_the_prefix_into_the_same_verdict() {
         assert_resumed_checksum_verification(Checksum::crc64nvme).await;
@@ -1499,9 +1385,6 @@ mod tests {
         );
     }
 
-    /// The same evidence the buffered read holds bytes to, folded chunk by
-    /// chunk: a provider-assembled object carries only a CRC, and a streamed
-    /// read verifies it rather than waving it through.
     #[tokio::test]
     async fn a_streamed_read_verifies_a_reference_whose_only_evidence_is_a_crc64nvme() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1524,10 +1407,6 @@ mod tests {
         assert_eq!(read, bytes);
     }
 
-    /// Bytes that disagree with the reference fail the read at the call that
-    /// reports the end, after the chunks have been handed out. That is what
-    /// streaming costs, and why a caller that installs a file installs it
-    /// only once this call has returned.
     #[tokio::test]
     async fn a_streamed_read_rejects_an_object_that_does_not_match_its_reference() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1560,8 +1439,6 @@ mod tests {
         ));
     }
 
-    /// An object that is not there fails when the stream is opened, so a
-    /// caller learns it before it has written anything anywhere.
     #[tokio::test]
     async fn a_streamed_read_reports_a_missing_object_when_it_opens() {
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1576,9 +1453,6 @@ mod tests {
         ));
     }
 
-    /// An object longer or shorter than its reference claims is caught
-    /// before any of it is handed out, by the same size check the buffered
-    /// read makes over the bytes it downloaded.
     #[tokio::test]
     async fn a_streamed_read_rejects_an_object_of_the_wrong_length() {
         let (_temp_dir, store, content_store_id) = test_store();

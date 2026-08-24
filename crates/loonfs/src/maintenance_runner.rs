@@ -1,21 +1,8 @@
 //! Scheduler for bounded background maintenance.
 //!
-//! A [`MaintenanceJob`] performs one bounded unit of work for one namespace.
-//! Each step reloads durable state, performs at most one update, and returns a
-//! [`MaintenanceStepReport`]. The runner decides when jobs run.
-//!
-//! [`MaintenanceRunner`] owns scheduling. It tracks pending `(job, namespace)`
-//! keys, concurrency permits, retry backoff, earliest run times, per-job
-//! continuations, and reconciliation progress. Triggers are hints only; every
-//! step validates current durable state before acting.
-//!
-//! Continuations are in-memory performance hints. Losing one restarts the
-//! pass but does not change correctness.
-//!
-//! Automatic maintenance covers namespaces touched by this process or
-//! explicitly assigned to it. The runner never discovers namespaces.
-//! Maintenance tasks run on the writer's runtime and are included in writer
-//! shutdown. Readers and admin handles do not own a runner.
+//! Each [`MaintenanceJob`] performs one unit of work for one namespace. The
+//! runner manages concurrency, retries, deadlines, and continuations. It only
+//! maintains namespaces used by this process or explicitly assigned to it.
 
 mod admission;
 mod compaction;
@@ -52,33 +39,22 @@ const RECONCILE_INTERVAL_MS: u64 = 60_000;
 /// one long one.
 const MAX_RECONCILE_PROBES_PER_SWEEP: usize = 64;
 
-/// Writer-initiated background maintenance policy.
+/// Controls background maintenance started by a writer.
 ///
-/// The policy governs only maintenance a write-capable handle schedules for
-/// itself: the non-destructive metadata steps that keep read cost bounded
-/// once the WAL tail crosses its threshold, and the garbage-collection
-/// passes that reclaim what the upload sessions this writer opened leave
-/// behind once their leases pass. It never advances the retention floor —
-/// surrendering replay history stays an explicit
-/// [`FsAdmin`](crate::FsAdmin) operation with no scheduler behind it.
+/// Background work may compact metadata and collect expired uploads. It never
+/// advances the retention floor; that remains an explicit
+/// [`FsAdmin`](crate::FsAdmin) operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsBackgroundWork {
-    /// The writer may schedule non-destructive maintenance for itself,
-    /// spawned on the writer's owning runtime.
-    ///
-    /// The namespaces it covers are the ones this process touches and the
-    /// ones a host explicitly assigns to it — never a discovered set.
+    /// Run maintenance for namespaces used or explicitly assigned to this
+    /// process.
     Enabled,
-    /// The writer never auto-schedules maintenance. Jobs may still be
-    /// registered, and explicit [`FsAdmin`](crate::FsAdmin) maintenance
-    /// calls still work.
+    /// Disable automatic maintenance. Explicit admin operations remain
+    /// available.
     ManualOnly,
 }
 
-/// Stable identity of a registered maintenance job.
-///
-/// The name is part of the admission key and of every trace the job's steps
-/// emit, so it outlives any one registration and must not drift.
+/// Stable identifier for a registered maintenance job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MaintenanceJobId(&'static str);
 
@@ -113,21 +89,15 @@ impl fmt::Display for MaintenanceJobId {
 /// the key again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceStepConclusion {
-    /// Durable state advanced. The key is eligible again at once — behind
-    /// whatever else is waiting, so a long backlog stays fair to its peers.
+    /// Durable state advanced. The job may run again immediately.
     Progressed,
-    /// Nothing to do. The key parks until something nudges it or a
-    /// reconciliation sweep finds work.
+    /// No work was available. The job waits for a trigger or reconciliation.
     Idle,
-    /// There is work, and this step's policy cannot make progress on it —
-    /// an input that does not fit the per-step budget, for one. Parks like
-    /// [`Self::Idle`]: requeueing zero-progress work would only spin.
+    /// Work exists, but this step cannot process it within its limits.
     Blocked,
-    /// Another writer won the race this step was in. The key is eligible
-    /// again at once, to take the race against what actually landed.
+    /// Concurrent work changed the state. The job may retry immediately.
     Superseded,
-    /// This job has nothing to maintain for this namespace at all. The
-    /// runner forgets the key.
+    /// This job is not enabled for the namespace.
     NotEnabled,
 }
 
@@ -153,8 +123,7 @@ impl MaintenanceStepConclusion {
 pub struct MaintenanceStepReport {
     /// What the step accomplished.
     pub conclusion: MaintenanceStepConclusion,
-    /// Where this step stopped, for the next one to resume from. Opaque to
-    /// the runner, which stores it and hands it straight back.
+    /// Opaque state that lets the next step resume this job.
     ///
     /// The runner keeps it while the key is making progress or waiting for
     /// room to work, clears it on [`MaintenanceStepConclusion::Idle`], and
@@ -171,8 +140,7 @@ pub struct MaintenanceStepReport {
 }
 
 impl MaintenanceStepReport {
-    /// A conclusion with nothing to resume from and no deadline observed —
-    /// what a job whose whole position is durable returns.
+    /// Creates a report without a continuation or deadline.
     pub fn concluded(conclusion: MaintenanceStepConclusion) -> Self {
         Self {
             conclusion,
@@ -182,17 +150,12 @@ impl MaintenanceStepReport {
     }
 }
 
-/// What a reconciliation probe found.
-///
-/// A probe is the cheapest question a job can answer — one status read, or
-/// no read at all — and it exists so a sweep can re-admit forgotten work
-/// without running a step to find out there was none.
+/// Result of checking whether a maintenance job has work to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceProbe {
-    /// Durable state shows work waiting. The runner re-nudges the key.
+    /// Work is waiting.
     Due,
-    /// Nothing waiting. With no timed obligation left, the runner forgets
-    /// the key until something nudges it again.
+    /// No work is waiting.
     Idle,
 }
 
@@ -219,8 +182,8 @@ pub trait MaintenanceJob: Send + Sync + 'static {
         continuation: Option<&str>,
     ) -> Result<MaintenanceStepReport>;
 
-    /// Answers whether `namespace_id` has work waiting, as cheaply as this
-    /// job can. Called only by reconciliation, never on the hot path.
+    /// Checks whether `namespace_id` has work waiting. Called only during
+    /// reconciliation.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe>;
 
     /// Returns whether successful publications should nudge this job.
@@ -242,12 +205,7 @@ pub(crate) trait MaintenanceClock: fmt::Debug + Send + Sync {
     /// Unix milliseconds.
     fn now_ms(&self) -> u64;
 
-    /// A draw uniform in `0..span_ms`, and `0` when `span_ms` is zero.
-    ///
-    /// The error backoff jitters with this. It rides on the clock because
-    /// it answers the same kind of question — when to look again — and
-    /// because a test that substitutes one has to be able to name the
-    /// delays it asserts on.
+    /// Returns a value in `0..span_ms`, or `0` when `span_ms` is zero.
     fn jitter_below_ms(&self, span_ms: u64) -> u64;
 }
 
@@ -263,10 +221,7 @@ const JITTER_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 
 impl Default for SystemMaintenanceClock {
     fn default() -> Self {
-        // Seeded per instance, so two hosts riding out one provider outage
-        // do not draw the same retry sequence. The standard library's own
-        // randomly keyed hasher is the seed: this decides when to look
-        // again and nothing else, so it needs spread rather than secrecy.
+        // Use a per-instance random seed so hosts retry at different times.
         use std::hash::{BuildHasher, Hasher};
         let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
         hasher.write_u64(JITTER_GAMMA);
@@ -296,10 +251,7 @@ impl MaintenanceClock for SystemMaintenanceClock {
     }
 }
 
-/// SplitMix64's finalizer: three xor-shift-multiply rounds over a counter.
-///
-/// Two keys that fail in the same millisecond draw consecutive counters,
-/// and this is what makes those two draws land far apart.
+/// Applies the SplitMix64 finalizer to the jitter counter.
 fn split_mix_64(counter: u64) -> u64 {
     let mut mixed = counter;
     mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -335,8 +287,8 @@ impl MaintenanceHandle {
         }
     }
 
-    /// Asks for `job` to run against `namespace_id` as soon as a permit is
-    /// free. Repeated asks coalesce into one run.
+    /// Schedules `job` for `namespace_id` when a permit is available.
+    /// Repeated calls coalesce.
     pub fn nudge(&self, job: MaintenanceJobId, namespace_id: &NamespaceId) {
         let Some(inner) = self.inner.upgrade() else {
             return;
@@ -344,13 +296,8 @@ impl MaintenanceHandle {
         nudge_key(&inner, job, namespace_id, None);
     }
 
-    /// Asks for `job` to run against `namespace_id` once `not_before_ms`
-    /// passes, whether or not anything else asks in the meantime.
-    ///
-    /// This is how a wall-clock obligation — an upload lease that will
-    /// expire, content whose reclamation grace will pass — becomes admitted
-    /// work instead of something only the next unrelated write would notice.
-    /// Repeated asks keep the soonest time.
+    /// Schedules `job` for `namespace_id` at or after `not_before_ms`.
+    /// Repeated calls keep the earliest time.
     pub fn nudge_not_before(
         &self,
         job: MaintenanceJobId,
@@ -484,38 +431,24 @@ impl MaintenanceRunner {
         }
     }
 
-    /// A cloneable nudge-only view. Every trigger holds one of these; only
-    /// this runner can shut admission down.
+    /// Returns a cloneable scheduling handle that cannot shut down admission.
     pub(crate) fn handle(&self) -> MaintenanceHandle {
         MaintenanceHandle {
             inner: Arc::downgrade(&self.inner),
         }
     }
 
-    /// A cloneable view of the streaming compactions this runner is running.
-    ///
-    /// Every handle whose maintenance steps may plan one holds this, which is
-    /// what makes the runner's own steps and an operator's explicit step see
-    /// the same jobs and share the same permits.
+    /// Returns a shared view of running streaming compactions.
     pub(crate) fn compactions(&self) -> BackgroundCompactions {
         BackgroundCompactions::new(&self.inner)
     }
 
-    /// The executor registered under `id`.
-    ///
-    /// For a host that drives bounded steps itself instead of through
-    /// admission — a catch-up command with a caller's budget on it. The
-    /// steps are the same bounded, compare-and-swap-published units this
-    /// runner admits; they simply have no scheduler in front of them.
+    /// Returns the job registered under `id`.
     pub(crate) fn job(&self, id: MaintenanceJobId) -> Option<Arc<dyn MaintenanceJob>> {
         self.inner.job(id)
     }
 
-    /// Registers an executor under its own id.
-    ///
-    /// Registration is accepted under either policy: with
-    /// [`FsBackgroundWork::ManualOnly`] the runner simply never nudges what
-    /// it knows about.
+    /// Registers a job. Manual-only runners retain jobs for explicit use.
     pub(crate) fn register(&self, job: Arc<dyn MaintenanceJob>) -> Result<MaintenanceJobId> {
         let id = job.id();
         let mut jobs = self.inner.lock_jobs();
@@ -528,16 +461,11 @@ impl MaintenanceRunner {
         Ok(id)
     }
 
-    /// Rejects further scheduling and discards work still waiting for a
-    /// permit, and tells every running streaming compaction to stop. Running
-    /// steps and cancelled compactions stay visible to [`Self::drain`].
+    /// Stops admission, discards queued work, and cancels compactions.
     ///
-    /// Synchronous on purpose: a shutdown has to close admission before its
-    /// first await, or a step finishing during the publication drain hands
-    /// its slot to work the shutdown already decided to drop. Cancelling the
-    /// compactions here rather than in the drain is the same reasoning — a
-    /// job checks its token between block fetches, so the earlier it is set
-    /// the less of the drain it spends finishing work nobody will publish.
+    /// Running steps and cancelled compactions remain visible to
+    /// [`Self::drain`]. This method is synchronous so admission closes before
+    /// any shutdown await can allow another job to start.
     pub(crate) fn close_admission(&self) {
         self.inner.lock_state().admission.close();
         self.compactions().cancel_all();
@@ -596,9 +524,7 @@ impl MaintenanceRunner {
     /// the write path does not need job-specific wiring. Nudges are non-blocking,
     /// coalesced, and ignored when automatic maintenance is disabled or closed.
     pub(crate) fn nudge_publication_subscribers(&self, namespace_id: &NamespaceId) {
-        // The subscriber list is read out from under the job lock before
-        // any nudge takes the scheduling lock: the two are never held
-        // together anywhere, and this is the one place that would.
+        // Release the job lock before acquiring scheduling state.
         let subscribers: Vec<MaintenanceJobId> = self
             .inner
             .lock_jobs()
@@ -937,9 +863,8 @@ async fn wait_for_deadline(delay: Duration, wake: &Notify) {
     }
 }
 
-/// How long the timer may sleep: until the soonest deadline, and never past
-/// the reconciliation interval — which also bounds how long the task
-/// outlives a runner nobody holds any more. `None` means admission closed.
+/// Returns the delay until the next deadline or reconciliation sweep.
+/// `None` means admission is closed.
 fn next_wake_delay(inner: &Arc<RunnerInner>) -> Option<Duration> {
     let now_ms = inner.clock.now_ms();
     let state = inner.lock_state();

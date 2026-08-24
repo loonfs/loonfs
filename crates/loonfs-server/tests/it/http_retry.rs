@@ -243,11 +243,6 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     harness.server.abort();
 }
 
-/// The message is part of a commit's identity, so re-uploading the same
-/// bytes under a changed message is a different mutation and the conflict
-/// stands. The bytes matching is exactly what makes this worth pinning:
-/// content evidence alone would call this a successful retry and quietly
-/// keep the original annotation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_conflict_stands_when_only_the_message_changed() {
     let temp_dir = tempdir().expect("tempdir");
@@ -341,10 +336,6 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
     harness.server.abort();
 }
 
-/// The same bytes written somewhere else are a different mutation, and no
-/// amount of matching payload makes them the same one. Content evidence
-/// alone would call this a successful retry and leave `/b.txt` unwritten
-/// forever, which is why the client proves the whole request fingerprint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_conflict_stands_when_only_the_path_changed() {
     let temp_dir = tempdir().expect("tempdir");
@@ -420,9 +411,6 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
     harness.server.abort();
 }
 
-/// The replacement behavior and the expected-revision guard are part of
-/// what the caller asked for, so the same bytes at the same path under
-/// either one changed are different mutations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_conflict_stands_when_only_a_guard_changed() {
     let temp_dir = tempdir().expect("tempdir");
@@ -502,9 +490,6 @@ async fn http_put_conflict_stands_when_only_a_guard_changed() {
     harness.server.abort();
 }
 
-/// A commit that did more than one thing is not the commit a single put
-/// makes, however well its put half lines up. The operation list is inside
-/// the fingerprint, so the count alone settles this.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_single_put_does_not_replay_a_multi_operation_commit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -585,11 +570,6 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
     harness.server.abort();
 }
 
-/// The mutations that upload nothing reconcile nothing — the server's own
-/// identity check is the whole answer — so a changed message conflicts
-/// there whatever the put path does. These anchor that the client-side
-/// reconciliation is not the only thing keeping the contract: one commit
-/// built by the caller, and one `mkdir`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     let temp_dir = tempdir().expect("tempdir");
@@ -674,11 +654,6 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     harness.server.abort();
 }
 
-/// The client reconciles by reading the feed at the sequence the conflict
-/// reported. Once retention has surrendered incremental replay below that
-/// sequence, the feed cannot answer for it, so there is nothing to compare
-/// and the conflict stands — identical bytes included. A comparison that
-/// cannot be made is never reported as success.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     let temp_dir = tempdir().expect("tempdir");

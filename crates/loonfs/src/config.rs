@@ -1,6 +1,4 @@
-//! Runtime configuration: read-side limits and cache sizing, plus the
-//! writer-identity validation the write-capable builders apply, with the
-//! defaults the rest of the crate advertises.
+//! Runtime limits, cache sizing, and writer identity validation.
 
 use crate::trace::{TraceMode, TraceStoreKind};
 use crate::{MetadataSegmentCacheConfig, Result, RuntimeError};
@@ -27,11 +25,7 @@ pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// dropped: it takes the next one that frees.
 pub const DEFAULT_MAX_CONCURRENT_MAINTENANCE: usize = 2;
 
-/// Configuration for one read core, assembled by the handle builders.
-///
-/// Everything here governs reading and caching, so every handle carries it.
-/// Writer-side settings — the actor identity and publication pacing — belong
-/// to the write-capable handles and never reach a reader.
+/// Read and cache configuration shared by all handles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadConfig {
     /// Largest file content the buffered read APIs will materialize for one
@@ -51,20 +45,11 @@ pub(crate) struct ReadConfig {
 /// same way: a zero budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCacheConfig {
-    /// Maximum namespaces each entry-counted runtime cache retains: the
-    /// head anchors, the read-side WAL-tail projection entries, and the tail
-    /// projections a writer's namespace publishers hold. Setting this to
-    /// zero disables those caches — a diagnostic mode that trades speed for
-    /// re-reads. Cache settings never change behavior: maintenance
-    /// scheduling is controlled only by
-    /// [`FsBackgroundWork`](crate::FsBackgroundWork).
+    /// Maximum namespaces retained by entry-counted runtime caches. Zero
+    /// disables those caches. This does not affect maintenance scheduling.
     ///
-    /// It does not bound what a writer keeps per namespace it has mutated.
-    /// One writer session — the epoch it acquired and its terminal fencing
-    /// record — and the empty publisher around it are retained for every
-    /// live namespace, at a few dozen bytes each. That is deliberate:
-    /// nothing in the store can rebuild "this session was fenced", so
-    /// evicting it would let a fenced writer reacquire the epoch (see
+    /// Writer session state is retained separately because an evicted fenced
+    /// session could otherwise reacquire the epoch (see
     /// [`WriterSessionState`](loonfs_core::publish::WriterSessionState)).
     pub max_cached_namespaces: usize,
     /// Maximum metadata rows retained across WAL-tail projections. The read

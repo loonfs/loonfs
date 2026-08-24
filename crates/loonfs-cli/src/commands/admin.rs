@@ -791,9 +791,6 @@ mod tests {
     use crate::progress::ProgressMode;
     use loonfs_api::{GcResponse, NamespaceId, RetainedReason};
 
-    /// The multi-pass summary folds every counter and keeps the soonest
-    /// reclamation obligation any pass reported: a later pass with nothing
-    /// deferred does not erase an earlier pass's pending horizon.
     #[test]
     fn the_summary_folds_expired_releases_and_keeps_the_soonest_horizon() {
         let namespace = NamespaceId::parse("demo").expect("namespace id");
@@ -829,9 +826,6 @@ mod tests {
         }
     }
 
-    /// A run that finishes in one pass has nothing to report progress about:
-    /// its summary is the whole story, and a stray "pass 1" line before it
-    /// would be noise on every quiet invocation.
     #[test]
     fn a_single_pass_run_reports_no_progress() {
         let mut progress = PassProgress::new(runtime(false));
@@ -840,9 +834,6 @@ mod tests {
             .is_empty());
     }
 
-    /// Once a second pass proves the run is a long one, the first pass's line
-    /// is written too — so a multi-pass run accounts for every pass, in
-    /// order, rather than starting the story at pass two.
     #[test]
     fn a_multi_pass_run_reports_every_pass_in_order() {
         let mut progress = PassProgress::new(runtime(false));
@@ -859,8 +850,6 @@ mod tests {
         );
     }
 
-    /// `--json` promises one machine-readable envelope and nothing else, so
-    /// however many passes a run takes, it says nothing on the way.
     #[test]
     fn json_output_stays_silent_across_passes() {
         let mut progress = PassProgress::new(runtime(true));
@@ -871,8 +860,6 @@ mod tests {
         }
     }
 
-    /// A progress line answers what an operator watching a sweep asks: what
-    /// went, what stayed and mostly why, and when to expect the rest.
     #[test]
     fn a_pass_line_names_what_stayed_and_mostly_why() {
         let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
@@ -891,8 +878,6 @@ mod tests {
         );
     }
 
-    /// A pass that kept nothing says so plainly rather than inventing a
-    /// reason for zero candidates.
     #[test]
     fn a_pass_line_that_kept_nothing_names_no_reason() {
         let pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));

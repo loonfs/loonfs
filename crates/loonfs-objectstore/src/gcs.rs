@@ -367,9 +367,6 @@ mod tests {
         ));
     }
 
-    /// The store signs its own checksum readback, so a key that cannot sign
-    /// stops the store from being built at all rather than surfacing as a
-    /// failure on the first completion.
     #[test]
     fn a_service_account_key_that_cannot_sign_stops_the_store_from_being_built() {
         let (key_dir, _key_path) = gcs_fixture_service_account_key_file("gcs-unsignable");
@@ -390,10 +387,6 @@ mod tests {
         ));
     }
 
-    /// GCS spells its hash report two ways and orders it however it likes, so
-    /// the readback finds the crc32c in each of them. Reading only the first
-    /// header line would complete an upload on an md5 it cannot check, or
-    /// fail one whose crc32c was simply second.
     #[test]
     fn the_stored_crc32c_is_found_however_gcs_spells_its_hash_header() {
         let crc32c_of_hello = "9a71bb4c";

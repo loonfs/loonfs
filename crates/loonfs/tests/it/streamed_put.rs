@@ -48,8 +48,6 @@ async fn namespace(runtime: &TestRuntime) -> NamespaceId {
     namespace_id
 }
 
-/// A streamed put never holds more of its payload than one transfer part,
-/// and every byte crosses the store boundary exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_streamed_put_holds_one_part_of_its_payload() {
     let temp_dir = tempdir().expect("tempdir");

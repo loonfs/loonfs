@@ -465,30 +465,13 @@ impl FsAdmin {
         }
     }
 
-    /// Runs one planned streaming metadata compaction to its end, in the
-    /// caller's own task.
+    /// Runs one streaming metadata compaction in the caller's task.
     ///
-    /// This is the whole of metadata maintenance for a deployment that
-    /// schedules none: bounded steps run through [`Self::run_maintenance`],
-    /// and the one piece of upkeep that does not fit a step runs here. It
-    /// plans exactly as a step does, so a step reporting
-    /// [`ReorganizeStepOutcome::CompactionRequired`] is what says a call here
-    /// has work to do.
-    ///
-    /// The job is the same one background work runs: the same executor, the
-    /// same finalizer, and no durable record that it is running. Dropping the
-    /// returned future stops it, at the cost of the work it had done. A
-    /// handle attached to a writer's background work shares that writer's
-    /// namespace slots and compaction permits, so this waits its turn beside
-    /// the writer's own jobs and is cancelled by that writer's shutdown. A
-    /// standalone handle has neither, and the caller's own call rate is the
-    /// only limit on how many of these run at once.
-    ///
-    /// Planning here does not amortize. A caller who asks for this asked for
-    /// the long rebuild, so a family group whose base no bounded window can
-    /// reach is compacted on this call rather than after two more delta
-    /// merges have published over it — which, under sustained writes, is a
-    /// wait with no end.
+    /// Use this when automatic maintenance is disabled or
+    /// [`ReorganizeStepOutcome::CompactionRequired`] is reported. Dropping the
+    /// returned future cancels the compaction. Handles connected to a writer
+    /// share that writer's compaction limits and shutdown signal; standalone
+    /// handles rely on the caller to limit concurrency.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.compact_metadata",
@@ -520,8 +503,7 @@ impl FsAdmin {
             ReorganizationStep::Concluded(_) => return Ok(MetadataCompactionOutcome::NoWork),
         };
         let Some(compactions) = &self.compactions else {
-            // No runner behind this handle, so there is no slot to claim and
-            // no permit to wait for.
+            // Standalone handles have no shared concurrency limit.
             let cancellation = loonfs_core::MetadataCompactionCancellation::default();
             let outcome = self
                 .run_streaming_compaction(namespace_id, &spec, &cancellation)

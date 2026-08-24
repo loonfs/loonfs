@@ -1,52 +1,12 @@
-//! The runtime's metrics surface: a push-based recorder the embedder
-//! implements, and the instruments the runtime registers against it.
+//! Runtime metrics API.
 //!
-//! LoonFS defines instruments and reports values. It does not export them,
-//! and it depends on no metrics crate to do so. An embedder that already
-//! has a metrics pipeline implements [`MetricsRecorder`] over its own
-//! registry and the runtime's numbers land there directly; an embedder that
-//! has none installs [`DefaultMetricsRecorder`], which aggregates in atomics
-//! and hands back a [`MetricsSnapshot`] to render however the host likes.
-//! Installing nothing costs nothing: with no recorder configured the runtime
-//! registers no instruments and no hot path touches this module at all.
+//! Embedders can implement [`MetricsRecorder`] for an existing registry or
+//! use [`DefaultMetricsRecorder`] to collect a [`MetricsSnapshot`]. Without a
+//! recorder, the runtime does not register or update instruments.
 //!
-//! The reference server is LoonFS's own first embedder — it installs the
-//! default recorder and serves its snapshot as Prometheus text on
-//! `GET /metrics`.
-//!
-//! ## Names and labels
-//!
-//! Metric names are `loonfs.<subsystem>.<metric>` — `loonfs.gc.reclaimed`,
-//! `loonfs.maintenance.steps`. The subsystem is the part of the runtime that
-//! owns the number, and it is the same word the module that reports it is
-//! called.
-//!
-//! Every name, description, label key, and label value in this API is
-//! `&'static str`, and that is the whole cardinality policy expressed in the
-//! type system: a namespace id, a commit id, a path, or a request id cannot
-//! be borrowed for `'static`, so it cannot become a label. Label values come
-//! from closed enumerations' `as_str` methods and from nowhere else. There
-//! is no escape hatch, deliberately — a metrics backend does not survive one
-//! unbounded label, and "we will be careful" is not a mechanism.
-//!
-//! ## Object-store metrics
-//!
-//! This module also re-exports the object-store sampling vocabulary from
-//! [`loonfs_objectstore::metrics`]. The two surfaces compose rather than
-//! compete: a handle given a [`MetricsRecorder`] bridges every object-store
-//! sample into the instruments below, and a handle given an
-//! [`ObjectStoreMetricsRecorder`] as well receives the raw samples too.
-//!
-//! ## Deviations from the model this follows
-//!
-//! The design is SlateDB's (their RFC 0021), with two deliberate omissions:
-//!
-//! - **No up-down counter.** Nothing in the v1 instrument set needs one — a
-//!   quantity that falls is a gauge here. Adding the instrument later is
-//!   purely additive.
-//! - **No metric levels.** SlateDB filters instruments by verbosity because
-//!   it has enough of them for that to matter. This set is small enough to
-//!   read whole, and a level knob nobody turns is a knob that rots.
+//! Metric names use `loonfs.<subsystem>.<metric>`. Names and labels are static
+//! strings so request IDs, paths, and other unbounded values cannot become
+//! labels. This module also re-exports the object-store metrics API.
 
 mod instruments;
 
@@ -64,33 +24,24 @@ use std::sync::{Arc, Mutex};
 
 /// Bucket upper bounds for a latency histogram, in seconds.
 ///
-/// Twelve buckets from a millisecond to two minutes, stepping by roughly
-/// three: that spans a warm cache hit at one end and a provider call about
-/// to spend its whole operation deadline at the other, and no two adjacent
-/// buckets are so close that a shifted distribution hides between them.
+/// Covers latencies from one millisecond to two minutes.
 pub const LATENCY_SECONDS_BOUNDARIES: &[f64] = &[
     0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 60.0, 120.0,
 ];
 
-/// Bucket upper bounds for a histogram over small counts — how many
-/// candidates a publication batched, and the like.
+/// Bucket upper bounds for histograms over small counts.
 pub const SMALL_COUNT_BOUNDARIES: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
 
-/// Where the runtime reports its instruments.
+/// Registers instruments used by the runtime.
 ///
-/// An embedder implements this over whatever registry it already has. The
-/// runtime registers each instrument once, at handle construction, and then
-/// only ever calls the handle it was given — so an implementation may do
-/// real work in the `register_*` methods and must do as little as possible
-/// in the handles', which run on hot paths.
+/// Embedders may adapt this trait to an existing metrics registry. The runtime
+/// registers each instrument once and uses the returned handles on hot paths.
 ///
 /// Registering the same `(name, labels)` pair twice returns a handle to the
-/// same underlying value. Two parts of the runtime reporting the same
-/// instrument are reporting one number, not two.
+/// same underlying value.
 ///
-/// Everything here is `&'static str` on purpose: it makes a runtime id
-/// impossible to use as a name or a label value, which is the cardinality
-/// policy this crate enforces in the type system rather than by convention.
+/// Static names and labels prevent unbounded runtime values from increasing
+/// metric cardinality.
 pub trait MetricsRecorder: Send + Sync + 'static {
     /// Registers a monotonically increasing count.
     fn register_counter(
@@ -207,13 +158,7 @@ impl InstrumentKey {
     }
 }
 
-/// The in-process recorder: every instrument is a few atomics, and
-/// [`Self::snapshot`] reads them all.
-///
-/// This is what an embedder installs when it has no metrics pipeline of its
-/// own and wants one anyway. Reporting is lock-free — registration takes a
-/// lock, the handles never do — so hot paths pay an atomic add and nothing
-/// else.
+/// In-process metrics recorder backed by atomic values.
 #[derive(Debug, Default)]
 pub struct DefaultMetricsRecorder {
     registry: Mutex<BTreeMap<InstrumentKey, RegisteredInstrument>>,
@@ -234,10 +179,8 @@ impl DefaultMetricsRecorder {
 
     /// Reads every registered instrument's current value.
     ///
-    /// The read is per instrument, not a stop-the-world barrier: two
-    /// instruments in one snapshot may have been read a few nanoseconds
-    /// apart. Nothing an operator asks of these numbers needs them to agree
-    /// to that resolution.
+    /// Instruments are read independently, so a snapshot is not atomic across
+    /// all values.
     pub fn snapshot(&self) -> MetricsSnapshot {
         let registry = self.lock_registry();
         MetricsSnapshot {

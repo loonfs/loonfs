@@ -2,9 +2,6 @@
 
 use super::common::*;
 
-/// A download that takes real time says where it has got to, in events an
-/// agent can tell apart from a hang, and says so without disturbing the
-/// result document on standard output.
 #[test]
 fn a_download_reports_its_progress_to_an_agent() {
     let harness = Harness::new();
@@ -52,8 +49,6 @@ fn a_download_reports_its_progress_to_an_agent() {
     assert_eq!(finished[0]["path"], "/big.bin");
 }
 
-/// An upload counts the payload as it is read and then names the commit,
-/// which is the stretch where time passes and no bytes move.
 #[test]
 fn an_upload_reports_bytes_read_and_then_the_commit() {
     let harness = Harness::new();
@@ -97,9 +92,6 @@ fn an_upload_reports_bytes_read_and_then_the_commit() {
     );
 }
 
-/// Nobody asked, so nobody is told: a run whose standard error is a pipe
-/// and which asked for no events says nothing about the transfer, and
-/// --no-progress silences the agent stream too.
 #[test]
 fn progress_is_silent_unless_someone_is_watching() {
     let harness = Harness::new();
@@ -143,8 +135,6 @@ fn progress_is_silent_unless_someone_is_watching() {
     assert_eq!(json_error(&clash)["code"], "path_conflict");
 }
 
-/// The printed recovery commands are meant to be pasted, so they name the
-/// namespace they belong to and quote a path a shell would otherwise split.
 #[test]
 fn recovery_hints_name_their_namespace_and_quote_the_path() {
     let harness = Harness::new();
@@ -195,9 +185,6 @@ fn recovery_hints_name_their_namespace_and_quote_the_path() {
     assert_eq!(cat.stdout, b"body");
 }
 
-/// A hint that leaves out a profile or a config file a bare invocation would
-/// not find again sends the paste at some other filesystem, so both are
-/// spelled whenever this run did not reach them the default way.
 #[test]
 fn recovery_hints_name_a_profile_and_config_a_bare_invocation_would_miss() {
     let harness = Harness::new();
@@ -335,9 +322,6 @@ fn human_output_shows_dates_and_event_names() {
     assert!(entry["created_at_ms"].as_u64().expect("creation time") > 0);
 }
 
-/// A command line the parser rejected is a failure like any other under
-/// `--json`, and keeps clap's own exit status so a script can still tell a
-/// command that never ran from one that ran and failed.
 #[test]
 fn json_covers_command_lines_the_parser_rejects() {
     let harness = Harness::new();
@@ -440,9 +424,6 @@ fn json_all_is_invalid_usage_even_with_a_limit() {
     }
 }
 
-/// Embedded and remote profiles must report the same `code` for the same
-/// failure: registry codes pass through verbatim in both modes instead of
-/// being rewritten to CLI-local codes on one side.
 #[test]
 fn embedded_and_remote_profiles_emit_the_same_error_codes() {
     let harness = Harness::new();
@@ -533,8 +514,6 @@ fn help_lists_the_context_commands() {
     assert!(stdout.contains("use"));
 }
 
-/// The default listing stops after one real server page, while the explicit
-/// streaming modes cross that boundary and a cursor resumes at the next row.
 #[test]
 fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     let harness = Harness::new();
@@ -655,9 +634,6 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     assert_eq!(second_entries[0]["path"], "/listing/f1000.txt");
 }
 
-/// A two-page wire fixture makes the otherwise racy between-page commit
-/// deterministic while still exercising the CLI process, client, command,
-/// JSON envelope, and standard-error rendering together.
 #[test]
 fn ls_surfaces_head_drift_from_paged_responses() {
     let harness = Harness::new();

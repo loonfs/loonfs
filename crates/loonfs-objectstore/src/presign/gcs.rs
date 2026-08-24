@@ -446,7 +446,6 @@ mod tests {
             .expect("presign put")
     }
 
-    /// The signature covers the object path and create-only precondition.
     #[tokio::test]
     async fn presigned_put_binds_the_scoped_path_and_create_only_precondition() {
         let signed = presign_put(&presigner(Some("tenant-a"))).await;
@@ -474,9 +473,6 @@ mod tests {
         );
     }
 
-    /// The read capability signs `host` and nothing else, which is what
-    /// leaves `Range` outside the signature: one issued URL serves ranged,
-    /// resumed, and parallel reads without another round trip to the server.
     #[tokio::test]
     async fn presigned_get_signs_only_the_host_so_range_stays_unsigned() {
         let signed = presigner(Some("tenant-a"))
@@ -505,8 +501,6 @@ mod tests {
         );
     }
 
-    /// The checksum readback needs no request header, so it signs the same
-    /// header set a read does and differs only in method.
     #[test]
     fn presigned_head_reads_the_object_back_with_host_signed_alone() {
         let signed = presigner(Some("tenant-a"))
@@ -524,9 +518,6 @@ mod tests {
         );
     }
 
-    /// The key prefix is part of what is signed, not decoration on the URL:
-    /// dropping it produces a different signature, so a capability issued for
-    /// one tenant's prefix cannot be replayed against another's.
     #[tokio::test]
     async fn the_key_prefix_is_inside_the_signature() {
         let unprefixed = presign_put(&presigner(None)).await;
@@ -545,15 +536,6 @@ mod tests {
         );
     }
 
-    /// The signer and the provider client resolve an object key to the same
-    /// string, whatever spelling of a prefix the deployment configured.
-    ///
-    /// A whitespace-only prefix is the case that used to split them: the
-    /// store normalizes it away and works in the unprefixed keyspace, while
-    /// the signer kept it raw and addressed `%20%20%20/...`. An object
-    /// written through such a capability is committed and then invisible to
-    /// every read, listing, and collection the store performs — durable
-    /// nowhere anything looks.
     #[tokio::test]
     async fn the_signer_and_the_store_resolve_a_key_to_the_same_string() {
         for raw_prefix in [None, Some("   "), Some(""), Some("tenant-a")] {
@@ -586,8 +568,6 @@ mod tests {
         }
     }
 
-    /// A prefix the store would refuse is refused here too, at construction,
-    /// rather than producing capabilities the store cannot address.
     #[test]
     fn an_unusable_key_prefix_fails_construction() {
         for raw_prefix in ["tenant-a//bad", "../escape"] {
@@ -604,9 +584,6 @@ mod tests {
         }
     }
 
-    /// Path segments are percent-encoded, and the separators between them are
-    /// not. Getting either wrong signs a different object than the one the
-    /// URL addresses.
     #[tokio::test]
     async fn path_segments_are_percent_encoded_and_separators_are_not() {
         let signed = presigner(Some("tenant-a"))
@@ -630,8 +607,6 @@ mod tests {
         );
     }
 
-    /// Reads and writes of the same object address the same URL, so a
-    /// deployment cannot sign a write it is unable to sign a read of.
     #[tokio::test]
     async fn presigned_get_addresses_the_same_object_the_write_did() {
         let signer = presigner(Some("tenant-a"));
@@ -709,8 +684,6 @@ mod tests {
         }
     }
 
-    /// A signing key is a bearer credential for the whole bucket, so nothing
-    /// about it reaches a log through the store that holds it.
     #[test]
     fn presigner_debug_redacts_the_service_account_and_its_key() {
         let signer = presigner(Some("tenant-a"));
@@ -723,8 +696,6 @@ mod tests {
         assert!(rendered.contains("bucket"));
     }
 
-    /// GCS lists hashes in an unspecified order and may name algorithms this
-    /// format does not, so the CRC-32C is selected rather than positioned.
     #[test]
     fn stored_crc32c_selects_its_algorithm_out_of_the_hash_header() {
         assert_eq!(

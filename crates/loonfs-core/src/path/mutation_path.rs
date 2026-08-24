@@ -11,9 +11,8 @@ pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<Absolu
 /// [`CommitRequest`](crate::path::write::CommitRequest) carries:
 /// absolute, normalized, and not the root.
 ///
-/// This is the one named home for the invariant. Every surface that accepts
-/// a raw mutation path parses through it exactly once; planning re-asserts
-/// only the root guard ([`ensure_mutation_path`]) and never re-parses.
+/// Every surface that accepts a raw mutation path parses it here. Planning
+/// checks only the root guard and does not parse it again.
 pub fn parse_mutation_path(absolute_path: &str) -> Result<AbsolutePath> {
     let path = parse_absolute_path_for_core(absolute_path)?;
     ensure_mutation_path(&path)?;

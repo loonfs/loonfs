@@ -23,8 +23,6 @@ fn owner_update() -> UpdateAttributesOptions {
     options
 }
 
-/// The convenience call and the hand-built one-operation commit are the same
-/// request, so they cannot fingerprint differently.
 #[test]
 fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -111,8 +109,6 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     ));
 }
 
-/// Writing through the convenience and reading back through stat: the map is
-/// there, at the revision the write produced.
 #[test]
 fn a_write_is_visible_to_the_next_stat() {
     let temp_dir = tempdir().expect("tempdir");
@@ -178,7 +174,6 @@ fn a_write_is_visible_to_the_next_stat() {
     );
 }
 
-/// The read options decide whether the grouped projection is present.
 #[test]
 fn read_options_project_grouped_attributes_or_none() {
     let temp_dir = tempdir().expect("tempdir");
@@ -257,7 +252,6 @@ fn read_options_project_grouped_attributes_or_none() {
     }
 }
 
-/// The embedded document advertises attributes as a core feature.
 #[test]
 fn the_embedded_capability_document_advertises_attributes() {
     let temp_dir = tempdir().expect("tempdir");

@@ -1,10 +1,6 @@
-//! Answering "where is this inode now?" for a batch of inode ids.
+//! Resolves the current state and path of a batch of inode IDs.
 //!
-//! A consumer that holds inode ids from an earlier enumeration asks this
-//! what became of them: whether each is still visible, which revision it
-//! carries now, and where it currently sits. Stale ids are ordinary input —
-//! a candidate generator routinely holds ids that were deleted since — so
-//! an unknown id is answered, not refused.
+//! Stale or unknown IDs are returned as not visible rather than rejected.
 
 use super::materialized_view::LoadedMetadataView;
 use crate::error::{CoreError, Result};
@@ -13,31 +9,19 @@ use loonfs_api::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet};
 
-/// The most inode ids [`resolve_current_files`] answers in one call.
-///
-/// One item costs about what one row of a listing page costs, so the batch
-/// is bounded by the same number: the pagination policy's maximum page limit
-/// ([`loonfs_api::DEFAULT_MAX_PAGE_LIMIT`]).
+/// Maximum number of inode IDs accepted by a batch resolution.
 pub const MAX_RESOLVE_CURRENT_FILES: usize = loonfs_api::DEFAULT_MAX_PAGE_LIMIT as usize;
 
-/// What one inode looks like in the namespace's current state.
-///
-/// The shape is file-oriented but tolerant of anything an id can name: a
-/// directory answers `visible` with a path and no revision, and an id that
-/// names nothing answers not visible with nothing else filled in.
+/// Current namespace state for one inode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentFileState {
-    /// The inode this answer is about, echoed so batched answers stay
-    /// self-describing.
+    /// Requested inode ID.
     pub inode_id: InodeId,
-    /// Whether the inode is currently visible: it exists, no subtree
-    /// tombstone covers it or an ancestor, and its bindings still reach the
-    /// namespace root.
+    /// Whether the inode exists and has a visible path from the root.
     pub visible: bool,
-    /// The current revision number — `Some` only for a visible file that
-    /// has one.
+    /// Current revision number for a visible file.
     pub current_revision_no: Option<RevisionNo>,
-    /// Where the inode currently sits — `Some` exactly when `visible`.
+    /// Current path when visible.
     pub current_path: Option<AbsolutePath>,
 }
 
@@ -54,14 +38,9 @@ pub(crate) fn ensure_resolve_batch_within_cap(requested: usize) -> Result<()> {
     Ok(())
 }
 
-/// Resolves every inode id against one loaded view, in input order.
+/// Resolves inode IDs against one loaded view in input order.
 ///
-/// The whole batch reads one view, so every answer describes the same
-/// namespace state. Ancestor walks are shared: the batch memoizes each
-/// ancestor directory's path the first time a walk passes through it, so
-/// files under one directory pay for that chain once — the walking cost is
-/// bounded by the number of distinct ancestors in the batch, not by the
-/// number of items.
+/// The batch shares one namespace state and caches paths for common ancestors.
 pub(crate) async fn resolve_current_files<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     inode_ids: &[InodeId],
@@ -151,14 +130,9 @@ fn missing(inode_id: InodeId) -> CurrentFileState {
     }
 }
 
-/// Derives the inode's current path by following parent bindings up to the
-/// root, then spelling the chain back out.
+/// Derives an inode's path by following parent bindings to the root.
 ///
-/// This is the same binding relation a path resolution walks downward, read
-/// from the other end. `None` means the chain never reaches the root — a
-/// binding cycle, or a dead end — which commit validation prevents; the walk
-/// reports it as "not visible" rather than inventing a path for state it
-/// cannot name.
+/// Returns `None` for a cycle or a chain that does not reach the root.
 async fn current_path<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
     ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
@@ -184,9 +158,7 @@ async fn current_path<S: ObjectStore + ?Sized>(
         climbed.push(binding);
     };
 
-    // `climbed` runs leaf-first; spelling it out from the known base
-    // downward names every directory passed on the way, which is what the
-    // next item under the same directory reuses.
+    // Cache each path reconstructed from the known ancestor to the leaf.
     let mut path = base;
     for binding in climbed.iter().rev() {
         path = path.join(&binding.display_name);

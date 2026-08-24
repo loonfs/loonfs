@@ -1,13 +1,8 @@
 //! Client-side recursive transfers: `put -r`, `get -r`, and `cp -r`.
 //!
-//! Traversal is client-side and unpinned (API spec, section 9.3): remote
-//! walks read each directory at its own head through drift-tolerant
-//! listings, and every file rides the same per-file operation its singular
-//! command uses, as its own independent commit. One process holds one
-//! writer session, so concurrent submissions coalesce into batched WAL
-//! segments; the transfer runs with bounded concurrency and reports
-//! per-file outcomes, so a partial failure reruns per file instead of
-//! aborting a giant transaction.
+//! Traversal is unpinned and tolerates directory changes between pages. Each
+//! file uses the corresponding single-file operation and commits independently.
+//! Transfers use bounded concurrency and report failures per file.
 
 use super::context::CommandContext;
 use super::output::{
@@ -25,26 +20,16 @@ use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFil
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// How many per-file operations run at once. Matches the reference server's
-/// default upload concurrency; deliberately a constant, not a flag, until a
-/// real workload needs tuning.
+/// Maximum number of concurrent file operations.
 const TREE_TRANSFER_CONCURRENCY: usize = 8;
 
-/// One file or directory job, as namespace-absolute remote path plus the
-/// local half when one exists.
+/// One file or directory in a recursive transfer.
 struct FileJob {
     local: PathBuf,
     remote: String,
-    /// The file's length, when the walk that found it stated one. On a
-    /// download it also decides how the bytes travel — past the
-    /// deployment's proxy cap they come straight from object storage — and
-    /// on either transfer it is what lets the whole tree be measured before
-    /// the first byte moves.
+    /// File length, used for transfer selection and progress totals.
     size_bytes: Option<u64>,
-    /// What the remote file's content is, when a listing named it. It rides
-    /// along so a download interrupted part way can tell whether the bytes
-    /// it left behind are still the bytes it wants. An upload's jobs come
-    /// from a local walk and name no remote content.
+    /// Remote content identity used to resume downloads.
     content_ref: Option<loonfs_api::ContentRef>,
 }
 
@@ -71,9 +56,7 @@ impl TreeTally {
     }
 }
 
-/// What the whole tree weighs, or nothing at all when even one file's
-/// length is unknown: a total that is missing some files would misreport
-/// every percentage derived from it.
+/// Returns the total size when every file length is known.
 fn tree_bytes(files: &[FileJob]) -> Option<u64> {
     files
         .iter()
@@ -753,10 +736,6 @@ mod tests {
         (context, watched)
     }
 
-    /// A tree's largest file is never held whole. Each file travels the way
-    /// a single `put` of it would, so the payload of one too large to hold
-    /// crosses the store boundary in transfer parts — and the measurement is
-    /// retention at that boundary, not a reading of the process.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recursive_put_never_holds_a_whole_file() {
         let store_dir = tempfile::tempdir().expect("tempdir");

@@ -347,7 +347,6 @@ mod tests {
         );
     }
 
-    /// A receipt-only replay has no retained events.
     #[test]
     fn a_commit_response_omits_absent_events_and_message() {
         let response = CommitResponse {

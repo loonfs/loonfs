@@ -33,8 +33,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 // The family-group mapping
 // -------------------------------------------------------------------------
 
-/// Every family compacts in exactly one group. A family in none would never
-/// be folded; a family in two would be rewritten twice at one identity.
 #[test]
 fn every_family_belongs_to_exactly_one_reorganization_group() {
     for family in CHECKPOINT_ROW_FAMILIES {
@@ -831,9 +829,6 @@ async fn fold_group_whole<S: ObjectStore + ?Sized>(
 // The plan split
 // -------------------------------------------------------------------------
 
-/// A group whose bottom-anchored window fits the budgets is a bounded merge;
-/// the same group under budgets no window can satisfy is a streaming
-/// compaction over every run it holds.
 #[tokio::test]
 async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     let temp_dir = tempdir().expect("tempdir");
@@ -896,8 +891,6 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     );
 }
 
-/// A step that plans a compaction publishes nothing and stages nothing: it
-/// hands the plan back, and the runtime starts the job.
 #[tokio::test]
 async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     let temp_dir = tempdir().expect("tempdir");
@@ -931,10 +924,6 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     );
 }
 
-/// While a job rebuilds one group, steps leave that group alone and fold the
-/// others. Without this a step would keep re-planning the running job: the
-/// group's delta rows are frozen in the job's snapshot, so its count never falls
-/// while every other group's does.
 #[tokio::test]
 async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1007,16 +996,6 @@ async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
     );
 }
 
-/// A group whose bottom-anchored window is blocked still merges the delta
-/// runs above the frozen base — and under sustained writes there is always
-/// another pair of them, so a planner reading one step's view alone would take
-/// that merge forever and never start the job.
-///
-/// An amortizing runtime counts those published merges, and after
-/// `DELTA_MERGES_OVER_A_FROZEN_BASE` of them the planner starts the job
-/// regardless of what delta window is available. Here every step publishes a
-/// fresh delta run before the next one plans, which is the write pattern that
-/// used to postpone the job indefinitely.
 #[tokio::test]
 async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1093,12 +1072,6 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
     );
 }
 
-/// Between jobs, the ordinary delta merge is what consolidates new runs.
-///
-/// Starting a job for every batch of delta runs would reread the whole group
-/// to fold in a sliver, which is the amortization the counter exists to keep.
-/// A group whose base is not frozen never counts a merge at all, and a group
-/// whose base is frozen spends its budget on merges first.
 #[tokio::test]
 async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1184,19 +1157,6 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
 // The oracle
 // -------------------------------------------------------------------------
 
-/// A background compaction and a synchronous merge inside a maintenance step
-/// with the budgets raised must land in the same place: the same surviving rows
-/// in every family of the group, the same materialized namespace, and the same
-/// rows dropped.
-///
-/// Both paths run one engine, so this no longer bridges two implementations of
-/// the merge. What it guards now is the orchestration split. The background job
-/// resolves its input from a spec captured before it started, stages its output
-/// under its own prefix behind a lease, and swaps it in with a separate
-/// publication much later; the step chooses its window from the manifest it
-/// just read, writes at ordinary segment keys, and publishes in the same step.
-/// Those are different enough that a change to either one can move the rows a
-/// reader ends up with, and this is what says it did not.
 #[tokio::test]
 async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows() {
     let job_dir = tempdir().expect("tempdir");
@@ -1329,9 +1289,6 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
     }
 }
 
-/// The oracle has teeth only if the retention rules are what make the two
-/// rebuilds agree. A floor of zero is above nothing, so every rule that reads
-/// the floor keeps every row, and the job must then disagree with the step.
 #[tokio::test]
 async fn a_compaction_that_drops_nothing_fails_the_oracle() {
     let job_dir = tempdir().expect("tempdir");
@@ -1376,8 +1333,6 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
     );
 }
 
-/// A group with no drop rule at all is a straight rewrite: revisions are
-/// durable history, so the job's output must hold every row it read.
 #[tokio::test]
 async fn a_compaction_of_the_revisions_group_rewrites_every_row_it_reads() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1466,16 +1421,6 @@ async fn rewrite_base_segment(
     .await;
 }
 
-/// A run whose canonical family and secondary index both hold the same row
-/// twice is refused by both orchestration paths, and neither publishes.
-///
-/// The duplicate has to be on both sides. The output digests compare the two
-/// families against each other, so a one-sided duplicate only re-proves what
-/// the digests already catch; a duplicate present on both sides leaves both
-/// multisets equal and passes them. The segment builder does not catch it
-/// either — it refuses a descending row key, not a repeated one — so without
-/// the input-key guard the duplicate reaches a published run, where reads that
-/// concatenate runs would answer the same revision twice.
 #[tokio::test]
 async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1912,28 +1857,6 @@ async fn install_synthetic_bindings_base(
     unbind_decoded_bytes
 }
 
-/// A merge inside a maintenance step reads its window once, whatever order the
-/// reverse index walks the unbind keyspace in.
-///
-/// This is the total-work half of the resource contract. The other resource
-/// tests bound what a merge holds and how wide it fans out at any instant;
-/// neither of them sees a merge that reads the same block over and over.
-///
-/// The window here is the shape that used to cost the most: every reverse bind
-/// row is below the floor, so every one needs a verdict, and the names are
-/// scrambled against the child ids so consecutive reverse rows land in
-/// unrelated parts of the parent-ordered unbind family. Resolving those from
-/// the store costs one round trip per row once the probe cache can no longer
-/// hold the window's unbind family, which the step's budgets allow. Measured on
-/// a window whose unbind family just fills the cache, 65,536 reverse rows cost
-/// 27,427 data reads and 309 MB transferred against 16 MB of priced input, and
-/// doubling the family doubled both; the same window resolved from the
-/// collected set costs 386 data reads and 3.7 MB.
-///
-/// So the assertion is the contract rather than a number: the step reads each
-/// segment's index once and its data once, and makes no probe at all. A
-/// background job keeps the probes, because its memory must not follow the
-/// group it rebuilds, and this pins that split too.
 #[tokio::test]
 async fn a_step_contained_merge_reads_its_window_once() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2101,10 +2024,6 @@ impl ObjectStore for CancelAfterReadsStore {
     }
 }
 
-/// A cancelled job costs its work and nothing else. The manifest never moved,
-/// so a reader answers exactly as before; the segments the attempt wrote are
-/// staged and unreferenced; and running the same spec again lands where an
-/// uninterrupted job would have landed.
 #[tokio::test]
 async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_would_have() {
     let straight_dir = tempdir().expect("tempdir");
@@ -2259,14 +2178,6 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
 // The job's claim on its own output
 // -------------------------------------------------------------------------
 
-/// A job writes its lease before its first output object and leaves it in
-/// place after publishing, and the segments it published stay where they are.
-///
-/// The lease is what tells a collector who owns an unreferenced staged
-/// object. Deleting it at publication would open the one hole it exists to
-/// close: a collection pass that captured its live set a moment earlier would
-/// find segments far older than any grace window and nothing saying who wrote
-/// them. So the job stops heartbeating and lets the lease expire instead.
 #[tokio::test]
 async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_when_it_publishes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2321,8 +2232,6 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
     );
 }
 
-/// A cancelled job leaves its lease behind, which is what keeps a collector
-/// off the segments it had written until the lease expires.
 #[tokio::test]
 async fn a_cancelled_job_leaves_its_claim_standing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2367,15 +2276,6 @@ async fn a_cancelled_job_leaves_its_claim_standing() {
     );
 }
 
-/// A worker whose lease expired and was claimed cannot take its prefix back,
-/// and cannot publish.
-///
-/// This is the revival a timestamp-only lease allowed. A job that stalled long
-/// enough for its lease to expire — a suspended process, a starved runtime —
-/// used to be able to resume, overwrite the lease with a fresh heartbeat, and
-/// go on to publish descriptors naming segments the collector had already
-/// decided to reap. The claim is a compare-and-swap, so the worker's next
-/// heartbeat finds an etag it does not hold and stops there.
 #[tokio::test]
 async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2454,16 +2354,6 @@ impl MonotonicTimer for SteppingTimer {
     }
 }
 
-/// The heartbeat and the reaping claim are the same compare-and-swap on the
-/// same object, so whichever lands first wins and the other is refused.
-///
-/// The interesting order is the collector reading an expired lease and the
-/// worker heartbeating before the claim lands — the exact window in which a
-/// timestamp-only lease would have let both parties believe they owned the
-/// prefix. Here the claim is gated at its compare-and-swap, the worker's
-/// heartbeat goes through underneath it, and the claim is refused. The other
-/// order follows on the same store: once the claim wins, the heartbeat behind
-/// it is the one refused.
 #[tokio::test]
 async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2530,9 +2420,6 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
 // Resource discipline
 // -------------------------------------------------------------------------
 
-/// A merge's reads never overlap wider than its fetch bound, and the decoded
-/// blocks it holds never follow the size of what it is merging. Both hold for
-/// the background job and for the same engine run inside a maintenance step.
 #[tokio::test]
 async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2657,10 +2544,6 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     );
 }
 
-/// One directory far past the old per-step row budget streams through with
-/// the same bounded state. The case that needed a durable offset inside a
-/// partition needs nothing now: the operators hold one row at most, whatever
-/// the directory holds.
 #[tokio::test]
 async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     let job_dir = tempdir().expect("tempdir");
@@ -2745,14 +2628,6 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     );
 }
 
-/// Every group of a namespace whose churn all lands on one hot locality
-/// rebuilds to the same rows a step-contained merge reaches, while its
-/// operators hold at most one row.
-///
-/// The wide-directory case above proves that distinct localities do not
-/// accumulate together. This proves the other half: one inode's attribute
-/// history, one name slot's binding generations, and one deletion's markers
-/// are each decided by fixed state rather than by holding the locality.
 #[tokio::test]
 async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
     let job_dir = tempdir().expect("tempdir");
@@ -2910,17 +2785,6 @@ async fn referenced_segment_keys<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-/// The whole arc, driven through the entry point the maintenance runner
-/// calls.
-///
-/// A group past the budgets with churn below the floor is handed to a job.
-/// The runner starts that job and goes on stepping; here the steps and the job
-/// run in one task, which is the same interleaving with the timing taken out.
-/// While the job is in flight the other groups keep folding, no step touches
-/// the job's group, a run arrives above the job's snapshot and survives its
-/// publication, the loader accepts the manifest every step leaves, and a read
-/// answers the same thing throughout. The job then publishes, the group ends
-/// in one base run, and the churn the floor covered is gone.
 #[tokio::test]
 async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3111,14 +2975,6 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
     panic!("no step handed a group to a job")
 }
 
-/// The crash variant of the same arc: the job dies mid-run, and the next step
-/// plans it again.
-///
-/// Nothing durable records that a job was running, so a process that dies —
-/// or a shutdown that cancels — costs the work and nothing else. What a read
-/// answers has not moved, the manifest has not moved, the segments the attempt
-/// wrote are staged and named by nothing, and the step after it plans the
-/// group again and the second attempt finishes.
 #[tokio::test]
 async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3270,12 +3126,6 @@ impl ObjectStore for FlushDuringFinalizationStore {
     }
 }
 
-/// A flush that lands while a job is finalizing does not cost the job.
-///
-/// The finalizer reloads, checks that its input is still exactly what it read,
-/// and publishes on top of the flush. The flush's own run survives, because it
-/// arrived above the job's snapshot and the swap replaces only what the
-/// snapshot held.
 #[tokio::test]
 async fn a_flush_landing_during_finalization_is_retried_over() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3387,13 +3237,6 @@ async fn root_updated_at_ms<S: ObjectStore + ?Sized>(store: &S, namespace_id: &N
         .updated_at_ms
 }
 
-/// The root's timestamp says when the publication landed, not when the job
-/// that produced it started.
-///
-/// A job holds its writer identity for as long as it runs, and a long one
-/// finishes hours after the context it was planned under was built. Stamping
-/// the root with that context would make a job that rebases over a newer
-/// flush move the namespace's `updated_at_ms` backwards.
 #[tokio::test]
 async fn a_rebased_publication_never_moves_the_root_timestamp_backward() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3451,11 +3294,6 @@ async fn a_rebased_publication_never_moves_the_root_timestamp_backward() {
     );
 }
 
-/// A token set after the last row costs the job its publication.
-///
-/// The executor finished, so there is a whole rebuilt group in memory and
-/// staged output on the store. None of it lands: the manifest stays where it
-/// was, and the staged segments stay orphans a later pass reclaims.
 #[tokio::test]
 async fn a_cancellation_after_the_last_row_publishes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3580,12 +3418,6 @@ impl ObjectStore for CancelAtTheFirstPublicationStore {
     }
 }
 
-/// A shutdown during finalization does not wait out the attempts it has left.
-///
-/// The first attempt loses its race and the token is set while it does. The
-/// attempts after it are exactly the wait a shutdown must not sit through, so
-/// the job stops at the top of the next one rather than building three more
-/// manifests to lose three more races with.
 #[tokio::test]
 async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
     let temp_dir = tempdir().expect("tempdir");

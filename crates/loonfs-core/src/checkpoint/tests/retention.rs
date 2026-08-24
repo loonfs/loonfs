@@ -1647,9 +1647,6 @@ async fn checkpoints_chain_delta_runs_past_the_default_cap() {
     assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
 }
 
-/// A created namespace writes no floor object at all, and its absence
-/// reads as "retain from the namespace's birth sequence", which for a
-/// created namespace is genesis.
 #[tokio::test]
 async fn a_missing_floor_reads_as_retain_everything() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1678,9 +1675,6 @@ async fn a_missing_floor_reads_as_retain_everything() {
     assert_eq!(floor, ChangeSeq(0));
 }
 
-/// An over-budget WAL flush aborts before the root compare-and-swap:
-/// the root keeps its previous basis, the orphan outputs are harmless GC
-/// candidates, and an in-budget retry succeeds.
 #[tokio::test]
 async fn over_budget_wal_flush_aborts_without_publishing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1737,8 +1731,6 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     assert!(advanced.manifest_no > root_before.manifest.manifest_no);
 }
 
-/// An over-budget reorganization unit aborts the same way: no root motion,
-/// orphan segments left for garbage collection.
 #[tokio::test]
 async fn over_budget_reorganization_aborts_without_publishing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1886,22 +1878,6 @@ fn policy_that_cannot_fold_the_base(base_rows: u64) -> MetadataLsmPolicy {
     }
 }
 
-/// A group whose base run alone busts the per-step row budget used to park
-/// immediately: selection broke on the first candidate, chose nothing, and
-/// reported the group blocked on every step after that while delta runs
-/// piled up behind it with nothing saying why.
-///
-/// The step skips the base run it cannot read whole, merges the delta runs
-/// above it into one bigger delta run, and says out loud that the base has
-/// outgrown the budget. The merged output is a delta run at its newest
-/// input's identity, so the base stays exactly one run: minting a second
-/// base run here is what hid the over-budget bottom from the report.
-///
-/// Once the delta runs are down to one the group has nothing left to merge,
-/// and the step hands the whole group to a streaming compaction. That job
-/// rebuilds the group under no budget, so the base is folded again, its
-/// segments are replaced, and the group ends in one run. There is no state
-/// where the group is stuck.
 #[tokio::test]
 async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the_group() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2086,19 +2062,6 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     ));
 }
 
-/// A merge that skipped older runs must carry every row its inputs held, and
-/// must leave the group's base alone.
-///
-/// The retention drop rules read across the merged rows: an unbind cancels
-/// the bind it names, and both have to leave together. A window that starts
-/// above the base cannot see the bind at all, so dropping the unbind there
-/// would put a deleted file back. The step merges without dropping instead.
-///
-/// The output is a delta run at the newest input's sequence, so it stands
-/// where that run stood and the group keeps exactly one base run. Writing it
-/// at the base tier instead is what fragmented the base, and stamping it at
-/// the manifest head is what made two merges of one quiet namespace collide
-/// at one identity.
 #[tokio::test]
 async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2259,12 +2222,6 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     ));
 }
 
-/// Skipping is only ever legal at the recency bottom.
-///
-/// A run in the middle that busts the budget stops the window. The selector
-/// refuses to reach past it for a newer run that would have fit, because the
-/// merged output stands where the window stood and reaching past a run would
-/// move rows past it.
 #[tokio::test]
 async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2374,24 +2331,6 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     );
 }
 
-/// The soak's end state, as a test.
-///
-/// Four cycles of writes, deletions, and a retention floor that moves past
-/// them, folded under budgets too small to take a group whole. The old level
-/// rule turned every merge above the base into another base-tier run, so the
-/// bases fragmented: a live S3 soak ended with six base-tier runs — direntry
-/// binds split across three of them, revisions across four — and one run
-/// identity carrying the output of several publications. Nothing then
-/// reported any group as too large to fold from its oldest run, because every
-/// fragment fit one step on its own, and the rows below the retention floor
-/// could never be dropped.
-///
-/// What is pinned here is that neither happens. No group's base fragments,
-/// whatever the budgets do; every step leaves reads answering exactly what
-/// they answered before; a group whose bottom stops fitting one step is
-/// handed to a streaming compaction rather than minting another base run;
-/// and every cycle settles with nothing left to fold. There is no run of
-/// steps that ends with a group nothing can fold.
 #[tokio::test]
 async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
     let temp_dir = tempdir().expect("tempdir");

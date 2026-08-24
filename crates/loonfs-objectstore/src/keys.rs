@@ -250,12 +250,6 @@ mod tests {
         );
     }
 
-    /// Pins every standard key pattern in the format spec's "Durable object
-    /// families" table to the key this crate actually builds for that family.
-    ///
-    /// The table is normative: a new family must be added to the table and to
-    /// this test together, and neither the spec pattern nor the builder can
-    /// change without the other.
     #[test]
     fn standard_key_patterns_match_format_spec_table() {
         let spec = std::fs::read_to_string(concat!(
@@ -483,7 +477,6 @@ mod tests {
         }
     }
 
-    /// Segment descriptors derive standard and compaction object keys.
     #[test]
     fn segment_descriptors_derive_published_and_staging_keys() {
         assert_eq!(
@@ -500,8 +493,6 @@ mod tests {
         );
     }
 
-    /// Content keys shard on the id's own leading characters, so both shard
-    /// directories are derivable from the id and nothing else.
     #[test]
     fn content_keys_shard_on_the_content_id_prefix() {
         let id = content_id();

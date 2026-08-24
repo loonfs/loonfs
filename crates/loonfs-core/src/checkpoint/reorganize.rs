@@ -1,28 +1,12 @@
 //! Plans and publishes bounded metadata merges.
 //!
-//! Checkpoint publication appends delta runs. Each maintenance step selects
-//! one metadata family group and either merges a budgeted, contiguous set of
-//! complete runs or returns a plan for a background compaction of the entire
-//! group. Bounded steps and background jobs use the same merge engine.
+//! Each step selects one family group and either merges a bounded run window
+//! or requests a full background compaction. Base merges may apply retention;
+//! delta merges preserve every row. Both paths use the same merge engine.
 //!
-//! A merge that includes the group's oldest run writes a base-tier run and may
-//! remove rows below the retention floor. A merge that starts above the base
-//! writes a delta-tier run at its newest input sequence and preserves every
-//! row. These rules keep at most one base run per family group and preserve
-//! run ordering.
-//!
-//! Each bounded merge publishes a durable manifest, so no separate progress
-//! record is required. After interruption, the next step reloads the current
-//! manifest and selects another group. If a concurrent publication wins the
-//! root compare-and-swap, the merge output remains unreferenced for garbage
-//! collection and a later step retries from the new manifest.
-//!
-//! When the oldest run prevents a useful bounded merge, [`FrozenBasePolicy`]
-//! determines whether the step may merge newer delta runs or must request a
-//! full compaction. Writer maintenance permits a limited number of delta
-//! merges before requesting the background job. Explicit compaction requests
-//! select the job immediately. [`MetadataCompactionView`] identifies any group
-//! already being compacted so a bounded step does not select it again.
+//! Every successful merge publishes a new manifest. Interrupted or losing
+//! publications leave unreferenced output for garbage collection.
+//! [`FrozenBasePolicy`] decides when a blocked base requires full compaction.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::error::ManifestLoadError;
@@ -51,46 +35,20 @@ use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Delta merges that may publish over a frozen base before the planner
-/// insists on the job that unfreezes it.
-///
-/// Delta merges between jobs are how a stuck group amortizes: a job rereads
-/// the whole group, so running one for every eight delta runs would reread
-/// megabytes to fold in a sliver. Two merges is the smallest count that still
-/// lets the ordinary merge do that work, and it bounds how long retention for
-/// the group can stay stopped — the job starts within two published delta
-/// merges of the block, whatever the write rate is.
+/// Delta merges allowed over a frozen base before full compaction.
 pub(super) const DELTA_MERGES_OVER_A_FROZEN_BASE: u32 = 2;
 
 /// How planning treats a family group whose base run is frozen.
 ///
-/// A group whose bottom-anchored window is blocked still has delta runs above
-/// that base to merge, and under sustained writes there is always another pair
-/// of them. So the planner has to be told what to do about that, and the two
-/// answers are genuinely different work.
+/// Selects immediate or amortized compaction for a frozen base.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrozenBasePolicy {
-    /// Amortize the rebuild: keep taking the delta merge above the frozen
-    /// base until `DELTA_MERGES_OVER_A_FROZEN_BASE` of them have published
-    /// for the group, then plan the job. This is what a writer's own
-    /// maintenance runs under, because upkeep that rebuilt the whole group
-    /// for every eight delta runs would reread megabytes to fold in a sliver.
-    ///
-    /// The counts are per family group, keyed by the group itself: a group's
-    /// block is its own, and one step reorganizes one group. A group absent
-    /// from the map has published none.
-    ///
-    /// They are in-memory process state and safe to lose: a restart forgets
-    /// them and the next two merges rebuild them, which delays one cycle.
+    /// Merge newer delta runs before requesting a full compaction.
+    /// Counts are per family group and may be rebuilt after restart.
     Amortized {
         published_delta_merges_over_frozen_base: BTreeMap<MetadataFamilyGroup, u32>,
     },
-    /// Plan the job as soon as the bottom-anchored window is blocked. This is
-    /// what an explicit compaction request runs under, and what a bounded step
-    /// with nowhere to run background work runs under: the first reports the
-    /// operation its caller asked for, and the second reports that the
-    /// namespace needs one promptly instead of publishing delta merges that
-    /// never reach it.
+    /// Request full compaction as soon as the base is blocked.
     CompactImmediately,
 }
 
@@ -535,21 +493,13 @@ fn over_budget_run(
 /// Selects bounded merge input or plans a full compaction for one family
 /// group.
 ///
-/// Runs are ordered oldest first. Base-tier runs sort before delta-tier runs
-/// regardless of `run_seq`; within a tier, lower sequences are older. The
-/// selector first tries a contiguous window beginning at the oldest run. If
-/// that cannot make progress, it may try a window beginning at the oldest
-/// delta run. It never skips a delta run.
+/// Base runs sort before delta runs, with older runs first in each tier. The
+/// selector tries a window from the oldest run, then a delta-only window. It
+/// never skips a delta run. If neither bounded window can make progress, it
+/// plans a full compaction.
 ///
-/// A bottom-anchored merge makes progress when it moves at least one delta run
-/// into the base tier. A delta-only merge must combine at least two runs. If
-/// neither bounded window works, or `frozen_base` requires a full compaction,
-/// the result contains a plan covering every run in the group.
-///
-/// Block indexes are read before row data so the row and decoded-byte budgets
-/// can be enforced without partially including a run. A bounded merge resolves
-/// the current retention floor before applying retention. A full-compaction
-/// plan records `frozen_floor_seq` so the background job uses one fixed floor.
+/// Indexes are read before row data so each run either fits the row and byte
+/// budgets completely or is excluded.
 pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     group: MetadataFamilyGroup,

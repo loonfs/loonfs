@@ -52,8 +52,6 @@ fn a_gauge_reports_only_its_latest_value() {
     );
 }
 
-/// Boundaries are inclusive upper bounds, and the bucket past the last one
-/// catches everything above it.
 #[test]
 fn histogram_observations_land_in_the_bucket_their_boundary_names() {
     const BOUNDARIES: &[f64] = &[1.0, 2.0, 4.0];
@@ -101,7 +99,6 @@ fn registering_one_name_and_label_set_twice_shares_one_value() {
     assert_eq!(counter_value(&snapshot, "loonfs.test.calls"), 2);
 }
 
-/// The label set is the identity, not the order it was written in.
 #[test]
 fn label_order_does_not_split_an_instrument_in_two() {
     let recorder = DefaultMetricsRecorder::new();
@@ -144,7 +141,6 @@ fn distinct_label_sets_are_distinct_instruments() {
     assert_eq!(entries[1].value, MetricValue::Counter(4));
 }
 
-/// A snapshot renders in a fixed order so a host does not have to sort it.
 #[test]
 fn a_snapshot_orders_entries_by_name_then_labels() {
     let recorder = DefaultMetricsRecorder::new();

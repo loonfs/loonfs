@@ -761,8 +761,6 @@ mod tests {
         backoff_window_ms(consecutive_failures) - 1
     }
 
-    /// Ported from the previous scheduler: a request arriving during an
-    /// active step defers and reruns exactly once.
     #[test]
     fn a_request_during_an_active_step_defers_and_reruns_exactly_once() {
         let mut admission = book(8);
@@ -795,7 +793,6 @@ mod tests {
         );
     }
 
-    /// Ported: shutdown wins over a deferred rerun.
     #[test]
     fn shutdown_wins_over_a_deferred_rerun() {
         let mut admission = book(8);
@@ -812,9 +809,6 @@ mod tests {
         );
     }
 
-    /// The fairness rule has no exception for the key that just finished: a
-    /// request that arrived mid-step holds the newest ticket there is, so a
-    /// peer that was already waiting runs first.
     #[test]
     fn a_waiting_peer_outranks_a_rerun_asked_for_later() {
         let mut admission = book(1);
@@ -837,9 +831,6 @@ mod tests {
         );
     }
 
-    /// A job that subscribes to publications is renudged inside every step
-    /// it runs, and a busy namespace publishes without pause. Its reruns
-    /// must not add up to a permit it never gives back.
     #[test]
     fn a_key_renudged_on_every_run_cannot_hold_the_permit_past_a_peer() {
         let mut admission = book(1);
@@ -867,7 +858,6 @@ mod tests {
         );
     }
 
-    /// Losing the handoff is not losing the request.
     #[test]
     fn a_rerun_that_loses_the_handoff_runs_when_a_permit_frees() {
         let mut admission = book(1);
@@ -895,8 +885,6 @@ mod tests {
         );
     }
 
-    /// The other half of a claim: what the step it dispatches is told about
-    /// the wait it ended.
     #[test]
     fn a_claim_reports_how_long_its_run_waited() {
         let mut admission = book(1);
@@ -924,7 +912,6 @@ mod tests {
         );
     }
 
-    /// Ported: claims are singleflight and refused after close.
     #[test]
     fn claims_are_singleflight_and_refused_after_close() {
         let mut admission = book(8);
@@ -950,7 +937,6 @@ mod tests {
         );
     }
 
-    /// Ported: a freed slot claims the next key waiting at the global cap.
     #[test]
     fn a_freed_slot_claims_the_next_key_at_the_global_cap() {
         let mut admission = book(2);
@@ -973,7 +959,6 @@ mod tests {
         );
     }
 
-    /// Ported: repeated requests for one queued key coalesce to one run.
     #[test]
     fn repeated_requests_for_one_queued_key_coalesce_to_one_run() {
         let mut admission = book(1);
@@ -1001,7 +986,6 @@ mod tests {
         );
     }
 
-    /// Ported: shutdown clears keys waiting at the global cap.
     #[test]
     fn shutdown_clears_keys_waiting_at_the_global_cap() {
         let mut admission = book(1);
@@ -1115,10 +1099,6 @@ mod tests {
         );
     }
 
-    /// The whole continuation contract in one place: a progressing step's
-    /// position is stored and handed to the next one, a blocked step's is
-    /// kept for a retry with room to work, an idle step's is spent, and an
-    /// evicted key takes its position with it.
     #[test]
     fn the_runner_carries_a_continuation_between_steps() {
         let mut admission = book(1);
@@ -1238,8 +1218,6 @@ mod tests {
         );
     }
 
-    /// A deadline the step itself observed is planted the same way a
-    /// trigger's is, and merges with what is already there.
     #[test]
     fn a_step_can_report_its_own_next_eligible_time() {
         let mut admission = book(1);
@@ -1416,8 +1394,6 @@ mod tests {
         }
     }
 
-    /// The property a provider outage depends on: keys that failed in the
-    /// same millisecond must not all come back in the same millisecond.
     #[test]
     fn a_burst_of_failures_does_not_come_back_synchronized() {
         let mut admission = Admission::new(8, TestClock::walking());
@@ -1971,14 +1947,6 @@ mod tests {
         }
     }
 
-    /// The properties the book holds whatever order its callers arrive in:
-    /// one step per key, permits accounted for, ticket order, nothing
-    /// dispatched after a close, and an obligation only its own deadline or
-    /// a close may clear.
-    ///
-    /// The book is synchronous under one lock, so a seeded sequence of calls
-    /// is the whole concurrency story — there is no interleaving these
-    /// sequences cannot produce.
     #[test]
     fn a_seeded_action_sequence_holds_every_admission_invariant() {
         for (index, seed) in MODEL_SEEDS.into_iter().enumerate() {
