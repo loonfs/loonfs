@@ -87,7 +87,6 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         let next = WalFloorState {
             namespace_id: namespace_id.clone(),
             floor_seq: target_floor,
-            verified_at_ms: context.now_ms,
             updated_at_ms: context.now_ms,
         };
         let object_key = loonfs_objectstore::keys::wal_floor(namespace_id);

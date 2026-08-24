@@ -1,1 +1,1 @@
-{"kind":"wal_floor","format_version":1,"payload_checksum":"sha256:663c89bbd673e69dab3de873297fd7bf21a587d08e748a11e4c567e1d8ce64c9","payload":{"namespace_id":"demo","floor_seq":1,"verified_at_ms":3000,"updated_at_ms":3000}}
+{"kind":"wal_floor","format_version":1,"payload_checksum":"sha256:99ab5c70f3cfc98e241b7e303797770557a2aa9c0a2aef04503f74c09ffb8930","payload":{"namespace_id":"demo","floor_seq":1,"updated_at_ms":3000}}

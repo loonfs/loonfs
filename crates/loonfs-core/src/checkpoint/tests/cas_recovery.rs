@@ -131,7 +131,6 @@ impl FloorRaiseOnCasConflictStore {
             Err(_) => loonfs_api::wire::control::WalFloorState {
                 namespace_id: self.namespace_id.clone(),
                 floor_seq: ChangeSeq(0),
-                verified_at_ms: 1_000,
                 updated_at_ms: 1_000,
             },
         };
