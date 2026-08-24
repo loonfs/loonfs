@@ -822,8 +822,7 @@ mod tests {
             "a failed fetch should leave nothing behind for the next caller"
         );
 
-        // The loader below fails if it runs at all, so a successful answer
-        // is proof the populated key served the access on its own.
+        // This loader fails if called, so success confirms a cache hit.
         let cached: Result<_, String> = cache
             .get_or_load(&key("a"), || async {
                 Err("a populated key must not re-fetch".to_owned())

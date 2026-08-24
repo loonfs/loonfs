@@ -986,8 +986,7 @@ mod tests {
         assert_eq!(details.active_writer.as_deref(), Some("writer-b"));
         assert_eq!(details.active_acquired_at_ms, Some(2_000));
 
-        // A head with no writer block still names both epochs and carries
-        // neither half of the writer block.
+        // A head without writer metadata still reports both epochs.
         let anonymous = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
             active_epoch: WriterEpoch(4),
@@ -1040,9 +1039,7 @@ mod tests {
         assert_eq!(details.inode_id, Some(InodeId(7)));
         assert_eq!(details.expected_revision_no, Some(RevisionNo(2)));
         assert_eq!(details.actual_revision_no, Some(RevisionNo(5)));
-        // The prose says the same thing in words, so neither revision
-        // reaches a reader as Rust formatting. The sentence itself is free
-        // to change.
+        // Check both revisions without depending on the exact wording.
         let message = stale.to_string();
         assert!(message.contains("revision 2"), "{message}");
         assert!(message.contains("revision 5"), "{message}");

@@ -38,9 +38,7 @@ fn path(value: &str) -> AbsolutePath {
     AbsolutePath::parse(value).expect("valid path")
 }
 
-/// Asserts a planner rejection by its typed variant and its wire code. The
-/// message prose is deliberately not pinned: an edit to the wording is not a
-/// contract change.
+/// Checks the typed error variant and public error code.
 fn assert_invalid_commit_request(error: &CoreError, label: &str) {
     assert!(
         matches!(error, CoreError::InvalidCommitRequest(_)),

@@ -351,8 +351,6 @@ mod tests {
         ));
     }
 
-    /// A record has to describe the key it is stored under. Each case forges
-    /// one half of that identity and the loader has to refuse it.
     #[tokio::test]
     async fn listed_loader_validates_the_record_against_its_key() {
         enum Mismatch {

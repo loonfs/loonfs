@@ -1209,10 +1209,6 @@ async fn namespace_with_a_scan_worth_bounding(
     }
 }
 
-/// A manifest the marking pass already counted can still go wrong before the
-/// reference scan reads it. Bytes that do not decode surface as corruption;
-/// a store that will not read leaves the reference set unavailable rather
-/// than partial, because a partial set would authorize a deletion.
 #[tokio::test]
 async fn a_corrupt_marked_manifest_fails_the_scan_and_an_unreadable_one_makes_it_unavailable() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1249,9 +1245,6 @@ async fn a_corrupt_marked_manifest_fails_the_scan_and_an_unreadable_one_makes_it
     assert!(error.message().contains(&manifest_key));
 }
 
-/// The metadata rows are where published content references live. Rows that
-/// do not decode fail the pass; rows the store will not read leave the pass
-/// conservative. Either way the unpublished content and its session stay.
 #[tokio::test]
 async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_content() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1279,7 +1272,7 @@ async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_cont
     );
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
 
-    // A store failure is not proof that nothing references the content.
+    // Unreadable rows are treated conservatively.
     store.fail_all();
     let report = gc_namespace(&store, &namespace_id, &config(), &past)
         .await
@@ -1296,7 +1289,7 @@ async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_cont
         .await
         .is_some());
 
-    // Rows that do not decode are corruption, and the pass fails on them.
+    // Corrupt rows fail the pass.
     store.clear();
     for key in &segment_keys {
         let mut bytes = store
@@ -2836,8 +2829,7 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .expect("tail commit stays readable");
 }
 
-/// Runs one pass, either through the production entry point or with the
-/// sweep's re-verification chunk forced to a size a small fixture reaches.
+/// Runs GC with the default or an overridden re-verification chunk size.
 async fn gc_pass(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
@@ -2853,9 +2845,7 @@ async fn gc_pass(
     }
 }
 
-/// Every release trigger ends the same way, so every trigger's test asserts
-/// this half here: the pass that deletes a released record leaves the basis
-/// that record rooted standing, manifest and segments alike.
+/// Checks that a released record is deleted before its basis.
 async fn assert_record_reaped_and_basis_kept(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
@@ -2891,8 +2881,7 @@ async fn assert_record_reaped_and_basis_kept(
     }
 }
 
-/// The cascade's second half: one more pass finds the basis unreferenced and
-/// aged, and reaps it.
+/// Checks that a later pass deletes the unreferenced basis.
 async fn assert_basis_reaped(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
@@ -2917,9 +2906,6 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     assert_a_dead_records_cascade(None).await;
 }
 
-/// The same cascade with the sweep re-collecting the live set after every
-/// single decision, which is the path a pass with more candidates than one
-/// chunk takes.
 #[tokio::test]
 async fn a_chunked_sweep_reaches_the_same_dead_record_cascade() {
     assert_a_dead_records_cascade(Some(1)).await;
@@ -3518,8 +3504,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .expect("first gc pass");
     assert_eq!(first_pass.deleted.checkpoint_records, 1);
 
-    // The pass that reaps unreferenced bases runs and finds none, because
-    // the keeper still roots the shared one.
+    // The surviving record keeps the shared basis.
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("second gc pass");
@@ -3716,9 +3701,6 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     stat_root(&store, &source).await;
 }
 
-/// The fork target's head decides whether the source's fork record still has
-/// an owner. Bytes that do not decode fail the source's pass; a head the
-/// store will not read leaves the record where it was.
 #[tokio::test]
 async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains_the_record() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3740,7 +3722,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .expect("fork");
     let fork_record = read_fork_record(store.inner(), &source).await;
 
-    // An unreadable target says nothing about whether the fork still lives.
+    // An unreadable target head retains the fork record.
     store.fail_all();
     let report = gc_namespace(&store, &source, &config(), &setup)
         .await
@@ -3751,7 +3733,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         CheckpointStatus::Active {}
     );
 
-    // A head that is not a head at all is corruption.
+    // A corrupt target head fails the pass.
     store.clear();
     store
         .put_overwrite(&wal_head(&clone), Bytes::from_static(b"not json"))
@@ -3964,9 +3946,6 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
         .expect("forked file readable");
 }
 
-/// One record, two ways it can be unusable. Corrupt bytes are a namespace
-/// the pass must not touch; an unreadable store is a transport answer the
-/// pass must not read as a verdict. Both fail the pass and delete nothing.
 #[tokio::test]
 async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3997,7 +3976,7 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
     let before = namespace_keys(store.inner(), &namespace_id).await;
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
 
-    // A record the store will not read is retryable, not a verdict.
+    // An unreadable record fails without deleting anything.
     store.fail_all();
     let error = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
@@ -4013,7 +3992,7 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
         "a failed pass deletes nothing"
     );
 
-    // Bytes that are not a record at all are terminal corruption.
+    // A corrupt record reports namespace corruption.
     store.clear();
     store
         .put_overwrite(&record_key, Bytes::from_static(b"not json"))
@@ -4035,10 +4014,6 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
     );
 }
 
-/// The reference anchor is what dates every object the pass considers. A
-/// manifest that does not decode has to surface as corruption rather than
-/// degrade to "no anchor"; a manifest the store will not read is exactly the
-/// case where "no anchor" is the safe answer.
 #[tokio::test]
 async fn a_corrupt_reference_anchor_fails_and_an_unreadable_one_reads_as_missing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4079,8 +4054,7 @@ async fn a_corrupt_reference_anchor_fails_and_an_unreadable_one_reads_as_missing
         .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
         .await
         .expect("corrupt reference manifest");
-    // Overwriting the object refreshed its age, so the clock the anchor is
-    // selected against has to move past it again.
+    // The overwrite resets the object's age.
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
     let mut budget = PassBudget::new(None);
     let error = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
@@ -4093,9 +4067,6 @@ async fn a_corrupt_reference_anchor_fails_and_an_unreadable_one_reads_as_missing
     assert!(error.message().contains(&manifest_key));
 }
 
-/// A rooted manifest that does not decode is corruption the pass fails on;
-/// one the store will not read is a degraded pass that reclaims nothing.
-/// The difference is the whole retention policy for unreadable roots.
 #[tokio::test]
 async fn a_corrupt_root_manifest_fails_the_pass_and_an_unreadable_one_degrades_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4127,7 +4098,7 @@ async fn a_corrupt_root_manifest_fails_the_pass_and_an_unreadable_one_degrades_i
     let before = namespace_keys(store.inner(), &namespace_id).await;
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
 
-    // A read failure degrades the pass instead of failing it.
+    // Unreadable manifests degrade the pass.
     store.fail_all();
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
@@ -4145,7 +4116,7 @@ async fn a_corrupt_root_manifest_fails_the_pass_and_an_unreadable_one_degrades_i
         "a degraded pass reclaims nothing in the affected families"
     );
 
-    // Bytes that do not decode fail the pass instead.
+    // Corrupt manifests fail the pass.
     store.clear();
     for key in &manifest_keys {
         store

@@ -1055,9 +1055,6 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
         )));
 }
 
-/// The batch resolves a move against the put before it, and the ladder keeps
-/// climbing across the single commits that follow: put, move, copy, delete at
-/// sequences one through four.
 #[tokio::test]
 async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladder() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1399,8 +1396,6 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
     .expect("the moved inode keeps its identity under the new binding");
 }
 
-/// Create-only refuses an occupied name, whether the request spells it exactly
-/// as stored or in a casefold- and NFC-equivalent way.
 #[tokio::test]
 async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
     let temp_dir = tempdir().expect("tempdir");

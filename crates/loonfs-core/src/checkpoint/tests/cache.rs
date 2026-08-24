@@ -2,9 +2,7 @@
 
 use super::*;
 
-/// Eight files checkpointed and reorganized at one row per segment, so any
-/// scan over them has to visit more segments than the small-scan limit
-/// admits. Returns the manifest the reorganization published.
+/// Builds eight one-row segments and returns the reorganized manifest.
 async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -83,9 +81,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     );
     assert!(after_repeat.hits > after_first.hits);
 
-    // The list preload path is the other entry point onto the same cache: a
-    // page-shaped range scan over a directory whose bind rows span more
-    // segments than the small-scan limit.
+    // Scan the same cache through the range API.
     let docs_inode_id = InodeId(2);
     let lower_bound = format!("direntry-bind-{:020}-", docs_inode_id.0);
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
@@ -130,8 +126,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         "a warm range scan should be served entirely from the cache"
     );
 
-    // A budget too small to hold anything still answers: admission and
-    // eviction both happen, and the lookup is served rather than refused.
+    // A one-byte budget must still serve lookups while evicting entries.
     let degenerate = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
         max_decoded_bytes: 1,
     });

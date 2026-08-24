@@ -525,8 +525,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
         &second_materialized.metadata_state
     ));
 
-    // Two more rounds: the base run still does not move, and the delta chain
-    // just grows, one run per checkpoint in sequence order.
+    // Additional checkpoints extend the delta chain without changing its base.
     let mut checkpoint_seqs = vec![first.checkpoint_seq, second.checkpoint_seq];
     let mut latest = second;
     for index in 3..=4u64 {

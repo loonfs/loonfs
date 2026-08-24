@@ -1045,16 +1045,13 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         .await
         .expect("bootstrap");
 
-    // Ten rounds put the chain past this test's policy threshold and past
-    // the default cap as well.
+    // Exceed both the configured threshold and the default delta-run cap.
     let rounds = DEFAULT_MAX_CHECKPOINT_DELTA_RUNS + 2;
     for index in 1..=u64::try_from(rounds).expect("round count fits") {
         write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
 
-    // Checkpoints never compact: well past the policy threshold, and past
-    // the default cap that only triggers reorganization, every delta run is
-    // still chained and the base is still the seed's.
+    // Checkpointing adds delta runs; only reorganization compacts them.
     let appended = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,

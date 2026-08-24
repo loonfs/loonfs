@@ -162,9 +162,7 @@ mod tests {
         touch(&mut recency, &mut entries, "a");
         assert_eq!(recency.positions(), 1);
 
-        // Under the floor nothing is dropped, so the ghosts stay visible, and
-        // the compaction that eventually runs leaves the one live entry
-        // behind. Where the floor sits is an internal number, not a contract.
+        // Repeated touches create ghosts until compaction leaves the live entry.
         let mut previous = recency.positions();
         let mut compacted = false;
         for _ in 0..1_024 {

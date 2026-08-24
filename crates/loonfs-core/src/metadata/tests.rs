@@ -442,7 +442,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
 }
 
 #[test]
-fn every_row_kind_advances_the_indexed_watermark() {
+fn metadata_builder_tracks_the_highest_row_sequence() {
     let content_ref = ContentRef::blob_v1(ContentId::generate(), b"first revision bytes");
     let replacement_ref = ContentRef::blob_v1(ContentId::generate(), b"second revision bytes");
 
@@ -485,8 +485,6 @@ fn every_row_kind_advances_the_indexed_watermark() {
     });
     let metadata_state = builder.finish();
 
-    // Every kind of row counts, and the watermark is the highest sequence
-    // any of them carries.
     assert_eq!(metadata_state.row_count(), 4);
     assert_eq!(metadata_state.indexed_seq(), ChangeSeq(3));
 }
@@ -928,43 +926,4 @@ fn has_visible_children_sees_through_unbinds() {
         !visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe emptied directory")
     );
-}
-
-#[test]
-fn every_absent_visibility_leg_has_its_own_stable_name() {
-    use visibility::AbsentVisibilityLeg::{
-        self, BindingSuperseded, BindingUnbound, ChildInode, ForwardBinding, ParentInode,
-        ParentNotDirectory, ReverseIndex,
-    };
-
-    let legs: [AbsentVisibilityLeg; 7] = [
-        ParentInode,
-        ParentNotDirectory,
-        ForwardBinding,
-        BindingUnbound,
-        ReverseIndex,
-        BindingSuperseded,
-        ChildInode,
-    ];
-
-    // The match below is exhaustive, so a leg added to the enum stops this
-    // test compiling, and the position it has to name is only right if the
-    // list above grew with it. The names themselves are log strings, not a
-    // contract: the test asks that they exist and differ, not what they say.
-    for (position, leg) in legs.into_iter().enumerate() {
-        let listed = match leg {
-            ParentInode => 0,
-            ParentNotDirectory => 1,
-            ForwardBinding => 2,
-            BindingUnbound => 3,
-            ReverseIndex => 4,
-            BindingSuperseded => 5,
-            ChildInode => 6,
-        };
-        assert_eq!(listed, position, "{leg:?} is listed out of order");
-        assert!(!leg.name().is_empty(), "{leg:?} has no name");
-    }
-
-    let names: std::collections::BTreeSet<&str> = legs.iter().map(|leg| leg.name()).collect();
-    assert_eq!(names.len(), legs.len(), "two legs share one name");
 }

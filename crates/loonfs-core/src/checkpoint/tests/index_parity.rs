@@ -283,11 +283,6 @@ fn assert_revision_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
     }
 }
 
-/// One seed, four properties of the same fold. The namespace is written so
-/// every commit that matters sits below the advanced floor: two plain files,
-/// two revisions of one file, and a file created and deleted again. Nine
-/// write-plus-checkpoint rounds then push the runs past the reorganization
-/// trigger, and one drain folds them.
 #[tokio::test]
 async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not() {
     let temp_dir = tempdir().expect("tempdir");
@@ -356,7 +351,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     .await
     .expect("load manifest");
 
-    // Commit receipts below the floor go, and the floor's own receipt stays.
+    // Receipts below the floor are removed, but the floor's receipt remains.
     let receipts = manifest_rows_for_family(
         &materialized.metadata_state,
         ApiMetadataRowFamily::CommitReceipts,
@@ -375,8 +370,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq == floor
     )));
 
-    // Revision rows are never dropped: file history is durable data, not
-    // replay state, and its index keeps one row per revision.
+    // Revision history and its index remain complete.
     let revisions = manifest_rows_for_family(
         &materialized.metadata_state,
         ApiMetadataRowFamily::Revisions,
@@ -397,8 +391,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     );
     assert_eq!(index_rows.len(), revisions.len());
 
-    // A binding unbound below the floor goes, and so does the spent unbind
-    // marker that covered it.
+    // The deleted file's bind and unbind rows are removed.
     let binds = manifest_rows_for_family(
         &materialized.metadata_state,
         ApiMetadataRowFamily::DirentryBinds,
@@ -416,8 +409,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         "spent unbind markers survived: {unbinds:?}"
     );
 
-    // And the user-visible consequence: a revision below the floor is still
-    // restorable after the fold.
+    // Revisions below the floor can still be restored.
     let restored = restore_file_revision(
         &store,
         &namespace_id,
@@ -1023,10 +1015,6 @@ async fn manifest_rejects_missing_revision_desc_index() {
     );
 }
 
-/// Every way one revision-index segment can disagree with the revision family
-/// it indexes is refused at manifest load. One materialization pays for all
-/// four: the index segment object is restored from its original bytes before
-/// each case, so every case starts from the same durable state.
 #[tokio::test]
 async fn manifest_rejects_a_revision_desc_index_that_disagrees_with_its_family() {
     enum Rejection {
@@ -1034,7 +1022,6 @@ async fn manifest_rejects_a_revision_desc_index_that_disagrees_with_its_family()
         DuplicateRow,
     }
 
-    /// One corruption of the revision index, and the rejection it must draw.
     type IndexCorruption = (&'static str, fn(&mut Vec<MetadataRow>), Rejection);
 
     let temp_dir = tempdir().expect("tempdir");

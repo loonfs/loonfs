@@ -140,8 +140,6 @@ fn commit_id(value: &str) -> CommitId {
     CommitId::parse(value).expect("valid commit id")
 }
 
-/// One unadmitted content reference fails on its own, and two candidates that
-/// share one unadmitted reference both fail. Neither shape reads the blob.
 #[tokio::test]
 async fn unadmitted_content_fails_every_candidate_without_being_read() {
     let temp_dir = tempdir().expect("tempdir");
