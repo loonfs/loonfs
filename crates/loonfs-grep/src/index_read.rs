@@ -63,6 +63,17 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
         .ok_or_else(|| GrepError::CorruptIndex {
             message: format!("manifest references missing index segment `{object_key}`"),
         })?;
+    if bytes.len() != handle.stored_len as usize {
+        return Err(GrepError::StoreUnavailable {
+            object_key: object_key.to_owned(),
+            message: format!(
+                "ranged read returned {} bytes, expected {}",
+                bytes.len(),
+                handle.stored_len
+            ),
+            class: StoreFailureClass::Other,
+        });
+    }
     Ok(bytes.to_vec())
 }
 
@@ -152,5 +163,74 @@ fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {
         message: format!(
             "index segment `{object_key}` resolved its {expected} block to a different cache kind"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unreachable)]
+    // The stub store below serves one ranged read and reaches nothing else.
+
+    use super::{load_index_section_bytes, BlockHandle, GrepError};
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
+    use loonfs_objectstore::{
+        ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode, Result as StoreResult,
+    };
+
+    #[derive(Debug)]
+    struct ShortReadStore;
+
+    #[async_trait::async_trait]
+    impl ObjectStore for ShortReadStore {
+        async fn head(&self, _key: &str) -> StoreResult<Option<ObjectMetadata>> {
+            unreachable!()
+        }
+
+        async fn get_with_metadata(&self, _key: &str) -> StoreResult<Option<ObjectBody>> {
+            unreachable!()
+        }
+
+        async fn get(&self, _key: &str, _range: Option<ByteRange>) -> StoreResult<Option<Bytes>> {
+            Ok(Some(Bytes::from_static(b"truncated")))
+        }
+
+        async fn put(
+            &self,
+            _key: &str,
+            _bytes: Bytes,
+            _mode: PutMode,
+        ) -> StoreResult<ObjectMetadata> {
+            unreachable!()
+        }
+
+        async fn delete(&self, _key: &str) -> StoreResult<()> {
+            unreachable!()
+        }
+
+        fn list_prefix_from_stream(
+            &self,
+            _prefix: &str,
+            _start_after: Option<&str>,
+        ) -> BoxStream<'static, StoreResult<String>> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_short_ranged_read_is_a_store_failure_not_index_corruption() {
+        let handle = BlockHandle {
+            offset: 0,
+            stored_len: 64,
+            decoded_len: 64,
+            crc32c: 0,
+        };
+        let error = load_index_section_bytes(&ShortReadStore, "segments/one", &handle)
+            .await
+            .expect_err("a short ranged read should not decode");
+        assert!(
+            matches!(error, GrepError::StoreUnavailable { .. }),
+            "expected a store failure, got {error:?}"
+        );
     }
 }

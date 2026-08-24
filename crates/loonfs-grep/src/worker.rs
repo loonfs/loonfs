@@ -32,7 +32,7 @@ use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
     DEFAULT_INLINE_FILTER_MAX_BYTES, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_ROWS,
-    DEFAULT_MAX_REORGANIZATION_INPUT_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
+    DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_api::{
     decode_namespace_cursor, encode_cursor, next_public_ordinal, sha256_digest, ChangeSeq,
@@ -81,6 +81,9 @@ const MAX_GREP_WORKER_IO: usize = 8;
 const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
+/// Mid-level runs that trigger a fold into a fresh base run. Grep owns this
+/// trigger so a change to the metadata reorganization input cap cannot move it.
+const GREP_MAX_MID_RUNS: usize = 8;
 
 /// Writer-side budgets for one grep build or reorganize step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +111,7 @@ impl Default for GramIndexBuildPolicy {
             },
             max_rows_per_segment: const { NonZeroUsize::new(DEFAULT_MAX_ROWS_PER_SEGMENT).unwrap() },
             max_delta_runs: const { NonZeroUsize::new(DEFAULT_MAX_DELTA_RUNS).unwrap() },
-            max_mid_runs: const { NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_RUNS).unwrap() },
+            max_mid_runs: const { NonZeroUsize::new(GREP_MAX_MID_RUNS).unwrap() },
             max_decoded_input_rows_per_step: const {
                 NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_ROWS).unwrap()
             },
@@ -671,7 +674,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        ensure_publication_budget(&timer, publication_started_ms)?;
+        ensure_publication_budget(&timer, publication_started_ms, namespace_id)?;
         match self.advance_root(&current, &next).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
@@ -1264,7 +1267,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        ensure_publication_budget(&timer, publication_started_ms)?;
+        ensure_publication_budget(&timer, publication_started_ms, namespace_id)?;
         match self.advance_root(&current, &next).await {
             Ok(_) => Ok(reorganize_report(
                 namespace_id,
@@ -1804,11 +1807,21 @@ fn count_deleted_key(key: &str, report: &mut GrepGcReport) {
     }
 }
 
-fn ensure_publication_budget(timer: &impl MonotonicTimer, started_ms: u64) -> Result<()> {
+fn ensure_publication_budget(
+    timer: &impl MonotonicTimer,
+    started_ms: u64,
+    namespace_id: &NamespaceId,
+) -> Result<()> {
     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
     if elapsed_ms <= METADATA_PUBLICATION_BUDGET_MS {
         return Ok(());
     }
+    tracing::error!(
+        namespace_id = namespace_id.as_str(),
+        elapsed_ms,
+        budget_ms = METADATA_PUBLICATION_BUDGET_MS,
+        "grep publication overran its budget; aborting before the root compare-and-swap",
+    );
     Err(CoreError::MetadataPublicationBudgetExceeded {
         elapsed_ms,
         budget_ms: METADATA_PUBLICATION_BUDGET_MS,
@@ -1845,16 +1858,18 @@ fn core_store_error(object_key: &str, error: &ObjectStoreError) -> GrepError {
 }
 
 fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
-    let object_key = error.object_key().to_owned();
+    let fallback_object_key = error.object_key().to_owned();
     match error {
         ImmutableWriteError::DifferentObject { object_key } => GrepError::CorruptIndex {
-            message: format!("immutable object `{object_key}` contains different bytes"),
+            message: format!("immutable object `{object_key}` already exists with different bytes"),
         },
         ImmutableWriteError::Transport { object_key, source } => {
             core_store_error(&object_key, &source)
         }
-        error => GrepError::CorruptIndex {
-            message: format!("index segment `{object_key}`: {error}"),
+        error => GrepError::StoreUnavailable {
+            object_key: fallback_object_key,
+            message: error.to_string(),
+            class: StoreFailureClass::Other,
         },
     }
 }

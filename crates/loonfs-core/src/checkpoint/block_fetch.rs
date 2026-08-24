@@ -141,12 +141,19 @@ pub(super) async fn load_section_bytes<S: ObjectStore + ?Sized>(
     offset: u64,
     len: u64,
 ) -> Result<Vec<u8>, ManifestLoadError> {
+    let end_exclusive =
+        offset
+            .checked_add(len)
+            .ok_or_else(|| ManifestLoadError::SegmentDescriptorMismatch {
+                object_key: object_key.to_owned(),
+                message: "the named section runs past the address space".to_owned(),
+            })?;
     let Some(bytes) = store
         .get(
             object_key,
             Some(ByteRange {
                 start_inclusive: offset,
-                end_exclusive: offset + len,
+                end_exclusive,
             }),
         )
         .await
