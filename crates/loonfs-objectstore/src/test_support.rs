@@ -61,17 +61,15 @@ pub(crate) fn gcs_fixture_service_account_key_file(
     (dir, path)
 }
 
-/// Serializes every test that mutates process-wide AWS environment
-/// variables, which the whole process shares.
+/// Serializes tests that modify AWS environment variables.
 static AWS_ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Takes the process-environment lock. Hold the returned guard for as long as
-/// the environment stays mutated.
+/// Locks AWS environment access for a test.
 pub(crate) async fn aws_environment_lock() -> tokio::sync::MutexGuard<'static, ()> {
     AWS_ENVIRONMENT.lock().await
 }
 
-/// Restores one environment variable to what it held before, on drop.
+/// Restores an environment variable when dropped.
 pub(crate) struct EnvGuard {
     name: &'static str,
     previous: Option<std::ffi::OsString>,
@@ -100,12 +98,7 @@ impl Drop for EnvGuard {
     }
 }
 
-/// Empties the AWS credential chain's environment and points its files at a
-/// temporary directory, so a machine with real AWS variables set cannot
-/// decide a test. `environment_credentials` seeds the environment provider.
-///
-/// Hold the returned guards for the length of the test, and take
-/// [`aws_environment_lock`] first.
+/// Replaces ambient AWS credential sources for a test.
 pub(crate) fn isolated_aws_environment(
     tempdir: &tempfile::TempDir,
     environment_credentials: Option<(&str, &str, Option<&str>)>,

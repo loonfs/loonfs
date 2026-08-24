@@ -557,9 +557,6 @@ mod tests {
     const CONTENT_KEY: &str =
         "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef";
 
-    /// Credential-shaped fixture values. AWS publishes this key pair in its
-    /// own documentation, so it looks exactly like a real one without being
-    /// one.
     const FIXTURE_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
     const FIXTURE_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
     const FIXTURE_SESSION_TOKEN: &str = "FwoGZXIvYXdzEBYaDEZJWFRVUkVUT0tFTg==";
@@ -870,9 +867,6 @@ mod tests {
 
     #[test]
     fn presigner_debug_redacts_credentials() {
-        // The fixture carries credential-shaped values and the assertions
-        // search for those same constants, so a Debug that started printing
-        // one fails here instead of passing on a spelling mismatch.
         let config = S3PresignerConfig {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),

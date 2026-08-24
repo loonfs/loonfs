@@ -358,11 +358,6 @@ mod tests {
         );
     }
 
-    /// The literal key strings themselves are pinned once, by
-    /// `layout_golden_tree_matches_target_paths` in `layout.rs`. What is left
-    /// here is what that test does not cover: the listing prefixes these
-    /// builders answer with, and the parse helper that reads a segment
-    /// identity back out of a key.
     #[test]
     fn listing_prefixes_match_their_keys_and_wal_segment_ids_parse_back() {
         assert_eq!(

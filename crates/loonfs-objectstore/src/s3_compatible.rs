@@ -689,9 +689,6 @@ mod tests {
     use crate::test_support::{aws_environment_lock, isolated_aws_environment};
     use crate::{AwsS3Credentials, ObjectStoreErrorClass};
 
-    /// The credential chain is emptied first. An eager resolution would then
-    /// have nothing to resolve and would fail, so this only passes when
-    /// construction really does defer the lookup to the first call.
     #[tokio::test(flavor = "current_thread")]
     async fn ambient_aws_store_construction_does_not_resolve_credentials() {
         let _lock = aws_environment_lock().await;

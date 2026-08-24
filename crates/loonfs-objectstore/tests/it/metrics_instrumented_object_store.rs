@@ -22,13 +22,8 @@ fn bytes(bytes: &'static [u8]) -> Bytes {
     Bytes::from_static(bytes)
 }
 
-/// A path segment that appears nowhere else, built into the key the leak
-/// checks read back. Searching for a string the fixture does not contain is
-/// how a redaction assertion quietly stops testing anything.
 const SECRET_KEY_SEGMENT: &str = "secret-segment";
 
-/// A key whose own name carries [`SECRET_KEY_SEGMENT`], so a sample that
-/// leaked any part of it fails the checks below.
 fn secret_key() -> String {
     format!("namespaces/ns-1/wal/{SECRET_KEY_SEGMENT}.wal.zst")
 }

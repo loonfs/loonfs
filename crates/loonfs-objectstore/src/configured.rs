@@ -271,8 +271,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
-    /// Credential-shaped fixture values. AWS publishes this pair in its own
-    /// documentation, so it looks exactly like a real key without being one.
     const FIXTURE_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
     const FIXTURE_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 
@@ -557,9 +555,6 @@ mod tests {
 
     #[test]
     fn configured_object_store_debug_redacts_presigner_credentials() {
-        // The fixture carries credential-shaped values and the assertions
-        // search for those same constants, so a Debug that started printing
-        // either one fails here instead of passing on a spelling mismatch.
         let store = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),

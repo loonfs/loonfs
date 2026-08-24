@@ -173,8 +173,6 @@ mod tests {
 
     #[test]
     fn http_endpoint_is_allowed_for_emulator() {
-        // Azurite is addressed over plain HTTP, and the scheme check reads the
-        // spelling the operator wrote, so both cases have to build a store.
         for endpoint_url in [
             "http://127.0.0.1:10000/devstoreaccount1",
             "HTTP://127.0.0.1:10000/devstoreaccount1",
