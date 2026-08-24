@@ -47,8 +47,7 @@ pub(super) struct FlushedBasis {
     pub(super) head_commit_id: CommitId,
     /// Head sequence the attempt targeted.
     pub(super) target_head_seq: ChangeSeq,
-    /// Manifest `metadata/root.json` references after the attempt — the
-    /// basis itself, or the newer root that superseded it.
+    /// Manifest referenced by `metadata/root.json` after the attempt.
     pub(super) root_after_manifest_no: ManifestNo,
     /// Sequence covered by `root_after_manifest_no`.
     pub(super) root_after_head_seq: ChangeSeq,
@@ -56,9 +55,8 @@ pub(super) struct FlushedBasis {
 }
 
 pub(super) enum TryFlushWal {
-    /// The attempt reached a basis. That basis may have been published by
-    /// this attempt, already current before it, or superseded by a newer
-    /// root while it ran — settled, not necessarily flushed.
+    /// The attempt finished with a valid basis, whether or not it published
+    /// that basis itself.
     Settled(Box<FlushedBasis>),
     /// The root compare-and-swap raced another publisher to exhaustion;
     /// retry against a fresh projection.
@@ -163,9 +161,8 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     // so this attempt must abort without publishing (format spec, "Garbage
     // collection", rule 1). The orphans are reclaimed by a later pass.
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
-    // Advance the root for readers. A superseded outcome is fine: the
-    // manifest we wrote stays durable and valid as a basis even when a
-    // newer root already won.
+    // Advance the root. If another publisher updates it first, this attempt's
+    // manifest remains valid but unreferenced.
     let (outcome, root_after_manifest_no, root_after_head_seq) = match publish_metadata_root(
         store,
         namespace_id,
@@ -188,7 +185,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
             manifest.payload.head_seq,
         ),
         ManifestPublicationOutcome::Superseded(current) => (
-            FlushWalOutcome::Superseded,
+            FlushWalOutcome::RootAdvanced,
             current.manifest.manifest_no,
             current.manifest.manifest_head_seq,
         ),

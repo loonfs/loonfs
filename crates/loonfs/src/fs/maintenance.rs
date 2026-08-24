@@ -169,15 +169,12 @@ impl FsAdmin {
 
     /// Runs one bounded maintenance step against a namespace.
     ///
-    /// Selection is presence: the step runs exactly the actions `plan`
-    /// carries, in the order metadata upkeep, retention advance, garbage
-    /// collection. Nothing surrenders replay history or sweeps objects
-    /// unless the plan named it, and a plan naming nothing is rejected
-    /// rather than answered with an empty report.
+    /// The step runs the actions present in `plan`, in this order: metadata
+    /// maintenance, retention advancement, then garbage collection. A plan
+    /// with no actions is rejected.
     ///
-    /// Every action reports separately, and an absent report means the plan
-    /// did not select that action. Losing the head race or being superseded
-    /// by another publisher is an outcome, not an error.
+    /// Each selected action has its own report. Concurrent publication is
+    /// reported as an outcome rather than an error.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.step",
@@ -273,8 +270,8 @@ impl FsAdmin {
     }
 
     /// Optionally flushes the WAL tail, then runs one reorganization step.
-    /// `observed_head_seq` is reported only if another publisher wins the
-    /// head race.
+    /// `observed_head_seq` is reported when concurrent updates prevent every
+    /// flush attempt from publishing.
     async fn flush_then_reorganize(
         &self,
         namespace_id: &NamespaceId,
@@ -287,15 +284,16 @@ impl FsAdmin {
                     FlushWalOutcome::Published => WalFlushStepOutcome::Flushed {
                         manifest_head_seq: flush.manifest_head_seq,
                     },
-                    FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::Superseded => {
-                        WalFlushStepOutcome::Superseded {
+                    // In both cases, this flush did not update the root.
+                    FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::RootAdvanced => {
+                        WalFlushStepOutcome::AlreadyPublished {
                             attempted_seq: flush.target_head_seq,
                             current_manifest_no: flush.manifest_no,
                         }
                     }
                 },
                 Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
-                    WalFlushStepOutcome::RaceLost { observed_head_seq }
+                    WalFlushStepOutcome::RetriesExhausted { observed_head_seq }
                 }
                 Err(error) => return Err(error),
             }
@@ -405,8 +403,10 @@ impl FsAdmin {
                 return Ok(ReorganizationStep::CompactionPlanned(spec))
             }
             loonfs_core::MetadataReorganizeOutcome::Superseded => {
-                tracing::info!("metadata reorganization unit superseded; will retry");
-                ReorganizeStepOutcome::Superseded
+                tracing::info!(
+                    "metadata root changed before reorganization published; a later step retries"
+                );
+                ReorganizeStepOutcome::RootAdvanced
             }
         }))
     }

@@ -1042,7 +1042,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "ReorganizeStepOutcomeCompactionRunning",
                 "ReorganizeStepOutcomeCompactionAtCapacity",
                 "ReorganizeStepOutcomeCompactionRequired",
-                "ReorganizeStepOutcomeSuperseded",
+                "ReorganizeStepOutcomeRootAdvanced",
             ][..],
         ),
         (
@@ -1050,8 +1050,8 @@ fn openapi_names_tagged_one_of_alternatives() {
             &[
                 "WalFlushStepOutcomeNotNeeded",
                 "WalFlushStepOutcomeFlushed",
-                "WalFlushStepOutcomeSuperseded",
-                "WalFlushStepOutcomeRaceLost",
+                "WalFlushStepOutcomeAlreadyPublished",
+                "WalFlushStepOutcomeRetriesExhausted",
             ][..],
         ),
     ] {

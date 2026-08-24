@@ -96,15 +96,15 @@ pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u6
         WalFlushStepOutcome::Flushed { manifest_head_seq } => {
             format!("wal flushed @ seq {}", manifest_head_seq.0)
         }
-        WalFlushStepOutcome::Superseded {
+        WalFlushStepOutcome::AlreadyPublished {
             attempted_seq,
             current_manifest_no,
         } => format!(
-            "wal flush @ seq {} superseded (current manifest {current_manifest_no})",
+            "wal flush @ seq {} already published (current manifest {current_manifest_no})",
             attempted_seq.0
         ),
-        WalFlushStepOutcome::RaceLost { observed_head_seq } => format!(
-            "wal flush race lost (head moved past seq {})",
+        WalFlushStepOutcome::RetriesExhausted { observed_head_seq } => format!(
+            "wal flush ran out of attempts (head was at seq {})",
             observed_head_seq.0
         ),
     }

@@ -134,7 +134,10 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                             "one family group needs a compaction this server will not run on its \
                              own"
                         }
-                        ReorganizeStepOutcome::Superseded => "reorganize superseded",
+                        ReorganizeStepOutcome::RootAdvanced => {
+                            "another publisher moved the metadata root, so the reorganize \
+                             published nothing"
+                        }
                     }
                     .to_owned(),
                 );

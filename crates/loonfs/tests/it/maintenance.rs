@@ -700,7 +700,7 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
 
     assert_eq!(
         upkeep(&step).wal_flush,
-        WalFlushStepOutcome::RaceLost {
+        WalFlushStepOutcome::RetriesExhausted {
             observed_head_seq: ChangeSeq(1)
         }
     );
