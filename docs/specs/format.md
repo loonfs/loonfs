@@ -785,13 +785,7 @@ record and writes `deleted_direntry` as `null`; the field is always
 written, so omitting it is corruption rather than an unnamed deletion. Only a
 `set` includes this field. A reader ignores it on a `revoke`, just like any
 other unknown field (encoding conventions above). A partial binding is not
-valid. This schema
-evolves in place at metadata-row version 1 before the first stable
-release; the implementation carries no compatibility shim for intermediate
-pre-release encodings, and in particular the earlier encoding that spelled
-the generation as `tombstone_seq` and `tombstone_delta_index` beside
-independent optional `parent_inode_id`, `name_key`, and `display_name`
-fields does not decode.
+valid.
 
 The `active_deletions` family tracks deletions that can still be restored. A
 `set` tombstone creates a `listed` row keyed by `(deletion_seq,
@@ -1740,11 +1734,6 @@ namespace. An embedded caller that wants a retry after a lost
 acknowledgment to succeed asks for that explicitly, with its
 create-if-not-exists option.
 
-This is a strictly better answer than the previous protocol gave. The
-namespace named by `namespace_exists` is complete and usable; the multi-object
-install could leave a namespace that existed, could not be used, and could
-only be finished by an explicit repair.
-
 ### 3.10 Long-running operations
 
 Some operations are not well described by one request.
@@ -1865,10 +1854,7 @@ Two rules govern an absent value in every durable encoding.
    `deleted_direntry`, and three deletion records write it either way: the
    tombstone `set` action, the `active_deletions` `listed` action, and the WAL
    `tombstone_subtree` delta. A delete addressed by inode recorded no binding,
-   so it writes `null`. A record that omits the field fails to decode. An
-   earlier layout spelled the same binding as three separate optional fields,
-   and refusing the omission keeps those bytes from decoding as a delete that
-   recorded no name.
+   so it writes `null`. A record that omits the field fails to decode.
 
 ### 4.2 Format families and versions
 
@@ -2041,11 +2027,8 @@ It holds what every phase has — the in-progress `reorganize` state and the
   the cursor sits at a commit boundary;
 - `disabled`: no fields, no segments, and no reorganization.
 
-A phase carrying another phase's sequence is not representable. Before the
-first stable release, this nested schema evolves in place at version 1; the
-implementation carries no compatibility shim for intermediate pre-release
-encodings, and a namespace can rebuild its derived index from a fresh
-checkpoint.
+A phase carrying another phase's sequence is not representable. The index is
+derived state and can be rebuilt from a fresh checkpoint.
 
 A gram-index segment uses the section 4.2.1 block grammar unchanged —
 prefix-compressed data blocks, one bloom filter block, one index block,
