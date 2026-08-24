@@ -26,7 +26,10 @@ pub mod root;
 mod service;
 mod worker;
 
-pub use cache::{GrepBlockCache, GrepBlockCacheStats, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
+pub use cache::{
+    new_grep_block_cache, DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey,
+    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+};
 pub use config::{GrepWorkerConfig, GrepWorkerConfigError};
 pub use error::GrepError as Error;
 pub use error::{GrepError, Result};

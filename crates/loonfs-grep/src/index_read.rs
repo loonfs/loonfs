@@ -94,7 +94,7 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
             );
             Ok::<_, GrepError>(DecodedGrepBlock::Filter {
                 filter,
-                decoded_byte_len: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_len as usize,
             })
         })
         .await?;
@@ -121,7 +121,7 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
             );
             Ok::<_, GrepError>(DecodedGrepBlock::Index {
                 entries,
-                decoded_byte_len: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_len as usize,
             })
         })
         .await?;
@@ -148,7 +148,7 @@ pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
             );
             Ok::<_, GrepError>(DecodedGrepBlock::Data {
                 block,
-                decoded_byte_len: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_len as usize,
             })
         })
         .await?;

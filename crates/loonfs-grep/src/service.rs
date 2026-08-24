@@ -119,7 +119,7 @@ impl GrepService {
                 // As with the metadata manifest cache, JSON-backed decoded
                 // state is weighted at twice its canonical payload bytes to
                 // cover both owned strings and decoded structure overhead.
-                let decoded_byte_len = serde_json::to_vec(manifest.manifest_state())
+                let decoded_bytes = serde_json::to_vec(manifest.manifest_state())
                     .map_err(|error| {
                         CoreError::Internal(format!(
                             "failed to size decoded grep manifest `{}`: {error}",
@@ -130,7 +130,7 @@ impl GrepService {
                     .saturating_mul(2);
                 Ok(DecodedGrepBlock::Manifest {
                     state,
-                    decoded_byte_len,
+                    decoded_bytes,
                 })
             })
             .await

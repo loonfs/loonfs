@@ -344,7 +344,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
         assert!(matches!(
             error,
             GrepError::Runtime(RuntimeError::Core(CoreError::Internal(message)))
-                if message.contains("grep run number cannot exceed")
+                if message.contains("grep run number must be an integer")
         ));
     }
 

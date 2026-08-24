@@ -3,6 +3,7 @@
 //! The frozen tokenizer, posting-batch, and row-key grammar is specified in
 //! [`docs/specs/format.md` §4.2.2](../../../docs/specs/format.md#422-grep-roots-manifests-and-gram-index-segments).
 
+use loonfs_api::wire::sst_blocks::{read_varint, write_varint, SstBlockCodecError};
 use loonfs_api::{InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -133,7 +134,7 @@ pub fn encode_gram_postings(postings: &[GramPosting]) -> Result<Vec<u8>, IndexGr
 /// and that the batch ends exactly where its bytes do.
 pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGramsCodecError> {
     let mut cursor = 0usize;
-    let count = read_varint(bytes, &mut cursor)?;
+    let count = read_varint(bytes, &mut cursor).map_err(malformed_varint)?;
     if count == 0 {
         return Err(IndexGramsCodecError::EmptyPostings);
     }
@@ -149,12 +150,12 @@ pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGrams
     }
     let mut postings = Vec::with_capacity(count);
     let mut previous = GramPosting {
-        inode_id: InodeId(read_varint(bytes, &mut cursor)?),
+        inode_id: InodeId(read_varint(bytes, &mut cursor).map_err(malformed_varint)?),
         revision_no: read_revision_no(bytes, &mut cursor)?,
     };
     postings.push(previous);
     for _ in 1..count {
-        let inode_delta = read_varint(bytes, &mut cursor)?;
+        let inode_delta = read_varint(bytes, &mut cursor).map_err(malformed_varint)?;
         let inode_id = previous
             .inode_id
             .0
@@ -187,43 +188,14 @@ pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGrams
 }
 
 fn read_revision_no(bytes: &[u8], cursor: &mut usize) -> Result<RevisionNo, IndexGramsCodecError> {
-    let value = read_varint(bytes, cursor)?;
+    let value = read_varint(bytes, cursor).map_err(malformed_varint)?;
     RevisionNo::parse(value).map_err(|error| {
         IndexGramsCodecError::Malformed(format!("invalid posting revision `{value}`: {error}"))
     })
 }
 
-fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value == 0 {
-            bytes.push(byte);
-            return;
-        }
-        bytes.push(byte | 0x80);
-    }
-}
-
-fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, IndexGramsCodecError> {
-    let mut value = 0u64;
-    let mut shift = 0u32;
-    loop {
-        let byte = *bytes.get(*cursor).ok_or_else(|| {
-            IndexGramsCodecError::Malformed("varint runs past the block".to_owned())
-        })?;
-        *cursor += 1;
-        if shift >= 64 {
-            return Err(IndexGramsCodecError::Malformed(
-                "varint exceeds 64 bits".to_owned(),
-            ));
-        }
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-        shift += 7;
-    }
+fn malformed_varint(error: SstBlockCodecError) -> IndexGramsCodecError {
+    IndexGramsCodecError::Malformed(error.to_string())
 }
 
 /// One row of a gram index segment. Kind-tagged so a later released format

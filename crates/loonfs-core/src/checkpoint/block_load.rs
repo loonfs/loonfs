@@ -6,6 +6,7 @@ use super::data_block_load::load_segment_data_block_span;
 use super::error::ManifestLoadError;
 use super::scan::Readahead;
 use super::validate::validate_manifest_row_seq_range;
+use crate::block_cache::DecodedBlock as _;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, DecodedDataBlock};
 use loonfs_objectstore::keys::metadata_segment_object_key;
