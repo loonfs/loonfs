@@ -1844,6 +1844,22 @@ Every durable lifecycle field is named `status`, is always present, and uses a
 `kind`-tagged object. HTTP responses flatten the same data beside their
 `status` field.
 
+Two rules govern an absent value in every durable encoding.
+
+1. **An optional field is omitted when it has no value, and absence never
+   means a default.** Every field that has a value is written, including a
+   zero number and an empty list. "Absent means the default" would be a third
+   state beside present and absent, and no schema language states it, so no
+   durable encoding writes one.
+2. **One field is written as `null` instead of being omitted.** That field is
+   `deleted_direntry`, and three deletion records write it either way: the
+   tombstone `set` action, the `active_deletions` `listed` action, and the WAL
+   `tombstone_subtree` delta. A delete addressed by inode recorded no binding,
+   so it writes `null`. A record that omits the field fails to decode. An
+   earlier layout spelled the same binding as three separate optional fields,
+   and refusing the omission keeps those bytes from decoding as a delete that
+   recorded no name.
+
 ### 4.2 Format families and versions
 
 | Family | `kind` | Encoding | Current version |
@@ -2011,7 +2027,8 @@ It holds what every phase has — the in-progress `reorganize` state and the
 - `backfilling`: `target_seq` (the namespace sequence the pinned checkpoint
   captured), optional `cursor_inode_id` (the inode the walk resumes strictly
   after), and `checkpoint_id`;
-- `active`: `built_through_seq` and an optional `next_event_index`;
+- `active`: `built_through_seq` and `next_event_index`, which is zero when
+  the cursor sits at a commit boundary;
 - `disabled`: no fields, no segments, and no reorganization.
 
 A phase carrying another phase's sequence is not representable. Before the
@@ -2098,16 +2115,27 @@ and grep maintenance does not collect core-owned objects.
   the payload encoding — requires a new `format_version` for the owning family.
   Readers reject versions they do not support with a typed unsupported-version
   error; there is no silent fallback.
-- **Digest strings are self-describing.** Durable digest values carry their
-  algorithm as a prefix (`sha256:<hex>`) so a future algorithm can be
-  introduced without re-interpreting old values. Commit fingerprints
+- **A durable digest names its algorithm, and where the algorithm is chosen
+  decides the shape.** Three shapes cover every durable digest. An envelope,
+  pointer, or whole-object digest is the string `sha256:<64 lowercase hex>`:
+  `payload_checksum`, `manifest_payload_checksum`, and `object_checksum` are
+  written this way, and the prefix lets a future algorithm be introduced
+  without re-interpreting old values. A content or part checksum is an object
+  with an `algorithm` field and a `value` field, because the algorithm is
+  negotiated per transfer (section 1.6). The algorithm is its own field there,
+  so the value carries no prefix. A block CRC is a bare integer whose field
+  name is the algorithm, `crc32c` in a block handle (section 4.2.1), because a
+  handle is fixed-size and the format fixes the algorithm. Commit fingerprints
   additionally carry their canonicalization scheme (`v1:sha256:<hex>`, section
   3.3.1) because their preimage rules can evolve independently of the
   algorithm.
-- **Unknown content-ref kinds round-trip.** A reader that does not understand
-  a `content_ref.kind` must preserve the original string when relaying or
-  rewriting rows; it must not create new references with kinds it does not
-  understand (section 3.1.3).
+- **Unknown content-ref kinds round-trip in immutable records.** A reader that
+  does not understand a `content_ref.kind` must preserve the original string
+  when it relays or rewrites an immutable record, so a later format version
+  can add a kind. A reader of a mutable control object rejects an unknown kind
+  instead, because a guarded rewrite must not carry a kind it cannot validate.
+  No reader may create new references with kinds it does not understand
+  (section 3.1.3).
 - **Every encoding is pinned by golden-byte fixtures**
   (`crates/loonfs-api/tests/golden_formats.rs`). An encoder change that alters
   durable bytes fails those tests. During pre-release development, an

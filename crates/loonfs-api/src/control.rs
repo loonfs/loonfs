@@ -511,11 +511,9 @@ pub struct HeadState {
     /// Chain links remain the only history authority — any disagreement
     /// resolves in favor of the chain, and this array never protects anything
     /// from GC.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "strict_wal_segment_pointers"
-    )]
+    /// An empty list is written as `[]`. A head that omits the field fails
+    /// to decode.
+    #[serde(deserialize_with = "strict_wal_segment_pointers")]
     pub recent_segments: Vec<WalSegmentPointer>,
     /// Whether the namespace is active or terminally deleted. Every head
     /// writes it, and a head that omits it fails to decode.
@@ -1177,9 +1175,7 @@ mod tests {
         if let Some(tip) = visible_wal_tip {
             head["visible_wal_tip"] = tip;
         }
-        if !recent_segments.is_empty() {
-            head["recent_segments"] = serde_json::Value::Array(recent_segments);
-        }
+        head["recent_segments"] = serde_json::Value::Array(recent_segments);
         head
     }
 
@@ -1270,6 +1266,24 @@ mod tests {
             .expect("a head with no visible tip decodes");
         assert_eq!(genesis.visible_wal_tip, None);
         assert!(genesis.recent_segments.is_empty());
+    }
+
+    /// A head with no predecessor hints writes an empty list, so a head that
+    /// omits the field is not a head this format wrote.
+    #[test]
+    fn a_head_that_omits_its_predecessor_hints_does_not_decode() {
+        let mut head = head_json(None, Vec::new());
+        assert_eq!(head["recent_segments"], serde_json::json!([]));
+        head.as_object_mut()
+            .expect("the head is a JSON object")
+            .remove("recent_segments");
+
+        let error = serde_json::from_value::<HeadState>(head)
+            .expect_err("a head without `recent_segments` is corruption");
+        assert!(
+            error.to_string().contains("recent_segments"),
+            "the rejection should name the field: {error}"
+        );
     }
 
     #[test]
