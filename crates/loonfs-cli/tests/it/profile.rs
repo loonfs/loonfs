@@ -1015,6 +1015,53 @@ fn profile_create_rejects_token_over_non_loopback_http_before_writing() {
         !harness.config_path.exists(),
         "unsafe profile must be rejected before creating the config file"
     );
+
+    let ambient = harness.run_with_env(
+        &[("LOONFS_AUTH_TOKEN", "ambient-auth-token")],
+        &[
+            "--json",
+            "profile",
+            "create",
+            "remote",
+            "default",
+            "--server-url",
+            "http://example.internal",
+        ],
+    );
+    assert_failure(&ambient);
+    let error = json_error(&ambient);
+    assert_eq!(error["code"], "invalid_config");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("json string")
+            .contains("bearer tokens require https except for loopback http URLs"),
+        "{error}"
+    );
+    assert!(
+        !harness.config_path.exists(),
+        "a profile no request could use must not be written"
+    );
+}
+
+#[test]
+fn an_ambient_token_does_not_invalidate_an_unselected_profile() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&[
+        "profile",
+        "create",
+        "remote",
+        "unused",
+        "--server-url",
+        "http://example.internal",
+    ]));
+
+    let listed = harness.run_with_env(
+        &[("LOONFS_AUTH_TOKEN", "ambient-auth-token")],
+        &["profile", "list"],
+    );
+    assert_success(&listed);
 }
 
 #[test]

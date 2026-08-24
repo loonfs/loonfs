@@ -33,6 +33,21 @@ struct FileJob {
     content_ref: Option<loonfs_api::ContentRef>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryOutcome {
+    Created,
+    AlreadyExists,
+}
+
+impl DirectoryOutcome {
+    fn progress_label(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::AlreadyExists => "already exists",
+        }
+    }
+}
+
 struct TreeTally {
     files: u64,
     directories: u64,
@@ -48,12 +63,26 @@ impl TreeTally {
         }
     }
 
+    fn record_directory(&mut self, outcome: DirectoryOutcome) {
+        if outcome == DirectoryOutcome::Created {
+            self.directories += 1;
+        }
+    }
+
     fn fail(&mut self, path: impl Into<String>, error: CliError) {
         self.failures.push(TreeTransferFailure {
             path: path.into(),
             error,
         });
     }
+}
+
+fn create_local_directory(path: &Path) -> std::io::Result<DirectoryOutcome> {
+    if path.is_dir() {
+        return Ok(DirectoryOutcome::AlreadyExists);
+    }
+    std::fs::create_dir_all(path)?;
+    Ok(DirectoryOutcome::Created)
 }
 
 /// Returns the total size when every file length is known.
@@ -135,7 +164,7 @@ pub(crate) async fn run_put_tree(
                 continue;
             }
         };
-        let progress_label = match context
+        let outcome = match context
             .target
             .create_directory(
                 &spec,
@@ -150,14 +179,16 @@ pub(crate) async fn run_put_tree(
             )
             .await
         {
-            Ok(_) => "created",
+            Ok(_) => DirectoryOutcome::Created,
             Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
                 match context
                     .target
                     .get_path_entry_without_attributes(&spec)
                     .await
                 {
-                    Ok(entry) if entry.inode_kind() == InodeKind::Directory => "already exists",
+                    Ok(entry) if entry.inode_kind() == InodeKind::Directory => {
+                        DirectoryOutcome::AlreadyExists
+                    }
                     Ok(_) => {
                         tally.fail(remote, error.into());
                         continue;
@@ -173,9 +204,13 @@ pub(crate) async fn run_put_tree(
                 continue;
             }
         };
-        tally.directories += 1;
+        tally.record_directory(outcome);
         if runtime.progress.human_lines_enabled() {
-            write_stderr_progress(format_args!("{progress_label} {}", spec_target(&spec)));
+            write_stderr_progress(format_args!(
+                "{} {}",
+                outcome.progress_label(),
+                spec_target(&spec)
+            ));
         }
     }
 
@@ -273,9 +308,9 @@ pub(crate) async fn run_get_tree(
 ) -> Result<CommandOutput, CommandFailure> {
     let mut tally = TreeTally::new();
     // Fail early if the destination cannot be created.
-    std::fs::create_dir_all(local_root)
+    let root_outcome = create_local_directory(local_root)
         .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;
-    tally.directories += 1;
+    tally.record_directory(root_outcome);
     let listing = walk_remote_tree(context, kind, "remote_path", remote_root).await?;
     if !runtime.json {
         if let Some(drift) = listing.head_drift.as_ref() {
@@ -286,8 +321,8 @@ pub(crate) async fn run_get_tree(
 
     for components in &listing.directories {
         let local_dir = local_root.join(components.join("/"));
-        match std::fs::create_dir_all(&local_dir) {
-            Ok(()) => tally.directories += 1,
+        match create_local_directory(&local_dir) {
+            Ok(outcome) => tally.record_directory(outcome),
             Err(error) => tally.fail(
                 local_dir.display().to_string(),
                 CliError::io_for_path(&local_dir, error),
@@ -425,7 +460,7 @@ pub(crate) async fn run_copy_tree(
             .await
         {
             Ok(_) => {
-                tally.directories += 1;
+                tally.record_directory(DirectoryOutcome::Created);
                 if runtime.progress.human_lines_enabled() {
                     write_stderr_progress(format_args!("created {}", spec_target(&spec)));
                 }

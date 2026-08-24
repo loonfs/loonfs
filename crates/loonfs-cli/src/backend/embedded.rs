@@ -37,6 +37,7 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, Sto
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
 
+use super::progress::{wait_for_grep_index, GrepWaitStep};
 use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, StepBudget};
 
 /// Purpose-specific handles over one shared store client: reads go through
@@ -374,37 +375,32 @@ impl EmbeddedBackend {
     ) -> Result<GrepWaitProgress, BackendError> {
         let worker = self.grep_worker();
         let job = GrepMaintenanceJob::new(worker.clone(), GramIndexBuildPolicy::default());
-        let timer = StdMonotonicTimer::default();
-        let started_ms = timer.monotonic_now_ms();
-        let mut steps = 0;
-        let mut settled = false;
-        loop {
-            let lifecycle = GrepIndexLifecycle::from(
-                &worker
+        wait_for_grep_index(
+            target_seq,
+            budget,
+            || async {
+                let status = worker
                     .lifecycle(namespace_id)
                     .await
-                    .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?,
-            );
-            let reached = lifecycle.is_built_through(target_seq);
-            let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
-            if reached || settled || budget.spent(steps, elapsed_ms) {
-                return Ok(GrepWaitProgress { steps, reached });
-            }
-            let conclusion = job
-                .step(namespace_id, None)
-                .await
-                .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?
-                .conclusion;
-            steps += 1;
-            // A step that settled short of the target says the index has
-            // nothing more to do — disabled underneath us, or blocked on a
-            // budget of its own. Repeating it would only spin, so the next
-            // turn of this loop reports where it stopped.
-            settled = !matches!(
-                conclusion,
-                MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded
-            );
-        }
+                    .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?;
+                Ok(GrepIndexLifecycle::from(&status))
+            },
+            || async {
+                let conclusion = job
+                    .step(namespace_id, None)
+                    .await
+                    .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?
+                    .conclusion;
+                Ok(match conclusion {
+                    MaintenanceStepConclusion::Progressed
+                    | MaintenanceStepConclusion::Superseded => GrepWaitStep::Continue,
+                    MaintenanceStepConclusion::Idle
+                    | MaintenanceStepConclusion::Blocked
+                    | MaintenanceStepConclusion::NotEnabled => GrepWaitStep::Settled,
+                })
+            },
+        )
+        .await
     }
 
     /// Registers the jobs this process composes itself, then resolves every

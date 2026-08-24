@@ -21,7 +21,9 @@ use std::io::{self, Write};
 
 pub(crate) use human::{human_path_entry, human_success};
 pub(crate) use json::{json_error, json_success, render_parse_error};
-pub(crate) use summaries::format_utc_ms;
+pub(crate) use summaries::{
+    gc_pass_line, store_probe_summary_line, store_probe_verdict, StoreProbeVerdict,
+};
 
 pub(crate) fn render_success(output: &CommandOutput, json_mode: bool) -> io::Result<()> {
     if json_mode {

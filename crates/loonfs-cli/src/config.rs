@@ -1,6 +1,7 @@
 //! The CLI config file: profiles, defaults, and strict TOML loading.
 
 use crate::error::CliError;
+use loonfs_api::env::AUTH_TOKEN_ENV;
 use loonfs_api::{ActorId, ActorKind, ActorRef, NamespaceId, SecretString};
 use loonfs_client::{ClientConfig, ClientError};
 use loonfs_objectstore::StoreConfigError;
@@ -202,7 +203,7 @@ impl ProfileConfig {
                 ca_cert_path,
             } => {
                 validate_actor_and_default_namespace(name, actor, default_namespace.as_deref())?;
-                validate_remote_client_config(
+                validate_stored_remote_client_config(
                     name,
                     server_url,
                     auth_token.as_ref(),
@@ -648,21 +649,68 @@ fn validate_default_namespace(field: &str, value: &str) -> Result<(), CliError> 
         .map_err(|err| CliError::invalid_config(format!("invalid `{field}`: {err}")))
 }
 
+/// Builds the client configuration used by a remote profile.
+pub(crate) fn remote_client_config(
+    server_url: &str,
+    auth_token: Option<&SecretString>,
+    ca_cert_path: Option<&str>,
+    no_retry: bool,
+) -> ClientConfig {
+    remote_client_config_from(
+        server_url,
+        auth_token,
+        ca_cert_path,
+        no_retry,
+        non_empty_env,
+    )
+}
+
+fn remote_client_config_from(
+    server_url: &str,
+    auth_token: Option<&SecretString>,
+    ca_cert_path: Option<&str>,
+    no_retry: bool,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> ClientConfig {
+    ClientConfig {
+        server_url: server_url.to_owned(),
+        auth_token: auth_token.cloned().or_else(|| {
+            lookup(AUTH_TOKEN_ENV)
+                .filter(|token| !token.trim().is_empty())
+                .map(SecretString::from)
+        }),
+        request_timeout_ms: None,
+        disable_transient_retry: no_retry,
+        ca_cert_path: ca_cert_path.map(ToOwned::to_owned),
+    }
+}
+
 pub(crate) fn validate_remote_client_config(
     profile_name: &str,
     server_url: &str,
     auth_token: Option<&SecretString>,
     ca_cert_path: Option<&str>,
 ) -> Result<(), CliError> {
-    ClientConfig {
-        server_url: server_url.to_owned(),
-        auth_token: auth_token.cloned(),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: ca_cert_path.map(ToOwned::to_owned),
-    }
-    .validate()
-    .map_err(|error| match error {
+    validate_client_config(
+        profile_name,
+        remote_client_config(server_url, auth_token, ca_cert_path, false),
+    )
+}
+
+fn validate_stored_remote_client_config(
+    profile_name: &str,
+    server_url: &str,
+    auth_token: Option<&SecretString>,
+    ca_cert_path: Option<&str>,
+) -> Result<(), CliError> {
+    validate_client_config(
+        profile_name,
+        remote_client_config_from(server_url, auth_token, ca_cert_path, false, |_| None),
+    )
+}
+
+fn validate_client_config(profile_name: &str, config: ClientConfig) -> Result<(), CliError> {
+    config.validate().map_err(|error| match error {
         ClientError::MissingConfigField { field } => {
             CliError::invalid_config(format!("missing `{}`", profile_field(profile_name, field)))
         }
@@ -679,7 +727,49 @@ mod tests {
     #![allow(clippy::panic)]
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::{CliConfig, ProfileConfig};
+    use super::{remote_client_config_from, CliConfig, ProfileConfig};
+    use loonfs_api::env::AUTH_TOKEN_ENV;
+    use loonfs_api::SecretString;
+
+    #[test]
+    fn a_remote_profile_takes_its_token_from_the_config_then_the_environment() {
+        let stored = SecretString::from("stored-token");
+        let from_config = remote_client_config_from(
+            "https://loonfs.example.com",
+            Some(&stored),
+            None,
+            false,
+            |_| Some("env-token".to_owned()),
+        );
+        assert_eq!(
+            from_config.auth_token.as_ref().map(SecretString::expose),
+            Some("stored-token")
+        );
+        assert!(!from_config.disable_transient_retry);
+
+        let from_environment =
+            remote_client_config_from("https://loonfs.example.com", None, None, true, |name| {
+                assert_eq!(name, AUTH_TOKEN_ENV);
+                Some("env-token".to_owned())
+            });
+        assert_eq!(
+            from_environment
+                .auth_token
+                .as_ref()
+                .map(SecretString::expose),
+            Some("env-token")
+        );
+        assert!(
+            from_environment.disable_transient_retry,
+            "--no-retry reaches the client"
+        );
+
+        let blank =
+            remote_client_config_from("https://loonfs.example.com", None, None, false, |_| {
+                Some("  ".to_owned())
+            });
+        assert!(blank.auth_token.is_none());
+    }
 
     fn parse(contents: &str) -> Result<CliConfig, toml::de::Error> {
         toml::from_str(contents)
