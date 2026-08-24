@@ -19,7 +19,6 @@ fn completion_covers_capabilities_and_doctor_selectors() {
         assert!(script.contains(surface), "missing {surface} in completion");
     }
 
-    // The other supported shell renders the same command surface its own way.
     let bash = loonfs()
         .args(["completion", "--shell", "bash"])
         .output()

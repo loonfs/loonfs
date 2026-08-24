@@ -339,8 +339,6 @@ mod tests {
 
     #[test]
     fn human_stat_omits_the_absent_root_name() {
-        // The name line is the subject here, so the block's other fields are
-        // checked for presence rather than pinned as one joined string.
         let root = human_success(&stat_output(path_entry("/", None)));
         for line in [
             "path: /",
@@ -667,8 +665,6 @@ mod tests {
         error.param = Some("/pattern".to_owned());
         error.request_id = Some("req_human".to_owned());
 
-        // Which diagnostics reach the reader is the subject, not how the
-        // lines are joined.
         let rendered = human_error(&error);
         assert!(rendered.contains("grep is not served"), "{rendered}");
         assert!(rendered.contains("request id: req_human"), "{rendered}");
@@ -693,8 +689,6 @@ mod tests {
             },
         };
 
-        // Collapsing to a single detail line is the subject, so the line
-        // count carries the rule and the pieces are checked for presence.
         let rendered = human_success(&output);
         assert_eq!(rendered.lines().count(), 2, "{rendered}");
         assert!(rendered.contains("auth: failed"), "{rendered}");

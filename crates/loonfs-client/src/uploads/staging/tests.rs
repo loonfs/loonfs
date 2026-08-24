@@ -504,9 +504,6 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
         .into_iter()
         .all(|algorithm| algorithm == ChecksumAlgorithm::Crc32c));
     assert_eq!(retention.total_bytes(), TEST_PAYLOAD_BYTES as u64);
-    // One request per missing part, plus the completion and the commit. The
-    // exact request sequence of a resume is the subject of
-    // `a_resumed_multipart_put_uploads_only_the_parts_that_are_missing`.
     assert!(
         transport.attempts() >= missing.len() + 2,
         "{}",

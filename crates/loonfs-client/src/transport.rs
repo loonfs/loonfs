@@ -874,9 +874,6 @@ mod tests {
             })),
         };
 
-        // The URL, the deepest cause, and the field to fix are what a reader
-        // needs. The user-facing wording is covered end to end by the CLI's
-        // `unreachable_servers_are_named_with_their_url`.
         let connect = render_send_error("http://127.0.0.1:9/v0/namespaces", &error, true, false);
         assert!(
             connect.contains("http://127.0.0.1:9/v0/namespaces"),
@@ -926,9 +923,6 @@ mod tests {
             .expect("the count-bounded content retry succeeds");
 
         assert_eq!(bytes, b"content");
-        // It resent at least once, which the spent deadline would have
-        // forbidden. The sibling above pins the deadline-bounded side at
-        // exactly one attempt.
         assert!(transport.attempts() >= 2, "{}", transport.attempts());
     }
 }

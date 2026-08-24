@@ -541,9 +541,6 @@ mod tests {
 
     #[test]
     fn a_terminal_line_says_what_a_watcher_needs() {
-        // Which fields a line carries is the contract;
-        // `sizes_and_clocks_read_the_way_transfer_tools_spell_them` owns how
-        // the sizes and durations are spelled.
         let one_file = silent_reporter(ProgressOp::Get, "/docs/big.bin");
         let mut single = state(512 * 1_024, Some(1_024 * 1_024));
         single.files_total = Some(1);
@@ -559,7 +556,6 @@ mod tests {
         ] {
             assert!(line.contains(field), "{line}");
         }
-        // A single file is not counted off against a file total.
         assert!(!line.contains("files"), "{line}");
 
         let tree = silent_reporter(ProgressOp::Put, "demo:/up");

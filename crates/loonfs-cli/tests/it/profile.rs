@@ -18,9 +18,6 @@ fn profile_create_list_show_delete_work() {
     assert_success(&add_embedded);
     assert_eq!(json_data(&add_embedded)["mode"], "embedded");
 
-    // `profile create remote` records the URL and never contacts it, as
-    // `unreachable_servers_are_named_with_their_url` shows, so a literal
-    // loopback URL is all this needs.
     let add_remote = harness.run(&[
         "--json",
         "profile",

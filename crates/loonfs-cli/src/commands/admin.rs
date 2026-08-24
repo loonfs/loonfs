@@ -876,7 +876,6 @@ mod tests {
             line.contains("3 deleted, 5 retained (mostly within_grace_window: 4)"),
             "{line}"
         );
-        // The horizon reads as a UTC timestamp, not as raw milliseconds.
         assert!(
             line.contains("next reclaimable at 2023-11-14 22:13:20Z"),
             "{line}"

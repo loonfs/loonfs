@@ -922,7 +922,6 @@ mod tests {
     #[test]
     fn api_errors_tolerate_unknown_registry_codes() {
         assert_eq!(api_error(503, "code_from_a_newer_server").code(), None);
-        // An error that never came from the wire has no code either.
         assert_eq!(
             ClientError::Http("connection refused".to_owned()).code(),
             None
