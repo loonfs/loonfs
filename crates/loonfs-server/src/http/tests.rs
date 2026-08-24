@@ -1264,7 +1264,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
 }
 
 #[tokio::test]
-async fn the_publish_observer_nudges_the_enabled_namespaces_index() {
+async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "grep-observer-server");

@@ -4,11 +4,11 @@ use super::{owning_runtime, FsReader, HandleBuilderCore};
 use crate::fs::{ReadCore, WriterBits, WriterIdentity};
 use crate::maintenance_runner::{register_core_jobs, MaintenanceRunner};
 use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
-use crate::publisher::{PublishObserver, PublisherRegistry};
+use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver, PublisherRegistry};
 use crate::{
-    CapabilityDocument, ChangeSeq, FsBackgroundWork, MaintenanceHandle, MaintenanceJob,
-    MaintenanceJobId, NamespaceId, Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError,
-    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    CapabilityDocument, FsBackgroundWork, MaintenanceHandle, MaintenanceJob, MaintenanceJobId,
+    Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
+    TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::{MetadataSegmentCache, StoredMetadataBlockCache};
 use std::num::NonZeroUsize;
@@ -30,7 +30,7 @@ use std::sync::Arc;
 pub struct FsWriter {
     pub(crate) core: ReadCore,
     /// The writer half of the runtime: the writer identity, the maintenance
-    /// runner, and the publish observer. Publisher workers hold this weakly,
+    /// runner, and the namespace-advance observer. Publisher workers hold this weakly,
     /// so dropping every clone of this handle stops new publication work.
     pub(crate) bits: Arc<WriterBits>,
     pub(crate) publisher: PublisherRegistry,
@@ -222,7 +222,7 @@ pub struct FsWriterBuilder {
     background_work: FsBackgroundWork,
     max_concurrent_maintenance: usize,
     min_publish_interval_ms: u64,
-    publish_observer: Option<PublishObserver>,
+    namespace_advance_observer: Option<NamespaceAdvanceObserver>,
     maintenance_clock: Option<Arc<dyn crate::maintenance_runner::MaintenanceClock>>,
 }
 
@@ -234,7 +234,7 @@ impl FsWriterBuilder {
             background_work: FsBackgroundWork::ManualOnly,
             max_concurrent_maintenance: crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
             min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
-            publish_observer: None,
+            namespace_advance_observer: None,
             maintenance_clock: None,
         }
     }
@@ -362,18 +362,23 @@ impl FsWriterBuilder {
         self
     }
 
-    /// Registers a synchronous observer called after each successful durable
-    /// publication with the namespace and the batch's highest committed
-    /// sequence.
+    /// Registers an observer called with a [`NamespaceAdvanceHint`] after
+    /// each publication batch that durably commits at least one mutation.
     ///
-    /// The observer runs on the publication task and must not block. Use a
-    /// non-blocking channel send to hand work to another task. Writers that
-    /// register no observer retain the default publication behavior.
-    pub fn publish_observer(
+    /// The call happens after durable visibility. One batch may cover
+    /// several commits, so the hint carries a high-water mark rather than
+    /// one commit, and delivery is best-effort. The observer runs
+    /// synchronously on the publication task, so it must do nothing but a
+    /// non-blocking handoff such as a bounded-channel `try_send`: no
+    /// network, filesystem, object-store, lock-contended, or waiting work.
+    /// Downstream correctness comes from a durable change-feed cursor,
+    /// never from the hints. Writers that register no observer publish
+    /// exactly as before.
+    pub fn namespace_advance_observer(
         mut self,
-        observer: impl Fn(&NamespaceId, ChangeSeq) + Send + Sync + 'static,
+        observer: impl Fn(NamespaceAdvanceHint) + Send + Sync + 'static,
     ) -> Self {
-        self.publish_observer = Some(Arc::new(observer));
+        self.namespace_advance_observer = Some(Arc::new(observer));
         self
     }
 
@@ -418,7 +423,7 @@ impl FsWriterBuilder {
         let bits = Arc::new(WriterBits {
             identity,
             maintenance,
-            publish_observer: self.publish_observer,
+            namespace_advance_observer: self.namespace_advance_observer,
         });
         let publisher = PublisherRegistry::new(
             core.clone(),

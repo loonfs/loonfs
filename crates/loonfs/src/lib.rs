@@ -108,7 +108,7 @@ pub use loonfs_core::{
     MetadataCompactionJobOutcome, MetadataViewError, PassBudget, StoreFailureClass, WriterFence,
     CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
-pub use publisher::PublishObserver;
+pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 
 /// Commit types used by integrations that submit classified mutations to
 /// the runtime publisher.
