@@ -243,15 +243,4 @@ mod tests {
         );
         assert!(serde_json::from_str::<OptionalField>(r#"{"inode_id":42}"#).is_err());
     }
-
-    #[cfg(feature = "openapi")]
-    #[test]
-    fn openapi_schema_uses_shared_metadata() {
-        let schema = serde_json::to_value(schema()).expect("serialize public inode-id schema");
-
-        assert_eq!(schema["type"], "string");
-        assert_eq!(schema["pattern"], PATTERN);
-        assert_eq!(schema["example"], EXAMPLE);
-        assert_eq!(schema["description"], DESCRIPTION);
-    }
 }

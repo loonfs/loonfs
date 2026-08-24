@@ -2270,24 +2270,6 @@ fn decode_edited_row(row: &ciborium::Value, why: &str) -> MetadataRow {
 }
 
 #[test]
-fn commit_receipt_rows_without_committed_by_are_corrupt() {
-    let mut row = row_cbor(&MetadataRow::CommitReceipt {
-        commit_id: commit_id(),
-        committed_by: actor(),
-        semantic_commit_fingerprint: "v1:sha256:receipt".to_owned(),
-        committed_seq: ChangeSeq(9),
-        committed_at_ms: 9_000,
-        message: None,
-    });
-    cbor_map_of(&mut row).retain(|(key, _)| key.as_text() != Some("committed_by"));
-    let refusal = assert_row_is_corrupt(&row, "a receipt without attribution is corrupt");
-    assert!(
-        refusal.contains("missing field `committed_by`"),
-        "unexpected refusal: {refusal}"
-    );
-}
-
-#[test]
 fn tombstone_rows_reject_a_partial_deleted_direntry() {
     for missing in ["parent_inode_id", "name_key", "display_name"] {
         let mut row = row_cbor(&sample_tombstone_set_row());
@@ -2427,6 +2409,17 @@ fn provenance_rows_reject_every_missing_required_field() {
         (
             sample_populated_attributes_row(),
             &["commit_id", "updated_by", "updated_at_ms"][..],
+        ),
+        (
+            MetadataRow::CommitReceipt {
+                commit_id: commit_id(),
+                committed_by: actor(),
+                semantic_commit_fingerprint: "v1:sha256:receipt".to_owned(),
+                committed_seq: ChangeSeq(9),
+                committed_at_ms: 9_000,
+                message: None,
+            },
+            &["committed_by"][..],
         ),
     ];
 

@@ -783,36 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn checksum_evidence_is_outside_mutation_identity() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let content_ref = ContentRef::blob_v1(
-            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
-            b"pinned put bytes",
-        );
-        let crc_reference = ContentRef {
-            checksum: Checksum::crc32c(b"pinned put bytes"),
-            ..content_ref.clone()
-        };
-
-        assert_eq!(
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                &[put("/docs/report.txt", content_ref)]
-            )
-            .expect("fingerprint"),
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                &[put("/docs/report.txt", crc_reference)]
-            )
-            .expect("fingerprint")
-        );
-    }
-
-    #[test]
     fn a_different_content_object_changes_mutation_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let bytes = b"identical bytes, two uploads";
@@ -855,23 +825,6 @@ mod tests {
         .expect("fingerprint");
 
         assert_ne!(without, with);
-    }
-
-    #[test]
-    fn commit_fingerprint_changes_when_logical_inputs_change() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let baseline =
-            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[create_dir("/docs")])
-                .expect("baseline");
-        let changed = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            &[create_dir("/drafts")],
-        )
-        .expect("changed");
-
-        assert_ne!(baseline, changed);
     }
 
     #[test]

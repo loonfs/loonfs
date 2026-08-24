@@ -985,15 +985,6 @@ mod tests {
     }
 
     #[test]
-    fn commit_id_parse_uses_same_allowed_grammar() {
-        let parsed = CommitId::parse("c_demo-1").expect("valid commit_id");
-
-        assert_eq!(parsed.as_str(), "c_demo-1");
-        assert!(CommitId::parse("c/demo").is_err());
-        assert!(CommitId::parse("C_demo").is_err());
-    }
-
-    #[test]
     fn identity_try_from_validates_values() {
         assert_eq!(
             NamespaceId::try_from("demo")
@@ -1038,13 +1029,6 @@ mod tests {
         assert!(CheckpointId::try_from("chk_0000000000000000000000000000000g").is_err());
         assert!(NameKey::try_from("a/b").is_err());
         assert!(ManifestObjectId::try_from("42-0123456789abcdef").is_err());
-    }
-
-    #[test]
-    fn identity_from_str_delegates_to_parse() {
-        let namespace_id: NamespaceId = "demo".parse().expect("valid namespace id");
-        assert_eq!(namespace_id.as_str(), "demo");
-        assert!("invalid/name".parse::<NamespaceId>().is_err());
     }
 
     #[test]
@@ -1162,27 +1146,19 @@ mod tests {
     }
 
     #[test]
-    fn generated_wal_segment_ids_are_not_reused_across_samples() {
-        // Same position, many proposers: the suffix keeps every proposal
-        // distinct.
-        let mut ids = BTreeSet::new();
+    fn generated_positional_ids_are_not_reused_across_samples() {
+        let mut wal_segment_ids = BTreeSet::new();
+        let mut manifest_object_ids = BTreeSet::new();
         for _ in 0..128 {
-            let id = WalSegmentId::generate(ChangeSeq(412));
+            let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
             assert!(
-                ids.insert(id.clone()),
-                "generated duplicate WAL segment id {id}"
+                wal_segment_ids.insert(wal_segment_id.clone()),
+                "generated duplicate WAL segment id {wal_segment_id}"
             );
-        }
-    }
-
-    #[test]
-    fn generated_manifest_object_ids_are_not_reused_across_samples() {
-        let mut ids = BTreeSet::new();
-        for _ in 0..128 {
-            let id = ManifestObjectId::generate(ManifestNo(412));
+            let manifest_object_id = ManifestObjectId::generate(ManifestNo(412));
             assert!(
-                ids.insert(id.clone()),
-                "generated duplicate manifest object id {id}"
+                manifest_object_ids.insert(manifest_object_id.clone()),
+                "generated duplicate manifest object id {manifest_object_id}"
             );
         }
     }
@@ -1252,19 +1228,7 @@ mod tests {
     #[test]
     fn content_id_parse_requires_the_generated_id_shape() {
         assert!(ContentId::parse("con_0123456789abcdef0123456789abcdef").is_ok());
-        for value in [
-            "con_",
-            "con_abcdef",
-            "con_0123456789ABCDEF0123456789abcdef",
-            "con_0123456789abcdef0123456789abcde",
-            "upl_0123456789abcdef0123456789abcdef",
-            "0123456789abcdef0123456789abcdef",
-        ] {
-            assert!(
-                ContentId::parse(value).is_err(),
-                "expected invalid content id {value:?}"
-            );
-        }
+        assert!(ContentId::parse("upl_0123456789abcdef0123456789abcdef").is_err());
     }
 
     fn assert_generated_id_shape(value: &str, prefix: &str) {

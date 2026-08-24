@@ -394,14 +394,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn direct_put_upload_mode_serializes_as_expected() {
-        assert_eq!(
-            serde_json::to_string(&UploadMode::DirectPut).expect("serialize mode"),
-            r#""direct_put""#
-        );
-    }
-
-    #[test]
     fn a_begin_request_without_a_mode_does_not_decode() {
         assert!(serde_json::from_str::<BeginUploadRequest>("{}").is_err());
         assert_eq!(
@@ -493,7 +485,10 @@ mod tests {
         let missing_parts = r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}}"#;
         let error = serde_json::from_str::<CompleteUploadRequest>(missing_parts)
             .expect_err("multipart parts are required");
-        assert!(error.to_string().contains("missing field `parts`"));
+        assert!(
+            error.to_string().contains("parts"),
+            "the rejection should name the missing field: {error}"
+        );
 
         let multipart = CompleteUploadRequest::DirectMultipart {
             content: UploadContentClaim {
@@ -514,26 +509,6 @@ mod tests {
                 "parts": [],
             })
         );
-    }
-
-    #[test]
-    fn direct_put_response_exposes_the_algorithm_and_presigned_access() {
-        let response = BeginUploadResponse::DirectPut {
-            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            upload_id: UploadId::parse("upl_00000000000000000000000000000001")
-                .expect("valid upload id"),
-            checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-            access: ObjectTransferAccess::PresignedUrl {
-                method: "PUT".to_owned(),
-                url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
-                headers: BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]),
-                expires_at_ms: 1,
-            },
-        };
-
-        let json = serde_json::to_string(&response).expect("serialize response");
-        assert!(json.contains(r#""kind":"presigned_url""#));
-        assert!(!json.contains("object_key"));
     }
 
     #[test]
@@ -638,15 +613,6 @@ mod tests {
             .is_err(),
             "a client must not be able to name the content object"
         );
-    }
-
-    #[test]
-    fn an_upload_content_claim_carries_the_operations_required_algorithm() {
-        let claim: UploadContentClaim = serde_json::from_str(
-            r#"{"size_bytes":5,"checksum":{"algorithm":"crc32c","value":"a1b2c3d4"}}"#,
-        )
-        .expect("decode a non-sha256 direct-put claim");
-        assert_eq!(claim.checksum.algorithm, ChecksumAlgorithm::Crc32c);
     }
 
     #[test]

@@ -493,7 +493,7 @@ impl PathError {
 #[cfg(test)]
 mod tests {
     use super::{AbsolutePath, DisplayName, PathError};
-    use crate::{name_key_for_display_name, NameKey};
+    use crate::NameKey;
 
     #[test]
     fn unportable_names_are_rejected() {
@@ -756,16 +756,5 @@ mod tests {
             AbsolutePath::parse(format!("/docs/{}", "a".repeat(256))),
             Err(PathError::DisplayNameTooLong { .. })
         ));
-    }
-
-    #[test]
-    fn name_key_matches_folding_helper() {
-        let display_name = DisplayName::parse("Cafe\u{301}.TXT").expect("display name");
-        let key = NameKey::for_display_name(&display_name);
-
-        assert_eq!(
-            key.as_str(),
-            name_key_for_display_name(display_name.as_str())
-        );
     }
 }

@@ -431,11 +431,11 @@ mod tests {
         let limits = PaginationPolicy::default().capability_limits();
 
         assert_eq!(
-            limits.get(LIMIT_PAGINATION_DEFAULT),
+            limits.get("pagination.default_limit"),
             Some(&u64::from(DEFAULT_PAGE_LIMIT))
         );
         assert_eq!(
-            limits.get(LIMIT_PAGINATION_MAX),
+            limits.get("pagination.max_limit"),
             Some(&u64::from(DEFAULT_MAX_PAGE_LIMIT))
         );
     }

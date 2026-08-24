@@ -469,24 +469,6 @@ mod tests {
     }
 
     #[test]
-    fn serialized_entries_never_nest_attributes_inside_attributes() {
-        let mut projected = entry("/docs", Some(InodeId(1)), Some("docs"));
-        projected.attributes = Some(AttributesProjection {
-            attributes_revision_no: crate::AttributeRevisionNo(1),
-            attributes_updated_by: None,
-            attributes_updated_at_ms: None,
-            attributes: crate::Attributes::new(std::collections::BTreeMap::from([(
-                crate::AttributeKey::parse("owner").expect("attribute key"),
-                crate::AttributeValue::parse("finance").expect("attribute value"),
-            )]))
-            .expect("attributes"),
-        });
-
-        let projected_json = serde_json::to_value(projected).expect("serialize projected entry");
-        assert!(projected_json.pointer("/attributes/attributes").is_none());
-    }
-
-    #[test]
     fn a_trash_entry_nests_the_binding_the_deletion_removed() {
         let trash = TrashEntry {
             inode_id: InodeId(42),

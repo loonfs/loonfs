@@ -321,40 +321,49 @@ mod tests {
     }
 
     #[test]
-    fn grep_index_status_flattens_active_lifecycle() {
-        let response = GrepIndex {
-            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            lifecycle: GrepIndexLifecycle::Active {
-                built_through_seq: ChangeSeq(12),
-                next_event_index: 0,
-            },
-            next_run_no: RunNo(3),
-            reorganize_pending: false,
-        };
-
+    fn grep_index_status_flattens_its_lifecycle() {
         assert_eq!(
-            serde_json::to_string(&response).expect("serialize active status"),
-            r#"{"namespace_id":"demo","status":"active","built_through_seq":12,"next_run_no":3,"reorganize_pending":false}"#
+            serde_json::to_value(GrepIndex {
+                namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+                lifecycle: GrepIndexLifecycle::Active {
+                    built_through_seq: ChangeSeq(12),
+                    next_event_index: 0,
+                },
+                next_run_no: RunNo(3),
+                reorganize_pending: false,
+            })
+            .expect("serialize active status"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "status": "active",
+                "built_through_seq": 12,
+                "next_run_no": 3,
+                "reorganize_pending": false
+            })
         );
-    }
-
-    #[test]
-    fn grep_index_status_flattens_backfilling_lifecycle() {
-        let response = GrepIndex {
-            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            lifecycle: GrepIndexLifecycle::Backfilling {
-                target_seq: ChangeSeq(12),
-                cursor_inode_id: Some(InodeId(4)),
-                checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
-                    .expect("checkpoint id"),
-            },
-            next_run_no: RunNo(1),
-            reorganize_pending: false,
-        };
 
         assert_eq!(
-            serde_json::to_string(&response).expect("serialize backfilling status"),
-            r#"{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"chk_00000000000000000000000000000009","next_run_no":1,"reorganize_pending":false}"#
+            serde_json::to_value(GrepIndex {
+                namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+                lifecycle: GrepIndexLifecycle::Backfilling {
+                    target_seq: ChangeSeq(12),
+                    cursor_inode_id: Some(InodeId(4)),
+                    checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
+                        .expect("checkpoint id"),
+                },
+                next_run_no: RunNo(1),
+                reorganize_pending: false,
+            })
+            .expect("serialize backfilling status"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "status": "backfilling",
+                "target_seq": 12,
+                "cursor_inode_id": "ino_4",
+                "checkpoint_id": "chk_00000000000000000000000000000009",
+                "next_run_no": 1,
+                "reorganize_pending": false
+            })
         );
     }
 

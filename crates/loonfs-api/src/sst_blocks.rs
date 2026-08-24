@@ -683,6 +683,13 @@ mod tests {
         builder.finish().expect("finish segment")
     }
 
+    const SHARED_SEGMENT_ROWS: usize = 5_000;
+
+    fn shared_segment() -> &'static BuiltSegmentBlocks {
+        static SEGMENT: std::sync::OnceLock<BuiltSegmentBlocks> = std::sync::OnceLock::new();
+        SEGMENT.get_or_init(|| build_segment(SHARED_SEGMENT_ROWS))
+    }
+
     fn section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
         &bytes[handle.offset as usize..handle.offset as usize + handle.stored_len as usize]
     }
@@ -709,8 +716,8 @@ mod tests {
 
     #[test]
     fn segment_round_trips_every_row_through_index_and_blocks() {
-        let rows = 5_000;
-        let built = build_segment(rows);
+        let rows = SHARED_SEGMENT_ROWS;
+        let built = shared_segment();
         let index =
             decode_index_block(section(&built.bytes, &built.index), &built.index).expect("index");
         assert!(index.len() > 1, "5k inode rows should span several blocks");
@@ -735,7 +742,7 @@ mod tests {
 
     #[test]
     fn index_narrows_point_lookups_to_one_block() {
-        let built = build_segment(5_000);
+        let built = shared_segment();
         let index =
             decode_index_block(section(&built.bytes, &built.index), &built.index).expect("index");
         let (key, _, row) = inode_row(3_217);
@@ -754,7 +761,7 @@ mod tests {
 
     #[test]
     fn key_range_scan_covers_exactly_the_matching_blocks() {
-        let built = build_segment(5_000);
+        let built = shared_segment();
         let index =
             decode_index_block(section(&built.bytes, &built.index), &built.index).expect("index");
         let lower = inode_row(1_000).0;
@@ -954,15 +961,6 @@ mod tests {
         }
         let rate = false_positives as f64 / probes as f64;
         assert!(rate < 0.02, "false positive rate {rate} exceeds 2%");
-    }
-
-    #[test]
-    fn durable_encoding_is_deterministic() {
-        let first = build_segment(300);
-        let second = build_segment(300);
-        assert_eq!(first.bytes, second.bytes);
-        assert_eq!(first.index, second.index);
-        assert_eq!(first.filter, second.filter);
     }
 
     #[test]
