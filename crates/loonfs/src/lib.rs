@@ -185,7 +185,7 @@ pub use fs::{
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use maintenance_runner::{
     FsBackgroundWork, MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
-    MaintenanceStepConclusion, MaintenanceStepReport,
+    MaintenanceStepConclusion, MaintenanceStepReport, NamespacePublication,
 };
 pub use options::{
     CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,

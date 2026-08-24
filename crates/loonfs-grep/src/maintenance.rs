@@ -12,7 +12,7 @@ use crate::{
 };
 use loonfs::{
     current_time_ms, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion,
-    MaintenanceStepReport, NamespaceId, Result, RuntimeError,
+    MaintenanceStepReport, NamespaceId, NamespacePublication, Result, RuntimeError,
 };
 use loonfs_api::ErrorCode;
 use loonfs_objectstore::ObjectStore;
@@ -51,11 +51,11 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
     }
 
     /// The index is a projection of the namespace's own history, so a
-    /// publication is its one real trigger and the cheapest possible hint.
-    /// Subscribing here is all it takes: no host wires anything to the
-    /// write path on grep's behalf.
-    fn nudged_by_publications(&self) -> bool {
-        true
+    /// publication that committed is its one real trigger and the cheapest
+    /// possible hint. Declaring it here is all it takes: no host wires
+    /// anything to the write path on grep's behalf.
+    fn nudged_by_publication(&self, publication: &NamespacePublication) -> bool {
+        publication.committed_through_seq.is_some()
     }
 
     /// Runs one bounded build step, then one reorganization step only when the

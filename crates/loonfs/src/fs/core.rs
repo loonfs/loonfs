@@ -2,7 +2,7 @@
 
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::{validate_writer_id, ReadConfig};
-use crate::maintenance_runner::MaintenanceRunner;
+use crate::maintenance_runner::{MaintenanceRunner, NamespacePublication};
 use crate::metrics::RuntimeInstruments;
 use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 use crate::{
@@ -62,19 +62,26 @@ pub(crate) struct WriterBits {
 }
 
 impl WriterBits {
-    /// Reports that `namespace_id` is durably visible through `through_seq`.
+    /// Reports what one publication attempt against `namespace_id` left
+    /// behind.
     ///
-    /// The one post-publication emission point. A host observer panic is
-    /// contained here: the commit it followed is already durable.
-    pub(crate) fn notify_namespace_advanced(
+    /// The one post-publication emission point. Maintenance jobs decide for
+    /// themselves which attempts concern them; the host observer hears only
+    /// the ones that committed. A host observer panic is contained here: the
+    /// commit it followed is already durable.
+    pub(crate) fn notify_published(
         &self,
         namespace_id: &NamespaceId,
-        through_seq: ChangeSeq,
+        publication: &NamespacePublication,
     ) {
         // Nudge runtime-owned work first: a slow or panicking observer must
         // not delay it.
-        self.maintenance.nudge_publication_subscribers(namespace_id);
+        self.maintenance
+            .nudge_publication_subscribers(namespace_id, publication);
 
+        let Some(through_seq) = publication.committed_through_seq else {
+            return;
+        };
         let Some(observer) = &self.namespace_advance_observer else {
             return;
         };

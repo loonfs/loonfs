@@ -747,17 +747,44 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
                 .create_namespace(&namespace_id, CreateNamespaceOptions::default())
                 .await
                 .expect("create namespace");
-            fill_wal_tail_past_threshold(&writer, &namespace_id).await;
-            writer
-                .flush_background()
-                .await
-                .expect("background maintenance quiesces");
 
             let admin = FsAdmin::builder(store_config(temp_dir.path()))
                 .actor_id("handle-test-admin")
                 .build()
                 .await
                 .expect("build admin");
+            // The tail, not the publication, is what schedules the step. A
+            // writer that publishes below the threshold does no upkeep at
+            // all, so the common write costs nothing in the background.
+            writer
+                .put_file_bytes(
+                    &namespace_id,
+                    "/docs/under-threshold.txt",
+                    b"body",
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("put file below the threshold");
+            writer
+                .flush_background()
+                .await
+                .expect("nothing was scheduled below the threshold");
+            let status = admin
+                .get_namespace_diagnostics(&namespace_id)
+                .await
+                .expect("status below the threshold");
+            assert_eq!(
+                status.current_manifest_no, None,
+                "a publish below the threshold must not step: {status:?}"
+            );
+            assert_eq!(status.wal_tail_segments, 1, "{status:?}");
+
+            fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+            writer
+                .flush_background()
+                .await
+                .expect("background maintenance quiesces");
+
             let status = admin
                 .get_namespace_diagnostics(&namespace_id)
                 .await
@@ -776,6 +803,76 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
                 .expect("shut down writer background work");
         });
     }
+}
+
+#[test]
+fn a_refused_publish_schedules_the_step_that_relieves_the_debt() {
+    // The debt is inherited: another process left the tail at the write-stop
+    // bound, so this writer's runner has never heard of the namespace. Its
+    // first publish is refused, and that refusal is the only report the
+    // namespace can make — nothing committed, so no advance follows it.
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    block_on(async {
+        let stalled = FsWriter::builder(store_config(temp_dir.path()))
+            .writer_id("handle-test-stalled-writer")
+            .background_work(FsBackgroundWork::ManualOnly)
+            .build()
+            .await
+            .expect("build the writer that leaves the debt");
+        stalled
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        fill_wal_tail_to_write_stop(&stalled, &namespace_id).await;
+        stalled
+            .shutdown()
+            .await
+            .expect("shut down the first writer");
+
+        let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
+        let refused = writer
+            .put_file_bytes(
+                &namespace_id,
+                "/write-stop/refused.txt",
+                b"body",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect_err("a tail at the write-stop bound refuses the publish");
+        assert_eq!(refused.code(), ErrorCode::MaintenanceRequired);
+
+        writer
+            .flush_background()
+            .await
+            .expect("the step the refusal asked for settles");
+        let admin = FsAdmin::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin");
+        let status = admin
+            .get_namespace_diagnostics(&namespace_id)
+            .await
+            .expect("status after the refused publish");
+        assert!(
+            status.wal_tail_segments < wal_tail_segment_threshold(),
+            "the refused publish must schedule the flush that unblocks it: {status:?}"
+        );
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                "/write-stop/recovered.txt",
+                b"body",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("the retry lands once the debt is cleared");
+        writer
+            .shutdown()
+            .await
+            .expect("shut down writer background work");
+    });
 }
 
 #[test]

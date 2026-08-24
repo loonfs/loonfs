@@ -1,14 +1,14 @@
 //! [`FsWriter`]'s path mutations, commits, and the publication pipeline.
 
 use super::core::{ReadCore, WriterBits};
+use crate::maintenance_runner::NamespacePublication;
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
 use crate::ByteStream;
 use crate::FsWriter;
 use crate::{
     ChangeSeq, CommitId, CommitOptions, CommitResponse, ContentRef, CopyOptions, CoreError,
-    CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceJobId, MetadataMaintenanceOptions,
-    MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
-    UpdateAttributesOptions,
+    CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, NamespaceId, PutFileOptions,
+    RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAttributesOptions,
 };
 use crate::{Result, RuntimeError};
 use loonfs_api::{
@@ -973,11 +973,15 @@ pub(crate) async fn publish_batch_with_engine(
         .into_iter()
         .map(|result| result.map_err(RuntimeError::Core))
         .collect::<Vec<_>>();
-    // Notify observers only when at least one commit succeeded.
-    if let Some(through_seq) = highest_committed_seq(&results) {
-        writer.notify_namespace_advanced(namespace_id, through_seq);
-    }
-    maybe_auto_step_after_publish(writer, namespace_id, wal_tail_segments);
+    // The attempt reports what it left behind. Each job decides for
+    // itself whether that is one of its own triggers.
+    writer.notify_published(
+        namespace_id,
+        &NamespacePublication {
+            committed_through_seq: highest_committed_seq(&results),
+            wal_tail_segments,
+        },
+    );
     results
 }
 
@@ -988,28 +992,4 @@ fn highest_committed_seq(results: &[Result<CommitResponse>]) -> Option<ChangeSeq
         .filter_map(|result| result.as_ref().ok())
         .map(|response| response.committed_seq)
         .max()
-}
-
-/// Tells the maintenance runner a namespace crossed its WAL-tail threshold.
-///
-/// The nudge is a hint and nothing more: it never blocks the publish, never
-/// waits for a permit, and carries no claim on the step it suggests. The
-/// runner decides when — and whether — to run, and the step it eventually
-/// runs re-reads the tail rather than trusting what this publish saw.
-fn maybe_auto_step_after_publish(
-    writer: &Arc<WriterBits>,
-    namespace_id: &NamespaceId,
-    wal_tail_segments: u64,
-) {
-    if wal_tail_segments
-        < MetadataMaintenanceOptions::default()
-            .max_wal_tail_segments
-            .get()
-    {
-        return;
-    }
-    writer
-        .maintenance
-        .handle()
-        .nudge(MaintenanceJobId::METADATA, namespace_id);
 }

@@ -7,7 +7,7 @@
 
 use super::{
     BackgroundCompactions, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
-    MaintenanceStepConclusion, MaintenanceStepReport,
+    MaintenanceStepConclusion, MaintenanceStepReport, NamespacePublication,
 };
 use crate::fs::{ReadCore, WriterBits};
 use crate::publisher::PublisherRegistry;
@@ -35,7 +35,10 @@ pub(crate) fn register_core_jobs(
         publisher: publisher.clone(),
         compactions: runner.compactions(),
     };
-    runner.register(Arc::new(MetadataJob { context: context() }))?;
+    runner.register(Arc::new(MetadataJob {
+        context: context(),
+        options: MetadataMaintenanceOptions::default(),
+    }))?;
     runner.register(Arc::new(GcJob { context: context() }))?;
     Ok(())
 }
@@ -91,12 +94,22 @@ impl StepContext {
 /// reorganization unit.
 struct MetadataJob {
     context: StepContext,
+    /// The upkeep every step runs with. The trigger and the probe ask about
+    /// the same threshold, so the three cannot disagree.
+    options: MetadataMaintenanceOptions,
 }
 
 #[async_trait::async_trait]
 impl MaintenanceJob for MetadataJob {
     fn id(&self) -> MaintenanceJobId {
         MaintenanceJobId::METADATA
+    }
+
+    /// A publication is this job's trigger only once the tail it left has
+    /// reached the flush threshold. An earlier one would start a step that
+    /// declines to flush.
+    fn nudged_by_publication(&self, publication: &NamespacePublication) -> bool {
+        self.options.flush_is_due(publication.wal_tail_segments)
     }
 
     /// Carries no continuation: what is left to flush or fold is what the
@@ -114,10 +127,11 @@ impl MaintenanceJob for MetadataJob {
         };
         // Upkeep alone: no retention, no garbage collection. Both are other
         // decisions, and one of them is another job.
-        match admin
-            .run_maintenance(namespace_id, MaintenancePlan::metadata())
-            .await
-        {
+        let plan = MaintenancePlan {
+            metadata: Some(self.options),
+            ..MaintenancePlan::default()
+        };
+        match admin.run_maintenance(namespace_id, plan).await {
             Ok(step) => {
                 let metadata = step
                     .metadata_maintenance
@@ -153,14 +167,11 @@ impl MaintenanceJob for MetadataJob {
         // publishing unit concludes `Progressed`, so a backlog is folded by
         // the run that found it rather than left for a sweep.
         match admin.get_namespace_diagnostics(namespace_id).await {
-            Ok(status) => {
-                let threshold = MetadataMaintenanceOptions::default().max_wal_tail_segments;
-                Ok(if status.wal_tail_segments >= threshold.get() {
-                    MaintenanceProbe::Due
-                } else {
-                    MaintenanceProbe::Idle
-                })
-            }
+            Ok(status) => Ok(if self.options.flush_is_due(status.wal_tail_segments) {
+                MaintenanceProbe::Due
+            } else {
+                MaintenanceProbe::Idle
+            }),
             Err(error) if metadata_has_nothing_to_maintain(&error) => Ok(MaintenanceProbe::Idle),
             Err(error) => Err(error),
         }

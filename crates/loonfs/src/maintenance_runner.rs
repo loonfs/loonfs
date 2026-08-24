@@ -11,7 +11,7 @@ mod jobs;
 mod tests;
 
 use crate::metrics::RuntimeInstruments;
-use crate::{NamespaceId, Result, RuntimeError};
+use crate::{ChangeSeq, NamespaceId, Result, RuntimeError};
 use admission::{Admission, MaintenanceDispatch, MaintenanceKey, StepOutcome};
 pub(crate) use compaction::{BackgroundCompactions, CompactionStart};
 use futures::FutureExt as _;
@@ -150,6 +150,21 @@ impl MaintenanceStepReport {
     }
 }
 
+/// What one publication attempt left behind, as the jobs it may concern see
+/// it.
+///
+/// The write path reports every attempt. Each job decides which attempts are
+/// its own trigger, through [`MaintenanceJob::nudged_by_publication`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamespacePublication {
+    /// The highest sequence the attempt committed, or `None` when it
+    /// committed nothing.
+    pub committed_through_seq: Option<ChangeSeq>,
+    /// Visible WAL-tail length the attempt left behind. Zero when the
+    /// attempt failed before reading the tail.
+    pub wal_tail_segments: u64,
+}
+
 /// Result of checking whether a maintenance job has work to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceProbe {
@@ -186,12 +201,14 @@ pub trait MaintenanceJob: Send + Sync + 'static {
     /// reconciliation.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe>;
 
-    /// Returns whether successful publications should nudge this job.
+    /// Returns whether `publication` should nudge this job.
     ///
-    /// Use `true` for work derived from namespace history, such as an index or
-    /// projection. The nudge is only a scheduling hint; the step must reload
-    /// durable state. Deadline-driven jobs keep the default `false`.
-    fn nudged_by_publications(&self) -> bool {
+    /// Work derived from namespace history, such as an index or projection,
+    /// answers on `committed_through_seq`: every commit concerns it. Work
+    /// that starts at a WAL-tail threshold answers on `wal_tail_segments`.
+    /// The nudge is only a scheduling hint; the step must reload durable
+    /// state. Deadline-driven jobs keep the default `false`.
+    fn nudged_by_publication(&self, _publication: &NamespacePublication) -> bool {
         false
     }
 }
@@ -518,18 +535,22 @@ impl MaintenanceRunner {
         Ok(())
     }
 
-    /// Nudges each registered job that subscribes to successful publications.
+    /// Nudges each registered job that `publication` concerns.
     ///
-    /// Subscription is declared by [`MaintenanceJob::nudged_by_publications`], so
+    /// Subscription is declared by [`MaintenanceJob::nudged_by_publication`], so
     /// the write path does not need job-specific wiring. Nudges are non-blocking,
     /// coalesced, and ignored when automatic maintenance is disabled or closed.
-    pub(crate) fn nudge_publication_subscribers(&self, namespace_id: &NamespaceId) {
+    pub(crate) fn nudge_publication_subscribers(
+        &self,
+        namespace_id: &NamespaceId,
+        publication: &NamespacePublication,
+    ) {
         // Release the job lock before acquiring scheduling state.
         let subscribers: Vec<MaintenanceJobId> = self
             .inner
             .lock_jobs()
             .iter()
-            .filter(|(_, job)| job.nudged_by_publications())
+            .filter(|(_, job)| job.nudged_by_publication(publication))
             .map(|(id, _)| *id)
             .collect();
         for job in subscribers {

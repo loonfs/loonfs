@@ -264,7 +264,7 @@ impl FsAdmin {
         options: MetadataMaintenanceOptions,
         status_before: &NamespaceDiagnostics,
     ) -> Result<MetadataMaintenanceResponse> {
-        let flush = status_before.wal_tail_segments >= options.max_wal_tail_segments.get();
+        let flush = options.flush_is_due(status_before.wal_tail_segments);
         self.flush_then_reorganize(namespace_id, flush, status_before.head_seq)
             .await
     }
