@@ -131,6 +131,7 @@ mod tests {
                 StoreFailureClass::PermissionDenied,
                 ErrorCode::StoragePermissionDenied,
             ),
+            (StoreFailureClass::InvalidRequest, ErrorCode::ServerError),
             (StoreFailureClass::Other, ErrorCode::ServerError),
         ] {
             let error = GrepError::StoreUnavailable {

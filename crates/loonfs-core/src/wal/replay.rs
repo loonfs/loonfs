@@ -2,6 +2,7 @@
 
 pub(crate) use super::frame::WalReplayError;
 use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
+use crate::error::MetadataProjectionLoadError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
@@ -23,6 +24,29 @@ pub(crate) fn project_validated_wal_tail(
         replayed.resulting_head.visible_wal_tip = Some(last_segment.pointer());
     }
     Ok(replayed)
+}
+
+/// Verifies that replaying the WAL tail produces the current head.
+///
+/// An empty tail retains the basis tip, so the tip is compared only when the
+/// replay produced one.
+pub(crate) fn ensure_replayed_head_matches(
+    current_head: &HeadState,
+    reconstructed: &HeadState,
+) -> Result<(), MetadataProjectionLoadError> {
+    if current_head.namespace_id != reconstructed.namespace_id
+        || current_head.seq != reconstructed.seq
+        || current_head.head_commit_id != reconstructed.head_commit_id
+        || current_head.next_inode_id != reconstructed.next_inode_id
+        || (reconstructed.visible_wal_tip.is_some()
+            && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
+    {
+        return Err(MetadataProjectionLoadError::ReplayedHeadMismatch {
+            expected: Box::new(current_head.clone()),
+            actual: Box::new(reconstructed.clone()),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn replay_wal_records<'a, I>(

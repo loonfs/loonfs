@@ -71,7 +71,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     let loaded = match load_head_and_metadata_basis(store, namespace_id).await {
         Ok(loaded) => loaded,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
-        Err(error) => return Err(CoreError::load_head(error)),
+        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let content_store_id = loaded.head.state.content_store_id.clone();
 

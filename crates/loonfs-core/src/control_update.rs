@@ -2,8 +2,8 @@
 //! compare-and-swap the head or an upload session on its etag.
 
 use crate::control_object::{
-    core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
-    ControlObjectLoadError, LoadedControl,
+    expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
+    LoadedControl,
 };
 use crate::error::{CoreError, StoreFailureClass};
 use crate::namespace::control::{load_head_object, LoadedHeadObject};
@@ -204,7 +204,7 @@ async fn load_upload_session_object<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => Err(CoreError::UploadNotFound {
             upload_id: upload_id.clone(),
         }),
-        Err(error) => Err(core_control_load_error(error)),
+        Err(error) => Err(CoreError::ControlObjectLoad(error)),
     }
 }
 

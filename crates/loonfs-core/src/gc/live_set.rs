@@ -8,7 +8,7 @@ use super::reap::{lease_expired, manifest_object_id_of};
 use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::checkpoint::{load_namespace_manifest_envelope_if_present, ManifestLoadFailureClass};
 use crate::context::MutationContext;
-use crate::control_object::{core_control_load_error, ControlObjectLoadError};
+use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::{
     load_head_and_metadata_basis, resolve_retention_floor_seq, LoadedNamespaceBasis,
@@ -246,7 +246,7 @@ pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     }
     let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
-        .map_err(CoreError::load_head)?;
+        .map_err(CoreError::ControlObjectLoad)?;
     collect_live_set(
         store,
         namespace_id,
@@ -289,7 +289,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         charge(budget)?;
         let floor_seq = resolve_retention_floor_seq(store, head)
             .await
-            .map_err(CoreError::load_head)?;
+            .map_err(CoreError::ControlObjectLoad)?;
         let mut live = LiveSet::collecting(namespace_deleted);
         let mut manifest_object_ids = BTreeSet::new();
         if !namespace_deleted {
@@ -361,7 +361,7 @@ async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
         let record = match loaded {
             Ok(loaded) => loaded.state,
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,
-            Err(error) => return Err(core_control_load_error(error).into()),
+            Err(error) => return Err(CoreError::ControlObjectLoad(error).into()),
         };
         let candidate = checkpoint_is_candidate(store, &record, budget, context).await?;
         // A deleted namespace has no readers. Only an active fork checkpoint

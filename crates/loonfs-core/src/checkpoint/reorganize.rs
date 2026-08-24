@@ -196,7 +196,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // fold: reorganization has nothing to do until its first flush.
     let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
         .await
-        .map_err(CoreError::load_head)?
+        .map_err(CoreError::ControlObjectLoad)?
         .map(|loaded| loaded.state)
     else {
         return Ok(report(
@@ -238,11 +238,11 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // for the job's life.
     let head = load_head_object(store, namespace_id)
         .await
-        .map_err(CoreError::load_head)?
+        .map_err(CoreError::ControlObjectLoad)?
         .state;
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
-        .map_err(CoreError::load_head)?;
+        .map_err(CoreError::ControlObjectLoad)?;
     let selection = select_reorganization_input(
         &segments,
         group,

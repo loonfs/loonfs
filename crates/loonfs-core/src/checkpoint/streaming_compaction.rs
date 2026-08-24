@@ -603,7 +603,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         let publication_started_ms = timer.monotonic_now_ms();
         let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
             .await
-            .map_err(CoreError::load_head)?
+            .map_err(CoreError::ControlObjectLoad)?
             .map(|loaded| loaded.state)
         else {
             return Ok(Finalization::Abandoned);
@@ -715,7 +715,7 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
 ) -> Result<Option<VerifiedMetadataSegments<'a, S>>> {
     let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
         .await
-        .map_err(CoreError::load_head)?
+        .map_err(CoreError::ControlObjectLoad)?
         .map(|loaded| loaded.state)
     else {
         return Ok(None);

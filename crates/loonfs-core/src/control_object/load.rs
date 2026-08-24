@@ -1,7 +1,7 @@
 //! Loading and classification shared by mutable control-object families.
 
 use super::ControlObjectLoadError;
-use crate::error::{CoreError, StoreFailureClass};
+use crate::error::StoreFailureClass;
 use loonfs_api::wire::control::{decode_control_object, ControlObjectKind, ForkBasis, ManifestRef};
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::NamespaceId;
@@ -119,21 +119,6 @@ pub(crate) fn expect_foreign_fork_basis(
     Err(EmbeddedIdentityMismatch::ForkBasisOwner {
         namespace_id: namespace_id.clone(),
     })
-}
-
-pub(crate) fn core_control_load_error(error: ControlObjectLoadError) -> CoreError {
-    match error {
-        ControlObjectLoadError::Store {
-            object_key,
-            message,
-            class,
-        } => CoreError::Store {
-            object_key,
-            message,
-            class,
-        },
-        error => CoreError::NamespaceCorrupt(error.to_string()),
-    }
 }
 
 fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadError {

@@ -196,8 +196,10 @@ pub enum ObjectStoreError {
 pub enum ObjectStoreErrorClass {
     /// A required object was absent.
     NotFound,
-    /// A key, content reference, or range was invalid.
+    /// A content reference or byte range was invalid.
     InvalidRequest,
+    /// An object key or listing prefix was invalid.
+    InvalidKey,
     /// A conditional operation observed a conflicting state.
     PreconditionFailed,
     /// The selected identity or credentials were rejected.
@@ -224,7 +226,12 @@ impl ObjectStoreErrorClass {
     pub fn public_message(self) -> Cow<'static, str> {
         Cow::Borrowed(match self {
             Self::NotFound => "object-store object not found",
-            Self::InvalidRequest => "object-store request is invalid",
+            Self::InvalidRequest => {
+                "object-store rejected a content reference or byte range"
+            }
+            Self::InvalidKey => {
+                "object-store rejected an object key this deployment constructed"
+            }
             Self::PreconditionFailed => {
                 "object-store precondition failed; retry against the latest state"
             }
@@ -273,7 +280,8 @@ impl ObjectStoreError {
     pub fn class(&self) -> ObjectStoreErrorClass {
         match self {
             Self::NotFound { .. } => ObjectStoreErrorClass::NotFound,
-            Self::InvalidKey { .. } | Self::InvalidContentRef(_) | Self::InvalidRange { .. } => {
+            Self::InvalidKey { .. } => ObjectStoreErrorClass::InvalidKey,
+            Self::InvalidContentRef(_) | Self::InvalidRange { .. } => {
                 ObjectStoreErrorClass::InvalidRequest
             }
             Self::PreconditionFailed { .. } => ObjectStoreErrorClass::PreconditionFailed,

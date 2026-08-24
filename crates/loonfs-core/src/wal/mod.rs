@@ -13,7 +13,7 @@ pub(crate) use self::frame::{
 pub(crate) use self::reader::{
     count_visible_wal_tail_segments, load_validated_wal_chain, load_wal_chain_within, WalChainLoad,
 };
-pub(crate) use self::replay::project_validated_wal_tail;
+pub(crate) use self::replay::{ensure_replayed_head_matches, project_validated_wal_tail};
 pub(crate) use self::writer::prepare_wal_segment;
 
 #[cfg(test)]

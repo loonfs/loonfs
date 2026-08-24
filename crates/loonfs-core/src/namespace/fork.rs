@@ -65,7 +65,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;
     let source_head = crate::namespace::control::load_head_object(store, source_namespace_id)
         .await
-        .map_err(CoreError::load_head)?
+        .map_err(CoreError::ControlObjectLoad)?
         .state;
     // Start the target from the manifest pinned by the source checkpoint.
     let fork_basis = ForkBasis {
