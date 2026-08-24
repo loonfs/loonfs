@@ -19,7 +19,10 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
-use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
+use crate::wal::{
+    ensure_replayed_head_matches, load_validated_wal_chain, project_validated_wal_tail,
+    WalChainLoadRequest,
+};
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::{
@@ -271,6 +274,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
             })
         }?;
+        ensure_replayed_head_matches(&head, &replayed.resulting_head)?;
         let wal_tail_rows = Arc::new(replayed.resulting_metadata_state);
         if let Some(cache) = load_context.tail_cache {
             cache.insert(cache_key, Arc::clone(&wal_tail_rows));
@@ -905,8 +909,12 @@ mod tests {
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::namespace::control::load_head_object;
     use crate::path::write::{CommitRequest, FilesystemOperation};
-    use loonfs_api::{AttributeRevisionNo, AttributeValue, CommitId};
+    use bytes::Bytes;
+    use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
+    use loonfs_api::{AttributeRevisionNo, AttributeValue, CommitId, ErrorCode};
+    use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::attribute_key;
     use std::collections::BTreeMap;
@@ -985,6 +993,52 @@ mod tests {
             .expect("commit lands");
         }
         (temp_dir, store, namespace_id)
+    }
+
+    #[tokio::test]
+    async fn a_tail_that_replays_to_another_head_is_refused_by_reads_and_publishes_alike() {
+        let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
+        let mut head = load_head_object(&store, &namespace_id)
+            .await
+            .expect("load head")
+            .state;
+        head.next_inode_id = InodeId(head.next_inode_id.0 + 1);
+        let envelope =
+            HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head).expect("head envelope");
+        store
+            .put_overwrite(
+                &wal_head(&namespace_id),
+                Bytes::from(encode_control_object(&envelope).expect("encode head")),
+            )
+            .await
+            .expect("rewrite head");
+
+        let read = load_current_metadata_view(&store, &namespace_id)
+            .await
+            .err()
+            .expect("a head the tail does not reconstruct is corruption");
+        assert_eq!(read.code(), ErrorCode::NamespaceCorrupt);
+
+        let published = publish_namespace_commits_batch(
+            &store,
+            &namespace_id,
+            vec![CommitCandidate::new(CommitRequest::single(
+                CommitId::parse("create-after-tamper").expect("commit id"),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/docs/after").expect("path"),
+                    parents: false,
+                },
+            ))],
+            &context(),
+        )
+        .await
+        .into_iter()
+        .next()
+        .expect("one result")
+        .expect_err("the publish path refuses the same state");
+        assert_eq!(published.code(), read.code());
     }
 
     #[tokio::test]

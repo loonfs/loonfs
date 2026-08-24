@@ -2,6 +2,7 @@
 
 pub(crate) use super::frame::WalReplayError;
 use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
+use crate::error::MetadataProjectionLoadError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
@@ -23,6 +24,33 @@ pub(crate) fn project_validated_wal_tail(
         replayed.resulting_head.visible_wal_tip = Some(last_segment.pointer());
     }
     Ok(replayed)
+}
+
+/// Proves the durable head is exactly what replaying the WAL tail onto the
+/// basis lands on.
+///
+/// A tail that lands somewhere else is corruption, and it is the same
+/// corruption wherever it is met: publication, flush, and the read path all
+/// fail closed here rather than storing or serving the disagreement. The tip
+/// clause applies only once the tail has a tip of its own, because an empty
+/// tail leaves the basis tip in place.
+pub(crate) fn ensure_replayed_head_matches(
+    current_head: &HeadState,
+    reconstructed: &HeadState,
+) -> Result<(), MetadataProjectionLoadError> {
+    if current_head.namespace_id != reconstructed.namespace_id
+        || current_head.seq != reconstructed.seq
+        || current_head.head_commit_id != reconstructed.head_commit_id
+        || current_head.next_inode_id != reconstructed.next_inode_id
+        || (reconstructed.visible_wal_tip.is_some()
+            && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
+    {
+        return Err(MetadataProjectionLoadError::ReplayedHeadMismatch {
+            expected: Box::new(current_head.clone()),
+            actual: Box::new(reconstructed.clone()),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn replay_wal_records<'a, I>(

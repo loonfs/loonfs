@@ -3800,6 +3800,46 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
 }
 
 #[tokio::test]
+async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
+    // The missing-basis pass releases a record the creator could never have
+    // verified. A fork pin is not its to release: the target namespace's
+    // fate decides that, and only the fork arm reads it.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("namespace id");
+    let clone = NamespaceId::parse("clone").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &source, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    fork_namespace(&store, &source, &clone, &setup)
+        .await
+        .expect("fork");
+    let fork_record = read_fork_record(&store, &source).await;
+    // Advance the source root past the fork basis so the absent basis below
+    // is not the root's own, which would degrade the pass instead.
+    write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
+    create_checkpoint(&store, &source, &setup)
+        .await
+        .expect("advance root past the fork basis");
+    let basis_key = metadata_manifest_object(&source, &fork_record.manifest.manifest_object_id);
+    store.delete(&basis_key).await.expect("drop basis manifest");
+
+    let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+    let report = gc_namespace(&store, &source, &config(), &aged)
+        .await
+        .expect("gc pass");
+    assert_eq!(report.released_checkpoints.missing_basis, 0);
+    assert_eq!(report.released_checkpoints.fork, 0);
+    assert_eq!(
+        checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
+        CheckpointStatus::Active {},
+        "a live target keeps its pin whatever became of the basis"
+    );
+}
+
+#[tokio::test]
 async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

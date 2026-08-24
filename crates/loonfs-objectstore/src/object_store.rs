@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
-use loonfs_api::Checksum;
+use loonfs_api::{Checksum, ErrorCode};
 use std::borrow::Cow;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -196,8 +196,13 @@ pub enum ObjectStoreError {
 pub enum ObjectStoreErrorClass {
     /// A required object was absent.
     NotFound,
-    /// A key, content reference, or range was invalid.
+    /// A content reference or byte range the caller described was invalid.
     InvalidRequest,
+    /// An object key or listing prefix was outside the store's key grammar.
+    /// LoonFS builds every key it asks for from validated ids, so this is a
+    /// fault in the asking code or in the configured key prefix, never in
+    /// the end user's request.
+    InvalidKey,
     /// A conditional operation observed a conflicting state.
     PreconditionFailed,
     /// The selected identity or credentials were rejected.
@@ -220,11 +225,37 @@ impl ObjectStoreErrorClass {
         error.class()
     }
 
+    /// Returns the wire code every surface answers this category with.
+    ///
+    /// `InvalidRequest` is the one caller-derived category: the content ref
+    /// and the byte range come from the request, so a store that refuses
+    /// them is refusing what the caller asked for. Every other category is
+    /// the deployment's own problem and reads as a server fault.
+    pub fn error_code(self) -> ErrorCode {
+        match self {
+            Self::PermissionDenied => ErrorCode::StoragePermissionDenied,
+            Self::InvalidRequest => ErrorCode::InvalidRequest,
+            Self::NotFound
+            | Self::InvalidKey
+            | Self::PreconditionFailed
+            | Self::StoredChecksumMissing
+            | Self::Unsupported
+            | Self::Configuration
+            | Self::RetryableTransport
+            | Self::Other => ErrorCode::ServerError,
+        }
+    }
+
     /// Returns a safe message for users.
     pub fn public_message(self) -> Cow<'static, str> {
         Cow::Borrowed(match self {
             Self::NotFound => "object-store object not found",
-            Self::InvalidRequest => "object-store request is invalid",
+            Self::InvalidRequest => {
+                "object-store rejected the content reference or byte range in this request"
+            }
+            Self::InvalidKey => {
+                "object-store rejected an object key this deployment constructed"
+            }
             Self::PreconditionFailed => {
                 "object-store precondition failed; retry against the latest state"
             }
@@ -273,7 +304,8 @@ impl ObjectStoreError {
     pub fn class(&self) -> ObjectStoreErrorClass {
         match self {
             Self::NotFound { .. } => ObjectStoreErrorClass::NotFound,
-            Self::InvalidKey { .. } | Self::InvalidContentRef(_) | Self::InvalidRange { .. } => {
+            Self::InvalidKey { .. } => ObjectStoreErrorClass::InvalidKey,
+            Self::InvalidContentRef(_) | Self::InvalidRange { .. } => {
                 ObjectStoreErrorClass::InvalidRequest
             }
             Self::PreconditionFailed { .. } => ObjectStoreErrorClass::PreconditionFailed,

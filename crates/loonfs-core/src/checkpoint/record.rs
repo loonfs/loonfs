@@ -8,8 +8,8 @@
 use super::load::load_namespace_manifest_envelope;
 use super::ManifestLoadError;
 use crate::control_object::{
-    core_control_load_error, expect_identity_field, expect_namespace, expect_own_manifest,
-    load_control_object, ControlObjectLoadError, LoadedControl,
+    expect_identity_field, expect_namespace, expect_own_manifest, load_control_object,
+    ControlObjectLoadError, LoadedControl,
 };
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
@@ -143,7 +143,7 @@ pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
     match loaded {
         Ok(loaded) => Ok(Some(loaded)),
         Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
-        Err(error) => Err(core_control_load_error(error)),
+        Err(error) => Err(CoreError::load_head(error)),
     }
 }
 

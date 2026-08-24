@@ -316,20 +316,6 @@ impl From<ImmutableWriteError> for CoreError {
     }
 }
 
-fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
-    match class {
-        StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
-        StoreFailureClass::NotFound
-        | StoreFailureClass::InvalidRequest
-        | StoreFailureClass::PreconditionFailed
-        | StoreFailureClass::StoredChecksumMissing
-        | StoreFailureClass::Unsupported
-        | StoreFailureClass::Configuration
-        | StoreFailureClass::RetryableTransport
-        | StoreFailureClass::Other => ErrorCode::ServerError,
-    }
-}
-
 impl CoreError {
     pub(crate) fn load_head(error: ControlObjectLoadError) -> Self {
         Self::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
@@ -361,7 +347,7 @@ impl CoreError {
                 ErrorCode::ServerError
             }
             CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
-                classify_store_failure(*class)
+                class.error_code()
             }
             CoreError::HeadPublish(error) => classify_head_publish_error(error),
             CoreError::InvalidPath(_)
@@ -683,7 +669,7 @@ pub(crate) fn classify_control_object_load_error(error: &ControlObjectLoadError)
         | ControlObjectLoadError::KeyLayout { .. }
         | ControlObjectLoadError::ChecksumMismatch { .. }
         | ControlObjectLoadError::Codec { .. } => ErrorCode::NamespaceCorrupt,
-        ControlObjectLoadError::Store { class, .. } => classify_store_failure(*class),
+        ControlObjectLoadError::Store { class, .. } => class.error_code(),
     }
 }
 
@@ -751,7 +737,7 @@ fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> Error
         WriterEpochAcquireError::EmptyWriterId
         | WriterEpochAcquireError::WriterEpochOverflow { .. }
         | WriterEpochAcquireError::RetryExhausted { .. } => ErrorCode::ServerError,
-        WriterEpochAcquireError::HeadWrite { class, .. } => classify_store_failure(*class),
+        WriterEpochAcquireError::HeadWrite { class, .. } => class.error_code(),
     }
 }
 

@@ -13,7 +13,10 @@ use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::basis::{load_head_and_metadata_basis, MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::control::load_head_object;
-use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
+use crate::wal::{
+    ensure_replayed_head_matches, load_validated_wal_chain, project_validated_wal_tail,
+    WalChainLoadRequest,
+};
 use loonfs_api::v0::CommittedChange;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceStatus};
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
@@ -257,7 +260,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
     })?;
-    ensure_publish_reconstructed_head_matches(head, &replayed.resulting_head)?;
+    ensure_replayed_head_matches(head, &replayed.resulting_head)?;
     let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
     let projection = PublishTailProjection {
         key,
@@ -265,27 +268,6 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         tail_state: replayed.resulting_metadata_state,
     };
     Ok(projection)
-}
-
-fn ensure_publish_reconstructed_head_matches(
-    current_head: &HeadState,
-    reconstructed: &HeadState,
-) -> Result<()> {
-    if current_head.namespace_id != reconstructed.namespace_id
-        || current_head.seq != reconstructed.seq
-        || current_head.head_commit_id != reconstructed.head_commit_id
-        || current_head.next_inode_id != reconstructed.next_inode_id
-        || (reconstructed.visible_wal_tip.is_some()
-            && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
-    {
-        return Err(CoreError::MetadataProjection(
-            MetadataProjectionLoadError::ReplayedHeadMismatch {
-                expected: Box::new(current_head.clone()),
-                actual: Box::new(reconstructed.clone()),
-            },
-        ));
-    }
-    Ok(())
 }
 
 /// Confirms that the namespace head did not change while the publish view

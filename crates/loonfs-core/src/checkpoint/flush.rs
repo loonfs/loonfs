@@ -27,7 +27,10 @@ use crate::namespace::basis::{
     resolve_retention_floor_seq, MetadataBasis,
 };
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
+use crate::wal::{
+    ensure_replayed_head_matches, load_validated_wal_chain, project_validated_wal_tail,
+    WalChainLoadRequest,
+};
 use loonfs_api::wire::control::{HeadState, ManifestRef, NamespaceStatus};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{
@@ -269,7 +272,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         .map_err(MetadataProjectionLoadError::WalReplay)
         .map_err(CoreError::MetadataProjection)?
     };
-    ensure_reconstructed_head_matches(&head, &replayed.resulting_head)?;
+    ensure_replayed_head_matches(&head, &replayed.resulting_head)?;
     Ok(RootProjection {
         head,
         basis: loaded.basis,
@@ -277,27 +280,6 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         manifest_segments,
         tail_state: replayed.resulting_metadata_state,
     })
-}
-
-fn ensure_reconstructed_head_matches(
-    current_head: &HeadState,
-    reconstructed: &HeadState,
-) -> Result<()> {
-    if current_head.namespace_id != reconstructed.namespace_id
-        || current_head.seq != reconstructed.seq
-        || current_head.head_commit_id != reconstructed.head_commit_id
-        || current_head.next_inode_id != reconstructed.next_inode_id
-        || (reconstructed.visible_wal_tip.is_some()
-            && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
-    {
-        return Err(CoreError::MetadataProjection(
-            MetadataProjectionLoadError::ReplayedHeadMismatch {
-                expected: Box::new(current_head.clone()),
-                actual: Box::new(reconstructed.clone()),
-            },
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> {

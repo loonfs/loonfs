@@ -4,7 +4,7 @@ use crate::checkpoint::record::{
     encode_checkpoint_record, load_checkpoint_record_at_key, release_checkpoint_record,
 };
 use crate::context::MutationContext;
-use crate::control_object::{core_control_load_error, ControlObjectLoadError};
+use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_head_object;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, NamespaceStatus};
@@ -24,11 +24,11 @@ pub(super) enum ForkCheckpointSweep {
 
 /// Releases a still-active record whose basis manifest is verifiably gone.
 /// Every check runs against fresh reads at decision time: the record must
-/// still be active, older than the grace window by its own `created_at_ms`
-/// (an in-flight create is never raced), and the basis manifest must still
-/// be absent. The release is the compare-and-swap the creator's own
-/// verification failure would have performed; the released record then ages
-/// out through the normal delete path on a later pass.
+/// still be active, not fork-owned, older than the grace window by its own
+/// `created_at_ms` (an in-flight create is never raced), and the basis
+/// manifest must still be absent. The release is the compare-and-swap the
+/// creator's own verification failure would have performed; the released
+/// record then ages out through the normal delete path on a later pass.
 pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -40,10 +40,16 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(false),
-        Err(error) => return Err(core_control_load_error(error)),
+        Err(error) => return Err(CoreError::load_head(error)),
     };
     let record = loaded.state;
     if record.status != (CheckpointStatus::Active {}) {
+        return Ok(false);
+    }
+    // A fork pin ends with its target namespace, and only the fork arm below
+    // reads that. An absent basis says the source is already broken; it says
+    // nothing about whether the target stopped reading through this record.
+    if matches!(record.owner, CheckpointOwner::Fork { .. }) {
         return Ok(false);
     }
     if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
@@ -78,7 +84,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => {
             return Ok(ForkCheckpointSweep::NotAnActiveFork)
         }
-        Err(error) => return Err(core_control_load_error(error)),
+        Err(error) => return Err(CoreError::load_head(error)),
     };
     let record = loaded.state;
     if record.status != (CheckpointStatus::Active {}) {

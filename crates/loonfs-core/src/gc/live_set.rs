@@ -8,7 +8,7 @@ use super::reap::{lease_expired, manifest_object_id_of};
 use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::checkpoint::{load_namespace_manifest_envelope_if_present, ManifestLoadFailureClass};
 use crate::context::MutationContext;
-use crate::control_object::{core_control_load_error, ControlObjectLoadError};
+use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::{
     load_head_and_metadata_basis, resolve_retention_floor_seq, LoadedNamespaceBasis,
@@ -361,7 +361,7 @@ async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
         let record = match loaded {
             Ok(loaded) => loaded.state,
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,
-            Err(error) => return Err(core_control_load_error(error).into()),
+            Err(error) => return Err(CoreError::load_head(error).into()),
         };
         let candidate = checkpoint_is_candidate(store, &record, budget, context).await?;
         // A deleted namespace has no readers. Only an active fork checkpoint

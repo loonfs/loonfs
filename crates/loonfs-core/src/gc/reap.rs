@@ -6,7 +6,7 @@
 
 use crate::checkpoint::record::{encode_checkpoint_record, load_checkpoint_record_at_key};
 use crate::context::MutationContext;
-use crate::control_object::{core_control_load_error, ControlObjectLoadError};
+use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
 use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, NamespaceId, RetainedReason};
@@ -55,7 +55,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(CheckpointSweep::Retain),
-        Err(error) => return Err(core_control_load_error(error)),
+        Err(error) => return Err(CoreError::load_head(error)),
     };
     let record = loaded.state;
     if let CheckpointStatus::Released { released_at_ms } = record.status {

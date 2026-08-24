@@ -3,7 +3,7 @@
 //! The listing reads the `checkpoints/` prefix and excludes released records.
 
 use super::record::load_checkpoint_record_at_key;
-use crate::control_object::{core_control_load_error, ControlObjectLoadError};
+use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_head_object;
 use futures::StreamExt;
@@ -101,7 +101,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
         let loaded = match load_checkpoint_record_at_key(store, &key).await {
             Ok(loaded) => loaded,
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,
-            Err(error) => return Err(core_control_load_error(error)),
+            Err(error) => return Err(CoreError::load_head(error)),
         };
         if loaded.state.status != (CheckpointStatus::Active {}) {
             continue;
