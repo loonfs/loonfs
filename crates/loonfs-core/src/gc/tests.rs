@@ -3835,6 +3835,68 @@ async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
     );
 }
 
+/// The target-head read and checkpoint release CAS are separate object-store
+/// operations. If the target lands between them and the forker then crashes,
+/// GC can observe a released fork record beside a live target. The owner still
+/// protects the target's foreign basis in that state; both the record and its
+/// basis must survive later passes.
+#[tokio::test]
+async fn gc_retains_a_released_fork_record_when_its_target_lives() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("namespace id");
+    let clone = NamespaceId::parse("clone").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &source, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    fork_namespace(&store, &source, &clone, &setup)
+        .await
+        .expect("fork");
+    let fork_record = read_fork_record(&store, &source).await;
+
+    // Move the source root beyond the fork basis, then synthesize the durable
+    // state left by the model-checked race: target active, source pin released,
+    // and no forker left to run the post-install guard.
+    write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
+    create_checkpoint(&store, &source, &setup)
+        .await
+        .expect("advance root past the fork basis");
+    release_checkpoint_record(&store, &source, &fork_record.checkpoint_id, setup.now_ms)
+        .await
+        .expect("simulate the racing checkpoint release");
+    delete_namespace(&store, &source, DeleteNamespaceOptions::default(), &setup)
+        .await
+        .expect("delete source so only the fork pin protects its basis");
+
+    let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+    let report = gc_namespace(&store, &source, &config(), &aged)
+        .await
+        .expect("gc with a released fork record and live target");
+    assert_eq!(report.deleted.checkpoint_records, 0);
+    assert_eq!(report.released_checkpoints.fork, 0);
+    assert_eq!(
+        checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
+        CheckpointStatus::Released {
+            released_at_ms: setup.now_ms
+        }
+    );
+    assert!(crate::checkpoint::load_namespace_manifest_envelope(
+        &store,
+        &source,
+        &fork_record.manifest.manifest_object_id,
+    )
+    .await
+    .is_ok());
+    load_current_metadata_view(&store, &clone)
+        .await
+        .expect("target remains readable after source collection")
+        .resolve_path("/docs/one.txt", AttributeInclusion::Omit)
+        .await
+        .expect("forked file remains readable");
+}
+
 #[tokio::test]
 async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     let temp_dir = tempdir().expect("tempdir");
