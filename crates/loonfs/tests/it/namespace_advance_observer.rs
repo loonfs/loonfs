@@ -6,7 +6,7 @@
 use loonfs::{
     CreateNamespaceOptions, FsBackgroundWork, FsWriter, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepReport, NamespaceAdvanceHint,
-    PutFileOptions, Result, SharedObjectStore,
+    NamespacePublication, PutFileOptions, Result, SharedObjectStore,
 };
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -66,8 +66,6 @@ async fn registered_observer_sees_one_hint_per_publication() {
 
 const SUBSCRIBING_JOB: MaintenanceJobId = MaintenanceJobId::new("namespace-advance-subscriber");
 
-/// A job that says publications concern it, and records which namespaces it
-/// was stepped for.
 #[derive(Default)]
 struct SubscribingJob {
     steps: Mutex<Vec<NamespaceId>>,
@@ -85,8 +83,8 @@ impl MaintenanceJob for SubscribingJob {
         SUBSCRIBING_JOB
     }
 
-    fn nudged_by_publications(&self) -> bool {
-        true
+    fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
+        publication.committed_through_seq.is_some()
     }
 
     async fn step(

@@ -237,8 +237,6 @@ impl MaintenanceJob for TestJob {
 
 const SUBSCRIBING_JOB: MaintenanceJobId = MaintenanceJobId::new("subscribing");
 
-/// A job that says publications concern it, and records which namespaces
-/// it was told about.
 #[derive(Default)]
 struct SubscribingJob {
     steps: StdMutex<Vec<NamespaceId>>,
@@ -256,8 +254,8 @@ impl MaintenanceJob for SubscribingJob {
         SUBSCRIBING_JOB
     }
 
-    fn nudged_by_publications(&self) -> bool {
-        true
+    fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
+        publication.committed_through_seq.is_some()
     }
 
     async fn step(
@@ -597,7 +595,7 @@ async fn a_step_that_reports_a_deadline_re_arms_its_own_key() {
 }
 
 #[tokio::test]
-async fn a_publication_nudges_only_the_jobs_that_subscribe_to_it() {
+async fn a_publication_nudges_only_the_jobs_it_concerns() {
     let quiet = TestJob::idle();
     let subscriber = Arc::new(SubscribingJob::default());
     let runner = enabled_runner(quiet.clone());
@@ -606,13 +604,32 @@ async fn a_publication_nudges_only_the_jobs_that_subscribe_to_it() {
         .expect("register the subscribing job");
     let namespace_id = namespace_id("published");
 
-    runner.nudge_publication_subscribers(&namespace_id);
+    runner.nudge_jobs_after_publication(
+        &namespace_id,
+        &NamespacePublication {
+            committed_through_seq: None,
+            wal_tail_segments: 4,
+        },
+    );
+    runner.drain().await.expect("nothing was scheduled");
+    assert!(
+        subscriber.stepped().is_empty(),
+        "a publication that committed nothing is not this job's trigger"
+    );
+
+    runner.nudge_jobs_after_publication(
+        &namespace_id,
+        &NamespacePublication {
+            committed_through_seq: Some(ChangeSeq(7)),
+            wal_tail_segments: 5,
+        },
+    );
     runner.drain().await.expect("the subscriber's step settles");
 
     assert_eq!(subscriber.stepped(), vec!["published".to_owned()]);
     assert!(
         quiet.stepped().is_empty(),
-        "a job that did not subscribe hears nothing from a publication"
+        "a job that declares no publication trigger hears nothing"
     );
 }
 

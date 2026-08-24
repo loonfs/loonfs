@@ -55,6 +55,13 @@ impl Default for MetadataMaintenanceOptions {
     }
 }
 
+impl MetadataMaintenanceOptions {
+    /// Returns whether the WAL tail has reached the flush threshold.
+    pub fn flush_is_due(&self, wal_tail_segments: u64) -> bool {
+        wal_tail_segments >= self.max_wal_tail_segments.get()
+    }
+}
+
 impl MaintenancePlan {
     /// The plan for one metadata-upkeep pass at the default threshold.
     pub fn metadata() -> Self {
