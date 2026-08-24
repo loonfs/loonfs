@@ -683,13 +683,8 @@ mod tests {
         builder.finish().expect("finish segment")
     }
 
-    /// Row count of the shared multi-block segment.
     const SHARED_SEGMENT_ROWS: usize = 5_000;
 
-    /// The multi-block segment the index and scan tests read.
-    ///
-    /// Building and encoding it is the most expensive work in this module and
-    /// no reader mutates it, so the three tests share one build.
     fn shared_segment() -> &'static BuiltSegmentBlocks {
         static SEGMENT: std::sync::OnceLock<BuiltSegmentBlocks> = std::sync::OnceLock::new();
         SEGMENT.get_or_init(|| build_segment(SHARED_SEGMENT_ROWS))

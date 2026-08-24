@@ -1131,8 +1131,6 @@ mod tests {
     fn head_without_content_store_is_rejected() {
         // The content store is the namespace's addressing-semantics
         // authority; a head that omits it is malformed, never defaulted.
-        // Every other required field is present, so the named field is the
-        // only reason this can fail.
         let mut missing = head_json(None, Vec::new());
         missing
             .as_object_mut()

@@ -430,8 +430,6 @@ mod tests {
     fn policy_exports_capability_limits() {
         let limits = PaginationPolicy::default().capability_limits();
 
-        // The key strings are what SDKs read, so they are spelled out here
-        // rather than read back from the same constants that wrote them.
         assert_eq!(
             limits.get("pagination.default_limit"),
             Some(&u64::from(DEFAULT_PAGE_LIMIT))

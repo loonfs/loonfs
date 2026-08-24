@@ -1147,8 +1147,6 @@ mod tests {
 
     #[test]
     fn generated_positional_ids_are_not_reused_across_samples() {
-        // Same position, many proposers: the suffix keeps every proposal
-        // distinct. Both positional families draw it from the same source.
         let mut wal_segment_ids = BTreeSet::new();
         let mut manifest_object_ids = BTreeSet::new();
         for _ in 0..128 {
@@ -1230,9 +1228,6 @@ mod tests {
     #[test]
     fn content_id_parse_requires_the_generated_id_shape() {
         assert!(ContentId::parse("con_0123456789abcdef0123456789abcdef").is_ok());
-        // The body grammar is the shared generated-id validator, covered in
-        // full by the content-store test. What is unique here is the prefix:
-        // another family's well-formed id is not a content id.
         assert!(ContentId::parse("upl_0123456789abcdef0123456789abcdef").is_err());
     }
 

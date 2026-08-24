@@ -485,8 +485,6 @@ mod tests {
         let missing_parts = r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}}"#;
         let error = serde_json::from_str::<CompleteUploadRequest>(missing_parts)
             .expect_err("multipart parts are required");
-        // The field name is ours; the rest of the sentence is serde's, so it
-        // is not what this asserts.
         assert!(
             error.to_string().contains("parts"),
             "the rejection should name the missing field: {error}"

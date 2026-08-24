@@ -570,8 +570,6 @@ mod tests {
             Err(ContentRefValidationError::UnsupportedKind { .. })
         ));
 
-        // The checksum rules themselves are covered by the sibling test; this
-        // case only proves the reference reports what its checksum refused.
         let mut content_ref = ContentRef::blob_v1(content_id(), b"hello");
         content_ref.checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,

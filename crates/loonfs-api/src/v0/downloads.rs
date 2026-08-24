@@ -117,7 +117,6 @@ mod tests {
         AbsolutePath::parse("/docs/report.txt").expect("absolute path")
     }
 
-    /// A fixed reference, so the grants below can be pinned exactly.
     fn content_ref() -> ContentRef {
         ContentRef::blob_v1(
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
@@ -173,8 +172,6 @@ mod tests {
             },
         };
 
-        // Exact equality, not a search for the object key by name: a leaking
-        // field renamed to anything else still has to show up here.
         assert_eq!(
             serde_json::to_value(&response).expect("serialize response"),
             serde_json::json!({
@@ -211,8 +208,6 @@ mod tests {
                 expires_at_ms: 1,
             },
         };
-        // Exact equality again, so the by-inode grant cannot grow a path
-        // field under any spelling.
         assert_eq!(
             serde_json::to_value(&response).expect("serialize response"),
             serde_json::json!({
