@@ -8,7 +8,9 @@ use crate::aws_credentials::{
     aws_credentials_source, AwsSigningCredentials, SharedAwsCredentialsSource,
 };
 use crate::crypto::hmac_sha256;
-use crate::keyspace::{normalize_key_prefix, parse_endpoint_url, scope_object_key};
+use crate::keyspace::{
+    normalize_key_prefix, parse_endpoint_url, scope_object_key, virtual_hosted_authority,
+};
 use crate::object_store::Result;
 use crate::presign::v4::{
     canonical_query_string, hex_lower, normalize_header_value, percent_encode_path,
@@ -377,15 +379,9 @@ impl S3CompatiblePresigner {
                         ),
                     })
                 } else {
-                    let bucket_prefix = format!("{}.", self.config.bucket);
-                    let host = if parsed.authority.starts_with(&bucket_prefix) {
-                        parsed.authority.to_owned()
-                    } else {
-                        format!("{}.{}", self.config.bucket, parsed.authority)
-                    };
                     Ok(S3Endpoint {
                         scheme: parsed.scheme.to_owned(),
-                        host,
+                        host: virtual_hosted_authority(&self.config.bucket, parsed.authority),
                         canonical_uri: format!("{}/{}", base_path, encoded_key),
                     })
                 }
@@ -504,7 +500,7 @@ impl DirectGetIssuer for S3CompatiblePresigner {
 }
 
 /// Converts a CRC-64/NVME into the base64 spelling the S3 family signs.
-fn base64_crc64nvme(checksum: &Checksum) -> Result<String> {
+pub(crate) fn base64_crc64nvme(checksum: &Checksum) -> Result<String> {
     if checksum.algorithm != ChecksumAlgorithm::Crc64nvme {
         return Err(invalid_direct_put_content(
             "multipart uploads are checksummed with crc64nvme",

@@ -29,6 +29,7 @@ pub mod probe;
 mod provider_object_store;
 mod retry;
 pub mod s3_compatible;
+mod signed_request;
 mod store_config;
 mod store_io_runtime;
 #[cfg(test)]

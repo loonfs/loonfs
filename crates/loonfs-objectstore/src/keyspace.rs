@@ -1,4 +1,5 @@
-//! Key validation and prefix scoping shared by the provider stores.
+//! Key validation, prefix scoping, and endpoint addressing shared by the
+//! provider stores.
 
 use crate::object_store::Result;
 use crate::ObjectStoreError;
@@ -108,6 +109,16 @@ pub(crate) fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint<'_>> {
         authority,
         path: path.trim_end_matches('/'),
     })
+}
+
+/// Prefixes the bucket onto a virtual-hosted authority unless the endpoint
+/// already carries it.
+pub(crate) fn virtual_hosted_authority(bucket: &str, authority: &str) -> String {
+    let bucket = bucket.trim();
+    if authority.starts_with(&format!("{bucket}.")) {
+        return authority.to_owned();
+    }
+    format!("{bucket}.{authority}")
 }
 
 #[cfg(test)]
