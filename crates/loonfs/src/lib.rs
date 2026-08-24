@@ -93,6 +93,7 @@ pub use loonfs_api::{
     PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
+    DecodedBlock, DecodedBlockCache, DecodedBlockCacheObserver, DecodedBlockCacheStats,
     MetadataSegmentCacheConfig, Recency, StoredMetadataBlockCache,
     StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };

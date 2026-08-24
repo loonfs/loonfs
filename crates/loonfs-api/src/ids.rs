@@ -848,6 +848,16 @@ numeric_id! {
     schema_description = "Monotonic run counter allocated by the manifest that names the run. A run is the set of segments one producer wrote together."
 }
 
+impl RunNo {
+    /// Returns the number the allocator hands out after this one, or the
+    /// range error when this run number is already the public maximum.
+    pub fn successor(self) -> Result<Self, PublicOrdinalRangeError> {
+        next_public_ordinal(self.0)
+            .map(Self)
+            .ok_or(PublicOrdinalRangeError)
+    }
+}
+
 numeric_id! {
     /// Counter used to reject writes from an older writer.
     WriterEpoch,

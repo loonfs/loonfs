@@ -604,7 +604,9 @@ fn shared_prefix_len(previous: &str, current: &str) -> usize {
     len
 }
 
-pub(crate) fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
+/// Appends `value` to `bytes` in the LEB128 varint encoding the durable
+/// block grammar uses for its lengths and deltas.
+pub fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
     loop {
         let byte = (value & 0x7f) as u8;
         value >>= 7;
@@ -616,7 +618,8 @@ pub(crate) fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
     }
 }
 
-pub(crate) fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SstBlockCodecError> {
+/// Reads the LEB128 varint at `cursor` and advances `cursor` past it.
+pub fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SstBlockCodecError> {
     let mut value = 0u64;
     let mut shift = 0u32;
     loop {

@@ -52,6 +52,7 @@
 //! );
 //! ```
 
+mod block_cache;
 mod checkpoint;
 mod commit_engine;
 mod context;
@@ -95,6 +96,9 @@ pub mod time;
 /// Cache types and configuration used by runtime read paths. The `loonfs`
 /// runtime owns these caches and their statistics.
 pub mod cache {
+    pub use crate::block_cache::{
+        DecodedBlock, DecodedBlockCache, DecodedBlockCacheObserver, DecodedBlockCacheStats,
+    };
     pub use crate::recency::Recency;
 
     pub use crate::checkpoint::{

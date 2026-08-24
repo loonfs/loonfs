@@ -295,9 +295,9 @@ pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> 
 /// Advances the manifest's run allocator after a producer has taken
 /// `current`.
 pub(super) fn next_run_no_after(current: RunNo) -> Result<RunNo> {
-    next_public_ordinal(current.0).map(RunNo).ok_or_else(|| {
-        CoreError::Internal(format!("run number cannot exceed {MAX_PUBLIC_INTEGER}"))
-    })
+    current
+        .successor()
+        .map_err(|error| CoreError::Internal(format!("run number {error}")))
 }
 
 /// Refuses to initiate a root compare-and-swap once the publication budget

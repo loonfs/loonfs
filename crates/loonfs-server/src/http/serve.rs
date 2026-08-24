@@ -19,7 +19,7 @@ use loonfs::{
 };
 use loonfs_api::NamespaceId;
 use loonfs_grep::{
-    GrepBlockCache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
+    GrepBlockCache, GrepBlockCacheMetrics, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES, GREP_INDEX_JOB,
 };
 use loonfs_objectstore::presign::DirectTransferIssuers;
@@ -304,9 +304,11 @@ pub(super) async fn app_with_store_and_direct_transfers(
     )
     .await?;
     let probe_store = writer.object_store();
-    let grep_block_cache = Arc::new(GrepBlockCache::with_metrics(
+    let grep_block_cache = Arc::new(GrepBlockCache::with_observer(
         DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-        metrics.recorder().as_ref(),
+        Some(Arc::new(GrepBlockCacheMetrics::register(
+            metrics.recorder().as_ref(),
+        ))),
     ));
     // A deployment that maintains the index needs a worker whether or not it
     // answers queries with one. It runs on the writer's own instrumented

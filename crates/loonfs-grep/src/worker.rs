@@ -35,9 +35,9 @@ use loonfs_api::wire::sst_blocks::{
     DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_api::{
-    decode_namespace_cursor, encode_cursor, next_public_ordinal, sha256_digest, ChangeSeq,
-    CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId, NamespaceCursor,
-    NamespaceCursorError, NamespaceId, PageCursor, RevisionNo, RunNo, MAX_PUBLIC_INTEGER,
+    decode_namespace_cursor, encode_cursor, sha256_digest, ChangeSeq, CheckpointId, ContentRef,
+    ErrorCode, IndexSegmentId, InodeId, NamespaceCursor, NamespaceCursorError, NamespaceId,
+    PageCursor, RevisionNo, RunNo,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
@@ -1840,12 +1840,9 @@ fn core_state_error(
 }
 
 fn next_grep_run_no(current: RunNo) -> Result<RunNo> {
-    next_public_ordinal(current.0).map(RunNo).ok_or_else(|| {
-        CoreError::Internal(format!(
-            "grep run number cannot exceed {MAX_PUBLIC_INTEGER}"
-        ))
-        .into()
-    })
+    current
+        .successor()
+        .map_err(|error| CoreError::Internal(format!("grep run number {error}")).into())
 }
 
 fn core_store_error(object_key: &str, error: &ObjectStoreError) -> GrepError {
