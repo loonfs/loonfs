@@ -825,16 +825,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_omission_fault_is_deterministic() {
+    async fn list_omission_fault_is_deterministic_on_both_paths_and_traced() {
         let (_temp_dir, store) = temp_store();
+        // Steps 3 and 4 are the buffered list and the streaming list below,
+        // so both list paths meet the same fault over the same two writes.
+        let omit_recent = |step| ScheduledFault {
+            step,
+            op_kind: Some(ObjectOperationKind::ListPrefix),
+            key_contains: Some("prefix/".to_owned()),
+            fault: ObjectStoreFault::ListOmitsRecentObject,
+        };
         let schedule = FaultSchedule {
             seed: SimSeed(1),
-            faults: vec![ScheduledFault {
-                step: 3,
-                op_kind: Some(ObjectOperationKind::ListPrefix),
-                key_contains: Some("prefix/".to_owned()),
-                fault: ObjectStoreFault::ListOmitsRecentObject,
-            }],
+            faults: vec![omit_recent(3), omit_recent(4)],
         };
         let store = FaultInjectingObjectStore::new(store, schedule);
 
@@ -849,37 +852,17 @@ mod tests {
         let keys = store.list_prefix("prefix/").await.expect("list");
 
         assert_eq!(keys, vec!["prefix/a".to_owned()]);
-    }
-
-    #[tokio::test]
-    async fn list_stream_omission_fault_is_deterministic_and_traced() {
-        let (_temp_dir, store) = temp_store();
-        let schedule = FaultSchedule {
-            seed: SimSeed(1),
-            faults: vec![ScheduledFault {
-                step: 3,
-                op_kind: Some(ObjectOperationKind::ListPrefix),
-                key_contains: Some("prefix/".to_owned()),
-                fault: ObjectStoreFault::ListOmitsRecentObject,
-            }],
-        };
-        let store = FaultInjectingObjectStore::new(store, schedule);
-
-        store
-            .put_overwrite("prefix/a", Bytes::from_static(b"a"))
-            .await
-            .expect("put a");
-        store
-            .put_overwrite("prefix/b", Bytes::from_static(b"b"))
-            .await
-            .expect("put b");
         let keys = store
             .list_prefix_stream("prefix/")
             .try_collect::<Vec<_>>()
             .await
             .expect("stream list");
 
-        assert_eq!(keys, vec!["prefix/a".to_owned()]);
+        assert_eq!(
+            keys,
+            vec!["prefix/a".to_owned()],
+            "the stream drops the same recent key the buffered list dropped"
+        );
         let trace = store.shared_trace().snapshot();
         let event = trace.events.last().expect("stream list trace event");
         assert_eq!(event.operation, "list_prefix_stream_omits_recent_object");

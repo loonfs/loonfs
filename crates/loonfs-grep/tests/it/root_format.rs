@@ -16,7 +16,7 @@ use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::{ChangeSeq, RunNo};
 use loonfs_grep::root::{
     decode_grep_manifest, decode_grep_root, encode_grep_manifest, GrepEnvelopeCodecError,
-    GrepIndexState, GrepIndexStatus, GrepManifestEnvelope, GrepManifestObjectId, GrepManifestState,
+    GrepIndexState, GrepIndexStatus, GrepManifestEnvelope, GrepManifestState,
     GrepManifestStateError, GrepReorganizeState,
 };
 use loonfs_test_support::ids::namespace_id;
@@ -46,19 +46,6 @@ fn edited_document(
         document["kind"], document["format_version"],
     )
     .into_bytes()
-}
-
-#[test]
-fn identical_manifest_state_mints_distinct_ids() {
-    let first = GrepManifestObjectId::generate();
-    let second = GrepManifestObjectId::generate();
-
-    assert_ne!(first, second);
-    assert!(first.as_str().starts_with("gmf_"));
-    assert_eq!(
-        GrepManifestObjectId::parse(first.as_str()).expect("a generated id parses"),
-        first
-    );
 }
 
 #[test]

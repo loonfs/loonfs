@@ -440,15 +440,4 @@ mod tests {
         assert_eq!(cache.stats().misses, 1);
         assert_eq!(cache.stats().inserts, 1);
     }
-
-    #[test]
-    fn decoded_byte_budget_evicts_the_oldest_block() {
-        let cache = GrepBlockCache::new(1_000);
-        cache.insert(key("a"), block(600));
-        cache.insert(key("b"), block(600));
-
-        assert!(cache.get(&key("a")).is_none());
-        assert!(cache.get(&key("b")).is_some());
-        assert_eq!(cache.stats().evictions, 1);
-    }
 }

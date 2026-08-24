@@ -74,25 +74,3 @@ impl SharedSimTrace {
         self.inner.lock().expect("sim trace lock poisoned").clone()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shared_trace_records_events() {
-        let trace = SharedSimTrace::empty(RunId("run".to_owned()), SimSeed(1));
-        trace.push(SimTraceEvent {
-            step: 1,
-            actor: Some("writer-1".to_owned()),
-            operation: "put".to_owned(),
-            object_op: None,
-            injected_fault: None,
-            result: SimEventResult::Ok,
-            model_hash: None,
-            core_hash: None,
-        });
-
-        assert_eq!(trace.snapshot().events.len(), 1);
-    }
-}

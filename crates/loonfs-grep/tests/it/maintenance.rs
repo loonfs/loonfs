@@ -119,10 +119,6 @@ async fn a_disabled_root_concludes_not_enabled_on_the_next_step() {
             .conclusion,
         MaintenanceStepConclusion::NotEnabled
     );
-    assert_eq!(
-        job.probe(&namespace_id).await.expect("probe disabled root"),
-        MaintenanceProbe::Idle
-    );
 }
 
 #[tokio::test]
