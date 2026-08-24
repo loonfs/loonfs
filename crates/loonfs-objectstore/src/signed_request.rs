@@ -1,14 +1,11 @@
-//! Requests this crate signs for itself when a provider client cannot
-//! express them, and the provider-independent reading of their responses.
+//! Helpers for HTTP requests signed by LoonFS.
 
 use crate::object_store::Result;
 use crate::presign::PresignedUrl;
 use crate::{ObjectStoreError, StoredObjectChecksum};
 use loonfs_api::Checksum;
-use object_store::client::{HttpClient, HttpRequestBody};
+use object_store::client::{HttpClient, HttpRequestBody, HttpResponse};
 
-/// One internally signed response, read whole: the bodies are small control
-/// documents, and the S3 family can report failure inside a 200 body.
 pub(crate) struct SignedResponse {
     pub(crate) status: http::StatusCode,
     pub(crate) headers: http::HeaderMap,
@@ -20,7 +17,7 @@ pub(crate) async fn execute_signed(
     key: &str,
     signed: PresignedUrl,
     body: HttpRequestBody,
-) -> Result<SignedResponse> {
+) -> Result<HttpResponse> {
     let mut builder = http::Request::builder()
         .method(signed.method.as_str())
         .uri(&signed.url);
@@ -30,11 +27,19 @@ pub(crate) async fn execute_signed(
     let request = builder
         .body(body)
         .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
-    let response = client
+    client
         .execute(request)
         .await
-        .map_err(|err| ObjectStoreError::retryable_transport(key, err.to_string()))?;
+        .map_err(|err| ObjectStoreError::retryable_transport(key, err.to_string()))
+}
 
+pub(crate) async fn execute_signed_with_body(
+    client: &HttpClient,
+    key: &str,
+    signed: PresignedUrl,
+    body: HttpRequestBody,
+) -> Result<SignedResponse> {
+    let response = execute_signed(client, key, signed, body).await?;
     let status = response.status();
     let headers = response.headers().clone();
     let body = response
@@ -49,15 +54,13 @@ pub(crate) async fn execute_signed(
     })
 }
 
-/// Reads a signed checksum head, taking the provider's header reader. An
-/// object with no usable checksum is an error, never a size-only answer:
-/// completion has nothing to compare.
-pub(crate) fn stored_checksum_from_signed_head(
+/// Reads an object's size and checksum from a signed `HEAD` response.
+pub(crate) fn stored_checksum_from_signed_head<B>(
     key: &str,
-    response: &SignedResponse,
+    response: &http::Response<B>,
     stored_checksum: impl FnOnce(&http::HeaderMap) -> Option<Checksum>,
 ) -> Result<Option<StoredObjectChecksum>> {
-    let status = response.status;
+    let status = response.status();
     if status == http::StatusCode::NOT_FOUND {
         return Ok(None);
     }
@@ -75,13 +78,13 @@ pub(crate) fn stored_checksum_from_signed_head(
         ));
     }
 
-    let Some(checksum) = stored_checksum(&response.headers) else {
+    let Some(checksum) = stored_checksum(response.headers()) else {
         return Err(ObjectStoreError::StoredChecksumMissing {
             object_key: key.to_owned(),
         });
     };
     let size_bytes = response
-        .headers
+        .headers()
         .get(http::header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())

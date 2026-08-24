@@ -14,7 +14,9 @@ use crate::presign::{
     base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
     CHECKSUM_HEAD_TTL, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
 };
-use crate::signed_request::{execute_signed, stored_checksum_from_signed_head, SignedResponse};
+use crate::signed_request::{
+    execute_signed, execute_signed_with_body, stored_checksum_from_signed_head, SignedResponse,
+};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
     ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
@@ -288,8 +290,6 @@ impl S3CompatibleStore {
     }
 }
 
-/// The S3 family's own reading of a signed response: a flat XML control
-/// document, and a failure that can arrive inside a 200.
 impl SignedResponse {
     fn text(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.body)
@@ -341,7 +341,8 @@ impl ObjectStore for S3CompatibleStore {
             .request_signer
             .presign_create_multipart(key, MULTIPART_CONTROL_TTL, Self::signing_time())
             .await?;
-        let response = execute_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        let response =
+            execute_signed_with_body(&self.http, key, signed, HttpRequestBody::empty()).await?;
         if let Some(code) = response.provider_error_code() {
             return Err(multipart_error(key, "create", &code));
         }
@@ -367,7 +368,7 @@ impl ObjectStore for S3CompatibleStore {
                 Self::signing_time(),
             )
             .await?;
-        let response = execute_signed(
+        let response = execute_signed_with_body(
             &self.http,
             key,
             signed,
@@ -394,7 +395,8 @@ impl ObjectStore for S3CompatibleStore {
                 Self::signing_time(),
             )
             .await?;
-        let response = execute_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        let response =
+            execute_signed_with_body(&self.http, key, signed, HttpRequestBody::empty()).await?;
         match response.provider_error_code().as_deref() {
             // Nothing to abandon is the state an abort is trying to reach.
             None | Some("NoSuchUpload") => Ok(()),
