@@ -30,17 +30,21 @@ pub fn hex_encode_bytes(bytes: &[u8]) -> String {
     encoded
 }
 
+fn nibble(byte: u8) -> Result<u8, HexDecodeError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(HexDecodeError::InvalidByte { byte }),
+    }
+}
+
+pub(crate) fn is_lower_hex_byte(byte: u8) -> bool {
+    nibble(byte).is_ok()
+}
+
 /// Decodes lowercase hex. Errors carry no input bytes; callers name the
 /// field they were decoding.
 pub fn hex_decode_bytes(encoded: &str) -> Result<Vec<u8>, HexDecodeError> {
-    fn nibble(byte: u8) -> Result<u8, HexDecodeError> {
-        match byte {
-            b'0'..=b'9' => Ok(byte - b'0'),
-            b'a'..=b'f' => Ok(byte - b'a' + 10),
-            _ => Err(HexDecodeError::InvalidByte { byte }),
-        }
-    }
-
     let bytes = encoded.as_bytes();
     if bytes.len() % 2 != 0 {
         return Err(HexDecodeError::OddLength {

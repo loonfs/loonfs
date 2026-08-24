@@ -1,7 +1,7 @@
 //! [`ContentRef`]: the durable reference a file revision points at, naming
 //! one immutable content object and carrying the integrity evidence for it.
 
-use crate::hex::hex_encode_bytes;
+use crate::hex::{hex_encode_bytes, is_lower_hex_byte};
 use crate::ids::ContentId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha2Sha256};
@@ -169,11 +169,7 @@ impl Checksum {
                 actual_len: self.value.len(),
             });
         }
-        if !self
-            .value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
+        if !self.value.bytes().all(is_lower_hex_byte) {
             return Err(ChecksumValidationError::InvalidAlphabet {
                 algorithm: self.algorithm,
             });

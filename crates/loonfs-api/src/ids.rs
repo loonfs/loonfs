@@ -2,7 +2,7 @@
 //! `string_id!` and `numeric_id!` macros so all ids share one validated
 //! surface.
 
-use crate::hex::hex_encode_bytes;
+use crate::hex::{hex_encode_bytes, is_lower_hex_byte};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
@@ -437,10 +437,6 @@ fn parse_position_suffix_id<'a>(
     Ok((position, suffix))
 }
 
-fn is_lower_hex_byte(byte: u8) -> bool {
-    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-}
-
 fn validate_id_grammar(value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err("must not be empty".to_owned());
@@ -588,8 +584,7 @@ string_id! {
     /// names *which object*, never what it contains — integrity evidence
     /// rides [`crate::ContentRef`] beside it.
     ContentId,
-    error = GeneratedIdValidationError,
-    validate = |value: &str| validate_generated_id("con", value),
+    prefix = "con",
     schema(
         pattern = r"^con_[0-9a-f]{32}$",
         example = "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41"
@@ -597,14 +592,6 @@ string_id! {
 }
 
 impl ContentId {
-    /// Generates an id from 128 fresh random bits.
-    pub fn generate() -> Self {
-        Self(format!(
-            "con_{}",
-            crate::hex::hex_encode_bytes(&random_128())
-        ))
-    }
-
     /// Returns the two-character components for both content-key shard levels.
     ///
     /// Every valid id has a 32-character lowercase hex body, so this never
@@ -874,12 +861,19 @@ pub enum InodeKind {
     Directory,
 }
 
+impl InodeKind {
+    /// Returns the serialized value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "dir",
+        }
+    }
+}
+
 impl fmt::Display for InodeKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::File => f.write_str("file"),
-            Self::Directory => f.write_str("dir"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
