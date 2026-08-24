@@ -237,8 +237,6 @@ impl MaintenanceJob for TestJob {
 
 const SUBSCRIBING_JOB: MaintenanceJobId = MaintenanceJobId::new("subscribing");
 
-/// A job triggered by publications that committed, like the projections the
-/// hook is written for, recording which namespaces it was told about.
 #[derive(Default)]
 struct SubscribingJob {
     steps: StdMutex<Vec<NamespaceId>>,
@@ -256,7 +254,7 @@ impl MaintenanceJob for SubscribingJob {
         SUBSCRIBING_JOB
     }
 
-    fn nudged_by_publication(&self, publication: &NamespacePublication) -> bool {
+    fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
         publication.committed_through_seq.is_some()
     }
 
@@ -606,9 +604,7 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
         .expect("register the subscribing job");
     let namespace_id = namespace_id("published");
 
-    // An attempt that committed nothing still reaches every job. The job
-    // that answers on commits declines it; nothing is scheduled.
-    runner.nudge_publication_subscribers(
+    runner.nudge_jobs_after_publication(
         &namespace_id,
         &NamespacePublication {
             committed_through_seq: None,
@@ -621,7 +617,7 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
         "a publication that committed nothing is not this job's trigger"
     );
 
-    runner.nudge_publication_subscribers(
+    runner.nudge_jobs_after_publication(
         &namespace_id,
         &NamespacePublication {
             committed_through_seq: Some(ChangeSeq(7)),

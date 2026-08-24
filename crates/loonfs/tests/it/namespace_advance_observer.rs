@@ -66,8 +66,6 @@ async fn registered_observer_sees_one_hint_per_publication() {
 
 const SUBSCRIBING_JOB: MaintenanceJobId = MaintenanceJobId::new("namespace-advance-subscriber");
 
-/// A job triggered by publications that committed, recording which
-/// namespaces it was stepped for.
 #[derive(Default)]
 struct SubscribingJob {
     steps: Mutex<Vec<NamespaceId>>,
@@ -85,7 +83,7 @@ impl MaintenanceJob for SubscribingJob {
         SUBSCRIBING_JOB
     }
 
-    fn nudged_by_publication(&self, publication: &NamespacePublication) -> bool {
+    fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
         publication.committed_through_seq.is_some()
     }
 

@@ -973,9 +973,7 @@ pub(crate) async fn publish_batch_with_engine(
         .into_iter()
         .map(|result| result.map_err(RuntimeError::Core))
         .collect::<Vec<_>>();
-    // The attempt reports what it left behind. Each job decides for
-    // itself whether that is one of its own triggers.
-    writer.notify_published(
+    writer.notify_after_publish(
         namespace_id,
         &NamespacePublication {
             committed_through_seq: highest_committed_seq(&results),

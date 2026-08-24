@@ -150,18 +150,12 @@ impl MaintenanceStepReport {
     }
 }
 
-/// What one publication attempt left behind, as the jobs it may concern see
-/// it.
-///
-/// The write path reports every attempt. Each job decides which attempts are
-/// its own trigger, through [`MaintenanceJob::nudged_by_publication`].
+/// State available to maintenance jobs after a publish attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamespacePublication {
-    /// The highest sequence the attempt committed, or `None` when it
-    /// committed nothing.
+    /// Highest sequence committed by the attempt, if any.
     pub committed_through_seq: Option<ChangeSeq>,
-    /// Visible WAL-tail length the attempt left behind. Zero when the
-    /// attempt failed before reading the tail.
+    /// Visible WAL-tail length, or zero if the attempt did not read it.
     pub wal_tail_segments: u64,
 }
 
@@ -201,14 +195,10 @@ pub trait MaintenanceJob: Send + Sync + 'static {
     /// reconciliation.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe>;
 
-    /// Returns whether `publication` should nudge this job.
+    /// Returns whether this publish attempt should nudge the job.
     ///
-    /// Work derived from namespace history, such as an index or projection,
-    /// answers on `committed_through_seq`: every commit concerns it. Work
-    /// that starts at a WAL-tail threshold answers on `wal_tail_segments`.
-    /// The nudge is only a scheduling hint; the step must reload durable
-    /// state. Deadline-driven jobs keep the default `false`.
-    fn nudged_by_publication(&self, _publication: &NamespacePublication) -> bool {
+    /// A nudge is only a scheduling hint; the job must reload durable state.
+    fn should_nudge_after_publication(&self, _publication: &NamespacePublication) -> bool {
         false
     }
 }
@@ -535,12 +525,11 @@ impl MaintenanceRunner {
         Ok(())
     }
 
-    /// Nudges each registered job that `publication` concerns.
+    /// Nudges interested jobs after a publish attempt.
     ///
-    /// Subscription is declared by [`MaintenanceJob::nudged_by_publication`], so
-    /// the write path does not need job-specific wiring. Nudges are non-blocking,
-    /// coalesced, and ignored when automatic maintenance is disabled or closed.
-    pub(crate) fn nudge_publication_subscribers(
+    /// Nudges are non-blocking, coalesced, and ignored when automatic
+    /// maintenance is disabled or closed.
+    pub(crate) fn nudge_jobs_after_publication(
         &self,
         namespace_id: &NamespaceId,
         publication: &NamespacePublication,
@@ -550,7 +539,7 @@ impl MaintenanceRunner {
             .inner
             .lock_jobs()
             .iter()
-            .filter(|(_, job)| job.nudged_by_publication(publication))
+            .filter(|(_, job)| job.should_nudge_after_publication(publication))
             .map(|(id, _)| *id)
             .collect();
         for job in subscribers {

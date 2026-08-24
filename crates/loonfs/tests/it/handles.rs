@@ -753,9 +753,6 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
                 .build()
                 .await
                 .expect("build admin");
-            // The tail, not the publication, is what schedules the step. A
-            // writer that publishes below the threshold does no upkeep at
-            // all, so the common write costs nothing in the background.
             writer
                 .put_file_bytes(
                     &namespace_id,
@@ -807,10 +804,6 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
 
 #[test]
 fn a_refused_publish_schedules_the_step_that_relieves_the_debt() {
-    // The debt is inherited: another process left the tail at the write-stop
-    // bound, so this writer's runner has never heard of the namespace. Its
-    // first publish is refused, and that refusal is the only report the
-    // namespace can make — nothing committed, so no advance follows it.
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {

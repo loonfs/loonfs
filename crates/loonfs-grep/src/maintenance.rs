@@ -50,11 +50,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         GREP_INDEX_JOB
     }
 
-    /// The index is a projection of the namespace's own history, so a
-    /// publication that committed is its one real trigger and the cheapest
-    /// possible hint. Declaring it here is all it takes: no host wires
-    /// anything to the write path on grep's behalf.
-    fn nudged_by_publication(&self, publication: &NamespacePublication) -> bool {
+    fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
         publication.committed_through_seq.is_some()
     }
 

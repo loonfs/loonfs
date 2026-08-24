@@ -94,8 +94,6 @@ impl StepContext {
 /// reorganization unit.
 struct MetadataJob {
     context: StepContext,
-    /// The upkeep every step runs with. The trigger and the probe ask about
-    /// the same threshold, so the three cannot disagree.
     options: MetadataMaintenanceOptions,
 }
 
@@ -105,10 +103,7 @@ impl MaintenanceJob for MetadataJob {
         MaintenanceJobId::METADATA
     }
 
-    /// A publication is this job's trigger only once the tail it left has
-    /// reached the flush threshold. An earlier one would start a step that
-    /// declines to flush.
-    fn nudged_by_publication(&self, publication: &NamespacePublication) -> bool {
+    fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
         self.options.flush_is_due(publication.wal_tail_segments)
     }
 

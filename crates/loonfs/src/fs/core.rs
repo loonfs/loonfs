@@ -62,22 +62,16 @@ pub(crate) struct WriterBits {
 }
 
 impl WriterBits {
-    /// Reports what one publication attempt against `namespace_id` left
-    /// behind.
-    ///
-    /// The one post-publication emission point. Maintenance jobs decide for
-    /// themselves which attempts concern them; the host observer hears only
-    /// the ones that committed. A host observer panic is contained here: the
-    /// commit it followed is already durable.
-    pub(crate) fn notify_published(
+    /// Notifies maintenance after every publish attempt and the observer
+    /// after a successful commit.
+    pub(crate) fn notify_after_publish(
         &self,
         namespace_id: &NamespaceId,
         publication: &NamespacePublication,
     ) {
-        // Nudge runtime-owned work first: a slow or panicking observer must
-        // not delay it.
+        // Notify maintenance before running host code.
         self.maintenance
-            .nudge_publication_subscribers(namespace_id, publication);
+            .nudge_jobs_after_publication(namespace_id, publication);
 
         let Some(through_seq) = publication.committed_through_seq else {
             return;
