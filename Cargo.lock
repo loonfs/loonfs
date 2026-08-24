@@ -1970,7 +1970,6 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "loonfs-api",
- "loonfs-test-support",
  "object_store",
  "ring",
  "serde",

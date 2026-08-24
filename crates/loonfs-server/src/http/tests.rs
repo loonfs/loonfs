@@ -11,7 +11,7 @@ use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::http::StatusCode;
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, StreamExt};
 use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, MaintenanceJob,
     MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepReport,
@@ -2371,6 +2371,55 @@ async fn the_proxied_upload_route_never_holds_the_whole_payload() {
     assert_eq!(read_back, payload);
 
     harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
+    let temp_dir = tempdir().expect("tempdir");
+    let watched =
+        BufferWatchStore::watching_content(LocalFsStore::new(temp_dir.path()).expect("store"));
+
+    let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
+    let key = loonfs_objectstore::keys::content_blob(
+        &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
+            .expect("valid content store id"),
+        &loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+    );
+    // Use HTTP-sized chunks so the store must regroup them.
+    let chunks: Vec<Bytes> = payload
+        .chunks(64 * 1024)
+        .map(Bytes::copy_from_slice)
+        .collect();
+    let stored = watched
+        .put_streamed(
+            &key,
+            futures::stream::iter(chunks.into_iter().map(Ok)).boxed(),
+            PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("stream a multi-part payload into the store");
+
+    assert_eq!(stored, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    let peaks = watched.peaks();
+    assert_eq!(peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    assert!(
+        peaks.largest_buffer_bytes <= MEMORY_BOUND_PART_BYTES,
+        "no single buffer may exceed one part: largest was {}",
+        peaks.largest_buffer_bytes
+    );
+    assert!(
+        peaks.peak_live_bytes <= MEMORY_BOUND_PART_BYTES,
+        "the store held {} bytes at once, past its one-part window",
+        peaks.peak_live_bytes
+    );
+    assert_eq!(
+        watched
+            .get(&key, None)
+            .await
+            .expect("read back")
+            .expect("object exists"),
+        Bytes::from(payload)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
