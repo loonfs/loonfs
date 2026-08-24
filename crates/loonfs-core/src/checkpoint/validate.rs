@@ -9,8 +9,9 @@ use loonfs_api::wire::manifest::{
     MetadataRow, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
 use loonfs_api::{
-    manifest_object_id_manifest_no, ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId,
+    manifest_object_id_manifest_no, ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, RunNo,
 };
+use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
@@ -52,6 +53,49 @@ pub(super) fn validate_namespace_manifest(
             expected: manifest_object_id.clone(),
             actual: manifest.payload.manifest_object_id.clone(),
         });
+    }
+    Ok(())
+}
+
+/// Checks the two rules that make a run number an identity.
+///
+/// Every number a descriptor carries must already be allocated, so it sits
+/// below the manifest's `next_run_no`. And one number must name one run, so
+/// every descriptor carrying it must agree on the sequence the run
+/// materialized through and on the level it sits at.
+///
+/// Distinct runs then carry distinct numbers. The rest of the checkpoint code
+/// groups descriptors by number, so two runs sharing one number would be read
+/// as one run, and this is the check that refuses that manifest.
+pub(super) fn validate_manifest_run_identity(
+    object_key: &str,
+    payload: &NamespaceManifestPayload,
+) -> Result<(), ManifestLoadError> {
+    let mut identities: BTreeMap<RunNo, (ChangeSeq, u32)> = BTreeMap::new();
+    for descriptor in &payload.segments {
+        if descriptor.run_no >= payload.next_run_no {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!(
+                    "metadata segment `{}` names run `{}` but the manifest allocates run `{}` \
+                     next; every run a manifest names was already allocated",
+                    descriptor.segment_id, descriptor.run_no, payload.next_run_no
+                ),
+            });
+        }
+        let identity = (descriptor.run_seq, descriptor.level);
+        let (named_seq, named_level) = *identities.entry(descriptor.run_no).or_insert(identity);
+        if identity != (named_seq, named_level) {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!(
+                    "run `{}` carries seq `{named_seq}` level {named_level} on one segment and \
+                     seq `{}` level {} on metadata segment `{}`; one run materialized through one \
+                     sequence at one level",
+                    descriptor.run_no, descriptor.run_seq, descriptor.level, descriptor.segment_id
+                ),
+            });
+        }
     }
     Ok(())
 }

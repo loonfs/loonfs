@@ -43,7 +43,7 @@ impl VisibilityHarness {
             .await
             .expect("bootstrap namespace");
         // Publish the namespace's first manifest up front, so each flush a
-        // scenario performs adds exactly one L0 run to it.
+        // scenario performs adds exactly one delta run to it.
         engine.flush_wal().await.expect("publish first manifest");
         Self {
             _temp_dir: temp_dir,

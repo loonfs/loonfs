@@ -491,7 +491,7 @@ fn amortized(group: MetadataFamilyGroup, merges: u32) -> FrozenBasePolicy {
 /// rebuild in one unit whatever the streaming job did incrementally.
 fn fold_everything_policy() -> MetadataLsmPolicy {
     MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(4_000_000).expect("nonzero"),
         max_decoded_input_bytes_per_step: NonZeroUsize::new(1 << 30).expect("nonzero"),
         max_input_runs_per_step: NonZeroUsize::new(64).expect("nonzero"),
@@ -503,7 +503,7 @@ fn fold_everything_policy() -> MetadataLsmPolicy {
 /// window that makes progress and answers with a compaction.
 fn starving_policy() -> MetadataLsmPolicy {
     MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     }
@@ -533,7 +533,7 @@ async fn policy_that_starves_the_group<S: ObjectStore + ?Sized>(
         "the seed must leave this group a base run to starve"
     );
     MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(
             usize::try_from(base_rows).expect("test row counts are small") - 1,
         )
@@ -595,7 +595,7 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
         &segments,
         group,
         MetadataLsmPolicy {
-            max_l0_runs: NonZeroUsize::MIN,
+            max_delta_runs: NonZeroUsize::MIN,
             max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
             ..MetadataLsmPolicy::default()
         },
@@ -863,7 +863,7 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
         &segments,
         group,
         MetadataLsmPolicy {
-            max_l0_runs: NonZeroUsize::MIN,
+            max_delta_runs: NonZeroUsize::MIN,
             max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
             ..MetadataLsmPolicy::default()
         },
@@ -886,7 +886,7 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
         spec.inputs().iter().copied().collect::<BTreeSet<_>>(),
         snapshot
             .iter()
-            .map(|run| (run.run_seq, run.level))
+            .map(|run| run.run_no)
             .collect::<BTreeSet<_>>(),
         "a compaction takes every run the group holds, which is what anchors it at the bottom"
     );
@@ -933,7 +933,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
 
 /// While a job rebuilds one group, steps leave that group alone and fold the
 /// others. Without this a step would keep re-planning the running job: the
-/// group's L0 rows are frozen in the job's snapshot, so its count never falls
+/// group's delta rows are frozen in the job's snapshot, so its count never falls
 /// while every other group's does.
 #[tokio::test]
 async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
@@ -945,12 +945,12 @@ async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
 
     // Same durable state, twice. With no job in flight this group is what a
-    // step takes: it holds the most L0 rows.
+    // step takes: it holds the most delta rows.
     let fold_dir = tempdir().expect("tempdir");
     copy_store_tree(temp_dir.path(), fold_dir.path());
     let fold_store = LocalFsStore::new(fold_dir.path()).expect("store");
@@ -1108,7 +1108,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
     seed_bindings_workload(&store, &namespace_id).await;
     let group = MetadataFamilyGroup::Bindings;
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
 
@@ -1541,6 +1541,8 @@ async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
     else {
         panic!("raised budgets must admit a bounded merge");
     };
+    // The number the manifest this window came from would allocate.
+    let run_no = segments.manifest().payload.next_run_no;
     drop(segments);
 
     let step_error = merge_group_in_step(
@@ -1548,6 +1550,7 @@ async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
         &namespace_id,
         group,
         &input.runs,
+        run_no,
         input.placement,
         floor_seq,
         fold_everything_policy(),
@@ -1841,13 +1844,15 @@ async fn install_synthetic_bindings_base(
         .await
         .manifest()
         .clone();
-    let base_run_seq = manifest
+    // The synthetic segments replace this run's bindings, so they join the
+    // run that already holds the group's other families.
+    let base_run = manifest
         .payload
         .segments
         .iter()
         .find(|descriptor| descriptor.level == CHECKPOINT_BASE_RUN_LEVEL)
-        .expect("the namespace has been folded into a base run")
-        .run_seq;
+        .expect("the namespace has been folded into a base run");
+    let (base_run_no, base_run_seq) = (base_run.run_no, base_run.run_seq);
     let mut rows_by_family = BTreeMap::from([
         (ApiMetadataRowFamily::DirentryBinds, binds.clone()),
         (ApiMetadataRowFamily::DirentryChildBinds, binds),
@@ -1856,6 +1861,7 @@ async fn install_synthetic_bindings_base(
     let run_segments = build_manifest_segments_from_rows(
         store,
         namespace_id,
+        base_run_no,
         base_run_seq,
         CHECKPOINT_BASE_RUN_LEVEL,
         |family| {
@@ -1961,6 +1967,8 @@ async fn a_step_contained_merge_reads_its_window_once() {
     else {
         panic!("raised budgets must admit a bounded merge");
     };
+    // The number the manifest this window came from would allocate.
+    let run_no = segments.manifest().payload.next_run_no;
     drop(segments);
     let window_segments = input
         .runs
@@ -1979,6 +1987,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
         &namespace_id,
         group,
         &input.runs,
+        run_no,
         input.placement,
         floor_seq,
         fold_everything_policy(),
@@ -2612,12 +2621,15 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     else {
         panic!("raised budgets must admit a bounded merge");
     };
+    // The number the manifest this window came from would allocate.
+    let run_no = segments.manifest().payload.next_run_no;
     drop(segments);
     let merged = merge_group_in_step(
         &store,
         &namespace_id,
         group,
         &input.runs,
+        run_no,
         input.placement,
         floor_seq,
         small_segment_policy(),
@@ -2869,7 +2881,7 @@ async fn group_segments_outside_the_job<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     group: MetadataFamilyGroup,
 ) -> BTreeSet<String> {
-    let inputs: BTreeSet<(ChangeSeq, u32)> = spec.inputs().iter().copied().collect();
+    let inputs: BTreeSet<RunNo> = spec.inputs().iter().copied().collect();
     load_current_manifest_segments(store, namespace_id)
         .await
         .manifest()
@@ -2877,8 +2889,7 @@ async fn group_segments_outside_the_job<S: ObjectStore + ?Sized>(
         .segments
         .iter()
         .filter(|descriptor| {
-            group.contains(descriptor.family)
-                && !inputs.contains(&(descriptor.run_seq, descriptor.level))
+            group.contains(descriptor.family) && !inputs.contains(&descriptor.run_no)
         })
         .map(metadata_segment_object_key)
         .collect()
@@ -3073,7 +3084,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
 
 /// Runs steps until one hands a group to a job, and answers with that plan.
 ///
-/// A step folds the group with the most L0 rows, so the starved group is
+/// A step folds the group with the most delta rows, so the starved group is
 /// reached after the groups that still fit have folded.
 async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
     store: &S,
@@ -3343,7 +3354,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     );
     assert_eq!(
         runs.iter()
-            .filter(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
+            .filter(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
             .count(),
         1,
         "the flush's run must survive the swap"

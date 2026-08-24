@@ -1911,7 +1911,7 @@ mode = "serve_only"
 max_files_per_step = 4096
 max_content_bytes_per_step = 536870912
 max_rows_per_segment = 131072
-max_l0_runs = 4
+max_delta_runs = 4
 max_mid_runs = 6
 max_decoded_input_rows_per_step = 262144
 
@@ -1930,7 +1930,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(policy.max_files_per_step.get(), 4096);
         assert_eq!(policy.max_content_bytes_per_step.get(), 536_870_912);
         assert_eq!(policy.max_rows_per_segment.get(), 131_072);
-        assert_eq!(policy.max_l0_runs.get(), 4);
+        assert_eq!(policy.max_delta_runs.get(), 4);
         assert_eq!(policy.max_mid_runs.get(), 6);
         assert_eq!(policy.max_decoded_input_rows_per_step.get(), 262_144);
     }
@@ -1947,7 +1947,7 @@ writer_id = "loonfs-server"
 
 [grep]
 max_files_per_step = 1024
-max_l0_runs = 3
+max_delta_runs = 3
 
 [store]
 kind = "local-fs"
@@ -1962,7 +1962,7 @@ root = "/tmp/loonfs-server"
             .build_policy()
             .expect("valid configured grep policy");
         assert_eq!(policy.max_files_per_step.get(), 1024);
-        assert_eq!(policy.max_l0_runs.get(), 3);
+        assert_eq!(policy.max_delta_runs.get(), 3);
         assert_eq!(
             policy.max_mid_runs,
             loonfs_grep::GramIndexBuildPolicy::default().max_mid_runs,

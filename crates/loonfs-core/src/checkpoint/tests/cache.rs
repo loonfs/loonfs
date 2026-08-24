@@ -217,7 +217,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
 }
 
 #[tokio::test]
-async fn segment_range_page_merges_base_and_l0_in_row_key_order() {
+async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -385,7 +385,7 @@ async fn maintenance_materialization_does_not_populate_metadata_segment_cache() 
             .expect("load materialized manifest");
     let after = cache.stats();
 
-    assert!(flatten_manifest_segments(base_run(&materialized.manifest).segments).len() > 1);
+    assert!(flatten_manifest_segments(base_tier(&materialized.manifest)).len() > 1);
     assert_eq!(after, before);
 }
 
@@ -400,7 +400,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .expect("bootstrap");
 
     // "beta" lands in the base run; a second checkpoint puts "alpha" and
-    // "gamma" in an L0 run. The L0 bind segment's key range then straddles
+    // "gamma" in a delta run. The delta bind segment's key range then straddles
     // "beta", so min/max pruning cannot exclude it — only its bloom filter
     // can prove the name absent.
     write_file_bytes(
@@ -484,7 +484,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     let stats = cache.stats();
     assert!(
         stats.filter_skips >= 1,
-        "the L0 bind segment should be skipped by its filter, stats: {stats:?}"
+        "the delta bind segment should be skipped by its filter, stats: {stats:?}"
     );
 }
 
@@ -612,7 +612,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    // Three checkpoints append three L0 runs whose direntry key ranges
+    // Three checkpoints append three delta runs whose direntry key ranges
     // straddle one another (each run binds names from both ends of the
     // alphabet), so range pruning alone cannot narrow a name lookup below
     // several candidate segments — the shape a bulk-loaded directory's
@@ -1127,8 +1127,8 @@ async fn multi_block_direntry_segment() -> (
         .await
         .expect("overwrite segment");
     descriptor.row_count = built.row_count;
-    descriptor.min_key = built.min_key;
-    descriptor.max_key = built.max_key;
+    descriptor.min_row_key = built.min_row_key;
+    descriptor.max_row_key = built.max_row_key;
     descriptor.index_block = built.index;
     descriptor.filter_block = built.filter;
     descriptor.object_checksum = loonfs_api::sha256_digest(&built.bytes);
@@ -1137,7 +1137,7 @@ async fn multi_block_direntry_segment() -> (
     // segment's max key. Keyed scans prune on that key, so it has to name
     // the last row here as it would at any block size.
     assert_eq!(
-        descriptor.max_key,
+        descriptor.max_row_key,
         rows.last()
             .expect("the segment holds rows")
             .row_key_for_family(descriptor.family),
@@ -1433,7 +1433,7 @@ async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
 }
 
 #[tokio::test]
-async fn checkpoint_l0_update_does_not_read_existing_metadata_segments() {
+async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
         CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -1471,17 +1471,17 @@ async fn checkpoint_l0_update_does_not_read_existing_metadata_segments() {
 
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
-        .expect("create L0 checkpoint");
+        .expect("create delta checkpoint");
 
     assert_eq!(
         store.count(OperationClass::Read),
         0,
-        "L0 checkpoint update should use the WAL tail and copy existing metadata file refs"
+        "delta checkpoint update should use the WAL tail and copy existing metadata file refs"
     );
     let materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("load checkpoint manifest");
-    // One L0 run per checkpoint, the first included.
-    assert_eq!(l0_runs(&materialized.manifest).len(), 2);
+    // One delta run per checkpoint, the first included.
+    assert_eq!(delta_runs(&materialized.manifest).len(), 2);
 }

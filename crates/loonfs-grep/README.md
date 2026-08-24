@@ -34,7 +34,7 @@ mode = "serve_and_maintain"
 max_files_per_step = 256
 max_content_bytes_per_step = 67108864
 max_rows_per_segment = 65536
-max_l0_runs = 8
+max_delta_runs = 8
 max_mid_runs = 8
 max_decoded_input_rows_per_step = 131072
 ```

@@ -42,8 +42,8 @@ pub(super) async fn rewrite_manifest_segment(
         .expect("overwrite segment");
 
     descriptor.row_count = built.row_count;
-    descriptor.min_key = built.min_key;
-    descriptor.max_key = built.max_key;
+    descriptor.min_row_key = built.min_row_key;
+    descriptor.max_row_key = built.max_row_key;
     descriptor.index_block = built.index;
     // A rewritten segment's filter changes size, and a descriptor that inlines
     // a filter must inline the one it actually has: manifest load compares the
@@ -76,7 +76,7 @@ async fn revision_index_test_materialization(
     context: &MutationContext,
 ) -> (ManifestNo, NamespaceManifestEnvelope, Vec<MetadataRow>) {
     // The corruptions below target base-run segments, which only exist
-    // once reorganization has folded the checkpoint's L0 runs.
+    // once reorganization has folded the checkpoint's delta runs.
     let manifest_no =
         checkpoint_then_reorganize(store, namespace_id, context, MetadataLsmPolicy::default())
             .await;
@@ -196,11 +196,13 @@ async fn load_perturbed_manifest(
 /// The copied row metadata models a stray or duplicate descriptor.
 fn segment_modelled_on(
     modelled_on: &MetadataSegmentRef,
+    run_no: RunNo,
     run_seq: ChangeSeq,
     level: u32,
 ) -> MetadataSegmentRef {
     MetadataSegmentRef {
         segment_id: loonfs_api::MetadataSegmentId::generate(),
+        run_no,
         run_seq,
         level,
         segment_index: 0,
@@ -762,7 +764,7 @@ async fn bounded_subset_rebuild_rejects_divergent_revision_index() {
     rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
-    // L0 appends never re-read the base run; the reorganization merge that
+    // Delta appends never re-read the base run; the reorganization merge that
     // folds every run back together is the production point that must
     // reject it.
     for index in 0..3 {
@@ -778,10 +780,10 @@ async fn bounded_subset_rebuild_rejects_divergent_revision_index() {
         .expect("write");
         create_checkpoint(&store, &namespace_id, &context)
             .await
-            .expect("l0 checkpoint");
+            .expect("delta checkpoint");
     }
     let fold_policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
         ..MetadataLsmPolicy::default()
     };
@@ -997,8 +999,8 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
         .await
         .expect("replace inode segment");
     descriptor.row_count = built.row_count;
-    descriptor.min_key = built.min_key;
-    descriptor.max_key = built.max_key;
+    descriptor.min_row_key = built.min_row_key;
+    descriptor.max_row_key = built.max_row_key;
     descriptor.index_block = built.index;
     descriptor.filter_inline = (built.filter.stored_len
         <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
@@ -1060,9 +1062,8 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
             .expect("load manifest");
-    let base = base_run(&materialized.manifest);
+    let base = base_tier(&materialized.manifest);
     let child_binds = base
-        .segments
         .iter()
         .find(|family_segments| {
             family_segments.family
@@ -1071,7 +1072,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         .expect("child bind segments");
     let child_segment = child_binds.segments.first().expect("child bind segment");
     assert!(child_segment
-        .min_key
+        .min_row_key
         .starts_with("direntry-child-bind-000000000000000000"));
 
     let deleted_key = metadata_segment_object_key(child_segment);
@@ -1484,7 +1485,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         .await
         .expect("write file");
     }
-    // Fold the L0 runs so every inode row lands in one base segment.
+    // Fold the delta runs so every inode row lands in one base segment.
     let manifest_no = checkpoint_then_reorganize(
         &store,
         &namespace_id,
@@ -1545,7 +1546,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
     )
     .await;
     assert_eq!(
-        descriptor.max_key, last_inode_key,
+        descriptor.max_row_key, last_inode_key,
         "the descriptor must carry the segment's last row key"
     );
     overwrite_manifest(&store, &namespace_id, manifest).await;
@@ -1611,11 +1612,11 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     // answer no keyed lookup while still holding its rows.
     fn clear_max_key(descriptor: &mut MetadataSegmentRef) {
         assert!(descriptor.row_count > 0, "the segment should hold rows");
-        descriptor.max_key.clear();
+        descriptor.max_row_key.clear();
     }
     fn invert_key_range(descriptor: &mut MetadataSegmentRef) {
         assert!(descriptor.row_count > 0, "the segment should hold rows");
-        std::mem::swap(&mut descriptor.min_key, &mut descriptor.max_key);
+        std::mem::swap(&mut descriptor.min_row_key, &mut descriptor.max_row_key);
     }
     let perturbations: [(&str, Perturbation); 4] = [
         ("filter not adjacent to index", misalign_filter),
@@ -1631,7 +1632,8 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
             // A segment spanning several keys, so swapping its bounds
             // actually descends.
             .find(|descriptor| {
-                descriptor.filter_inline.is_some() && descriptor.min_key != descriptor.max_key
+                descriptor.filter_inline.is_some()
+                    && descriptor.min_row_key != descriptor.max_row_key
             })
             .expect("an inline-filtered descriptor spanning several keys");
         perturb(descriptor);
@@ -1664,8 +1666,13 @@ async fn a_manifest_whose_group_base_fragmented_does_not_load() {
     );
 
     let mut fragmented = manifest.payload.clone();
+    // A second base run, not a second segment of the one already there, so
+    // the copy takes a run number of its own out of the allocator.
+    let second_base_run_no = fragmented.next_run_no;
+    fragmented.next_run_no = RunNo(second_base_run_no.0 + 1);
     fragmented.segments.push(segment_modelled_on(
         &base_segment_of_family(&manifest, ApiMetadataRowFamily::Inodes),
+        second_base_run_no,
         manifest.payload.head_seq,
         CHECKPOINT_BASE_RUN_LEVEL,
     ));
@@ -1697,6 +1704,7 @@ async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
     let mut repeated = manifest.payload.clone();
     repeated.segments.push(segment_modelled_on(
         &existing,
+        existing.run_no,
         existing.run_seq,
         existing.level,
     ));
@@ -1727,7 +1735,8 @@ async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
     assert_eq!(existing.segment_index, 0);
 
     let mut overlapping = manifest.payload.clone();
-    let mut second = segment_modelled_on(&existing, existing.run_seq, existing.level);
+    let mut second =
+        segment_modelled_on(&existing, existing.run_no, existing.run_seq, existing.level);
     // Index one keeps the numbering valid, leaving the overlapping range as
     // the only error.
     second.segment_index = 1;

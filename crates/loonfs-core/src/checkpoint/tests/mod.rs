@@ -34,8 +34,9 @@ use super::retention::advance_retention_floor;
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
     flatten_manifest_segments, runs_from_segments, runs_in_scan_order, MetadataFamilyGroup,
-    MetadataLsmPolicy, MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
-    CHECKPOINT_ROW_FAMILIES, DEFAULT_MAX_CHECKPOINT_L0_RUNS, REORGANIZE_FAMILY_GROUPS,
+    MetadataFamilySegments, MetadataLsmPolicy, MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL,
+    CHECKPOINT_DELTA_RUN_LEVEL, CHECKPOINT_ROW_FAMILIES, DEFAULT_MAX_CHECKPOINT_DELTA_RUNS,
+    REORGANIZE_FAMILY_GROUPS,
 };
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
@@ -82,7 +83,7 @@ use loonfs_api::wire::sst_blocks::{
 };
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId,
-    ManifestNo, ManifestObjectId, NameKey, NamespaceId, RevisionNo,
+    ManifestNo, ManifestObjectId, NameKey, NamespaceId, RevisionNo, RunNo,
 };
 use loonfs_objectstore::keys::{
     metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key, wal_head,
@@ -216,7 +217,7 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
         .expect("resolve retention floor")
 }
 
-/// Checkpoints, then folds every L0 run into the base through
+/// Checkpoints, then folds every delta run into the base through
 /// reorganization units, returning the resulting current manifest number. The
 /// old synchronous rebuild produced this shape in one checkpoint call;
 /// tests that need a compacted base with a specific segmentation policy use
@@ -309,7 +310,7 @@ fn fold_rows_with_retention(
 }
 
 /// Runs reorganization units until nothing is left to fold, with the
-/// trigger forced so even one L0 run folds.
+/// trigger forced so even one delta run folds.
 async fn drain_reorganization<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -317,7 +318,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
 ) -> ManifestNo {
     let fold_policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         ..policy
     };
     loop {
@@ -434,7 +435,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     // One byte admits no run whole, so the group a step selects has no window
     // that makes progress and is handed to a job.
     let policy = MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
@@ -539,25 +540,44 @@ async fn load_current_projection<S: ObjectStore + ?Sized>(
     })
 }
 
-fn base_run(manifest: &NamespaceManifestEnvelope) -> MetadataRunManifest {
-    runs_from_segments(&manifest.payload)
+/// Every base-tier segment the manifest holds, gathered per family.
+///
+/// One family group has at most one base run, but the groups rebuild
+/// separately and each rebuild writes a run of its own, so a manifest holds
+/// as many base runs as it has rebuilt groups. A caller asking about "the
+/// base" means all of them.
+fn base_tier(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataFamilySegments> {
+    let base_runs = runs_from_segments(&manifest.payload)
         .into_iter()
-        .find(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
-        .expect("base run")
-}
-
-fn l0_runs(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataRunManifest> {
-    runs_from_segments(&manifest.payload)
+        .filter(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
+        .collect::<Vec<_>>();
+    assert!(!base_runs.is_empty(), "base tier");
+    CHECKPOINT_ROW_FAMILIES
         .into_iter()
-        .filter(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
+        .map(|family| MetadataFamilySegments {
+            family,
+            segments: base_runs
+                .iter()
+                .flat_map(|run| &run.segments)
+                .filter(|family_segments| family_segments.family == family)
+                .flat_map(|family_segments| family_segments.segments.clone())
+                .collect(),
+        })
         .collect()
 }
 
-/// A run's identity: the sequence and level a manifest names it by.
-type RunId = (ChangeSeq, u32);
+fn delta_runs(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataRunManifest> {
+    runs_from_segments(&manifest.payload)
+        .into_iter()
+        .filter(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
+        .collect()
+}
 
 /// Every run that holds rows of one family group right now.
-fn group_runs(manifest: &NamespaceManifestEnvelope, group: &[ApiMetadataRowFamily]) -> Vec<RunId> {
+fn group_runs(
+    manifest: &NamespaceManifestEnvelope,
+    group: &[ApiMetadataRowFamily],
+) -> Vec<MetadataRunManifest> {
     runs_from_segments(&manifest.payload)
         .into_iter()
         .filter(|run| {
@@ -565,7 +585,6 @@ fn group_runs(manifest: &NamespaceManifestEnvelope, group: &[ApiMetadataRowFamil
                 group.contains(&family_segments.family) && !family_segments.segments.is_empty()
             })
         })
-        .map(|run| (run.run_seq, run.level))
         .collect()
 }
 
@@ -578,10 +597,10 @@ fn group_runs(manifest: &NamespaceManifestEnvelope, group: &[ApiMetadataRowFamil
 fn group_base_runs(
     manifest: &NamespaceManifestEnvelope,
     group: &[ApiMetadataRowFamily],
-) -> Vec<RunId> {
+) -> Vec<MetadataRunManifest> {
     group_runs(manifest, group)
         .into_iter()
-        .filter(|(_, level)| *level != CHECKPOINT_L0_RUN_LEVEL)
+        .filter(|run| run.level != CHECKPOINT_DELTA_RUN_LEVEL)
         .collect()
 }
 
@@ -589,10 +608,10 @@ fn group_base_runs(
 fn group_delta_runs(
     manifest: &NamespaceManifestEnvelope,
     group: &[ApiMetadataRowFamily],
-) -> Vec<RunId> {
+) -> Vec<MetadataRunManifest> {
     group_runs(manifest, group)
         .into_iter()
-        .filter(|(_, level)| *level == CHECKPOINT_L0_RUN_LEVEL)
+        .filter(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
         .collect()
 }
 
@@ -600,7 +619,7 @@ fn group_delta_runs(
 /// them has fragmented.
 fn base_runs_per_family_group(
     manifest: &NamespaceManifestEnvelope,
-) -> Vec<(&'static [ApiMetadataRowFamily], Vec<RunId>)> {
+) -> Vec<(&'static [ApiMetadataRowFamily], Vec<MetadataRunManifest>)> {
     REORGANIZE_FAMILY_GROUPS
         .into_iter()
         .map(|group| {
@@ -624,8 +643,7 @@ fn base_segment_object_keys_for_family(
     manifest: &NamespaceManifestEnvelope,
     family: ApiMetadataRowFamily,
 ) -> Vec<String> {
-    base_run(manifest)
-        .segments
+    base_tier(manifest)
         .iter()
         .find(|family_segments| family_segments.family == family)
         .expect("the family's segments")
@@ -772,8 +790,11 @@ impl ObjectStore for ConflictOnManifestCreateStore {
     }
 }
 
-use super::build::{build_manifest_l0_run_segments, debug_assert_manifest_segments_do_not_overlap};
-use super::runs::l0_run_count;
+use super::build::{
+    build_manifest_delta_run_segments, debug_assert_manifest_segments_do_not_overlap,
+};
+use super::flush::next_run_no_after;
+use super::runs::delta_run_count;
 
 // Test support: a manifest built directly from a MetadataState, used to
 // author arbitrary layouts without driving the full checkpoint pipeline.
@@ -808,11 +829,19 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         _ => None,
     };
 
+    // Same allocation rule as the production flush: the manifest that first
+    // names a run takes the number, and a manifest that writes no run leaves
+    // the counter alone.
+    let run_no = previous_manifest
+        .as_ref()
+        .map_or(RunNo(0), |previous| previous.manifest.payload.next_run_no);
+    let mut next_run_no = next_run_no_after(run_no)?;
     let (base_seq, segments) = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
             let run_segments = build_manifest_segments(
                 store,
                 namespace_id,
+                run_no,
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
                 metadata_state,
@@ -822,19 +851,24 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
             (head_seq, flatten_manifest_segments(run_segments))
         }
-        Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs.get() => {
+        Some(previous)
+            if delta_run_count(&previous.manifest.payload) < policy.max_delta_runs.get() =>
+        {
             let mut segments = previous.manifest.payload.segments.clone();
             if previous.manifest.payload.head_seq < head_seq {
                 segments.extend(flatten_manifest_segments(
-                    build_manifest_l0_run_segments(
+                    build_manifest_delta_run_segments(
                         store,
                         namespace_id,
+                        run_no,
                         head_seq,
                         previous.manifest.payload.head_seq,
                         metadata_state,
                     )
                     .await?,
                 ));
+            } else {
+                next_run_no = run_no;
             }
             (previous.manifest.payload.base_seq, segments)
         }
@@ -842,6 +876,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             let run_segments = build_manifest_segments(
                 store,
                 namespace_id,
+                run_no,
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
                 metadata_state,
@@ -855,6 +890,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             let run_segments = build_manifest_segments(
                 store,
                 namespace_id,
+                run_no,
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
                 metadata_state,
@@ -874,6 +910,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         base_seq,
         writer_epoch: head.writer_epoch,
         next_inode_id: head.next_inode_id,
+        next_run_no,
         retention_floor_seq: source.retention_floor_seq,
         segments,
     })

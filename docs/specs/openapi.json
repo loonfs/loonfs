@@ -5291,6 +5291,13 @@
         "maximum": 9007199254740991,
         "minimum": 0
       },
+      "RunNo": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Monotonic run counter allocated by the manifest that names the run. A run is the set of segments one producer wrote together.",
+        "maximum": 9007199254740991,
+        "minimum": 0
+      },
       "SignUploadPartsRequest": {
         "type": "object",
         "description": "Request for part-upload capabilities on an open multipart session.",
@@ -6343,7 +6350,7 @@
         "required": [
           "status",
           "namespace_id",
-          "next_run_ordinal",
+          "next_run_no",
           "reorganize_pending"
         ],
         "properties": {
@@ -6357,12 +6364,9 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the status describes."
           },
-          "next_run_ordinal": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Next logical run ordinal the index will allocate.",
-            "maximum": 9007199254740991,
-            "minimum": 0
+          "next_run_no": {
+            "$ref": "#/components/schemas/RunNo",
+            "description": "Run number the index allocates next."
           },
           "reorganize_pending": {
             "type": "boolean",
@@ -6378,7 +6382,7 @@
           "checkpoint_id",
           "status",
           "namespace_id",
-          "next_run_ordinal",
+          "next_run_no",
           "reorganize_pending"
         ],
         "properties": {
@@ -6406,12 +6410,9 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the status describes."
           },
-          "next_run_ordinal": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Next logical run ordinal the index will allocate.",
-            "maximum": 9007199254740991,
-            "minimum": 0
+          "next_run_no": {
+            "$ref": "#/components/schemas/RunNo",
+            "description": "Run number the index allocates next."
           },
           "reorganize_pending": {
             "type": "boolean",
@@ -6426,7 +6427,7 @@
           "built_through_seq",
           "status",
           "namespace_id",
-          "next_run_ordinal",
+          "next_run_no",
           "reorganize_pending"
         ],
         "properties": {
@@ -6450,12 +6451,9 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the status describes."
           },
-          "next_run_ordinal": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Next logical run ordinal the index will allocate.",
-            "maximum": 9007199254740991,
-            "minimum": 0
+          "next_run_no": {
+            "$ref": "#/components/schemas/RunNo",
+            "description": "Run number the index allocates next."
           },
           "reorganize_pending": {
             "type": "boolean",

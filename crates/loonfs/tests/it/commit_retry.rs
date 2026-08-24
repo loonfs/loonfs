@@ -661,10 +661,10 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     // Move the floor strictly past the pinned commit, and pile up enough
     // flushed runs that reorganization has real folding to do — receipts
     // are dropped when the runs holding them are rebuilt, and rebuilding
-    // waits for enough L0 runs to accumulate.
+    // waits for enough delta runs to accumulate.
     // Nine rounds: the first flush builds the base run, and the next eight
-    // accumulate the L0 runs that reach the fold trigger
-    // (`DEFAULT_MAX_CHECKPOINT_L0_RUNS`).
+    // accumulate the delta runs that reach the fold trigger
+    // (`DEFAULT_MAX_CHECKPOINT_DELTA_RUNS`).
     let mut last_seq = first.committed_seq;
     for round in 0..9 {
         let filler = runtime

@@ -806,6 +806,17 @@ numeric_id! {
 }
 
 numeric_id! {
+    /// Monotonic run counter allocated by the manifest that names the run.
+    ///
+    /// A run is the set of segments one producer wrote together. The
+    /// namespace manifest and the grep manifest each keep their own counter,
+    /// so a run number means nothing outside the manifest that allocated it.
+    RunNo,
+    public_ordinal,
+    schema_description = "Monotonic run counter allocated by the manifest that names the run. A run is the set of segments one producer wrote together."
+}
+
+numeric_id! {
     /// Counter used to reject writes from an older writer.
     WriterEpoch,
     public_ordinal,
@@ -844,7 +855,7 @@ impl fmt::Display for InodeKind {
 mod tests {
     use super::{
         next_public_ordinal, ChangeSeq, CheckpointId, CommitId, ContentId, ContentStoreId, InodeId,
-        ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo,
+        ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo,
         UploadId, WalSegmentId, WriterEpoch, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributeRevisionNo;
@@ -893,6 +904,7 @@ mod tests {
         assert_range!(ChangeSeq);
         assert_range!(AttributeRevisionNo);
         assert_range!(ManifestNo);
+        assert_range!(RunNo);
         assert_range!(WriterEpoch);
 
         assert_eq!(

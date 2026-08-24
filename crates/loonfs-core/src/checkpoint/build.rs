@@ -3,7 +3,7 @@
 
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq};
 use super::runs::{
-    MetadataFamilySegments, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_ROW_FAMILIES,
+    MetadataFamilySegments, CHECKPOINT_DELTA_RUN_LEVEL, CHECKPOINT_ROW_FAMILIES,
     MAX_MAINTENANCE_SEGMENT_IO,
 };
 use crate::error::{CoreError, Result};
@@ -14,7 +14,9 @@ use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
-use loonfs_api::{sha256_digest, ChangeSeq, MetadataCompactionId, MetadataSegmentId, NamespaceId};
+use loonfs_api::{
+    sha256_digest, ChangeSeq, MetadataCompactionId, MetadataSegmentId, NamespaceId, RunNo,
+};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroUsize;
@@ -22,6 +24,7 @@ use std::num::NonZeroUsize;
 pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    run_no: RunNo,
     run_seq: ChangeSeq,
     level: u32,
     metadata_state: &MetadataState,
@@ -30,6 +33,7 @@ pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     build_manifest_segments_from_rows(
         store,
         namespace_id,
+        run_no,
         run_seq,
         level,
         |family| manifest_rows_for_family(metadata_state, family),
@@ -49,23 +53,24 @@ pub(super) fn debug_assert_manifest_segments_do_not_overlap(
 ) {
     #[cfg(debug_assertions)]
     for family_segments in _segments_by_family {
-        let mut previous_max_key: Option<&str> = None;
+        let mut previous_max_row_key: Option<&str> = None;
         for descriptor in &family_segments.segments {
-            if let Some(previous) = previous_max_key {
+            if let Some(previous) = previous_max_row_key {
                 debug_assert!(
-                    previous < descriptor.min_key.as_str(),
+                    previous < descriptor.min_row_key.as_str(),
                     "overlapping metadata segment ranges for `{:?}`",
                     family_segments.family
                 );
             }
-            previous_max_key = Some(descriptor.max_key.as_str());
+            previous_max_row_key = Some(descriptor.max_row_key.as_str());
         }
     }
 }
 
-pub(super) async fn build_manifest_l0_run_segments<S: ObjectStore + ?Sized>(
+pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    run_no: RunNo,
     run_seq: ChangeSeq,
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
@@ -73,8 +78,9 @@ pub(super) async fn build_manifest_l0_run_segments<S: ObjectStore + ?Sized>(
     build_manifest_segments_from_rows(
         store,
         namespace_id,
+        run_no,
         run_seq,
-        CHECKPOINT_L0_RUN_LEVEL,
+        CHECKPOINT_DELTA_RUN_LEVEL,
         |family| manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
         MetadataSegmentation::Full,
     )
@@ -101,6 +107,7 @@ pub(super) struct MetadataSegmentRows {
 pub(super) async fn build_manifest_segments_from_rows<S, RowsForFamily>(
     store: &S,
     namespace_id: &NamespaceId,
+    run_no: RunNo,
     run_seq: ChangeSeq,
     level: u32,
     mut rows_for_family: RowsForFamily,
@@ -128,6 +135,7 @@ where
             let segment_index = u32::try_from(segment_index)
                 .map_err(|_| CoreError::Internal("metadata segment index overflow".to_owned()))?;
             requests.push(destination.write_request(
+                run_no,
                 run_seq,
                 level,
                 family,
@@ -194,6 +202,7 @@ impl<'a> MetadataSegmentDestination<'a> {
 
     pub(super) fn write_request(
         self,
+        run_no: RunNo,
         run_seq: ChangeSeq,
         level: u32,
         family: MetadataRowFamily,
@@ -203,6 +212,7 @@ impl<'a> MetadataSegmentDestination<'a> {
         MetadataSegmentWriteRequest {
             destination: self,
             segment_id: MetadataSegmentId::generate(),
+            run_no,
             run_seq,
             level,
             family,
@@ -215,6 +225,7 @@ impl<'a> MetadataSegmentDestination<'a> {
 pub(super) struct MetadataSegmentWriteRequest<'a> {
     destination: MetadataSegmentDestination<'a>,
     segment_id: MetadataSegmentId,
+    run_no: RunNo,
     run_seq: ChangeSeq,
     level: u32,
     family: MetadataRowFamily,
@@ -251,13 +262,14 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         owner_namespace_id: request.destination.namespace_id().clone(),
         segment_id,
         compaction_job_id: request.destination.compaction_job_id(),
+        run_no: request.run_no,
         run_seq: request.run_seq,
         level: request.level,
         family: request.family,
         segment_index: request.segment_index,
         row_count: built.row_count,
-        min_key: built.min_key,
-        max_key: built.max_key,
+        min_row_key: built.min_row_key,
+        max_row_key: built.max_row_key,
         index_block: built.index,
         filter_block: built.filter,
         filter_inline,

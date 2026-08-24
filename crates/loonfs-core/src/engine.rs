@@ -887,7 +887,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Performs at most one metadata reorganization step for one row family.
-    /// It merges L0 delta rows into new base segments and publishes a manifest
+    /// It merges delta rows into new base segments and publishes a manifest
     /// that replaces the old references.
     ///
     /// Run this repeatedly until it returns `NotNeeded`. Each call reloads durable

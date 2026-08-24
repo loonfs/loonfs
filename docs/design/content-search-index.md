@@ -114,7 +114,7 @@ Segments live under
 `extensions/grep/root.json` pointer names an immutable manifest under
 `extensions/grep/manifests/`, minted under a fresh id and bound to the
 pointer by its payload digest; that manifest records the
-query-visible segments, the lifecycle, run-ordinal allocation, and any
+query-visible segments, the lifecycle, run-number allocation, and any
 in-progress reorganization snapshot, outputs, and cursor. The pointer and
 manifests are independent of the namespace manifest, so core never has to
 understand grep state to read the filesystem.
@@ -226,7 +226,7 @@ It is tiered. The metadata store has two levels, delta and base; the
 index has three. Delta runs reorganize into a mid run, and only
 accumulated mid runs reorganize — together with the base — into a
 fresh base, so the whole-index rewrite happens once per
-`max_l0_runs x max_mid_runs` build runs (about 64 with the
+`max_delta_runs x max_mid_runs` build runs (about 64 with the
 defaults) instead of once per delta threshold. That is a
 constant-factor amortization of base rewrites, not logarithmic
 cumulative write amplification: the level count is fixed at
@@ -240,7 +240,7 @@ leveling, where levels are added as the corpus grows (see
 Reorganize triggers count logical runs, never physical segments. Every
 publish that creates gram segments — a WAL or backfill build
 unit, a delta reorganization's outputs, a base reorganization's outputs — stamps one
-run ordinal on the whole batch, allocated from a counter in the
+run number on the whole batch, allocated from a counter in the
 grep manifest and incremented in the same pointer publication,
 so allocation is atomic with the root swap. The per-segment row
 cap can therefore split a run into any number of segments without
@@ -271,12 +271,12 @@ invisible to reads:
 - Descriptor `level` in the grep manifest's segment list: `0` for the
   delta segments build units write, `1` for a delta reorganization's mid
   runs, and `2` for the base.
-- Descriptor `run_ordinal`: the batch-wide run identity described
+- Descriptor `run_no`: the batch-wide run identity described
   above.
-- Root index-state `next_run_ordinal`: the allocation counter.
+- Root index-state `next_run_no`: the allocation counter.
 - Reorganize-state `output_level`: the tier the in-flight reorganization's outputs
   are stamped with (`1` or `2`).
-- Reorganize-state `run_ordinal`: the ordinal stamped on every output
+- Reorganize-state `run_no`: the run number stamped on every output
   segment of the reorganization, fixed when it starts so a resumed
   reorganization keeps its identity.
 
@@ -436,7 +436,7 @@ Following the segment-format convention, two different contracts:
   evidence at large corpora shows cumulative write amplification
   still dominating, the next step is a level count that grows
   with corpus size — true logarithmic amplification. The level
-  and run-ordinal fields are already per-segment, so adding
+  and run-number fields are already per-segment, so adding
   levels is writer-side policy, not a format change.
 - **Variable-length grams.** Choosing gram boundaries by corpus
   rarity instead of a fixed width shrinks posting lists for

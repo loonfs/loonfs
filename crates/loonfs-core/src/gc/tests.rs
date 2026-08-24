@@ -2029,7 +2029,7 @@ fn aged_before_now(
     )
 }
 
-/// Folds the L0 runs into fresh base segments, which is what leaves the
+/// Folds the delta runs into fresh base segments, which is what leaves the
 /// previous run segments unreferenced.
 async fn fold_metadata<S: ObjectStore + ?Sized>(
     store: &S,
@@ -2037,7 +2037,7 @@ async fn fold_metadata<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) {
     let fold_policy = crate::checkpoint::MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
     let mut folded = false;
@@ -3157,7 +3157,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
 
     // The first flush materialized the namespace's first manifest and the
     // next two superseded it; only the root's manifest is reachable. Its
-    // segments are all still referenced (a flush only appends L0 runs).
+    // segments are all still referenced (a flush only appends delta runs).
     assert_eq!(report.deleted.manifests, 2);
     assert!(!report.retention_degraded);
     let manifests_left = store
@@ -3166,10 +3166,10 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .expect("list manifests");
     assert_eq!(manifests_left.len(), 1, "only the live root manifest stays");
 
-    // Reorganization folds the L0 runs into fresh base segments; the
+    // Reorganization folds the delta runs into fresh base segments; the
     // superseded run segments then age out on the next pass.
     let fold_policy = crate::checkpoint::MetadataLsmPolicy {
-        max_l0_runs: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
     for _ in 0..16 {

@@ -129,7 +129,7 @@ async fn warm_phase_request_accounting() {
     let namespace_id = NamespaceId::parse("acct").expect("valid namespace id");
 
     // Build phase: bench-like shape — one wide hot directory, maintenance
-    // steps a few times so the manifest ends with a seed base plus a few L0
+    // steps a few times so the manifest ends with a seed base plus a few delta
     // runs and a WAL tail, like the 10k benchmark build.
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("acct-writer")

@@ -1,5 +1,5 @@
 //! Pins the cold first-stat request shape: a fresh handle resolving a path
-//! over a manifest that carries several unfolded L0 runs must not pay a
+//! over a manifest that carries several unfolded delta runs must not pay a
 //! per-run filter fetch (the manifest's inline filter copies answer those),
 //! and every metadata-segment object it does touch is small enough to load
 //! whole with a single ranged GET.
@@ -65,7 +65,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("create namespace");
     // Publish the namespace's first manifest up front, so each maintenance
-    // step below adds exactly one L0 run to it. A flush needs a tail to
+    // step below adds exactly one delta run to it. A flush needs a tail to
     // flush, so one seed commit comes first; its run holds a single name
     // that sorts past every name looked up below, so range pruning rules it
     // out of those lookups.
@@ -86,7 +86,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("load namespace catalog");
 
-    // Three commit batches, checkpointed one L0 run each, with names
+    // Three commit batches, checkpointed one delta run each, with names
     // interleaved by stride so every run's direntry key range straddles the
     // whole directory span: range pruning alone cannot rule any run out of
     // a name lookup, which is exactly the shape a bulk-loaded backlog takes.
@@ -142,7 +142,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .expect("step");
     }
 
-    // Confirm the manifest really carries several straddling L0 direntry
+    // Confirm the manifest really carries several straddling delta direntry
     // runs with inline filters — the premise of the assertions below.
     let root = loonfs_core::control::load_namespace_metadata_root_control(&store, &namespace_id)
         .await
@@ -155,7 +155,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .expect("read manifest")
         .expect("manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    let direntry_l0_runs: BTreeSet<_> = manifest
+    let direntry_delta_runs: BTreeSet<_> = manifest
         .payload
         .segments
         .iter()
@@ -165,9 +165,9 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .map(|descriptor| descriptor.run_seq)
         .collect();
     assert!(
-        direntry_l0_runs.len() >= RUNS,
-        "expected at least {RUNS} unfolded L0 direntry runs, found {}",
-        direntry_l0_runs.len()
+        direntry_delta_runs.len() >= RUNS,
+        "expected at least {RUNS} unfolded delta direntry runs, found {}",
+        direntry_delta_runs.len()
     );
     assert!(
         manifest
@@ -176,7 +176,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .iter()
             .filter(|descriptor| descriptor.level == 0)
             .all(|descriptor| descriptor.filter_inline.is_some()),
-        "every L0 segment should carry an inline filter"
+        "every delta segment should carry an inline filter"
     );
     let filter_offsets: BTreeSet<(String, u64)> = manifest
         .payload

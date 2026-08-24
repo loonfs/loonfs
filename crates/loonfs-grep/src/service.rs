@@ -78,8 +78,8 @@ struct MaterializedGrepIndexSnapshot {
 #[derive(Debug, Clone)]
 struct GrepQuerySegment {
     object_key: String,
-    min_key: String,
-    max_key: String,
+    min_row_key: String,
+    max_row_key: String,
     index_block: BlockHandle,
     filter_block: BlockHandle,
     filter_inline: Option<String>,
@@ -181,8 +181,8 @@ fn materialized_snapshot_from_state(
         .iter()
         .map(|segment| GrepQuerySegment {
             object_key: segment_key(root.namespace_id(), &segment.segment_id),
-            min_key: segment.min_row_key.clone(),
-            max_key: segment.max_row_key.clone(),
+            min_row_key: segment.min_row_key.clone(),
+            max_row_key: segment.max_row_key.clone(),
             index_block: segment.index_block,
             filter_block: segment.filter_block,
             filter_inline: segment.filter_inline.clone(),
@@ -274,11 +274,11 @@ async fn indexed_candidates<S: ObjectStore + ?Sized>(
         let mut probes: Vec<(&GramLookup, &GrepQuerySegment)> = Vec::new();
         for gram_lookup in &lookups {
             for descriptor in segments {
-                if descriptor.max_key.as_str() < gram_lookup.probe.as_str()
+                if descriptor.max_row_key.as_str() < gram_lookup.probe.as_str()
                     || gram_lookup
                         .upper
                         .as_deref()
-                        .is_some_and(|upper| descriptor.min_key.as_str() >= upper)
+                        .is_some_and(|upper| descriptor.min_row_key.as_str() >= upper)
                 {
                     continue;
                 }

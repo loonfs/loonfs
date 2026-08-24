@@ -1869,10 +1869,10 @@ kind's payload schema can change without invalidating the others.
 A metadata segment object is not an envelope: it is a sequence of
 independently readable sections — prefix-compressed data blocks holding rows
 in ascending row-key order, one bloom filter block over per-family lookup
-prefixes, then one index block naming each data block's last key and byte
-range. There is no footer and no self-describing header; the referencing
-manifest's segment descriptor carries the index and filter block handles, and
-is the only entry point into the object. Each section's CRC32C is computed
+prefixes, then one index block naming each data block's last row key
+(`last_row_key`) and byte range. There is no footer and no self-describing
+header; the referencing manifest's segment descriptor carries the index and
+filter block handles, and is the only entry point into the object. Each section's CRC32C is computed
 over its stored (compressed) bytes and lives in the handle that names it —
 index entries for data blocks, the manifest descriptor for the index and
 filter — so a reader verifies every ranged read before decoding it, and the
@@ -1896,16 +1896,41 @@ unreachable except through a manifest. Rows inside a segment use the attribution
 
 A descriptor does not store an object key. Readers derive the key from `owner_namespace_id`, `segment_id`, and optional `compaction_job_id`. Compaction output includes the job id and remains under that job's prefix (section 6.2). Other segments omit the field and use the owner's `metadata/segments/` prefix.
 
-A run is identified by its `run_seq` and `level` together, and holds one
-family's segments from one producer: a WAL flush's delta run or a rebuild's
-output. A producer writes a family's rows in ascending key order and writes
-no key twice. So one family's `segment_index` values inside one run are
-numbered from zero, once each, in the order they were written, the segments'
-key ranges ascend in that same order without touching, and a manifest whose
-descriptors say otherwise does not load. Two runs of different levels may
-share a sequence, and two family groups routinely share one base run — they
-rebuild at the same manifest head — but within one run each family has
-exactly one producer.
+A **run** is the set of segments one producer wrote together, and `run_no` is
+its identity. The manifest allocates run numbers from `next_run_no`: a
+producer takes that value, stamps it on every segment it writes, and publishes
+a manifest whose `next_run_no` is one higher. A WAL flush takes one number for
+the delta run it writes across every family. A rebuild takes one number for
+the run it writes for one family group. So `run_no` and `family` together name
+one family's segment list inside one run, and `segment_index` numbers that
+list from zero, once each, in the order the segments were written.
+
+A descriptor carries two more facts about its run, neither of which is its
+identity. `run_seq` is the namespace sequence the run materialized through.
+`level` is the tier the run sits at, and it has two values. Level `0` is a
+delta run: a WAL flush writes one, and so does a merge that starts above its
+family group's oldest run. Level `1` is a base run: a rebuild that starts at
+its group's oldest run writes one, and it replaces the base run it read, so a
+group holds at most one. Every segment carrying one `run_no` carries the same
+`run_seq` and the same `level`, and two runs never share a number. Two runs
+may share a sequence and a level, because a rebuild writes its output beside
+the runs it did not read; those runs hold different families, so no read ever
+compares them.
+
+A producer writes a family's rows in ascending key order and writes no key
+twice. So one family's segments inside one run have ascending key ranges that
+never touch, stated by `min_row_key` and `max_row_key` and ordered by
+`segment_index`.
+
+Manifest loading rejects a manifest that breaks any of this: a `run_no` at or
+above the manifest's `next_run_no`, one `run_no` carrying two sequences or two
+levels, a family's `segment_index` values inside one run that are not
+zero-based and dense, and key ranges that descend or overlap.
+
+A read consults the runs holding the family it wants, newest first: delta runs
+before base runs, and within one level, the higher `run_seq` first. The higher
+`run_no` breaks a tie, which keeps the order total. The first row a read finds
+for a key is the answer.
 
 ##### Row-key grammar
 
@@ -1980,7 +2005,7 @@ immutable manifest decoder tolerates additive fields.
 
 The nested `index` object carries its own `format_version`, currently `1`.
 It holds what every phase has — the in-progress `reorganize` state and the
-`next_run_ordinal` allocator — while each phase's own position lives in the
+`next_run_no` allocator — while each phase's own position lives in the
 `status` tag beside it:
 
 - `backfilling`: `target_seq` (the namespace sequence the pinned checkpoint
@@ -2000,9 +2025,23 @@ prefix-compressed data blocks, one bloom filter block, one index block,
 handles and checksums in the grep-manifest descriptor — with a grep-owned row
 payload instead of metadata rows. Its `object_checksum` is the SHA-256 digest
 of the complete stored segment, with the same meaning as the metadata segment
-field. The tokenizer, row shapes, and posting encoding below are
-frozen by grep manifest format version 1; their evolution follows the rules in
-section 4.3 and always permits rebuilding this derived work (section 6.6).
+field.
+
+Its descriptor uses the section 4.2.1 run vocabulary unchanged too. `run_no`
+is the run's identity and comes from the grep manifest's own `next_run_no`;
+`run_seq` is the namespace sequence the run materialized through;
+`segment_index` numbers one run's segments from zero; and `min_row_key` and
+`max_row_key` state the segment's key range. Only `level` differs, because
+grep reorganizes in three tiers rather than two: `0` is a delta run, `1` is a
+mid run merged from delta runs, and `2` is the base run merged from everything
+below it. A reorganize in progress records the level and the run number it
+stamps on its outputs, so a step that resumes writes into the same run. Grep
+loading rejects a `run_no` at or above `next_run_no`, in the manifest's
+segments and in the reorganize state alike.
+
+The tokenizer, row shapes, and posting encoding below are frozen by grep
+manifest format version 1; their evolution follows the rules in section 4.3
+and always permits rebuilding this derived work (section 6.6).
 
 - The **tokenizer** is every overlapping three-byte window (gram) of an
   eligible revision's content, after folding ASCII letters to lower case.

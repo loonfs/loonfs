@@ -664,6 +664,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
     let segments = build_manifest_segments(
         &store,
         &namespace_id,
+        RunNo(0),
         materialization_before.head.seq,
         CHECKPOINT_BASE_RUN_LEVEL,
         &materialization_before.metadata_state,
@@ -680,6 +681,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         base_seq: materialization_before.head.seq,
         writer_epoch: materialization_before.head.writer_epoch,
         next_inode_id: materialization_before.head.next_inode_id,
+        next_run_no: RunNo(1),
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
         segments: flatten_manifest_segments(segments),
     })

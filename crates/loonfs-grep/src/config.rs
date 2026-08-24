@@ -24,7 +24,7 @@ pub struct GrepWorkerConfig {
     /// Rows per written grep segment.
     pub max_rows_per_segment: usize,
     /// Delta-level runs that trigger a reorganization into a mid run.
-    pub max_l0_runs: usize,
+    pub max_delta_runs: usize,
     /// Mid-level runs that trigger a reorganization into the base run.
     pub max_mid_runs: usize,
     /// Rows merged by one reorganize step.
@@ -41,7 +41,7 @@ impl GrepWorkerConfig {
                 self.max_content_bytes_per_step,
             )?,
             max_rows_per_segment: nonzero_usize("max_rows_per_segment", self.max_rows_per_segment)?,
-            max_l0_runs: nonzero_usize("max_l0_runs", self.max_l0_runs)?,
+            max_delta_runs: nonzero_usize("max_delta_runs", self.max_delta_runs)?,
             max_mid_runs: nonzero_usize("max_mid_runs", self.max_mid_runs)?,
             max_decoded_input_rows_per_step: nonzero_usize(
                 "max_decoded_input_rows_per_step",
@@ -64,7 +64,7 @@ impl Default for GrepWorkerConfig {
             max_files_per_step: policy.max_files_per_step.get(),
             max_content_bytes_per_step: policy.max_content_bytes_per_step.get(),
             max_rows_per_segment: policy.max_rows_per_segment.get(),
-            max_l0_runs: policy.max_l0_runs.get(),
+            max_delta_runs: policy.max_delta_runs.get(),
             max_mid_runs: policy.max_mid_runs.get(),
             max_decoded_input_rows_per_step: policy.max_decoded_input_rows_per_step.get(),
         }
@@ -128,9 +128,9 @@ mod tests {
                 },
             ),
             (
-                "max_l0_runs",
+                "max_delta_runs",
                 GrepWorkerConfig {
-                    max_l0_runs: 0,
+                    max_delta_runs: 0,
                     ..GrepWorkerConfig::default()
                 },
             ),
@@ -184,9 +184,9 @@ mod tests {
                 },
             ),
             (
-                "max_l0_runs",
+                "max_delta_runs",
                 GrepWorkerConfig {
-                    max_l0_runs: 0,
+                    max_delta_runs: 0,
                     ..GrepWorkerConfig::default()
                 },
             ),

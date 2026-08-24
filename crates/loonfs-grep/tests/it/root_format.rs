@@ -4,7 +4,7 @@
 
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::sst_blocks::BlockHandle;
-use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId};
+use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, RunNo};
 use loonfs_grep::root::{
     decode_grep_manifest, decode_grep_root, encode_grep_manifest, encode_grep_root,
     GrepEnvelopeCodecError, GrepIndexState, GrepIndexStatus, GrepManifestEnvelope,
@@ -19,10 +19,10 @@ use loonfs_test_support::ids::namespace_id;
 //
 // Every pre-release grep format stays at version 1. These current bytes pin
 // the schema where each phase owns its own watermark.
-const BACKFILLING_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:33abc4ace4f03eeb7df262ad7d29ac7bb9c2dcadcc56c3629426be95edf509a2","payload":{"namespace_id":"docs","status":{"kind":"backfilling","target_seq":7,"cursor_inode_id":7,"checkpoint_id":"chk_00000000000000000000000000000009"},"index":{"format_version":1,"reorganize":{"snapshot_segment_ids":["idx_00000000000000000000000000000001","idx_00000000000000000000000000000002"],"output_segment_ids":["idx_00000000000000000000000000000003"],"row_key_cursor":"gram-6d6e6f-00000000000000000042","output_level":1,"run_ordinal":3},"next_run_ordinal":4},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_seq":8,"run_ordinal":1,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000002","run_seq":9,"run_ordinal":2,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000003","run_seq":10,"run_ordinal":3,"level":1,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
-const ACTIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271","payload":{"namespace_id":"docs","status":{"kind":"active","built_through_seq":11,"next_event_index":5},"index":{"format_version":1,"next_run_ordinal":2},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_seq":8,"run_ordinal":1,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
-const DISABLED_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:23df5ecd9b434d54cd161da837a68125b58876f21015262840cd8924fcebef90","payload":{"namespace_id":"docs","status":{"kind":"disabled"},"index":{"format_version":1,"next_run_ordinal":4},"segments":[]}}"#;
-const ADDITIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:0686ca1af01c1081a560dd41599fb09371574df010d5f6724c876a1847ec68f7","payload":{"namespace_id":"docs","status":{"kind":"active","built_through_seq":11,"future_status":"ignored"},"index":{"format_version":1,"next_run_ordinal":2,"future_index":17},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_seq":8,"run_ordinal":1,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","future_segment":"ignored"}],"future_root":true},"future_envelope":{"retained":true}}"#;
+const BACKFILLING_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:358aea64c965cea7287dd10d1dcf6c75100ae2539b814f6d0dae7043d38fc818","payload":{"namespace_id":"docs","status":{"kind":"backfilling","target_seq":7,"cursor_inode_id":7,"checkpoint_id":"chk_00000000000000000000000000000009"},"index":{"format_version":1,"reorganize":{"snapshot_segment_ids":["idx_00000000000000000000000000000001","idx_00000000000000000000000000000002"],"output_segment_ids":["idx_00000000000000000000000000000003"],"row_key_cursor":"gram-6d6e6f-00000000000000000042","output_level":1,"run_no":3},"next_run_no":4},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_no":1,"run_seq":8,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000002","run_no":2,"run_seq":9,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},{"segment_id":"idx_00000000000000000000000000000003","run_no":3,"run_seq":10,"level":1,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
+const ACTIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:fc23e318c24a9243a1f3a665a2fa4523836ffd3c5ca01f144e21866623a50323","payload":{"namespace_id":"docs","status":{"kind":"active","built_through_seq":11,"next_event_index":5},"index":{"format_version":1,"next_run_no":2},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_no":1,"run_seq":8,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}}"#;
+const DISABLED_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:b93963eec6c2f0c2f452c4ea85f50538cf002bf0aa3fe53a16b3cf81892319af","payload":{"namespace_id":"docs","status":{"kind":"disabled"},"index":{"format_version":1,"next_run_no":4},"segments":[]}}"#;
+const ADDITIVE_V1: &str = r#"{"kind":"grep_manifest","format_version":1,"payload_checksum":"sha256:3c9820b53c34f61fa2a3516bdacfd43972d1426ef2aada4dab4dfd76ab55e2d0","payload":{"namespace_id":"docs","status":{"kind":"active","built_through_seq":11,"future_status":"ignored"},"index":{"format_version":1,"next_run_no":2,"future_index":17},"segments":[{"segment_id":"idx_00000000000000000000000000000001","run_no":1,"run_seq":8,"level":0,"segment_index":0,"min_row_key":"gram-616263-00000000000000000001","max_row_key":"gram-7a7a7a-00000000000000000099","index_block":{"offset":128,"stored_len":48,"decoded_len":96,"crc32c":305419896},"filter_block":{"offset":176,"stored_len":16,"decoded_len":16,"crc32c":2591069104},"filter_inline":"00112233445566778899aabbccddeeff","object_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","future_segment":"ignored"}],"future_root":true},"future_envelope":{"retained":true}}"#;
 
 // Pointer ids are minted, not derived, so each fixture names an arbitrary
 // id and carries the digest of the manifest it points at. That pairing is
@@ -31,14 +31,14 @@ const BACKFILLING_MANIFEST_OBJECT_ID: &str = "gmf_1a2b3c4d5e6f70819a2b3c4d5e6f70
 const ACTIVE_MANIFEST_OBJECT_ID: &str = "gmf_2b3c4d5e6f70819a2b3c4d5e6f708192";
 const DISABLED_MANIFEST_OBJECT_ID: &str = "gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b";
 
-const BACKFILLING_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:c644f431c05f81a81a024a7a93a97e3d739f950d914192030a6e1b0f78a4e6e2","payload":{"namespace_id":"docs","manifest_object_id":"gmf_1a2b3c4d5e6f70819a2b3c4d5e6f7081","manifest_payload_checksum":"sha256:33abc4ace4f03eeb7df262ad7d29ac7bb9c2dcadcc56c3629426be95edf509a2"}}"#;
-const ACTIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:c45edca5a7938a9184e59e93d82bc4a1b92fa77e37d210e652d69f16b893d97d","payload":{"namespace_id":"docs","manifest_object_id":"gmf_2b3c4d5e6f70819a2b3c4d5e6f708192","manifest_payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271"}}"#;
-const DISABLED_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:85a15333cb34faa587ec66511cfca4a4d375e261c312c07aed5faa29bdc072f1","payload":{"namespace_id":"docs","manifest_object_id":"gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b","manifest_payload_checksum":"sha256:23df5ecd9b434d54cd161da837a68125b58876f21015262840cd8924fcebef90"}}"#;
-const ADDITIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:7b47a63a7ddc97b373bc6d434a133a06bcc088e2f57ba329a76e59cfa05fcbbc","payload":{"namespace_id":"docs","manifest_object_id":"gmf_4d5e6f70819a2b3c4d5e6f70819a2b3c","manifest_payload_checksum":"sha256:ea082d9faa0dbdf7505d20597dc80b081d272e8176461d844b8b287d5c25a271","future_pointer":true},"future_envelope":{"retained":true}}"#;
+const BACKFILLING_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:bce6d9aadc818f1623593c9d29eaf17d0b0250905f273a2aabb219f04d7aef12","payload":{"namespace_id":"docs","manifest_object_id":"gmf_1a2b3c4d5e6f70819a2b3c4d5e6f7081","manifest_payload_checksum":"sha256:358aea64c965cea7287dd10d1dcf6c75100ae2539b814f6d0dae7043d38fc818"}}"#;
+const ACTIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:588b936ed66ec60812872776983452c2f398e31393ad520248e91d06913788db","payload":{"namespace_id":"docs","manifest_object_id":"gmf_2b3c4d5e6f70819a2b3c4d5e6f708192","manifest_payload_checksum":"sha256:fc23e318c24a9243a1f3a665a2fa4523836ffd3c5ca01f144e21866623a50323"}}"#;
+const DISABLED_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:246f206d2ffe87c601d124ac9c79a31d37e5f35262028fdc4a6178bb96f06e9a","payload":{"namespace_id":"docs","manifest_object_id":"gmf_3c4d5e6f70819a2b3c4d5e6f70819a2b","manifest_payload_checksum":"sha256:b93963eec6c2f0c2f452c4ea85f50538cf002bf0aa3fe53a16b3cf81892319af"}}"#;
+const ADDITIVE_POINTER_V1: &str = r#"{"kind":"grep_root","format_version":1,"payload_checksum":"sha256:061e11c2fe0a07ebcc55661e468e6cbd4fc3d89e6cc73d284c4eec5a4efe1c96","payload":{"namespace_id":"docs","manifest_object_id":"gmf_4d5e6f70819a2b3c4d5e6f70819a2b3c","manifest_payload_checksum":"sha256:fc23e318c24a9243a1f3a665a2fa4523836ffd3c5ca01f144e21866623a50323","future_pointer":true},"future_envelope":{"retained":true}}"#;
 
 // The string spelling every grep envelope carried before the version became
 // a number, kept only to prove it is refused.
-const STRING_VERSION_MANIFEST: &str = r#"{"kind":"grep_manifest","format_version":"v1","payload_checksum":"sha256:23df5ecd9b434d54cd161da837a68125b58876f21015262840cd8924fcebef90","payload":{"namespace_id":"docs","status":{"kind":"disabled"},"index":{"format_version":1,"next_run_ordinal":4},"segments":[]}}"#;
+const STRING_VERSION_MANIFEST: &str = r#"{"kind":"grep_manifest","format_version":"v1","payload_checksum":"sha256:b93963eec6c2f0c2f452c4ea85f50538cf002bf0aa3fe53a16b3cf81892319af","payload":{"namespace_id":"docs","status":{"kind":"disabled"},"index":{"format_version":1,"next_run_no":4},"segments":[]}}"#;
 
 #[test]
 fn encoded_manifests_and_pointers_match_frozen_bytes() {
@@ -269,13 +269,13 @@ fn decoder_rejects_truncated_payload() {
 
 #[test]
 fn constructor_rejects_reorganization_segment_mismatch() {
-    let mut index = GrepIndexState::new(None, 2);
+    let mut index = GrepIndexState::new(None, RunNo(2));
     index.reorganize = Some(GrepReorganizeState {
         snapshot_segment_ids: vec![segment_id(9)],
         output_segment_ids: Vec::new(),
         row_key_cursor: String::new(),
         output_level: 1,
-        run_ordinal: 1,
+        run_no: RunNo(1),
     });
 
     assert!(matches!(
@@ -298,7 +298,7 @@ fn sample_backfilling_root() -> GrepManifestState {
         output_segment_ids: vec![segment_id(3)],
         row_key_cursor: "gram-6d6e6f-00000000000000000042".to_owned(),
         output_level: 1,
-        run_ordinal: 3,
+        run_no: RunNo(3),
     };
     GrepManifestState::new(
         namespace_id("docs"),
@@ -308,7 +308,7 @@ fn sample_backfilling_root() -> GrepManifestState {
             checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
                 .expect("valid checkpoint id"),
         },
-        GrepIndexState::new(Some(reorganization), 4),
+        GrepIndexState::new(Some(reorganization), RunNo(4)),
         vec![
             segment_ref(1, 1, 0, 0),
             segment_ref(2, 2, 0, 0),
@@ -325,7 +325,7 @@ fn sample_active_root(built_through_seq: ChangeSeq, next_event_index: u32) -> Gr
             built_through_seq,
             next_event_index,
         },
-        GrepIndexState::new(None, 2),
+        GrepIndexState::new(None, RunNo(2)),
         vec![segment_ref(1, 1, 0, 0)],
     )
     .expect("valid active root")
@@ -335,17 +335,17 @@ fn sample_disabled_root() -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
         GrepIndexStatus::Disabled {},
-        GrepIndexState::new(None, 4),
+        GrepIndexState::new(None, RunNo(4)),
         Vec::new(),
     )
     .expect("valid disabled root")
 }
 
-fn segment_ref(number: u8, run_ordinal: u64, level: u32, segment_index: u32) -> GrepSegmentRef {
+fn segment_ref(number: u8, run_no: u64, level: u32, segment_index: u32) -> GrepSegmentRef {
     GrepSegmentRef {
         segment_id: segment_id(number),
+        run_no: RunNo(run_no),
         run_seq: ChangeSeq(7 + u64::from(number)),
-        run_ordinal,
         level,
         segment_index,
         min_row_key: "gram-616263-00000000000000000001".to_owned(),

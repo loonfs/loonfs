@@ -50,7 +50,7 @@ use xxhash_rust::xxh64::xxh64;
 /// listing at one GET per tiny block.
 pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 64 * 1024;
 /// Number of level-zero runs that triggers reorganization.
-pub const DEFAULT_MAX_L0_RUNS: usize = 8;
+pub const DEFAULT_MAX_DELTA_RUNS: usize = 8;
 /// Target number of rows in one immutable segment.
 pub const DEFAULT_MAX_ROWS_PER_SEGMENT: usize = 65_536;
 /// Maximum number of runs read by one reorganization step.
@@ -93,7 +93,7 @@ pub struct BlockHandle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SegmentIndexEntry {
     /// Greatest row key in `block`, used to binary-search candidate blocks.
-    pub last_key: String,
+    pub last_row_key: String,
     /// Data-section location and integrity metadata.
     pub block: BlockHandle,
 }
@@ -111,9 +111,9 @@ pub struct BuiltSegmentBlocks {
     /// Number of rows accepted by the builder, including adjacent duplicate keys.
     pub row_count: u64,
     /// Least row key in the non-empty segment.
-    pub min_key: String,
+    pub min_row_key: String,
     /// Greatest row key in the non-empty segment.
-    pub max_key: String,
+    pub max_row_key: String,
 }
 
 /// One decoded data block: row keys and rows, parallel and in key order.
@@ -194,13 +194,13 @@ pub struct SegmentBlocksBuilder {
     entry_count: usize,
     /// Last row key the builder accepted. It anchors prefix compression
     /// inside a block, floors the ascending-order guard, and becomes the
-    /// segment's max key. A block's first entry stores its key in full
+    /// segment's max row key. A block's first entry stores its key in full
     /// regardless, because a restart point always begins a block.
     previous_key: String,
     finished_blocks: Vec<(String, Vec<u8>)>,
     filter_hashes: Vec<(u64, u64)>,
     row_count: u64,
-    min_key: String,
+    min_row_key: String,
 }
 
 impl Default for SegmentBlocksBuilder {
@@ -221,7 +221,7 @@ impl SegmentBlocksBuilder {
             finished_blocks: Vec::new(),
             filter_hashes: Vec::new(),
             row_count: 0,
-            min_key: String::new(),
+            min_row_key: String::new(),
         }
     }
 
@@ -242,7 +242,7 @@ impl SegmentBlocksBuilder {
             });
         }
         if self.row_count == 0 {
-            self.min_key = row_key.to_owned();
+            self.min_row_key = row_key.to_owned();
         }
         self.filter_hashes.push(filter_key_hashes(filter_key));
 
@@ -286,10 +286,10 @@ impl SegmentBlocksBuilder {
         payload.extend_from_slice(&(self.restarts.len() as u32).to_le_bytes());
         self.restarts.clear();
         self.entry_count = 0;
-        // The block copies the last key it holds. Taking it would leave the
+        // The block copies the last row key it holds. Taking it would leave the
         // builder without one, and the builder still needs it: as the prefix
         // anchor inside the next block, as the order guard's floor across the
-        // boundary, and as the segment's max key once every row is in.
+        // boundary, and as the segment's max row key once every row is in.
         self.finished_blocks
             .push((self.previous_key.clone(), payload));
     }
@@ -303,9 +303,12 @@ impl SegmentBlocksBuilder {
 
         let mut bytes = Vec::new();
         let mut index = Vec::with_capacity(self.finished_blocks.len());
-        for (last_key, payload) in std::mem::take(&mut self.finished_blocks) {
+        for (last_row_key, payload) in std::mem::take(&mut self.finished_blocks) {
             let block = append_section(&mut bytes, &payload, true)?;
-            index.push(SegmentIndexEntry { last_key, block });
+            index.push(SegmentIndexEntry {
+                last_row_key,
+                block,
+            });
         }
 
         let filter_payload = build_filter_payload(&self.filter_hashes);
@@ -321,8 +324,8 @@ impl SegmentBlocksBuilder {
             index,
             filter,
             row_count: self.row_count,
-            min_key: self.min_key,
-            max_key: self.previous_key,
+            min_row_key: self.min_row_key,
+            max_row_key: self.previous_key,
         })
     }
 }
@@ -349,24 +352,24 @@ pub fn decode_index_block(
             .ok_or_else(|| {
                 SstBlockCodecError::Malformed(format!(
                     "index block `{}` byte range overflows",
-                    entry.last_key
+                    entry.last_row_key
                 ))
             })?;
         if let Some((previous_key, previous_end)) = previous {
-            if previous_key > &entry.last_key {
+            if previous_key > &entry.last_row_key {
                 return Err(SstBlockCodecError::Malformed(format!(
                     "index blocks out of key order: `{}` follows `{previous_key}`",
-                    entry.last_key
+                    entry.last_row_key
                 )));
             }
             if entry.block.offset != previous_end {
                 return Err(SstBlockCodecError::Malformed(format!(
                     "index block `{}` does not start where `{previous_key}` ends",
-                    entry.last_key
+                    entry.last_row_key
                 )));
             }
         }
-        previous = Some((&entry.last_key, end));
+        previous = Some((&entry.last_row_key, end));
     }
     Ok(entries)
 }
@@ -517,12 +520,12 @@ pub fn index_blocks_for_key_range(
     lower_bound: &str,
     upper_bound: Option<&str>,
 ) -> std::ops::Range<usize> {
-    let start = index.partition_point(|entry| entry.last_key.as_str() < lower_bound);
+    let start = index.partition_point(|entry| entry.last_row_key.as_str() < lower_bound);
     let end = upper_bound.map_or(index.len(), |upper_bound| {
-        // A block whose last key equals the exclusive upper bound can still
+        // A block whose last row key equals the exclusive upper bound can still
         // hold keys below it, so the bound block itself is included.
         index
-            .partition_point(|entry| entry.last_key.as_str() < upper_bound)
+            .partition_point(|entry| entry.last_row_key.as_str() < upper_bound)
             .saturating_add(1)
             .min(index.len())
     });
@@ -715,9 +718,9 @@ mod tests {
         (bytes, handle)
     }
 
-    fn index_entry(last_key: &str, offset: u64, stored_len: u32) -> SegmentIndexEntry {
+    fn index_entry(last_row_key: &str, offset: u64, stored_len: u32) -> SegmentIndexEntry {
         SegmentIndexEntry {
-            last_key: last_key.to_owned(),
+            last_row_key: last_row_key.to_owned(),
             block: BlockHandle {
                 offset,
                 stored_len,
@@ -742,15 +745,15 @@ mod tests {
             assert_eq!(block.row_keys.len(), block.rows.len());
             assert_eq!(
                 block.row_keys.last().expect("blocks are never empty"),
-                &entry.last_key
+                &entry.last_row_key
             );
             recovered.extend(block.row_keys.iter().cloned());
         }
         let expected: Vec<String> = (0..rows).map(|i| inode_row(i as u64).0).collect();
         assert_eq!(recovered, expected);
         assert_eq!(built.row_count, rows as u64);
-        assert_eq!(built.min_key, expected[0]);
-        assert_eq!(&built.max_key, expected.last().expect("rows"));
+        assert_eq!(built.min_row_key, expected[0]);
+        assert_eq!(&built.max_row_key, expected.last().expect("rows"));
     }
 
     #[test]
@@ -815,8 +818,8 @@ mod tests {
 
     /// The builder closes a data block from inside `push` as soon as the
     /// block reaches its target size, so the last row of a segment can be
-    /// the row that closes one. The segment's max key must survive that:
-    /// an empty max key sorts below every bound, so a keyed scan would
+    /// the row that closes one. The segment's max row key must survive that:
+    /// an empty max row key sorts below every bound, so a keyed scan would
     /// prune the whole segment away and report the rows missing.
     #[test]
     fn max_key_survives_a_last_row_that_closes_its_block() {
@@ -844,8 +847,8 @@ mod tests {
         let built = builder.finish().expect("finish segment");
 
         let expected_max = inode_row((rows - 1) as u64).0;
-        assert_eq!(built.min_key, inode_row(0).0);
-        assert_eq!(built.max_key, expected_max);
+        assert_eq!(built.min_row_key, inode_row(0).0);
+        assert_eq!(built.max_row_key, expected_max);
         assert_eq!(built.row_count, rows as u64);
         // The last push closed the block, so `finish` appended nothing. The
         // object must still be the same bytes a larger target produces.
@@ -853,7 +856,7 @@ mod tests {
         let index =
             decode_index_block(section(&built.bytes, &built.index), &built.index).expect("index");
         assert_eq!(index.len(), 1);
-        assert_eq!(index[0].last_key, expected_max);
+        assert_eq!(index[0].last_row_key, expected_max);
     }
 
     /// A segment's key range describes its rows, not its block geometry, so
@@ -870,9 +873,9 @@ mod tests {
                 builder.push(&key, &filter_key, &row).expect("push row");
             }
             let built = builder.finish().expect("finish segment");
-            assert_eq!(built.min_key, expected[0], "target {target}");
+            assert_eq!(built.min_row_key, expected[0], "target {target}");
             assert_eq!(
-                &built.max_key,
+                &built.max_row_key,
                 expected.last().expect("rows"),
                 "target {target}"
             );
@@ -884,19 +887,19 @@ mod tests {
             for entry in &index {
                 let block = decode_data_block(section(&built.bytes, &entry.block), &entry.block)
                     .expect("data block");
-                // Each block still names its own last key, so the index the
+                // Each block still names its own last row key, so the index the
                 // reader binary-searches keeps its shape.
                 assert_eq!(
                     block.row_keys.last().expect("blocks are never empty"),
-                    &entry.last_key,
+                    &entry.last_row_key,
                     "target {target}"
                 );
                 recovered.extend(block.row_keys);
             }
             assert_eq!(recovered, expected, "target {target}");
             assert_eq!(
-                index.last().expect("blocks").last_key,
-                built.max_key,
+                index.last().expect("blocks").last_row_key,
+                built.max_row_key,
                 "target {target}"
             );
         }

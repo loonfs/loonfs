@@ -366,7 +366,7 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
 }
 
 #[tokio::test]
-async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overlay() {
+async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = content_blob_counting_store(temp_dir.path());
     let context = mutation_context();
@@ -444,7 +444,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
     .expect("delete dead");
     create_checkpoint(&store, &namespace_id, &context)
         .await
-        .expect("l0 checkpoint");
+        .expect("delta checkpoint");
 
     put_file_bytes(
         &store,

@@ -448,7 +448,7 @@ async fn manifest_materialization_uses_written_segments() {
 }
 
 #[tokio::test]
-async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
+async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -496,22 +496,22 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
             .expect("load second manifest");
 
     // Checkpoints only append: the base run stays the bootstrap seed's and
-    // each checkpoint contributes one L0 run.
+    // each checkpoint contributes one delta run.
     assert_eq!(
         second_materialized.manifest.payload.base_seq,
         first_materialized.manifest.payload.base_seq
     );
     assert_eq!(
-        base_run(&second_materialized.manifest).segments,
-        base_run(&first_materialized.manifest).segments
+        base_tier(&second_materialized.manifest),
+        base_tier(&first_materialized.manifest)
     );
-    let l0_runs = l0_runs(&second_materialized.manifest);
-    assert_eq!(l0_runs.len(), 2);
-    assert_eq!(l0_runs[0].run_seq, first.checkpoint_seq);
-    assert_eq!(l0_runs[1].run_seq, second.checkpoint_seq);
-    assert!(l0_runs
+    let delta_runs = delta_runs(&second_materialized.manifest);
+    assert_eq!(delta_runs.len(), 2);
+    assert_eq!(delta_runs[0].run_seq, first.checkpoint_seq);
+    assert_eq!(delta_runs[1].run_seq, second.checkpoint_seq);
+    assert!(delta_runs
         .iter()
-        .all(|run| run.level == CHECKPOINT_L0_RUN_LEVEL));
+        .all(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL));
     for response in [&first, &second] {
         let record = load_checkpoint_record(&store, &namespace_id, &response.checkpoint_id)
             .await
@@ -527,7 +527,7 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
 }
 
 #[tokio::test]
-async fn manifest_l0_run_missing_segment_fails_load() {
+async fn manifest_delta_run_missing_segment_fails_load() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -566,14 +566,17 @@ async fn manifest_l0_run_missing_segment_fails_load() {
             .await
             .expect("load materialized manifest");
     let deleted_key = metadata_segment_object_key(
-        l0_runs(&materialized.manifest)[0]
+        delta_runs(&materialized.manifest)[0]
             .segments
             .iter()
             .flat_map(|family_segments| family_segments.segments.iter())
             .next()
-            .expect("l0 run segment"),
+            .expect("delta run segment"),
     );
-    store.delete(&deleted_key).await.expect("delete l0 segment");
+    store
+        .delete(&deleted_key)
+        .await
+        .expect("delete delta segment");
 
     match load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_no)
         .await
@@ -581,7 +584,7 @@ async fn manifest_l0_run_missing_segment_fails_load() {
         Err(ManifestLoadError::MissingSegment { object_key }) => {
             assert_eq!(object_key, deleted_key);
         }
-        other => panic!("expected missing l0 segment, got {other:?}"),
+        other => panic!("expected missing delta segment, got {other:?}"),
     }
 }
 
@@ -611,6 +614,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     let malformed_run_segments = build_manifest_segments_from_rows(
         &store,
         &namespace_id,
+        RunNo(0),
         first,
         CHECKPOINT_BASE_RUN_LEVEL,
         |family| manifest_rows_for_family(&materialization.metadata_state, family),
@@ -621,8 +625,9 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     let metadata_segments = build_manifest_segments_from_rows(
         &store,
         &namespace_id,
+        RunNo(1),
         materialization.head.seq,
-        CHECKPOINT_L0_RUN_LEVEL,
+        CHECKPOINT_DELTA_RUN_LEVEL,
         |family| {
             super::row::manifest_rows_for_family_after_seq(
                 &materialization.metadata_state,
@@ -645,6 +650,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         base_seq: first,
         writer_epoch: materialization.head.writer_epoch,
         next_inode_id: materialization.head.next_inode_id,
+        next_run_no: RunNo(2),
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
         segments,
     })
@@ -666,7 +672,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
 }
 
 #[tokio::test]
-async fn manifest_l0_runs_chain_across_successive_manifests() {
+async fn manifest_delta_runs_chain_across_successive_manifests() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -684,14 +690,14 @@ async fn manifest_l0_runs_chain_across_successive_manifests() {
             .await
             .expect("load chained manifest");
     // Always-append checkpoints keep the first published base (seq 0) and
-    // chain one L0 run per checkpoint, the first included.
+    // chain one delta run per checkpoint, the first included.
     assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(0));
-    let l0_runs = l0_runs(&materialized.manifest);
-    assert_eq!(l0_runs.len(), 4);
-    for (offset, run) in l0_runs.iter().enumerate() {
+    let delta_runs = delta_runs(&materialized.manifest);
+    assert_eq!(delta_runs.len(), 4);
+    for (offset, run) in delta_runs.iter().enumerate() {
         let seq = ChangeSeq(offset as u64 + 1);
         assert_eq!(run.run_seq, seq);
-        assert_eq!(run.level, CHECKPOINT_L0_RUN_LEVEL);
+        assert_eq!(run.level, CHECKPOINT_DELTA_RUN_LEVEL);
     }
 }
 
@@ -725,16 +731,14 @@ async fn manifest_base_run_segments_have_sorted_segment_coverage() {
             .await
             .expect("load manifest");
 
-    let base = base_run(&materialized.manifest);
+    let base = base_tier(&materialized.manifest);
     let revisions = base
-        .segments
         .iter()
         .find(|family_segments| family_segments.family == ApiMetadataRowFamily::Revisions)
         .expect("revision segments");
     assert!(revisions.segments.len() >= 3);
 
     let direntries = base
-        .segments
         .iter()
         .find(|family_segments| family_segments.family == ApiMetadataRowFamily::DirentryBinds)
         .expect("direntry segments");
@@ -743,14 +747,14 @@ async fn manifest_base_run_segments_have_sorted_segment_coverage() {
         "hot directory direntry rows should be range-split"
     );
 
-    for family_segments in &base.segments {
-        let mut previous_max_key: Option<&str> = None;
+    for family_segments in &base {
+        let mut previous_max_row_key: Option<&str> = None;
         for descriptor in &family_segments.segments {
-            assert!(descriptor.min_key.as_str() <= descriptor.max_key.as_str());
-            if let Some(previous) = previous_max_key {
-                assert!(previous < descriptor.min_key.as_str());
+            assert!(descriptor.min_row_key.as_str() <= descriptor.max_row_key.as_str());
+            if let Some(previous) = previous_max_row_key {
+                assert!(previous < descriptor.min_row_key.as_str());
             }
-            previous_max_key = Some(descriptor.max_key.as_str());
+            previous_max_row_key = Some(descriptor.max_row_key.as_str());
         }
     }
     assert!(metadata_states_equivalent(

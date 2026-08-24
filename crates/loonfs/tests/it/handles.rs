@@ -998,8 +998,8 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
 /// Threshold crossings with background work enabled must both bound the
 /// WAL tail and drain the reorganization backlog. The first crossing
 /// publishes the namespace's first manifest as one base run; the next
-/// eight chain one L0 run each, and the last of them reaches the fold
-/// trigger (eight L0 runs). The writer's own background step then folds
+/// eight chain one delta run each, and the last of them reaches the fold
+/// trigger (eight delta runs). The writer's own background step then folds
 /// every family group — no admin involvement. Before the drain, background
 /// steps folded at most one unit per crossing, so fold debt outlived the
 /// burst that created it.
@@ -1043,15 +1043,15 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
             .expect("read manifest")
             .expect("manifest exists");
         let manifest = decode_namespace_manifest_json(&bytes).expect("decode manifest");
-        let l0_files = manifest
+        let delta_files = manifest
             .payload
             .segments
             .iter()
             .filter(|descriptor| descriptor.level == 0)
             .count();
         assert_eq!(
-            l0_files, 0,
-            "background steps drain the fold backlog to zero L0 runs; \
+            delta_files, 0,
+            "background steps drain the fold backlog to zero delta runs; \
              a leftover run means the drain stopped early"
         );
     });
