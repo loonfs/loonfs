@@ -9,11 +9,10 @@ use crate::maintenance_runner::CompactionStart;
 use crate::FsAdmin;
 use crate::NamespaceDiagnostics;
 use crate::{
-    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions,
-    CreateCheckpointResponse, ErrorCode, FlushWalOutcome, FlushWalResponse,
-    ListCheckpointsResponse, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceOptions,
-    MetadataMaintenanceResponse, NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome,
-    SharedObjectStore, WalFlushStepOutcome,
+    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions, ErrorCode,
+    FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenancePlan,
+    MaintenanceStepResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
@@ -681,7 +680,7 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
         options: CreateCheckpointOptions,
-    ) -> Result<CreateCheckpointResponse> {
+    ) -> Result<Checkpoint> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let result = self

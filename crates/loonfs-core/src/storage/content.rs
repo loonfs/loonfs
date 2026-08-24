@@ -11,8 +11,8 @@ use futures::StreamExt;
 #[cfg(any(test, feature = "test-support"))]
 use loonfs_api::NamespaceId;
 use loonfs_api::{
-    AuthoritativePathEntry, Checksum, ContentId, ContentRef, ContentRefValidationError,
-    ContentStoreId, Sha256, StreamingChecksum,
+    Checksum, ContentId, ContentRef, ContentRefValidationError, ContentStoreId, PathEntry, Sha256,
+    StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteRange, ByteStream, ObjectStore, ObjectStoreError, PutMode};
@@ -257,7 +257,7 @@ pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 /// stays for callers that want the whole answer or none of it.
 pub struct FileContentStream<S> {
     store: S,
-    entry: AuthoritativePathEntry,
+    entry: PathEntry,
     object_key: String,
     content_ref: ContentRef,
     chunk_bytes: NonZeroU64,
@@ -295,7 +295,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     pub(crate) async fn open(
         store: S,
         content_store_id: &ContentStoreId,
-        entry: AuthoritativePathEntry,
+        entry: PathEntry,
         content_ref: ContentRef,
         chunk_bytes: NonZeroU64,
         start_offset: u64,
@@ -361,7 +361,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     }
 
     /// The authoritative metadata entry the path resolved to.
-    pub fn entry(&self) -> &AuthoritativePathEntry {
+    pub fn entry(&self) -> &PathEntry {
         &self.entry
     }
 
@@ -777,9 +777,7 @@ mod tests {
         DurableContentValidationError, FileContentStream, NonZeroU64,
     };
     use bytes::Bytes;
-    use loonfs_api::{
-        AuthoritativePathEntry, Checksum, ContentId, ContentRef, ContentRefKind, ContentStoreId,
-    };
+    use loonfs_api::{Checksum, ContentId, ContentRef, ContentRefKind, ContentStoreId, PathEntry};
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
@@ -1068,14 +1066,14 @@ mod tests {
         (0..len).map(|offset| (offset % 251) as u8).collect()
     }
 
-    fn test_entry() -> AuthoritativePathEntry {
-        AuthoritativePathEntry {
+    fn test_entry() -> PathEntry {
+        PathEntry {
             namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             path: loonfs_api::AbsolutePath::parse("/file.bin").expect("absolute path"),
             inode_id: loonfs_api::InodeId(1),
             created_by: loonfs_api::ActorRef::loonfs_system(),
             created_at_ms: 1,
-            kind: loonfs_api::AuthoritativePathEntryKind::File {
+            kind: loonfs_api::PathEntryKind::File {
                 revision_no: loonfs_api::RevisionNo(1),
                 size_bytes: 0,
                 content_ref: ContentRef::blob_v1(loonfs_api::ContentId::generate(), b""),

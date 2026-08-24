@@ -60,7 +60,7 @@ pub(super) struct StatInodeQuery {
             ("include_attributes" = inline(Option<super::handlers_filesystem::OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.")
         ),
         responses(
-            (status = 200, description = "Authoritative current inode entry", body = loonfs_api::AuthoritativePathEntry),
+            (status = 200, description = "Authoritative current inode entry", body = loonfs_api::PathEntry),
             (status = 400, description = "Invalid inode ID or include_attributes", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or visible inode not found", body = ApiError),
@@ -75,7 +75,7 @@ pub(super) async fn get_inode(
     path: AppPath<InodePathParams>,
     headers: HeaderMap,
     query: AppQuery<StatInodeQuery>,
-) -> Result<Json<loonfs_api::AuthoritativePathEntry>, ApiResponseError> {
+) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let inode_id = parse_inode_id(&path.into_params()?.inode_id)?;

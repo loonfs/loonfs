@@ -46,19 +46,16 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         context,
     )
     .await?;
-    let source_record = load_checkpoint_record(
-        store,
-        source_namespace_id,
-        &checkpoint.checkpoint.checkpoint_id,
-    )
-    .await?
-    .ok_or_else(|| {
-        CoreError::NamespaceCorrupt(format!(
-            "source checkpoint `{}` disappeared during fork",
-            checkpoint.checkpoint.checkpoint_id
-        ))
-    })?
-    .state;
+    let source_record =
+        load_checkpoint_record(store, source_namespace_id, &checkpoint.checkpoint_id)
+            .await?
+            .ok_or_else(|| {
+                CoreError::NamespaceCorrupt(format!(
+                    "source checkpoint `{}` disappeared during fork",
+                    checkpoint.checkpoint_id
+                ))
+            })?
+            .state;
     let source_manifest = load_namespace_manifest_envelope(
         store,
         source_namespace_id,

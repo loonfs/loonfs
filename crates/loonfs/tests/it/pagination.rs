@@ -5,14 +5,13 @@
 
 use crate::common::*;
 use loonfs::{
-    AuthoritativePathEntry, CreateNamespaceOptions, DestinationBehavior, ErrorCode, PageRequest,
-    PutFileOptions,
+    CreateNamespaceOptions, DestinationBehavior, ErrorCode, PageRequest, PathEntry, PutFileOptions,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use tempfile::tempdir;
 
-fn display_names(entries: &[AuthoritativePathEntry]) -> Vec<&str> {
+fn display_names(entries: &[PathEntry]) -> Vec<&str> {
     entries
         .iter()
         .map(|entry| {

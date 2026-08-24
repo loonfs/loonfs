@@ -117,8 +117,8 @@ mod tests {
     use insta::{assert_json_snapshot, assert_snapshot};
     use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse};
     use loonfs_api::{
-        AbsolutePath, AttributesProjection, AuthoritativePathEntry, AuthoritativePathEntryKind,
-        ChangeSeq, DisplayName, InodeId, NamespaceId,
+        AbsolutePath, AttributesProjection, ChangeSeq, DisplayName, InodeId, NamespaceId,
+        PathEntry, PathEntryKind,
     };
     use loonfs_client::ClientError;
 
@@ -316,14 +316,14 @@ mod tests {
         );
     }
 
-    fn path_entry(path: &str, display_name: Option<&str>) -> AuthoritativePathEntry {
-        AuthoritativePathEntry {
+    fn path_entry(path: &str, display_name: Option<&str>) -> PathEntry {
+        PathEntry {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if display_name.is_some() { 2 } else { 1 }),
             created_by: loonfs_api::ActorRef::loonfs_system(),
             created_at_ms: 1_752_624_000_000,
-            kind: AuthoritativePathEntryKind::Directory {},
+            kind: PathEntryKind::Directory {},
             head_seq: ChangeSeq(3),
             parent_inode_id: display_name.map(|_| InodeId(1)),
             display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
@@ -331,7 +331,7 @@ mod tests {
         }
     }
 
-    fn stat_output(entry: AuthoritativePathEntry) -> CommandOutput {
+    fn stat_output(entry: PathEntry) -> CommandOutput {
         CommandOutput {
             kind: CommandKind::FilesystemStat,
             profile: Some("default".to_owned()),

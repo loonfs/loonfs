@@ -17,11 +17,11 @@ use loonfs::{
     CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState, FsReader,
     ListChangesOptions, StatPathOptions, MAX_RESOLVE_CURRENT_FILES,
 };
-use loonfs_api::v0::{ChangesResponse, FilesystemChange};
+use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
-    decode_cursor, AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, ContentRef,
-    DirectoryPageCursor, EffectiveLimit, InodeId, LimitError, NamespaceId, Page, PageRequest,
-    PaginationPolicy, RevisionNo, MAX_PUBLIC_INTEGER,
+    decode_cursor, AbsolutePath, ChangeSeq, CheckpointId, ContentRef, DirectoryPageCursor,
+    EffectiveLimit, InodeId, LimitError, NamespaceId, Page, PageRequest, PaginationPolicy,
+    PathEntry, RevisionNo, MAX_PUBLIC_INTEGER,
 };
 
 /// One namespace's filesystem reads, borrowed from a reader handle.
@@ -98,7 +98,7 @@ impl<'a> NamespaceReads<'a> {
         &self,
         after_seq: ChangeSeq,
         limit: usize,
-    ) -> Result<ChangesResponse> {
+    ) -> Result<ListChangesResponse> {
         Ok(self
             .reader
             .list_changes(
@@ -132,10 +132,7 @@ impl<'a> NamespaceReads<'a> {
     /// candidate's kind and revision, and grep answers with matches rather
     /// than with entries, so paying an attribute lookup per candidate would
     /// buy nothing.
-    pub async fn resolve_path(
-        &self,
-        absolute_path: &AbsolutePath,
-    ) -> Result<AuthoritativePathEntry> {
+    pub async fn resolve_path(&self, absolute_path: &AbsolutePath) -> Result<PathEntry> {
         Ok(self
             .reader
             .stat_path(
@@ -154,7 +151,7 @@ impl<'a> NamespaceReads<'a> {
         absolute_path: &AbsolutePath,
         cursor: Option<DirectoryPageCursor>,
         limit: usize,
-    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let page = self
             .reader
             .list_path_entries_page(

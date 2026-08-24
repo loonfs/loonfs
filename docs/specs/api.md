@@ -312,6 +312,8 @@ conditional-request failures.
 One SDK serves both backends; deployment mode never forks the client
 codebase.
 
+Generated SDKs use schema names as public type names. A resource body uses the resource name, such as `Checkpoint` or `UploadSession`. A response envelope uses `<Verb><Noun>Response`, such as `ListCheckpointsResponse`. Namespace-owned resources include `namespace_id`.
+
 Revision numbers, change sequences, attribute revisions, manifest numbers,
 writer epochs, and grep run ordinals are JSON integers from 0 through
 9007199254740991 (`2^53 - 1`). Implementations MUST reject larger input values
@@ -850,14 +852,7 @@ floor has advanced.
 
 #### Checkpoint inventory
 
-A checkpoint name is a label, not a key: every create mints a new record
-under a new id, and two creates under one name leave two records. Create and
-list use one checkpoint object: `checkpoint_id`, `owner`, `created_at_ms`,
-optional `expires_at_ms`, `checkpoint_seq`, and `manifest_no`. The create
-response adds `namespace_id` as an envelope and flattens that object into the
-same JSON level. For an API create, `owner` is `user` with the request's
-`name`; `created_at_ms` is the durable record timestamp that listing later
-reports.
+A checkpoint name is a label, not a key. Every create call generates a new record, so the same name may identify multiple checkpoints. Create and list use one checkpoint object with `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, optional `expires_at_ms`, `checkpoint_seq`, and `manifest_no`. Create returns this object directly. For API-created checkpoints, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record timestamp.
 
 For example, a create response is:
 
@@ -872,7 +867,7 @@ id. Fork checkpoints retain their `fork` owner and remain until their target
 namespace is deleted.
 
 ```json
-{"namespace_id":"demo","checkpoints":[{"checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}]}
+{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}]}
 ```
 
 Release is idempotent and returns only the addressed namespace and

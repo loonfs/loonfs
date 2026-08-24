@@ -20,7 +20,7 @@ mod search;
 mod uploads;
 
 pub use commits::{
-    ChangesResponse, CommitResponse, CommittedChange, DirectoryBinding, FilesystemChange,
+    CommitResponse, CommittedChange, DirectoryBinding, FilesystemChange, ListChangesResponse,
 };
 pub use downloads::{
     BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
@@ -28,10 +28,10 @@ pub use downloads::{
 };
 pub use operations::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, Checkpoint,
-    CheckpointOwnerSummary, CommitRequest, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DeletedObjectCounts,
-    DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome,
-    FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
+    CheckpointOwnerSummary, CommitRequest, CreateCheckpointRequest, CreateNamespaceRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DeletedObjectCounts, DestinationBehavior,
+    ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse,
+    ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
     ListFileRevisionsResponse, MaintenanceStepRequest, MaintenanceStepResponse,
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics,
     ReleaseCheckpointResponse, ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates,
@@ -39,16 +39,16 @@ pub use operations::{
     StoreProbeResponse, WalFlushStepOutcome,
 };
 pub use reads::{
-    AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,
-    AuthoritativePathEntryKind, ListPathEntriesResponse, ListTrashResponse, TrashEntry,
+    AttributesProjection, FileBytes, ListPathEntriesResponse, ListTrashResponse, PathEntry,
+    PathEntryKind, TrashEntry,
 };
 pub use search::{
-    GrepGcRequest, GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse, GrepMatch,
-    GrepRequest, GrepResponse,
+    GrepGcRequest, GrepGcResponse, GrepIndex, GrepIndexLifecycle, GrepMatch, GrepRequest,
+    GrepResponse,
 };
 pub use uploads::{
     BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompleteUploadRequest,
     CompletedUploadPart, ContentToken, ObjectTransferAccess, SignUploadPartsRequest,
     SignUploadPartsResponse, SignedUploadPart, UploadContentClaim, UploadContentResponse,
-    UploadMode, UploadPartChecksumClaim, UploadSessionResponse, UploadSessionStatus,
+    UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };

@@ -494,8 +494,7 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
         &setup,
     )
     .await
-    .expect("second checkpoint")
-    .checkpoint;
+    .expect("second checkpoint");
     assert_ne!(moved_on.manifest_no, pinned.manifest_no);
 
     // Simulate the crash residue: the pinned record stays active while
@@ -3286,7 +3285,6 @@ async fn caller_release_and_expiry_release_converge_on_the_winners_stamp() {
             &setup,
         )
         .await
-        .map(|response| response.checkpoint)
     };
     let pass_first = pin("pass-first").await.expect("expiring checkpoint");
     let caller_first = pin("caller-first").await.expect("expiring checkpoint");
@@ -3368,8 +3366,7 @@ async fn a_release_that_loses_its_etag_retains_without_erroring() {
         &setup,
     )
     .await
-    .expect("expiring checkpoint")
-    .checkpoint;
+    .expect("expiring checkpoint");
     let expired = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let caller_stamp = expired.now_ms + 1;
 
@@ -3495,8 +3492,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
         &setup,
     )
     .await
-    .expect("expiring checkpoint")
-    .checkpoint;
+    .expect("expiring checkpoint");
     let lasting = crate::checkpoint::create_checkpoint(
         &store,
         &namespace_id,
@@ -3507,8 +3503,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
         &setup,
     )
     .await
-    .expect("lasting checkpoint")
-    .checkpoint;
+    .expect("lasting checkpoint");
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
@@ -3584,8 +3579,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
     )
     .await
-    .expect("first owner")
-    .checkpoint;
+    .expect("first owner");
     let second = crate::checkpoint::create_checkpoint(
         &store,
         &namespace_id,
@@ -3596,8 +3590,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
     )
     .await
-    .expect("second owner")
-    .checkpoint;
+    .expect("second owner");
     assert_ne!(first.checkpoint_id, second.checkpoint_id);
     assert_eq!(first.manifest_no, second.manifest_no);
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
@@ -3986,8 +3979,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
         &attempt,
     )
     .await
-    .expect("leased fork record")
-    .checkpoint;
+    .expect("leased fork record");
     let fork_record = read_fork_record(&store, &source).await;
     write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &source, &setup)
@@ -4064,8 +4056,7 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
         &setup,
     )
     .await
-    .expect("leased fork record from the attempt that died")
-    .checkpoint;
+    .expect("leased fork record from the attempt that died");
 
     fork_namespace(&store, &source, &clone, &setup)
         .await

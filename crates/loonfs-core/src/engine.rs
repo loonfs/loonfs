@@ -23,18 +23,16 @@ use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent}
 use crate::time::current_time_ms;
 use loonfs_api::options::{DirectMultipartUploadOptions, ListPathEntriesOptions, StatPathOptions};
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
-    CompleteMultipartUploadRequest, UploadContentResponse, UploadMode, UploadPartChecksumClaim,
-    UploadSessionResponse,
+    BeginUploadRequest, BeginUploadResponse, CommitResponse, CompleteMultipartUploadRequest,
+    ListChangesResponse, UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceStatus};
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
-    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    CheckpointId, ChecksumAlgorithm, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
-    DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
-    Namespace, NamespaceId, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo, TrashEntry,
-    TrashPageCursor, UploadId,
+    AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, ContentRef,
+    DeleteNamespaceResponse, DirectoryPageCursor, FileBytes, FileRevision, FileRevisionsPageCursor,
+    FlushWalResponse, InodeId, Namespace, NamespaceId, Page, PageRequest, PathEntry,
+    ReleaseCheckpointResponse, RevisionNo, TrashEntry, TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
@@ -124,7 +122,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         path: impl AsRef<str>,
         options: StatPathOptions,
         context: &RuntimeReadContext,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let view = self.load_read_view(context).await?;
         view.resolve_path(path.as_ref(), options.include_attributes.into())
             .await
@@ -137,7 +135,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
         context: &RuntimeReadContext,
-    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let view = self.load_read_view(context).await?;
         view.list_path_page(path.as_ref(), request, options.include_attributes.into())
             .await
@@ -271,7 +269,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         path: impl AsRef<str>,
         context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
-    ) -> Result<AuthoritativeFileBytes> {
+    ) -> Result<FileBytes> {
         let view = self.load_read_view(context).await?;
         view.get_file_bytes(&self.store, path.as_ref(), max_content_bytes)
             .await
@@ -347,7 +345,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         inode_id: InodeId,
         options: StatPathOptions,
         context: &RuntimeReadContext,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let view = self.load_read_view(context).await?;
         view.stat_inode(inode_id, options.include_attributes.into())
             .await
@@ -476,7 +474,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         revision_no: RevisionNo,
         context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
-    ) -> Result<AuthoritativeFileBytes> {
+    ) -> Result<FileBytes> {
         let view = self.load_read_view(context).await?;
         view.get_file_revision_bytes(&self.store, path.as_ref(), revision_no, max_content_bytes)
             .await
@@ -537,7 +535,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
-    ) -> Result<ChangesResponse> {
+    ) -> Result<ListChangesResponse> {
         crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq, limit).await
     }
 }
@@ -625,7 +623,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Completes a service-proxied or direct-PUT upload session.
-    pub async fn complete_upload(&self, upload_id: &UploadId) -> Result<UploadSessionResponse> {
+    pub async fn complete_upload(&self, upload_id: &UploadId) -> Result<UploadSession> {
         Ok(self.complete_upload_prepared(upload_id).await?.response)
     }
 
@@ -634,7 +632,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
-    ) -> Result<UploadSessionResponse> {
+    ) -> Result<UploadSession> {
         Ok(self
             .complete_multipart_upload_prepared(upload_id, request)
             .await?
@@ -783,7 +781,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// Terminal and idempotent: repeating it succeeds, and it refuses a
     /// session that already completed, whose content may be published.
-    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<UploadSessionResponse> {
+    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<UploadSession> {
         let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
             &self.store,
             &self.namespace_id,
@@ -806,7 +804,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub async fn get_upload_status(
         &self,
         upload_id: &UploadId,
-    ) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
+    ) -> Result<(UploadSession, Option<CompletedUploadReceipt>)> {
         let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
             &self.store,
             &self.namespace_id,
@@ -830,11 +828,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// has no manifest, the method first publishes one without compacting
     /// metadata. `ttl_ms` sets an expiration time; `None` keeps the checkpoint
     /// until it is released.
-    pub async fn create_checkpoint(
-        &self,
-        name: String,
-        ttl_ms: Option<u64>,
-    ) -> Result<CreateCheckpointResponse> {
+    pub async fn create_checkpoint(&self, name: String, ttl_ms: Option<u64>) -> Result<Checkpoint> {
         let context = self.mutation_context()?;
         let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
         crate::checkpoint::create_checkpoint(

@@ -7,7 +7,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions};
 use loonfs::{FsAdmin, FsReader};
-use loonfs_api::v0::{GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse};
+use loonfs_api::v0::{GrepGcResponse, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
     ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, FEATURE_ADMIN_GREP_INDEX,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
@@ -158,7 +158,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         GrepIndexLifecycle::Disabled
     );
 
-    let enabled: GrepIndexStatusResponse = response_json(
+    let enabled: GrepIndex = response_json(
         send(
             &router,
             Method::POST,
@@ -200,7 +200,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     assert!(!active.reorganize_pending);
 
     // Re-enabling an active root reports the phase it found, still tagged.
-    let again: GrepIndexStatusResponse = response_json(
+    let again: GrepIndex = response_json(
         send(
             &router,
             Method::POST,
@@ -748,7 +748,7 @@ fn status_path(namespace_id: &NamespaceId) -> String {
     format!("/v0/admin/namespaces/{namespace_id}/grep/index")
 }
 
-async fn index_status(router: &Router, namespace_id: &NamespaceId) -> GrepIndexStatusResponse {
+async fn index_status(router: &Router, namespace_id: &NamespaceId) -> GrepIndex {
     let response = send(router, Method::GET, &status_path(namespace_id), None).await;
     assert_eq!(response.status(), StatusCode::OK);
     response_json(response).await
@@ -765,7 +765,7 @@ async fn enable_grep(router: &Router, namespace_id: &NamespaceId) -> StatusCode 
     .status()
 }
 
-async fn disable_grep(router: &Router, namespace_id: &NamespaceId) -> GrepIndexStatusResponse {
+async fn disable_grep(router: &Router, namespace_id: &NamespaceId) -> GrepIndex {
     let response = send(
         router,
         Method::POST,

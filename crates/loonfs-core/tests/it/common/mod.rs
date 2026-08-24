@@ -186,7 +186,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
-    ) -> Result<loonfs_api::v0::ChangesResponse, CoreError> {
+    ) -> Result<loonfs_api::v0::ListChangesResponse, CoreError> {
         namespace_engine(store, namespace_id, &mutation_context())
             .list_changes_after(after_seq, page_limit(loonfs_api::DEFAULT_PAGE_LIMIT))
             .await
@@ -196,7 +196,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-    ) -> Result<loonfs_api::CreateCheckpointResponse, CoreError> {
+    ) -> Result<loonfs_api::Checkpoint, CoreError> {
         namespace_engine(store, namespace_id, context)
             .create_checkpoint("test-pin".to_owned(), None)
             .await
@@ -300,7 +300,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
+    ) -> Result<loonfs_api::PathEntry, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
             .resolve_path(
@@ -315,7 +315,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
+    ) -> Result<loonfs_api::FileBytes, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
             .get_file(absolute_path, &context, None)

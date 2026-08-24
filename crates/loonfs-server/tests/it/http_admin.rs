@@ -6,8 +6,8 @@ use crate::common::http_split_support::*;
 use crate::common::{collect_checkpoints, start_server};
 use bytes::Bytes;
 use loonfs_api::{
-    ApiError, ChangeSeq, CheckpointId, CheckpointOwnerSummary, CreateCheckpointResponse,
-    ManifestNo, ReleaseCheckpointResponse,
+    ApiError, ChangeSeq, Checkpoint, CheckpointId, CheckpointOwnerSummary, ManifestNo,
+    ReleaseCheckpointResponse,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -18,7 +18,7 @@ use tempfile::tempdir;
 
 type ApiResult<T> = Result<T, Box<ApiError>>;
 
-fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<CreateCheckpointResponse> {
+fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<Checkpoint> {
     post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoints"),
         "test-token",
@@ -190,62 +190,50 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         .expect("write file");
 
     let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
-    assert!(CheckpointId::parse(first.checkpoint.checkpoint_id.as_str()).is_ok());
+    assert!(CheckpointId::parse(first.checkpoint_id.as_str()).is_ok());
     assert_eq!(
-        first.checkpoint.owner,
+        first.owner,
         CheckpointOwnerSummary::User {
             name: "nightly".to_owned()
         }
     );
-    assert_eq!(first.checkpoint.checkpoint_seq, ChangeSeq(1));
-    assert_eq!(first.checkpoint.manifest_no, ManifestNo(1));
+    assert_eq!(first.checkpoint_seq, ChangeSeq(1));
+    assert_eq!(first.manifest_no, ManifestNo(1));
     let listed = collect_checkpoints(&client, &namespace)
         .await
         .expect("list first checkpoint");
-    assert_eq!(listed.checkpoints, vec![first.checkpoint.clone()]);
+    assert_eq!(listed.checkpoints, vec![first.clone()]);
 
     // Creating again over the same head is a second pin, not a second name
     // for the first: a new record under a new id, over the same basis.
     let repeated = post_checkpoint(&server_url, namespace.as_str()).expect("repeat checkpoint");
-    assert_ne!(
-        repeated.checkpoint.checkpoint_id,
-        first.checkpoint.checkpoint_id
-    );
+    assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
     assert_eq!(repeated.namespace_id, first.namespace_id);
-    assert_eq!(repeated.checkpoint.owner, first.checkpoint.owner);
-    assert_eq!(
-        repeated.checkpoint.checkpoint_seq,
-        first.checkpoint.checkpoint_seq
-    );
-    assert_eq!(
-        repeated.checkpoint.manifest_no,
-        first.checkpoint.manifest_no
-    );
-    assert_eq!(
-        repeated.checkpoint.expires_at_ms,
-        first.checkpoint.expires_at_ms
-    );
-    assert!(repeated.checkpoint.created_at_ms >= first.checkpoint.created_at_ms);
+    assert_eq!(repeated.owner, first.owner);
+    assert_eq!(repeated.checkpoint_seq, first.checkpoint_seq);
+    assert_eq!(repeated.manifest_no, first.manifest_no);
+    assert_eq!(repeated.expires_at_ms, first.expires_at_ms);
+    assert!(repeated.created_at_ms >= first.created_at_ms);
 
     // Release is idempotent: the first call flips the record one way, and
     // the repeat observes the settled end state.
     let released = post_checkpoint_release(
         &server_url,
         namespace.as_str(),
-        first.checkpoint.checkpoint_id.as_str(),
+        first.checkpoint_id.as_str(),
     )
     .expect("release checkpoint");
     assert_eq!(
         released,
         ReleaseCheckpointResponse {
             namespace_id: namespace.clone(),
-            checkpoint_id: first.checkpoint.checkpoint_id.clone(),
+            checkpoint_id: first.checkpoint_id.clone(),
         }
     );
     let released_again = post_checkpoint_release(
         &server_url,
         namespace.as_str(),
-        first.checkpoint.checkpoint_id.as_str(),
+        first.checkpoint_id.as_str(),
     )
     .expect("repeat release");
     assert_eq!(released_again, released);

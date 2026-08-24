@@ -14,16 +14,15 @@ use loonfs::{CheckpointPageCursor, CreateNamespaceOptions, DeleteNamespaceOption
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
-    decode_namespace_cursor, CapabilityDocument, CheckpointId, CreateCheckpointRequest,
-    CreateCheckpointResponse, CreateNamespaceRequest, ErrorCode, ForkNamespaceRequest,
-    ListCheckpointsResponse, MaintenanceStepRequest, MaintenanceStepResponse, PageRequest,
-    PaginationPolicy, ReleaseCheckpointResponse, FEATURE_ADMIN_GREP_INDEX,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
+    decode_namespace_cursor, CapabilityDocument, Checkpoint, CheckpointId, CreateCheckpointRequest,
+    CreateNamespaceRequest, ErrorCode, ForkNamespaceRequest, ListCheckpointsResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, PageRequest, PaginationPolicy,
+    ReleaseCheckpointResponse, FEATURE_ADMIN_GREP_INDEX, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
+    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
 };
 
 /// Advertises a feature, or removes the key: an absent key and an
@@ -379,7 +378,7 @@ pub(super) async fn fork_namespace(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body(content = CreateCheckpointRequest, description = "Checkpoint name and optional lifetime"),
         responses(
-            (status = 200, description = "Namespace envelope containing the created checkpoint", body = CreateCheckpointResponse),
+            (status = 200, description = "The created checkpoint", body = Checkpoint),
             (status = 400, description = "Invalid namespace id, name, or lifetime", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -393,7 +392,7 @@ pub(super) async fn create_checkpoint(
     namespace_id_path: NamespaceIdPath,
     query: AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateCheckpointRequest>,
-) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
+) -> Result<Json<Checkpoint>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     query.into_params()?;
     let response = state

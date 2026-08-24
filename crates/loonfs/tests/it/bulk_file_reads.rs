@@ -51,10 +51,10 @@ async fn listed_files(
             .entries;
         for entry in entries {
             match entry.kind {
-                loonfs::AuthoritativePathEntryKind::Directory {} => {
+                loonfs::PathEntryKind::Directory {} => {
                     directories.push(entry.path.as_str().to_owned());
                 }
-                loonfs::AuthoritativePathEntryKind::File {
+                loonfs::PathEntryKind::File {
                     revision_no,
                     size_bytes,
                     content_ref,
@@ -476,8 +476,7 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
         "the fork target's basis manifest should still name source-owned metadata files"
     );
 
-    let enumerated =
-        checkpoint_files(&fs.reader, &target, &checkpoint.checkpoint.checkpoint_id, 1).await;
+    let enumerated = checkpoint_files(&fs.reader, &target, &checkpoint.checkpoint_id, 1).await;
     assert_eq!(
         enumerated
             .iter()

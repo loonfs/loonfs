@@ -46,7 +46,7 @@ impl PathEntriesPager {
     /// Returns at most `max_items` entries.
     ///
     /// Unused entries from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<AuthoritativePathEntry>> {
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<PathEntry>> {
         let mut entries = Vec::new();
         while entries.len() < max_items {
             let Some(page) = self.next().await else {
@@ -206,13 +206,13 @@ pub struct ChangesPager {
     namespace_id: NamespaceId,
     after_seq: ChangeSeq,
     page_size: Option<u32>,
-    pending: Option<ChangesResponse>,
+    pending: Option<ListChangesResponse>,
     exhausted: bool,
 }
 
 impl ChangesPager {
     /// Returns the next change page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<ChangesResponse>> {
+    pub async fn next(&mut self) -> Option<Result<ListChangesResponse>> {
         if let Some(page) = self.pending.take() {
             return Some(Ok(page));
         }
@@ -367,7 +367,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let mut url = format!(
             "{}/v0/namespaces/{}/filesystem/entry?path={}",
             self.base_url,
@@ -390,7 +390,7 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         options: &StatPathOptions,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         let mut url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}",
@@ -565,7 +565,7 @@ impl Client {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
-    ) -> Result<ChangesResponse> {
+    ) -> Result<ListChangesResponse> {
         let mut url = format!(
             "{}/v0/namespaces/{namespace_id}/changes?after_seq={}",
             self.base_url, after_seq.0
@@ -573,7 +573,7 @@ impl Client {
         if let Some(limit) = limit {
             url.push_str(&format!("&limit={limit}"));
         }
-        self.request_json::<(), ChangesResponse>(self.get(&url), None)
+        self.request_json::<(), ListChangesResponse>(self.get(&url), None)
             .await
     }
 

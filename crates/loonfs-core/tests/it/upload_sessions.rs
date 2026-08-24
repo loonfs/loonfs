@@ -63,7 +63,7 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     context: &MutationContext,
-) -> Result<loonfs_api::v0::UploadSessionResponse, CoreError> {
+) -> Result<loonfs_api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
         .complete_upload(upload_id)
         .await
@@ -617,7 +617,7 @@ mod direct_multipart {
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
         context: &MutationContext,
-    ) -> Result<loonfs_api::v0::UploadSessionResponse, CoreError> {
+    ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
         namespace_engine(store, namespace_id, context)
             .complete_multipart_upload(upload_id, request)
             .await

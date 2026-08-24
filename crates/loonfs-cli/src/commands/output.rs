@@ -5,14 +5,12 @@ use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use loonfs_api::v0::{
-    ChangesResponse, GrepGcResponse, GrepIndexStatusResponse, StoreProbeCheckOutcome,
-    StoreProbeResponse,
+    GrepGcResponse, GrepIndex, ListChangesResponse, StoreProbeCheckOutcome, StoreProbeResponse,
 };
 use loonfs_api::{
-    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId,
-    CreateCheckpointResponse, DeleteNamespaceResponse, FileRevision, GcResponse, GrepMatch,
-    InodeId, ListCheckpointsResponse, MaintenanceStepResponse, Namespace, NamespaceId,
-    ReleaseCheckpointResponse,
+    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteNamespaceResponse,
+    FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse, MaintenanceStepResponse,
+    Namespace, NamespaceId, PathEntry, ReleaseCheckpointResponse,
 };
 use serde::Serialize;
 
@@ -165,7 +163,7 @@ pub(crate) enum CommandData {
     },
     NamespaceStatus(Namespace),
     NamespaceDeleted(DeleteNamespaceResponse),
-    CheckpointCreated(CreateCheckpointResponse),
+    CheckpointCreated(Checkpoint),
     CheckpointsListed(ListCheckpointsResponse),
     CheckpointReleased(ReleaseCheckpointResponse),
     MaintenanceStepped(MaintenanceStepResponse),
@@ -174,7 +172,7 @@ pub(crate) enum CommandData {
         /// The lifecycle and bookkeeping last observed: what enable read
         /// with `--no-wait`, otherwise the status after waiting stopped.
         #[serde(flatten)]
-        response: GrepIndexStatusResponse,
+        response: GrepIndex,
         /// The sequence the wait drove toward. Absent with `--no-wait` and
         /// on a namespace whose index is disabled.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,10 +204,10 @@ pub(crate) enum CommandData {
     /// What one store contract probe found. Failed checks are data, not an
     /// error: the probe ran and the store is what it is.
     StoreProbed(StoreProbeResponse),
-    GrepIndexDisabled(GrepIndexStatusResponse),
-    GrepIndexStatus(GrepIndexStatusResponse),
+    GrepIndexDisabled(GrepIndex),
+    GrepIndexStatus(GrepIndex),
     GrepIndexCollected(GrepGcResponse),
-    Changes(ChangesResponse),
+    Changes(ListChangesResponse),
     Trash(TrashListing),
     PathEntries {
         namespace_id: NamespaceId,
@@ -219,12 +217,12 @@ pub(crate) enum CommandData {
         /// Heads observed when this invocation crossed namespace states.
         #[serde(skip_serializing_if = "Option::is_none")]
         head_drift: Option<ListingHeadDrift>,
-        entries: Vec<AuthoritativePathEntry>,
+        entries: Vec<PathEntry>,
         /// Where a bounded listing stopped, and how to resume it.
         #[serde(skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
     },
-    PathEntry(AuthoritativePathEntry),
+    PathEntry(PathEntry),
     GrepMatches {
         pattern: String,
         namespace_id: NamespaceId,

@@ -81,7 +81,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &CreateCheckpointRequest,
-    ) -> Result<CreateCheckpointResponse> {
+    ) -> Result<Checkpoint> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
             self.base_url
@@ -218,43 +218,34 @@ impl Client {
 
     /// Returns whether the namespace's grep index is disabled, being built,
     /// or active. This operation does not change the index.
-    pub async fn get_grep_index_status(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse> {
+    pub async fn get_grep_index_status(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/grep/index",
             self.base_url
         );
-        self.request_json::<(), GrepIndexStatusResponse>(self.get(&url), None)
+        self.request_json::<(), GrepIndex>(self.get(&url), None)
             .await
     }
 
     /// Enables the namespace's grep root (admin plane); embedded mode starts
     /// that namespace's event-driven backfill. Idempotent.
-    pub async fn enable_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse> {
+    pub async fn enable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/enable",
             self.base_url
         );
-        self.request_json::<(), GrepIndexStatusResponse>(self.post(&url), None)
+        self.request_json::<(), GrepIndex>(self.post(&url), None)
             .await
     }
 
     /// Disables the namespace's grep root (admin plane); garbage collection
     /// reclaims the segments. Idempotent.
-    pub async fn disable_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<GrepIndexStatusResponse> {
+    pub async fn disable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/disable",
             self.base_url
         );
-        self.request_json::<(), GrepIndexStatusResponse>(self.post(&url), None)
+        self.request_json::<(), GrepIndex>(self.post(&url), None)
             .await
     }
 

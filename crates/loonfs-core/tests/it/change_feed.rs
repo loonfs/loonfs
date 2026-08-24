@@ -4,7 +4,7 @@
 // Unexpected variants include the full event in the failure message.
 
 use crate::common::commit_split_support::*;
-use loonfs_api::v0::{ChangesResponse, FilesystemChange};
+use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId,
     RevisionNo,
@@ -33,7 +33,7 @@ fn event_kind(event: &FilesystemChange) -> &'static str {
     }
 }
 
-fn event_kinds(changes: &ChangesResponse, id: &str) -> Vec<&'static str> {
+fn event_kinds(changes: &ListChangesResponse, id: &str) -> Vec<&'static str> {
     changes
         .changes
         .iter()

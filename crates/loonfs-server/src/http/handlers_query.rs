@@ -12,7 +12,7 @@ use crate::http::error::{status_for_core_error_code, ApiResponseError};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use loonfs_api::v0::{GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse};
+use loonfs_api::v0::{GrepGcRequest, GrepGcResponse, GrepIndex};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
@@ -180,7 +180,7 @@ pub(super) async fn grep_index_not_maintained(
         description = "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Grep root enabled or already enabled", body = GrepIndexStatusResponse),
+            (status = 200, description = "Grep root enabled or already enabled", body = GrepIndex),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -196,7 +196,7 @@ pub(super) async fn enable_grep_index(
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<NoQuery>,
-) -> Result<Json<GrepIndexStatusResponse>, ApiResponseError> {
+) -> Result<Json<GrepIndex>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     query.into_params()?;
@@ -232,7 +232,7 @@ pub(super) async fn enable_grep_index(
         description = "Returns whether the namespace's grep index is `disabled`, `backfilling`, or `active`, including build progress when available. A namespace that has never enabled the index is `disabled`. This operation requires a deployment that maintains grep indexes and does not change the index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Grep index status and build progress", body = GrepIndexStatusResponse),
+            (status = 200, description = "Grep index status and build progress", body = GrepIndex),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
@@ -246,7 +246,7 @@ pub(super) async fn get_grep_index(
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<NoQuery>,
-) -> Result<Json<GrepIndexStatusResponse>, ApiResponseError> {
+) -> Result<Json<GrepIndex>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     query.into_params()?;
@@ -256,7 +256,7 @@ pub(super) async fn get_grep_index(
 async fn read_grep_index_status(
     state: &AppState,
     namespace_id: &NamespaceId,
-) -> Result<GrepIndexStatusResponse, ApiResponseError> {
+) -> Result<GrepIndex, ApiResponseError> {
     state
         .grep_worker()
         .get_grep_index_status(namespace_id)
@@ -275,7 +275,7 @@ async fn read_grep_index_status(
         description = "Disables the namespace's grep root and clears its segment references with one durable compare-and-swap; index maintenance stops on its own once a step reads the disabled root. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Grep root disabled or already disabled", body = GrepIndexStatusResponse),
+            (status = 200, description = "Grep root disabled or already disabled", body = GrepIndex),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -291,7 +291,7 @@ pub(super) async fn disable_grep_index(
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<NoQuery>,
-) -> Result<Json<GrepIndexStatusResponse>, ApiResponseError> {
+) -> Result<Json<GrepIndex>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     query.into_params()?;

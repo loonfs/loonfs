@@ -104,6 +104,7 @@ fn checkpoint_summary(
         },
     };
     loonfs_api::Checkpoint {
+        namespace_id: record.namespace_id,
         checkpoint_id: record.checkpoint_id,
         owner,
         created_at_ms: record.created_at_ms,

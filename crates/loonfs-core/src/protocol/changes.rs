@@ -5,7 +5,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::load_namespace_head_control;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
-use loonfs_api::v0::{ChangesResponse, CommittedChange, FilesystemChange};
+use loonfs_api::v0::{CommittedChange, FilesystemChange, ListChangesResponse};
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
@@ -17,7 +17,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
     limit: EffectiveLimit,
-) -> Result<ChangesResponse> {
+) -> Result<ListChangesResponse> {
     let head = load_namespace_head_control(store, namespace_id)
         .await
         .map_err(|error| {
@@ -42,7 +42,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         });
     }
     if after_seq >= head.seq {
-        return Ok(ChangesResponse {
+        return Ok(ListChangesResponse {
             namespace_id: namespace_id.clone(),
             after_seq,
             through_seq: head.seq,
@@ -85,7 +85,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         }
     }
 
-    Ok(ChangesResponse {
+    Ok(ListChangesResponse {
         namespace_id: namespace_id.clone(),
         after_seq,
         through_seq,

@@ -5,12 +5,11 @@ use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::FsReader;
 use crate::Result;
 use crate::{
-    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse,
-    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, CommittedChange, ContentRef,
-    CoreError, CurrentFileState, FileContentStream, FileRevision, InodeId, ListChangesOptions,
-    ListFileRevisionsResponse, ListPathEntriesOptions, ListPathEntriesResponse, Namespace,
-    NamespaceId, ReadFileStreamOptions, RevisionNo, RuntimeError, SharedObjectStore,
-    StatPathOptions, TrashEntry,
+    ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, CommittedChange,
+    ContentRef, CoreError, CurrentFileState, FileBytes, FileContentStream, FileRevision, InodeId,
+    ListChangesOptions, ListChangesResponse, ListFileRevisionsResponse, ListPathEntriesOptions,
+    ListPathEntriesResponse, Namespace, NamespaceId, PathEntry, ReadFileStreamOptions, RevisionNo,
+    RuntimeError, SharedObjectStore, StatPathOptions, TrashEntry,
 };
 use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageCursor, PageRequest,
@@ -61,7 +60,7 @@ impl PathEntriesPager {
     /// Returns at most `max_items` entries.
     ///
     /// Unused entries from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<AuthoritativePathEntry>> {
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<PathEntry>> {
         let mut entries = Vec::new();
         while entries.len() < max_items {
             let Some(page) = self.next().await else {
@@ -219,13 +218,13 @@ pub struct ChangesPager {
     namespace_id: NamespaceId,
     after_seq: ChangeSeq,
     options: ListChangesOptions,
-    pending: Option<ChangesResponse>,
+    pending: Option<ListChangesResponse>,
     exhausted: bool,
 }
 
 impl ChangesPager {
     /// Returns the next change page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<ChangesResponse>> {
+    pub async fn next(&mut self) -> Option<Result<ListChangesResponse>> {
         if let Some(page) = self.pending.take() {
             return Some(Ok(page));
         }
@@ -318,7 +317,7 @@ impl FsReader {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: StatPathOptions,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
@@ -348,7 +347,7 @@ impl FsReader {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         options: StatPathOptions,
-    ) -> Result<AuthoritativePathEntry> {
+    ) -> Result<PathEntry> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
@@ -458,7 +457,7 @@ impl FsReader {
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> Result<AuthoritativeFileBytes> {
+    ) -> Result<FileBytes> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let read = engine
@@ -865,7 +864,7 @@ impl FsReader {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         revision_no: RevisionNo,
-    ) -> Result<AuthoritativeFileBytes> {
+    ) -> Result<FileBytes> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let read = engine
@@ -930,7 +929,7 @@ impl FsReader {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         options: ListChangesOptions,
-    ) -> Result<ChangesResponse> {
+    ) -> Result<ListChangesResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let limit = match options.limit {
             Some(limit) => limit,

@@ -243,7 +243,7 @@ fn signed_parts(first: u32, count: u32) -> Outcome {
 }
 
 fn completed(content_ref: ContentRef) -> Outcome {
-    json(&UploadSessionResponse {
+    json(&UploadSession {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
         mode: UploadMode::DirectMultipart,

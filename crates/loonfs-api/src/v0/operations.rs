@@ -509,17 +509,6 @@ pub struct CreateCheckpointRequest {
     pub ttl_ms: Option<u64>,
 }
 
-/// Result of creating a checkpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct CreateCheckpointResponse {
-    /// Namespace that was checkpointed.
-    pub namespace_id: NamespaceId,
-    /// Checkpoint that was created.
-    #[serde(flatten)]
-    pub checkpoint: Checkpoint,
-}
-
 /// Result of releasing a checkpoint pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -560,6 +549,8 @@ pub enum CheckpointOwnerSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Checkpoint {
+    /// Namespace that owns the checkpoint.
+    pub namespace_id: NamespaceId,
     /// Durable checkpoint id used to address the checkpoint for release.
     pub checkpoint_id: CheckpointId,
     /// Who owns the checkpoint, including the label carried by a user pin.
@@ -1733,6 +1724,7 @@ mod tests {
     fn checkpoint_responses_use_one_checkpoint_wire_object() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let checkpoint = Checkpoint {
+            namespace_id: namespace_id.clone(),
             checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
                 .expect("checkpoint id"),
             owner: CheckpointOwnerSummary::User {
@@ -1744,6 +1736,7 @@ mod tests {
             manifest_no: ManifestNo(9),
         };
         let checkpoint_json = serde_json::json!({
+            "namespace_id": "demo",
             "checkpoint_id": "chk_00000000000000000000000000000001",
             "owner": {"kind": "user", "name": "release"},
             "created_at_ms": 1_752_623_000_000_u64,
@@ -1751,15 +1744,9 @@ mod tests {
             "checkpoint_seq": 12,
             "manifest_no": 9,
         });
-        let mut create_json = checkpoint_json.clone();
-        create_json["namespace_id"] = serde_json::json!("demo");
         assert_eq!(
-            serde_json::to_value(CreateCheckpointResponse {
-                namespace_id: namespace_id.clone(),
-                checkpoint: checkpoint.clone(),
-            })
-            .expect("serialize create checkpoint response"),
-            create_json,
+            serde_json::to_value(checkpoint.clone()).expect("serialize checkpoint"),
+            checkpoint_json,
         );
         assert_eq!(
             serde_json::to_value(ListCheckpointsResponse {
@@ -1789,6 +1776,7 @@ mod tests {
     #[test]
     fn optional_response_fields_are_omitted_and_default_when_absent() {
         let checkpoint_json = serde_json::to_value(Checkpoint {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
                 .expect("checkpoint id"),
             owner: CheckpointOwnerSummary::User {

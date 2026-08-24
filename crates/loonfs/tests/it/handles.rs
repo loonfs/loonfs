@@ -979,7 +979,7 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
             )
             .await
             .expect("create checkpoint");
-        assert!(checkpoint.checkpoint.manifest_no > ManifestNo(0));
+        assert!(checkpoint.manifest_no > ManifestNo(0));
         let retention = admin
             .maintenance_step_namespace(
                 &namespace_id,

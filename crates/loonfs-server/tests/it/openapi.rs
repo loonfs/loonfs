@@ -959,13 +959,7 @@ fn openapi_names_tagged_one_of_alternatives() {
         .expect("openapi schemas object");
 
     for (schema_name, expected_names) in [
-        (
-            "AuthoritativePathEntry",
-            &[
-                "AuthoritativePathEntryDirectory",
-                "AuthoritativePathEntryFile",
-            ][..],
-        ),
+        ("PathEntry", &["PathEntryDirectory", "PathEntryFile"][..]),
         (
             "BeginUploadRequest",
             &[
@@ -1012,7 +1006,7 @@ fn openapi_names_tagged_one_of_alternatives() {
             &["ObjectTransferAccessPresignedUrl"][..],
         ),
         (
-            "UploadSessionResponse",
+            "UploadSession",
             &[
                 "UploadSessionStatusOpen",
                 "UploadSessionStatusCompleted",
@@ -1032,7 +1026,7 @@ fn openapi_names_tagged_one_of_alternatives() {
             ][..],
         ),
         (
-            "GrepIndexStatusResponse",
+            "GrepIndex",
             &[
                 "GrepIndexLifecycleDisabled",
                 "GrepIndexLifecycleBackfilling",
@@ -1073,7 +1067,7 @@ fn openapi_names_tagged_one_of_alternatives() {
 /// every variant.
 const UNION_COMPOSITE_ENVELOPES: &[(&str, &[&str])] = &[
     (
-        "AuthoritativePathEntry",
+        "PathEntry",
         &[
             "namespace_id",
             "path",
@@ -1083,12 +1077,9 @@ const UNION_COMPOSITE_ENVELOPES: &[(&str, &[&str])] = &[
             "head_seq",
         ],
     ),
+    ("UploadSession", &["mode", "namespace_id", "upload_id"]),
     (
-        "UploadSessionResponse",
-        &["mode", "namespace_id", "upload_id"],
-    ),
-    (
-        "GrepIndexStatusResponse",
+        "GrepIndex",
         &["namespace_id", "next_run_ordinal", "reorganize_pending"],
     ),
 ];
@@ -1226,7 +1217,7 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
         "public inode fields use inline string schemas"
     );
 
-    for variant in one_of_schema_names(schemas, "GrepIndexStatusResponse") {
+    for variant in one_of_schema_names(schemas, "GrepIndex") {
         let schema = schemas
             .get(variant)
             .unwrap_or_else(|| panic!("{variant} schema"));
@@ -1368,7 +1359,7 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     assert!(schemas.contains_key("UploadContentClaim"));
     assert!(schemas.contains_key("ContentToken"));
     assert!(schemas.contains_key("UploadMode"));
-    assert!(schemas.contains_key("UploadSessionResponse"));
+    assert!(schemas.contains_key("UploadSession"));
     for retired_response in [
         "CompleteUploadResponse",
         "AbortUploadResponse",
@@ -1391,9 +1382,7 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
             ][..]
         )
     );
-    let session_response = schemas
-        .get("UploadSessionResponse")
-        .expect("UploadSessionResponse schema");
+    let session_response = schemas.get("UploadSession").expect("UploadSession schema");
     assert_eq!(
         session_response
             .pointer("/discriminator/propertyName")
@@ -1401,7 +1390,7 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         Some("status"),
         "the upload session union tags on `status`"
     );
-    for variant_name in one_of_schema_names(schemas, "UploadSessionResponse") {
+    for variant_name in one_of_schema_names(schemas, "UploadSession") {
         let variant = schemas
             .get(variant_name)
             .unwrap_or_else(|| panic!("{variant_name} schema"));
@@ -1429,7 +1418,7 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
                 .and_then(|operation| operation
                     .pointer("/responses/200/content/application~1json/schema/$ref"))
                 .and_then(Value::as_str),
-            Some("#/components/schemas/UploadSessionResponse")
+            Some("#/components/schemas/UploadSession")
         );
     }
 
@@ -1573,13 +1562,12 @@ fn openapi_flattens_the_path_entry_attribute_projection() {
         .pointer("/components/schemas")
         .and_then(Value::as_object)
         .expect("openapi schemas object");
-    assert!(!schemas.contains_key("AuthoritativeAttributes"));
     assert!(
         !schemas.contains_key("AttributesProjection"),
         "the attribute fields are flattened into each path entry variant"
     );
 
-    for variant_name in one_of_schema_names(schemas, "AuthoritativePathEntry") {
+    for variant_name in one_of_schema_names(schemas, "PathEntry") {
         let variant = schemas
             .get(variant_name)
             .unwrap_or_else(|| panic!("{variant_name} schema"));

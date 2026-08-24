@@ -6,14 +6,14 @@
 
 use loonfs::publish::{CommitCandidate, CommitRequest};
 use loonfs::{
-    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
-    BeginUploadResponse, ChangeSeq, ChangesResponse, Checkpoint, ChecksumAlgorithm, CommitResponse,
-    ContentRef, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader,
-    FsWriter, FsWriterBuilder, ListChangesOptions, MaintenancePlan, MaintenanceStepResponse,
-    MetadataMaintenanceResponse, MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest,
-    PaginationPolicy, PutFileOptions, RuntimeError, SharedObjectStore, UploadContentResponse,
-    UploadId, UploadSessionResponse,
+    AdvanceRetentionResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq, Checkpoint,
+    ChecksumAlgorithm, CommitResponse, ContentRef, CopyOptions, CreateCheckpointOptions,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode,
+    FileBytes, FsAdmin, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions,
+    ListChangesResponse, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceResponse,
+    MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PathEntry,
+    PutFileOptions, RuntimeError, SharedObjectStore, UploadContentResponse, UploadId,
+    UploadSession,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -179,7 +179,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> loonfs::Result<AuthoritativePathEntry> {
+    ) -> loonfs::Result<PathEntry> {
         self.reader
             .stat_path(namespace_id, absolute_path, Default::default())
             .await
@@ -189,7 +189,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
+    ) -> loonfs::Result<Vec<PathEntry>> {
         Ok(
             collect_path_entries(&self.reader, namespace_id, absolute_path)
                 .await?
@@ -240,7 +240,6 @@ impl TestRuntime {
                 },
             )
             .await
-            .map(|response| response.checkpoint)
     }
 
     pub(crate) async fn begin_direct_put_upload_target(
@@ -258,7 +257,7 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         content: loonfs::UploadContentClaim,
-    ) -> loonfs::Result<UploadSessionResponse> {
+    ) -> loonfs::Result<UploadSession> {
         self.writer
             .complete_upload_prepared_for_mode(namespace_id, upload_id, |_| {
                 Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut { content })
@@ -308,17 +307,17 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> loonfs::Result<AuthoritativePathEntry>;
+    ) -> loonfs::Result<PathEntry>;
     fn list_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> loonfs::Result<Vec<AuthoritativePathEntry>>;
+    ) -> loonfs::Result<Vec<PathEntry>>;
     fn get_file_bytes_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> loonfs::Result<AuthoritativeFileBytes>;
+    ) -> loonfs::Result<FileBytes>;
     fn put_file_bytes_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -366,7 +365,7 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> loonfs::Result<UploadSessionResponse>;
+    ) -> loonfs::Result<UploadSession>;
     fn mutate_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -381,7 +380,7 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
-    ) -> loonfs::Result<ChangesResponse>;
+    ) -> loonfs::Result<ListChangesResponse>;
     fn create_checkpoint_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Checkpoint>;
     fn advance_retention_floor_blocking(
         &self,
@@ -432,7 +431,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> loonfs::Result<AuthoritativePathEntry> {
+    ) -> loonfs::Result<PathEntry> {
         block_on(
             self.reader
                 .stat_path(namespace_id, absolute_path, Default::default()),
@@ -443,7 +442,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
+    ) -> loonfs::Result<Vec<PathEntry>> {
         block_on(collect_path_entries(
             &self.reader,
             namespace_id,
@@ -456,7 +455,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> loonfs::Result<AuthoritativeFileBytes> {
+    ) -> loonfs::Result<FileBytes> {
         block_on(self.reader.get_file_bytes(namespace_id, absolute_path))
     }
 
@@ -546,7 +545,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> loonfs::Result<UploadSessionResponse> {
+    ) -> loonfs::Result<UploadSession> {
         block_on(self.writer.complete_upload(namespace_id, upload_id))
     }
 
@@ -578,7 +577,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
-    ) -> loonfs::Result<ChangesResponse> {
+    ) -> loonfs::Result<ListChangesResponse> {
         block_on(
             self.reader
                 .list_changes(namespace_id, after_seq, ListChangesOptions::default()),
