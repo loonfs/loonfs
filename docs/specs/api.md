@@ -191,7 +191,7 @@ Every error response is a JSON body:
   "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b`, acquired at 1739459200000 ms)",
   "request_id": "req_9c2f4a1b7d8e4f21a0b3c4d5e6f70819",
   "details": {
-    "fenced_epoch": 3,
+    "fenced_writer_epoch": 3,
     "active_writer_epoch": 4,
     "active_writer": "server-b",
     "active_acquired_at_ms": 1739459200000
@@ -227,17 +227,20 @@ so a caller's log line and the server's trace can be joined.
 `details` is present when the failure carries machine-usable identity, so a
 caller never has to parse `message` to act. Every field is optional and
 clients must tolerate absent fields exactly as they tolerate unknown codes.
+
+The top-level fields (`code`, `message`, `param`, `feature`, and `request_id`) describe the failed request and error. `details` contains the machine-readable values involved. When a caller supplied one value and the server found another, the fields are named `expected_<field>` and `actual_<field>`.
+
 The codes that populate it:
 
 | Code | Detail fields |
 | --- | --- |
-| `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
+| `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision) |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `stale_head` | `expected_head_seq`, `actual_head_seq`, when the failure was a caller-supplied `expected_head_seq` precondition rather than a raced head advance. A caller that still means to delete retries against the sequence it found |
-| `not_deleted` | `inode_id`, plus `requested_deletion_seq` and `active_deletion_seq` when a live deletion exists at a different generation |
+| `not_deleted` | `inode_id`, plus `expected_deletion_seq` and `actual_deletion_seq` when a live deletion exists at a different generation |
 | any failed commit | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
 | any commit carrying more than one operation | `operation_index` — the position of the operation that stopped the request (section 5.1) |
 
@@ -1828,10 +1831,7 @@ the explicit path. The in-place parent and name obey the same rules a path
 would: the parent must not be deleted, and the name must be free, each
 answering its usual code otherwise.
 
-Only the root of a deletion can be undeleted, and only the exact deletion
-generation named by `deletion_seq` — anything else answers `not_deleted`
-with the requested and active generations in the details, so a stale
-recovery request can never cancel a later deletion.
+Only the root of a deletion can be undeleted, and `deletion_seq` must match the active deletion generation. A mismatch returns `not_deleted` with the expected and actual generations, preventing a stale recovery request from cancelling a later deletion.
 
 and `update_attributes`, which writes and removes attributes on the inode a
 path resolves to:

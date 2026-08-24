@@ -81,7 +81,7 @@ pub struct ErrorDetails {
     /// Epoch the failing writer session held when it was displaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub fenced_epoch: Option<WriterEpoch>,
+    pub fenced_writer_epoch: Option<WriterEpoch>,
     /// Epoch that currently owns the namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -130,14 +130,14 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention_floor_seq: Option<ChangeSeq>,
-    /// Deletion generation an undelete asked to recover.
+    /// Deletion generation the undelete expected to be active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub requested_deletion_seq: Option<ChangeSeq>,
+    pub expected_deletion_seq: Option<ChangeSeq>,
     /// Deletion generation actually active for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub active_deletion_seq: Option<ChangeSeq>,
+    pub actual_deletion_seq: Option<ChangeSeq>,
     /// Head sequence a namespace delete required the namespace to still be
     /// at.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -175,8 +175,8 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         RuntimeError::Core(error) => {
             assert_eq!(error.code(), ErrorCode::NotDeleted);
             let details = error.details().expect("generation mismatch details");
-            assert_eq!(details.requested_deletion_seq, Some(first_deletion));
-            assert_eq!(details.active_deletion_seq, Some(second_deletion));
+            assert_eq!(details.expected_deletion_seq, Some(first_deletion));
+            assert_eq!(details.actual_deletion_seq, Some(second_deletion));
         }
         other => panic!("expected core error, got {other:?}"),
     }
