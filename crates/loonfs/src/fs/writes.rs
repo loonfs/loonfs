@@ -820,13 +820,13 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "apply_commit",
-            method = "commit",
+            method = "create_commit",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn commit(
+    pub async fn create_commit(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,

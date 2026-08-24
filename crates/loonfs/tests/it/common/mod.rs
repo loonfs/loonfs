@@ -175,13 +175,13 @@ impl TestRuntime {
             .await
     }
 
-    pub(crate) async fn stat_path(
+    pub(crate) async fn get_path_entry(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<PathEntry> {
         self.reader
-            .stat_path(namespace_id, absolute_path, Default::default())
+            .get_path_entry(namespace_id, absolute_path, Default::default())
             .await
     }
 
@@ -242,13 +242,13 @@ impl TestRuntime {
             .await
     }
 
-    pub(crate) async fn begin_direct_put_upload_target(
+    pub(crate) async fn create_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
         self.writer
-            .begin_direct_put_upload_target(namespace_id, checksum_algorithm)
+            .create_direct_put_upload_target(namespace_id, checksum_algorithm)
             .await
     }
 
@@ -417,7 +417,7 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         plan: MaintenancePlan,
     ) -> loonfs::Result<MaintenanceStepResponse> {
-        block_on(self.admin.maintenance_step_namespace(namespace_id, plan))
+        block_on(self.admin.run_maintenance(namespace_id, plan))
     }
 
     fn flush_wal_blocking(
@@ -434,7 +434,7 @@ impl RuntimeTestExt for TestRuntime {
     ) -> loonfs::Result<PathEntry> {
         block_on(
             self.reader
-                .stat_path(namespace_id, absolute_path, Default::default()),
+                .get_path_entry(namespace_id, absolute_path, Default::default()),
         )
     }
 
@@ -528,7 +528,7 @@ impl RuntimeTestExt for TestRuntime {
     ) -> loonfs::Result<BeginUploadResponse> {
         block_on(
             self.writer
-                .begin_upload(namespace_id, BeginUploadRequest::ServiceProxied {}),
+                .create_upload(namespace_id, BeginUploadRequest::ServiceProxied {}),
         )
     }
 
@@ -538,7 +538,10 @@ impl RuntimeTestExt for TestRuntime {
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> loonfs::Result<UploadContentResponse> {
-        block_on(self.writer.upload_content(namespace_id, upload_id, bytes))
+        block_on(
+            self.writer
+                .put_upload_content(namespace_id, upload_id, bytes),
+        )
     }
 
     fn complete_upload_blocking(
@@ -554,7 +557,7 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> loonfs::Result<CommitResponse> {
-        block_on(self.writer.commit(namespace_id, request))
+        block_on(self.writer.create_commit(namespace_id, request))
     }
 
     fn mutate_batch_blocking(

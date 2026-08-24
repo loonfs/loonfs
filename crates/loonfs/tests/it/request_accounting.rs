@@ -193,7 +193,7 @@ async fn warm_phase_request_accounting() {
         publish_candidates(&writer, &namespace_id, candidates).await;
         if (index / BATCH) % STEP_EVERY_BATCHES == 0 {
             admin
-                .maintenance_step_namespace(
+                .run_maintenance(
                     &namespace_id,
                     MaintenancePlan {
                         metadata: Some(MetadataMaintenanceOptions {
@@ -250,7 +250,7 @@ async fn warm_phase_request_accounting() {
     report("warm full list", &log.take_gets(), &segments);
 
     reader
-        .stat_path(&namespace_id, "/hot/file-04999.txt", Default::default())
+        .get_path_entry(&namespace_id, "/hot/file-04999.txt", Default::default())
         .await
         .expect("stat");
     report("warm stat", &log.take_gets(), &segments);

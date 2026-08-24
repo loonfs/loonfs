@@ -600,7 +600,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("write after watermark");
     admin
-        .maintenance_step_namespace(
+        .run_maintenance(
             &namespace_id,
             MaintenancePlan {
                 metadata: Some(MetadataMaintenanceOptions {
@@ -612,7 +612,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("flush wal");
     let floor = admin
-        .maintenance_step_namespace(
+        .run_maintenance(
             &namespace_id,
             MaintenancePlan {
                 advance_retention: true,
@@ -1035,7 +1035,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
     let docs_inode_id = reader
-        .stat_path(&namespace_id, "/docs", Default::default())
+        .get_path_entry(&namespace_id, "/docs", Default::default())
         .await
         .expect("stat the directory")
         .inode_id;

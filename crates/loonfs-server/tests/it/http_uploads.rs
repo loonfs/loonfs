@@ -126,7 +126,7 @@ async fn stored_proxied_mode_rejects_other_tags_and_retired_completion_fields_pr
         .expect("create namespace");
     let begin = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
 
@@ -172,7 +172,7 @@ async fn stored_proxied_mode_rejects_other_tags_and_retired_completion_fields_pr
 
     harness
         .client
-        .upload_content(&namespace, begin.upload_id(), b"hello")
+        .put_upload_content(&namespace, begin.upload_id(), b"hello")
         .await
         .expect("stage content");
     harness
@@ -204,12 +204,12 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         .expect("create namespace");
     let begin = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let limit = harness
         .client
-        .capabilities()
+        .get_capabilities()
         .await
         .expect("fetch capabilities")
         .limits
@@ -292,23 +292,23 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
 
     let begin = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let first_content = harness
         .client
-        .upload_content(&namespace, begin.upload_id(), file_bytes)
+        .put_upload_content(&namespace, begin.upload_id(), file_bytes)
         .await
         .expect("upload content");
     let repeated_content = harness
         .client
-        .upload_content(&namespace, begin.upload_id(), file_bytes)
+        .put_upload_content(&namespace, begin.upload_id(), file_bytes)
         .await
         .expect("repeat upload content");
     assert_eq!(first_content, repeated_content);
     match harness
         .client
-        .upload_content(&namespace, begin.upload_id(), b"different bytes")
+        .put_upload_content(&namespace, begin.upload_id(), b"different bytes")
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
@@ -349,7 +349,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
 
     let stat = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat committed file");
     assert_eq!(stat.inode_id, InodeId(2));
@@ -421,10 +421,10 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     // An open session reports itself and mints nothing.
     let open = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
-    let status = get_upload_status(&harness.server_url, open.upload_id());
+    let status = get_upload(&harness.server_url, open.upload_id());
     assert_eq!(status.namespace_id, namespace);
     assert_eq!(&status.upload_id, open.upload_id());
     assert_eq!(status.mode, UploadMode::ServiceProxied);
@@ -443,7 +443,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     else {
         panic!("abort reports an aborted session")
     };
-    let status = get_upload_status(&harness.server_url, open.upload_id());
+    let status = get_upload(&harness.server_url, open.upload_id());
     assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Aborted { aborted_at_ms } = status.status else {
         panic!("an aborted session reports itself aborted");
@@ -469,7 +469,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     // the read hands back, without sending a byte of content again.
     let (upload_id, content_ref, completed_at_ms) =
         complete_upload_session(&harness, &namespace, b"status re-mint").await;
-    let status = get_upload_status(&harness.server_url, &upload_id);
+    let status = get_upload(&harness.server_url, &upload_id);
     assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Completed {
         completed_at_ms: reported_completed_at_ms,
@@ -542,7 +542,7 @@ async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
 
     let status = harness
         .client
-        .get_upload_status(&namespace, &upload_id)
+        .get_upload(&namespace, &upload_id)
         .await
         .expect("read the upload session back");
     assert_eq!(status.namespace_id, namespace);
@@ -561,7 +561,7 @@ async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
 
     let commit = harness
         .client
-        .commit(
+        .create_commit(
             &namespace,
             &CommitRequest {
                 commit_id: CommitId::parse("client-read-back-put").expect("valid commit id"),
@@ -599,12 +599,12 @@ async fn complete_upload_session(
 ) -> (loonfs_api::UploadId, ContentRef, u64) {
     let begin = harness
         .client
-        .begin_upload(namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     harness
         .client
-        .upload_content(namespace, begin.upload_id(), bytes)
+        .put_upload_content(namespace, begin.upload_id(), bytes)
         .await
         .expect("upload content");
     let completed = harness
@@ -628,7 +628,7 @@ async fn complete_upload_session(
     (begin.upload_id().clone(), content_ref, completed_at_ms)
 }
 
-fn get_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSession {
+fn get_upload(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSession {
     let response = raw_agent()
         .get(&format!(
             "{server_url}/v0/namespaces/demo/uploads/{upload_id}"

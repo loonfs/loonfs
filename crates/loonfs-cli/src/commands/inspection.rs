@@ -40,7 +40,7 @@ pub(crate) async fn run_capabilities(
     let mode = resolved.target.mode_str().to_owned();
     let document = resolved
         .target
-        .capabilities()
+        .get_capabilities()
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
@@ -162,7 +162,7 @@ pub(crate) async fn run_doctor(
         let result = target
             .as_ref()
             .expect("remote provider validation constructs a target")
-            .capabilities()
+            .get_capabilities()
             .await;
         checks.push(match &result {
             Ok(_) => ok(
@@ -211,7 +211,7 @@ pub(crate) async fn run_doctor(
     let capability_result = if remote {
         remote_capabilities.expect("remote auth check records its capability result")
     } else if let Some(target) = &target {
-        target.capabilities().await
+        target.get_capabilities().await
     } else {
         checks.push(skipped(
             DOCTOR_CHECK_NAMES[7],

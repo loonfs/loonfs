@@ -149,7 +149,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
 
     let capabilities = harness
         .client
-        .capabilities()
+        .get_capabilities()
         .await
         .expect("fetch capabilities");
     assert!(capabilities.supports("core.uploads.direct_put"));
@@ -167,7 +167,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
 
     let begin = harness
         .client
-        .begin_direct_put(&namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload(&namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -238,14 +238,14 @@ async fn assert_direct_get_returns_the_written_bytes(
     target: &NamespacePath,
     bytes: &[u8],
 ) {
-    let capabilities = client.capabilities().await.expect("fetch capabilities");
+    let capabilities = client.get_capabilities().await.expect("fetch capabilities");
     assert!(
         capabilities.supports("core.downloads.direct_get"),
         "a provider proven for direct writes must be offered for direct reads"
     );
 
     let grant = client
-        .begin_download(target, None)
+        .create_download(target, None)
         .await
         .expect("begin download");
     let ObjectTransferAccess::PresignedUrl { method, .. } = &grant.access;
@@ -274,7 +274,7 @@ async fn assert_direct_get_capability_serves_ranges(
     bytes: &[u8],
 ) {
     let grant = client
-        .begin_download(target, None)
+        .create_download(target, None)
         .await
         .expect("begin download for ranged reads");
     let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
@@ -322,7 +322,7 @@ async fn assert_wrong_direct_put_bytes_rejected(
     let bytes = b"expected direct put bytes\n";
     let wrong_bytes = b"wrong direct put bytes\n";
     let begin = client
-        .begin_direct_put(namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin wrong-bytes direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -364,7 +364,7 @@ async fn assert_direct_put_requires_its_signed_headers(
         ),
     ] {
         let begin = client
-            .begin_direct_put(namespace_id, Some(bytes.len() as u64))
+            .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
             .await
             .expect("begin meddled direct put");
         let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -401,7 +401,7 @@ async fn assert_direct_put_is_no_replace(
 ) {
     let bytes = b"duplicate direct put bytes\n";
     let begin = client
-        .begin_direct_put(namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin duplicate direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -674,7 +674,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
 
     let capabilities = harness
         .client
-        .capabilities()
+        .get_capabilities()
         .await
         .expect("fetch capabilities");
     assert!(capabilities.supports("core.uploads.direct_put"));
@@ -701,7 +701,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
 ) {
     let bytes = b"gcs completion reads the object back\n";
     let begin = client
-        .begin_direct_put(namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -742,7 +742,7 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
     let bytes = b"gcs prefix scoping\n";
     let begin = harness
         .client
-        .begin_direct_put(&namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload(&namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
@@ -801,7 +801,7 @@ async fn assert_gcs_read_capability_serves_ranges_and_resumes(
 
     let grant = harness
         .client
-        .begin_download(&target, None)
+        .create_download(&target, None)
         .await
         .expect("begin download");
     let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
@@ -847,7 +847,7 @@ async fn assert_gcs_read_capability_serves_ranges_and_resumes(
 async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"gcs expiry\n";
     let begin = client
-        .begin_direct_put(namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
@@ -887,7 +887,7 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
 
     let grant = harness
         .client
-        .begin_download(&target, None)
+        .create_download(&target, None)
         .await
         .expect("an object past the read cap is served by grant");
     let mut received = Vec::new();
@@ -977,7 +977,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
 
     let capabilities = harness
         .client
-        .capabilities()
+        .get_capabilities()
         .await
         .expect("fetch capabilities");
     assert!(capabilities.supports("core.uploads.direct_multipart"));
@@ -1000,7 +1000,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // not have to: the claim arrives with the completion below.
     let begin = harness
         .client
-        .begin_direct_multipart(&namespace_id, DirectMultipartUploadOptions::default())
+        .create_direct_multipart_upload(&namespace_id, DirectMultipartUploadOptions::default())
         .await
         .expect("begin direct multipart");
     let upload_id = begin.upload_id().clone();
@@ -1145,7 +1145,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // symmetry this deployment owes.
     let grant = harness
         .client
-        .begin_download(&target, None)
+        .create_download(&target, None)
         .await
         .expect("begin download of the assembled object");
     let mut received = Vec::new();

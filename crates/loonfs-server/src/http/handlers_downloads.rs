@@ -84,7 +84,7 @@ pub(super) async fn create_download(
 
     let target = state
         .reader
-        .direct_download_target(&namespace_id, request.path.as_str(), request.revision_no)
+        .create_download(&namespace_id, request.path.as_str(), request.revision_no)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let access = presigned_access(issuer, &target.object_key).await?;
@@ -141,7 +141,7 @@ pub(super) async fn create_download_by_inode(
     let issuer = direct_get_issuer(&state)?;
     let target = state
         .reader
-        .direct_download_target_by_inode(&namespace_id, inode_id, revision_no)
+        .create_download_by_inode(&namespace_id, inode_id, revision_no)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let access = presigned_access(issuer, &target.object_key).await?;

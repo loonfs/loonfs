@@ -72,7 +72,7 @@ impl MaintenancePlan {
     /// Resolves a wire-level step request into the plan it selects.
     ///
     /// A request that selects nothing resolves to an empty plan, which
-    /// [`FsAdmin::maintenance_step_namespace`](crate::FsAdmin::maintenance_step_namespace)
+    /// [`FsAdmin::run_maintenance`](crate::FsAdmin::run_maintenance)
     /// then refuses — one gate, wherever the plan came from.
     pub fn from_request(request: MaintenanceStepRequest) -> Result<Self> {
         Ok(Self {

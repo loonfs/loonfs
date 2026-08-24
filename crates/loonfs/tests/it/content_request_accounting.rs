@@ -490,14 +490,14 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
     let bytes = b"service proxied upload";
     let begin = harness
         .writer
-        .begin_upload(&harness.namespace_id, BeginUploadRequest::ServiceProxied {})
+        .create_upload(&harness.namespace_id, BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     harness.recording.reset();
 
     harness
         .writer
-        .upload_content(&harness.namespace_id, begin.upload_id(), bytes)
+        .put_upload_content(&harness.namespace_id, begin.upload_id(), bytes)
         .await
         .expect("upload content");
     let upload_counts = harness.recording.snapshot();
@@ -549,7 +549,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
     let bytes = b"direct provider upload";
     let begin = harness
         .writer
-        .begin_direct_put_upload_target(
+        .create_direct_put_upload_target(
             &harness.namespace_id,
             loonfs_api::ChecksumAlgorithm::Sha256,
         )
@@ -648,7 +648,7 @@ async fn writer_mutate_with_external_ref_fails_typed_without_content_io() {
     // content I/O, and the caller still receives a typed core error.
     let error = harness
         .writer
-        .commit(
+        .create_commit(
             &harness.namespace_id,
             put_request("mutate-create", "/file.txt", content_ref.clone()),
         )
@@ -808,7 +808,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
     // re-downloading the retained blob would prove nothing.
     harness
         .writer
-        .commit(
+        .create_commit(
             &harness.namespace_id,
             CommitRequest::single(
                 CommitId::parse("restore-first-revision").expect("valid commit id"),

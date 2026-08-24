@@ -386,7 +386,7 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
     // Forcing the threshold to one segment flushes the WAL tail, and the
     // named retention and collection actions run behind it.
     let forced: loonfs_api::MaintenanceStepResponse = client
-        .maintenance_step(
+        .run_maintenance(
             &namespace,
             &loonfs_api::MaintenanceStepRequest {
                 metadata_maintenance: Some(loonfs_api::MetadataMaintenanceRequest {
@@ -502,14 +502,17 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .await
         .expect("corrupt manifest");
 
-    match cold_client.stat_path(&target, &Default::default()).await {
+    match cold_client
+        .get_path_entry(&target, &Default::default())
+        .await
+    {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
         other => panic!("expected namespace_corrupt, got {other:?}"),
     }
     // The warm server keeps serving its pinned pair; the corruption is
     // surfaced by whoever actually consumes the manifest.
     client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("warm server reads from its pinned head-plus-manifest pair");
 

@@ -190,7 +190,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
 
     // An undeleted file: visible again, at a new path.
     let recovered_inode_id = fs
-        .stat_path(namespace_id, "/notes/recovered.txt")
+        .get_path_entry(namespace_id, "/notes/recovered.txt")
         .await
         .expect("stat before delete")
         .inode_id;
@@ -605,7 +605,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         let fs = &fs;
         let namespace_id = &namespace_id;
         async move {
-            fs.stat_path(namespace_id, path)
+            fs.get_path_entry(namespace_id, path)
                 .await
                 .expect("stat path")
                 .inode_id
@@ -773,7 +773,7 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
     .await
     .expect("put file");
     let alpha = fs
-        .stat_path(&namespace_id, "/docs/alpha.txt")
+        .get_path_entry(&namespace_id, "/docs/alpha.txt")
         .await
         .expect("stat file")
         .inode_id;
@@ -825,7 +825,7 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
     .await
     .expect("put file");
     let content_ref = fs
-        .stat_path(&namespace_id, "/docs/alpha.txt")
+        .get_path_entry(&namespace_id, "/docs/alpha.txt")
         .await
         .expect("stat file")
         .content_ref()
@@ -877,7 +877,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
     .await
     .expect("put file");
     let content_ref = fs
-        .stat_path(&namespace_id, "/docs/alpha.txt")
+        .get_path_entry(&namespace_id, "/docs/alpha.txt")
         .await
         .expect("stat file")
         .content_ref()

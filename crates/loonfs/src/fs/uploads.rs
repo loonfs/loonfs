@@ -55,13 +55,13 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "begin_upload",
-            method = "begin_upload",
+            method = "create_upload",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn begin_upload(
+    pub async fn create_upload(
         &self,
         namespace_id: &NamespaceId,
         request: BeginUploadRequest,
@@ -81,13 +81,13 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "begin_upload",
-            method = "begin_direct_put_upload_target",
+            method = "create_direct_put_upload_target",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn begin_direct_put_upload_target(
+    pub async fn create_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
         checksum_algorithm: ChecksumAlgorithm,
@@ -111,13 +111,13 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "begin_upload",
-            method = "begin_direct_multipart_upload_target",
+            method = "create_direct_multipart_upload_target",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn begin_direct_multipart_upload_target(
+    pub async fn create_direct_multipart_upload_target(
         &self,
         namespace_id: &NamespaceId,
         options: DirectMultipartUploadOptions,
@@ -144,7 +144,7 @@ impl FsWriter {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn direct_multipart_part_targets(
+    pub async fn sign_upload_parts(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -165,14 +165,14 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "upload_content",
-            method = "upload_content",
+            method = "put_upload_content",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn upload_content(
+    pub async fn put_upload_content(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -194,7 +194,7 @@ impl FsWriter {
     /// object's length. Everything after this point — the reference it
     /// produces, completion, publication — is identical to the buffered
     /// path's; callers that already hold their bytes should stay on
-    /// [`Self::upload_content`].
+    /// [`Self::put_upload_content`].
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.upload_content",
@@ -202,14 +202,14 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "upload_content",
-            method = "upload_streamed_content",
+            method = "put_upload_content_stream",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = "streamed",
         )
     )]
-    pub async fn upload_streamed_content(
+    pub async fn put_upload_content_stream(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -432,7 +432,7 @@ impl FsWriter {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_upload_status(
+    pub async fn get_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,

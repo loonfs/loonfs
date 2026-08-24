@@ -192,7 +192,7 @@ fn capabilities_for(advertised: Advertised) -> Outcome {
     })
 }
 
-fn begin_direct_put(checksum_algorithm: ChecksumAlgorithm) -> Outcome {
+fn create_direct_put_upload(checksum_algorithm: ChecksumAlgorithm) -> Outcome {
     json(&BeginUploadResponse::DirectPut {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
@@ -650,7 +650,7 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
         }),
-        begin_direct_put(ChecksumAlgorithm::Sha256),
+        create_direct_put_upload(ChecksumAlgorithm::Sha256),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -689,7 +689,7 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024 * 1024),
         }),
-        begin_direct_put(ChecksumAlgorithm::Crc32c),
+        create_direct_put_upload(ChecksumAlgorithm::Crc32c),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -734,7 +734,7 @@ async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
             proxy_max_bytes: Some(4_096),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024 * 1024),
         }),
-        begin_direct_put(ChecksumAlgorithm::Crc32c),
+        create_direct_put_upload(ChecksumAlgorithm::Crc32c),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -770,7 +770,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
         }),
-        begin_direct_put(ChecksumAlgorithm::Sha256),
+        create_direct_put_upload(ChecksumAlgorithm::Sha256),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -844,7 +844,7 @@ async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
         }),
-        begin_direct_put(ChecksumAlgorithm::Sha256),
+        create_direct_put_upload(ChecksumAlgorithm::Sha256),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -899,7 +899,7 @@ async fn request_head_for(source: PayloadSource) -> String {
     .expect("valid client config");
     // The response is not the point; the request head is.
     let _ = client
-        .upload_streamed_content(&namespace_id(), &upload_id(), source)
+        .put_upload_content_stream(&namespace_id(), &upload_id(), source)
         .await;
     served.await.expect("probe task")
 }

@@ -144,7 +144,7 @@ impl Client {
     /// names none is rejected. Absent overrides inside a selected action use
     /// the server's defaults.
     /// Retrying this request starts a distinct attempt.
-    pub async fn maintenance_step(
+    pub async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
         request: &MaintenanceStepRequest,
@@ -218,7 +218,7 @@ impl Client {
 
     /// Returns whether the namespace's grep index is disabled, being built,
     /// or active. This operation does not change the index.
-    pub async fn get_grep_index_status(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
+    pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/grep/index",
             self.base_url

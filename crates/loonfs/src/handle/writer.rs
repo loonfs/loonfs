@@ -118,8 +118,8 @@ impl FsWriter {
 
     /// Returns the capability document for this embedded build (API spec,
     /// "Capability discovery").
-    pub fn capabilities(&self) -> CapabilityDocument {
-        self.core.capabilities()
+    pub fn get_capabilities(&self) -> CapabilityDocument {
+        self.core.get_capabilities()
     }
 
     /// Snapshots the runtime cache counters.

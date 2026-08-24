@@ -39,7 +39,7 @@ async fn a_client_trusting_the_server_certificate_round_trips_over_tls() {
 
     let stat = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat file");
     assert_eq!(

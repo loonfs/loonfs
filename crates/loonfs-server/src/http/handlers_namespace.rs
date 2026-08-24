@@ -74,7 +74,7 @@ pub(super) async fn get_capabilities(
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     query.into_params()?;
-    let mut capabilities = state.reader.capabilities();
+    let mut capabilities = state.reader.get_capabilities();
     // Each direct transport is advertised from the issuer that performs it,
     // so a provider that signs whole-object writes but has no multipart API
     // says exactly that. The read is advertised for the bundle as a whole:
@@ -562,7 +562,7 @@ pub(super) async fn run_maintenance(
         })?;
     let result = state
         .admin
-        .maintenance_step_namespace(&namespace_id, plan)
+        .run_maintenance(&namespace_id, plan)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(result))

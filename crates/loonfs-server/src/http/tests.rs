@@ -1628,7 +1628,7 @@ async fn runtime_created_state_is_readable_through_http() {
     let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("target");
     let stat = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat file");
     assert_eq!(stat.path, "/notes/hello.txt");
@@ -1877,7 +1877,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
     assert_api_error(
         harness
             .client
-            .stat_path(&old_child, &Default::default())
+            .get_path_entry(&old_child, &Default::default())
             .await,
         404,
         "path_not_found",
@@ -2303,7 +2303,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     // the proxied content route directly, the way a client that never read
     // the capability document would.
     let session = client
-        .begin_upload(
+        .create_upload(
             &namespace,
             &loonfs_api::v0::BeginUploadRequest::ServiceProxied {},
         )
@@ -2311,7 +2311,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         .expect("begin a proxied upload session");
     assert_api_error(
         client
-            .upload_content(&namespace, session.upload_id(), &[0u8; 4096])
+            .put_upload_content(&namespace, session.upload_id(), &[0u8; 4096])
             .await,
         413,
         "content_too_large",
@@ -2464,7 +2464,7 @@ async fn capability_document_advertises_the_upload_limit() {
 
     let capabilities = harness
         .client
-        .capabilities()
+        .get_capabilities()
         .await
         .expect("fetch capability document");
     assert_eq!(
@@ -2791,7 +2791,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     .await;
     let inode_id = seed_writer
         .reader()
-        .stat_path(&namespace_id("demo"), "/note.txt", Default::default())
+        .get_path_entry(&namespace_id("demo"), "/note.txt", Default::default())
         .await
         .expect("stat seeded file")
         .inode_id;
@@ -2953,13 +2953,13 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     .await;
     let big_inode_id = seed_writer
         .reader()
-        .stat_path(&namespace_id("demo"), "/big.bin", Default::default())
+        .get_path_entry(&namespace_id("demo"), "/big.bin", Default::default())
         .await
         .expect("stat big file")
         .inode_id;
     let small_inode_id = seed_writer
         .reader()
-        .stat_path(&namespace_id("demo"), "/small.bin", Default::default())
+        .get_path_entry(&namespace_id("demo"), "/small.bin", Default::default())
         .await
         .expect("stat small file")
         .inode_id;
@@ -3813,7 +3813,7 @@ mod direct_download {
             .await
             .expect("seed the oversized file");
         let entry = client
-            .stat_path(&target, &Default::default())
+            .get_path_entry(&target, &Default::default())
             .await
             .expect("stat seeded file");
 
@@ -3827,7 +3827,7 @@ mod direct_download {
         );
 
         let grant = client
-            .begin_download(&target, None)
+            .create_download(&target, None)
             .await
             .expect("download grant");
         assert_eq!(grant.path.as_str(), "/big.bin");
@@ -3850,7 +3850,7 @@ mod direct_download {
             .await
             .expect("delete current binding");
         let inode_grant = client
-            .begin_download_by_inode(&namespace, entry.inode_id, RevisionNo(1))
+            .create_download_by_inode(&namespace, entry.inode_id, RevisionNo(1))
             .await
             .expect("grant retained inode revision");
         assert_eq!(inode_grant.inode_id, entry.inode_id);
@@ -3890,7 +3890,7 @@ mod direct_download {
             .expect("seed revision 1");
 
         let grant = client
-            .begin_download(&target, None)
+            .create_download(&target, None)
             .await
             .expect("grant for revision 1");
         assert_eq!(grant.revision_no, RevisionNo(1));
@@ -3910,7 +3910,7 @@ mod direct_download {
         // And asking for the old revision by number resolves to the same
         // object the earlier grant named.
         let pinned = client
-            .begin_download(&target, Some(RevisionNo(1)))
+            .create_download(&target, Some(RevisionNo(1)))
             .await
             .expect("grant for a prior revision");
         assert_eq!(pinned.revision_no, RevisionNo(1));
@@ -3938,7 +3938,7 @@ mod direct_download {
             .expect("seed a file");
 
         let error = client
-            .begin_download(&target, None)
+            .create_download(&target, None)
             .await
             .expect_err("a deployment with no issuer cannot grant reads");
         match &error {
@@ -3955,12 +3955,12 @@ mod direct_download {
             other => panic!("expected a typed not_supported, got {other:?}"),
         }
         let inode_id = client
-            .stat_path(&target, &Default::default())
+            .get_path_entry(&target, &Default::default())
             .await
             .expect("stat proxied file")
             .inode_id;
         let inode_error = client
-            .begin_download_by_inode(&namespace, inode_id, RevisionNo(1))
+            .create_download_by_inode(&namespace, inode_id, RevisionNo(1))
             .await
             .expect_err("the inode route honors the same provider gate");
         match inode_error {
@@ -3997,7 +3997,7 @@ mod direct_download {
         let transfers = DirectTransferIssuers::read_only(issuer.clone()).with_put(issuer);
         let advertised = start(temp_dir.path(), "put-without-multipart", Some(transfers))
             .await
-            .capabilities()
+            .get_capabilities()
             .await
             .expect("capabilities");
 
@@ -4039,7 +4039,7 @@ mod direct_download {
             .await
             .expect("create namespace");
         let begin = client
-            .begin_direct_put(&namespace_id, Some(5))
+            .create_direct_put_upload(&namespace_id, Some(5))
             .await
             .expect("begin direct put");
 
@@ -4103,7 +4103,7 @@ mod direct_download {
         .await;
 
         // The deployment advertises direct PUT without checksum feature keys.
-        let advertised = client.capabilities().await.expect("capabilities");
+        let advertised = client.get_capabilities().await.expect("capabilities");
         assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT));
         assert!(advertised.supports(FEATURE_DOWNLOADS_DIRECT_GET));
         assert!(
@@ -4129,7 +4129,7 @@ mod direct_download {
             .expect("a large file goes straight to object storage under a crc32c claim");
 
         let grant = client
-            .begin_download(&target, None)
+            .create_download(&target, None)
             .await
             .expect("download grant");
         assert_eq!(
@@ -4154,7 +4154,7 @@ mod direct_download {
         let temp_dir = tempdir().expect("tempdir");
         let advertised = start(temp_dir.path(), "advertises-none", None)
             .await
-            .capabilities()
+            .get_capabilities()
             .await
             .expect("capabilities");
 
@@ -4208,7 +4208,7 @@ mod direct_download {
         // It came home through the grant, byte for byte, which proves the
         // object the presigned write created is the one the commit named.
         let grant = client
-            .begin_download(&target, None)
+            .create_download(&target, None)
             .await
             .expect("download grant");
         assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);

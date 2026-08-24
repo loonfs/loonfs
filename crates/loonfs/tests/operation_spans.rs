@@ -73,7 +73,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
 
         let reader = writer.reader();
         reader
-            .stat_path(&namespace_id, "/", Default::default())
+            .get_path_entry(&namespace_id, "/", Default::default())
             .await
             .expect("stat namespace root");
         reader

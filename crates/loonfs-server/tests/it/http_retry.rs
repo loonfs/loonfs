@@ -133,7 +133,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
     let first = harness
         .client
-        .commit(
+        .create_commit(
             &namespace_id("demo"),
             &commit_request(staged.content_ref.clone(), token.clone()),
         )
@@ -143,7 +143,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
     let repeated = harness
         .client
-        .commit(
+        .create_commit(
             &namespace_id("demo"),
             &commit_request(staged.content_ref.clone(), token),
         )
@@ -178,7 +178,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
     let entry = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat path");
     assert_eq!(entry.head_seq, first.committed_seq);
@@ -330,7 +330,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
     );
     let entry = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat path");
     assert_eq!(
@@ -401,7 +401,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
 
     match harness
         .client
-        .stat_path(&second_target, &Default::default())
+        .get_path_entry(&second_target, &Default::default())
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
@@ -409,7 +409,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
     }
     let entry = harness
         .client
-        .stat_path(&first_target, &Default::default())
+        .get_path_entry(&first_target, &Default::default())
         .await
         .expect("stat path");
     assert_eq!(
@@ -491,7 +491,7 @@ async fn http_put_conflict_stands_when_only_a_guard_changed() {
 
     let entry = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat path");
     assert_eq!(
@@ -527,7 +527,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
     let staged = stage_uploaded_content(&harness.client, &namespace, b"stable bytes\n").await;
     let first = harness
         .client
-        .commit(
+        .create_commit(
             &namespace,
             &CommitRequest {
                 commit_id: commit_id.clone(),
@@ -574,7 +574,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
 
     let entry = harness
         .client
-        .stat_path(&target, &Default::default())
+        .get_path_entry(&target, &Default::default())
         .await
         .expect("stat path");
     assert_eq!(
@@ -623,18 +623,18 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     };
     let first = harness
         .client
-        .commit(&namespace, &commit_request("one"))
+        .create_commit(&namespace, &commit_request("one"))
         .await
         .expect("first commit");
     let replay = harness
         .client
-        .commit(&namespace, &commit_request("one"))
+        .create_commit(&namespace, &commit_request("one"))
         .await
         .expect("an identical retry replays");
     assert_eq!(replay, first);
     match harness
         .client
-        .commit(&namespace, &commit_request("two"))
+        .create_commit(&namespace, &commit_request("two"))
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
@@ -727,7 +727,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         .expect("create checkpoint");
     let advanced = harness
         .client
-        .maintenance_step(
+        .run_maintenance(
             &namespace,
             &MaintenanceStepRequest {
                 retention: Some(AdvanceRetentionRequest::default()),
@@ -831,12 +831,12 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
     assert_eq!(copy_repeated, copy_first);
     let source_entry = harness
         .client
-        .stat_path(&source, &Default::default())
+        .get_path_entry(&source, &Default::default())
         .await
         .expect("source stat");
     let copied_entry = harness
         .client
-        .stat_path(&copied, &Default::default())
+        .get_path_entry(&copied, &Default::default())
         .await
         .expect("copied stat");
     assert_ne!(source_entry.inode_id, copied_entry.inode_id);
@@ -876,13 +876,17 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .await
         .expect("move repeat");
     assert_eq!(move_repeated, move_first);
-    match harness.client.stat_path(&copied, &Default::default()).await {
+    match harness
+        .client
+        .get_path_entry(&copied, &Default::default())
+        .await
+    {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
         other => panic!("expected path_not_found for moved-from path, got {other:?}"),
     }
     let moved_entry = harness
         .client
-        .stat_path(&moved, &Default::default())
+        .get_path_entry(&moved, &Default::default())
         .await
         .expect("moved stat");
     assert_eq!(moved_entry.inode_id, copied_entry.inode_id);
@@ -918,7 +922,11 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .await
         .expect("delete repeat");
     assert_eq!(delete_repeated, delete_first);
-    match harness.client.stat_path(&moved, &Default::default()).await {
+    match harness
+        .client
+        .get_path_entry(&moved, &Default::default())
+        .await
+    {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
         other => panic!("expected path_not_found for deleted path, got {other:?}"),
     }
@@ -1020,7 +1028,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
 
     // Fencing gates writes only; server A still reads the moved file.
     let host_b_entry = client_a
-        .stat_path(&host_b_target, &Default::default())
+        .get_path_entry(&host_b_target, &Default::default())
         .await
         .expect("stat host b file");
     assert_eq!(host_b_entry.head_seq.0, moved.committed_seq.0);

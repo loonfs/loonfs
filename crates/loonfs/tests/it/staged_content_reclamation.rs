@@ -174,7 +174,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
         .expect("published put");
     let content_ref = runtime
         .reader
-        .stat_path(&namespace_id, "/docs/kept.txt", Default::default())
+        .get_path_entry(&namespace_id, "/docs/kept.txt", Default::default())
         .await
         .expect("stat file")
         .content_ref()
@@ -230,7 +230,7 @@ async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survi
         .expect("first put");
     let committed_content_ref = runtime
         .reader
-        .stat_path(&namespace_id, "/docs/retry.txt", Default::default())
+        .get_path_entry(&namespace_id, "/docs/retry.txt", Default::default())
         .await
         .expect("stat file")
         .content_ref()

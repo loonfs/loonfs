@@ -63,14 +63,14 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
 
     let by_path = harness
         .client
-        .stat_path(&before, &Default::default())
+        .get_path_entry(&before, &Default::default())
         .await
         .expect("stat path");
     let inode_id = by_path.inode_id;
     assert_eq!(
         harness
             .client
-            .stat_inode(&namespace, inode_id, &Default::default())
+            .get_inode(&namespace, inode_id, &Default::default())
             .await
             .expect("stat inode before rename"),
         by_path
@@ -91,7 +91,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         .expect("rename file");
     let renamed = harness
         .client
-        .stat_inode(&namespace, inode_id, &Default::default())
+        .get_inode(&namespace, inode_id, &Default::default())
         .await
         .expect("stat inode after rename");
     assert_eq!(renamed.inode_id, inode_id);
@@ -100,7 +100,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         renamed,
         harness
             .client
-            .stat_path(&after, &Default::default())
+            .get_path_entry(&after, &Default::default())
             .await
             .expect("stat renamed path")
     );
@@ -136,7 +136,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
     assert_api_code(
         harness
             .client
-            .stat_inode(&namespace, inode_id, &Default::default())
+            .get_inode(&namespace, inode_id, &Default::default())
             .await,
         404,
         ErrorCode::InodeNotFound,
@@ -181,7 +181,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .expect("create namespace");
     let root = harness
         .client
-        .stat_inode(&namespace, InodeId(1), &Default::default())
+        .get_inode(&namespace, InodeId(1), &Default::default())
         .await
         .expect("stat root inode");
     assert_eq!(root.path.as_str(), "/");
@@ -196,7 +196,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .expect("create directory");
     let directory_id = harness
         .client
-        .stat_path(&directory, &Default::default())
+        .get_path_entry(&directory, &Default::default())
         .await
         .expect("stat directory")
         .inode_id;
@@ -211,7 +211,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     for result in [
         harness
             .client
-            .stat_inode(&namespace, InodeId(u64::MAX), &Default::default())
+            .get_inode(&namespace, InodeId(u64::MAX), &Default::default())
             .await
             .map(|_| ()),
         harness
@@ -231,7 +231,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .expect("put file");
     let file_id = harness
         .client
-        .stat_path(&file, &Default::default())
+        .get_path_entry(&file, &Default::default())
         .await
         .expect("stat file")
         .inode_id;
@@ -258,7 +258,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     assert_api_code(
         harness
             .client
-            .stat_inode(&deleted_namespace, InodeId(1), &Default::default())
+            .get_inode(&deleted_namespace, InodeId(1), &Default::default())
             .await,
         410,
         ErrorCode::NamespaceDeleted,
@@ -284,7 +284,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     assert_api_code(
         harness
             .client
-            .begin_download_by_inode(&namespace, file_id, RevisionNo(1))
+            .create_download_by_inode(&namespace, file_id, RevisionNo(1))
             .await,
         501,
         ErrorCode::NotSupported,
@@ -324,7 +324,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
     assert_eq!(
         harness
             .client
-            .stat_path(&inode_27_path, &Default::default())
+            .get_path_entry(&inode_27_path, &Default::default())
             .await
             .expect("stat ino_27")
             .inode_id,

@@ -115,7 +115,7 @@ impl MaintenanceJob for MetadataJob {
         // Upkeep alone: no retention, no garbage collection. Both are other
         // decisions, and one of them is another job.
         match admin
-            .maintenance_step_namespace(namespace_id, MaintenancePlan::metadata())
+            .run_maintenance(namespace_id, MaintenancePlan::metadata())
             .await
         {
             Ok(step) => {
@@ -201,7 +201,7 @@ impl MaintenanceJob for GcJob {
             }),
             ..MaintenancePlan::default()
         };
-        let step = match admin.maintenance_step_namespace(namespace_id, plan).await {
+        let step = match admin.run_maintenance(namespace_id, plan).await {
             Ok(step) => step,
             Err(error) if error.code() == ErrorCode::NamespaceNotFound => {
                 // A deleted namespace still owns reclaimable state, so only

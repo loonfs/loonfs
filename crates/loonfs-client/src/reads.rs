@@ -363,7 +363,7 @@ impl Client {
     }
 
     /// Returns path metadata using the requested projection.
-    pub async fn stat_path(
+    pub async fn get_path_entry(
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
@@ -385,7 +385,7 @@ impl Client {
     }
 
     /// Returns the current entry for a visible inode.
-    pub async fn stat_inode(
+    pub async fn get_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,

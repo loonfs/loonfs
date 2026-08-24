@@ -135,7 +135,7 @@ impl<'a> NamespaceReads<'a> {
     pub async fn resolve_path(&self, absolute_path: &AbsolutePath) -> Result<PathEntry> {
         Ok(self
             .reader
-            .stat_path(
+            .get_path_entry(
                 self.namespace_id,
                 absolute_path.as_str(),
                 StatPathOptions {

@@ -336,7 +336,7 @@ impl Client {
     /// Size hints do not cause local rejection. The server checks the final
     /// size for direct PUT and proxied uploads.
     async fn provisional_transport(&self, size_hint: Option<u64>) -> Result<UploadTransport> {
-        let capabilities = self.capabilities().await?;
+        let capabilities = self.get_capabilities().await?;
         Ok(match Self::transport_for(&capabilities, size_hint) {
             Ok(transport) => transport,
             Err(no_fit) if no_fit.direct_put_supported => UploadTransport::DirectPut,
@@ -349,7 +349,7 @@ impl Client {
     /// Returns `UploadTooLarge` before transfer when no transport accepts the
     /// measured size.
     async fn transport_for_measured(&self, size_bytes: u64) -> Result<UploadTransport> {
-        let capabilities = self.capabilities().await?;
+        let capabilities = self.get_capabilities().await?;
         Self::transport_for(&capabilities, Some(size_bytes)).map_err(|no_fit| {
             ClientError::UploadTooLarge {
                 size_bytes,
@@ -430,7 +430,7 @@ impl Client {
         body: DirectPutBody<'_>,
     ) -> Result<StagedContent> {
         let begin = self
-            .begin_direct_put(namespace_id, body.size_hint())
+            .create_direct_put_upload(namespace_id, body.size_hint())
             .await?;
         let BeginUploadResponse::DirectPut {
             upload_id,
@@ -497,7 +497,10 @@ impl Client {
             ),
             None => {
                 let begin = self
-                    .begin_direct_multipart(namespace_id, DirectMultipartUploadOptions::default())
+                    .create_direct_multipart_upload(
+                        namespace_id,
+                        DirectMultipartUploadOptions::default(),
+                    )
                     .await?;
                 let BeginUploadResponse::DirectMultipart {
                     upload_id,
@@ -721,9 +724,9 @@ impl Client {
         bytes: &[u8],
     ) -> Result<StagedContent> {
         let upload = self
-            .begin_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
+            .create_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await?;
-        self.upload_content(namespace_id, upload.upload_id(), bytes)
+        self.put_upload_content(namespace_id, upload.upload_id(), bytes)
             .await?;
         self.complete_staged(namespace_id, upload.upload_id()).await
     }
@@ -739,10 +742,10 @@ impl Client {
         source: PayloadSource,
     ) -> Result<StagedContent> {
         let upload = self
-            .begin_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
+            .create_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await?;
         let staged = self
-            .upload_streamed_content(namespace_id, upload.upload_id(), source)
+            .put_upload_content_stream(namespace_id, upload.upload_id(), source)
             .await;
         if let Err(error) = staged {
             let _ = self.abort_upload(namespace_id, upload.upload_id()).await;

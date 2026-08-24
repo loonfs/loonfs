@@ -187,7 +187,7 @@ impl ReadCore {
     /// this document before serving it. Callers should still gate on the
     /// document rather than on the backend kind, so the same logic works
     /// against remote deployments that implement more or less.
-    pub(crate) fn capabilities(&self) -> CapabilityDocument {
+    pub(crate) fn get_capabilities(&self) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             profiles: vec![PROFILE_CORE_V0.to_owned(), PROFILE_ADMIN_V0.to_owned()],

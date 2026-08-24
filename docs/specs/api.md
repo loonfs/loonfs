@@ -341,10 +341,11 @@ An inode ID is only unique within its namespace. Use `namespace_id` and
 opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
 
 - The embedded handles (`loonfs::FsWriter`, `loonfs::FsReader`) and the
-  remote client (`loonfs_client::Client`) expose the same operations and the
-  same `capabilities()` accessor returning the capability document of
-  section 2.1. For the remote client the document is fetched from
-  `GET /v0/capabilities` and cached; for the embedded handles it is a constant.
+  remote client (`loonfs_client::Client`) expose the same operations under the
+  same names, including the `get_capabilities()` accessor that returns the
+  capability document of section 2.1. For the remote client the document is
+  fetched from `GET /v0/capabilities` and cached; for the embedded handles it
+  is a constant.
 - The two surfaces stay aligned by sharing one definition of every option
   struct they both take (`PutFileOptions`, `CreateDirectoryOptions`,
   `DeleteOptions` live in `loonfs-api` and are re-exported by both), not by a

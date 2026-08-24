@@ -272,7 +272,7 @@ pub(super) async fn get_path_entry(
     }
     let entry = state
         .reader
-        .stat_path(&namespace_id, &path, options)
+        .get_path_entry(&namespace_id, &path, options)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -552,7 +552,7 @@ pub(super) async fn create_commit(
         .instrument(span)
         .await
     } else {
-        state.writer.commit(&namespace_id, request).await
+        state.writer.create_commit(&namespace_id, request).await
     };
     let response = response_result.map_err(|error| {
         ApiResponseError::runtime_for_namespace(&namespace_id, error)
