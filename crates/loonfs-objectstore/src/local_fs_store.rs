@@ -373,8 +373,7 @@ impl LocalFsStore {
         let invalid_range = || ObjectStoreError::InvalidRange {
             object_key: key.to_owned(),
         };
-        // A descending range is a caller error, answered before the open so a
-        // missing object cannot report absence in its place.
+        // Reject descending ranges before checking whether the object exists.
         if range
             .as_ref()
             .is_some_and(|range| range.end_exclusive < range.start_inclusive)
