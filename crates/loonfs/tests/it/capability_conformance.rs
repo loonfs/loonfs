@@ -49,9 +49,6 @@ fn is_grep_key(key: &str) -> bool {
     key.starts_with("query.") || key.starts_with("admin.grep.")
 }
 
-/// A feature only a serving host can answer: the three direct transports are
-/// properties of the deployment's object store, so these handles leave them
-/// absent and the host adds them when its store can presign.
 fn is_host_transfer_key(key: &str) -> bool {
     matches!(
         key,

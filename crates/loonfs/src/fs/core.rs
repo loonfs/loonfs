@@ -187,9 +187,6 @@ impl ReadCore {
         self.inner.config.trace_store_kind.as_str()
     }
 
-    /// Stamps the two standard context fields onto an operation span. The
-    /// one owner of what "standard context" means, so a new field lands here
-    /// rather than at each span.
     pub(crate) fn record_trace_context(&self, span: &tracing::Span) {
         span.record("mode", self.trace_mode());
         span.record("store_kind", self.trace_store_kind());
@@ -209,11 +206,6 @@ impl ReadCore {
                 // Attributes are core, implemented by this crate, so the
                 // answer does not depend on what a serving host composes.
                 (FEATURE_ATTRIBUTES.to_owned(), true),
-                // The three transfer keys are the host's to answer, not
-                // this runtime's: an embedded engine signs nothing and
-                // reads its own bytes, so it leaves them absent, which is
-                // how the API spells unsupported. A serving host that can
-                // presign adds all three together.
             ]),
             limits: {
                 let mut limits = PaginationPolicy::default().capability_limits();

@@ -638,9 +638,6 @@ pub(super) fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseEr
     parse_public_ordinal("revision_no", value, RevisionNo::parse)
 }
 
-/// One template for a rejected path id: names the parameter, echoes the
-/// rejected input, and states the rule it broke. `Debug` on the value quotes
-/// and escapes it, so hostile path bytes cannot mangle a log line.
 pub(super) fn invalid_path_id_error(name: &str, value: &str, reason: &str) -> ApiResponseError {
     ApiResponseError::new(
         ErrorCode::InvalidRequest,

@@ -33,9 +33,7 @@ pub enum UploadMode {
 }
 
 impl UploadMode {
-    /// Returns the mode's wire spelling, the one `rename_all` above serializes.
-    /// Messages that quote a mode back to a client read it from here so they
-    /// cannot name a spelling the API no longer accepts.
+    /// Returns the serialized value.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ServiceProxied => "service_proxied",

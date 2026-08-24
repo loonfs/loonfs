@@ -21,8 +21,6 @@ pub(super) struct ApiResponseError {
 }
 
 impl ApiResponseError {
-    /// Builds the envelope for `code`. The status is derived from the code,
-    /// so no caller can serve a status the registry disagrees with.
     pub(super) fn new(code: ErrorCode, message: &str) -> Self {
         let response = Self {
             status: status_for_core_error_code(code),

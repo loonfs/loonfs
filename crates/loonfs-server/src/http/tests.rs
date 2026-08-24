@@ -2277,6 +2277,14 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "unauthorized",
     );
 
+    let grep_gc_url = format!("http://{addr}/v0/admin/namespaces/demo/grep/index/gc");
+    expect_enveloped(
+        || raw_agent().post(&grep_gc_url).call(),
+        "grep index collection should require authorization",
+        401,
+        "unauthorized",
+    );
+
     server.abort();
 }
 

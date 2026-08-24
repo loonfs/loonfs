@@ -67,11 +67,6 @@ impl From<ConfiguredObjectStoreKind> for TraceStoreKind {
     }
 }
 
-/// Opens a `loonfs.phase` span carrying the standard context every phase
-/// reports: the phase name, the namespace it runs for, and the runtime's
-/// mode and store kind. A call site adds its own fields after those. This
-/// is the only place the standard field names are written, so a new one
-/// lands on all four phases at once.
 macro_rules! phase_span {
     ($core:expr, $phase:literal, $namespace_id:expr $(, $($field:tt)+)?) => {
         tracing::debug_span!(

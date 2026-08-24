@@ -249,14 +249,12 @@ pub(crate) async fn grep_with(
     service.query(request, limit, &reads, store).await
 }
 
-/// The page size for a test that is not about paging.
 pub(crate) fn default_page_limit() -> EffectiveLimit {
     PaginationPolicy::default()
         .resolve_limit(None)
         .expect("the pagination policy should accept its own default")
 }
 
-/// A page size for a test that is about paging.
 pub(crate) fn page_limit(matches: u32) -> EffectiveLimit {
     PaginationPolicy::default()
         .resolve_limit(Some(matches))

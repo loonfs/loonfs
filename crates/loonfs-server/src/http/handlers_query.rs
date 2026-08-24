@@ -332,9 +332,11 @@ pub(super) async fn disable_grep_index(
 pub(super) async fn gc_grep_index(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
+    headers: HeaderMap,
     query: AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<GrepGcRequest>,
 ) -> Result<Json<GrepGcResponse>, ApiResponseError> {
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     query.into_params()?;
     let request = request.unwrap_or_default();

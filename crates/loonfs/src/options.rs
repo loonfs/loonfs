@@ -218,8 +218,6 @@ mod tests {
         assert_eq!(explicit.max_objects, None);
         assert_eq!(explicit.cursor, None);
 
-        // The step is what bounds a GC pass, so a plan built from a request
-        // hands it the same absent budget every other plan producer does.
         let step = plan(MaintenanceStepRequest {
             gc: Some(GcRequest::default()),
             ..MaintenanceStepRequest::default()
