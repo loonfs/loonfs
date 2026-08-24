@@ -117,6 +117,26 @@ mod tests {
         AbsolutePath::parse("/docs/report.txt").expect("absolute path")
     }
 
+    /// A fixed reference, so the grants below can be pinned exactly.
+    fn content_ref() -> ContentRef {
+        ContentRef::blob_v1(
+            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+            b"hello",
+        )
+    }
+
+    fn content_ref_json() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "blob_v1",
+            "content_id": "con_0123456789abcdef0123456789abcdef",
+            "size_bytes": 5,
+            "checksum": {
+                "algorithm": "sha256",
+                "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            }
+        })
+    }
+
     #[test]
     fn a_download_request_names_only_a_path_and_a_revision() {
         let request: BeginDownloadRequest =
@@ -144,7 +164,7 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             path: absolute_path(),
             revision_no: RevisionNo(7),
-            content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
+            content_ref: content_ref(),
             access: ObjectTransferAccess::PresignedUrl {
                 method: "GET".to_owned(),
                 url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
@@ -153,9 +173,23 @@ mod tests {
             },
         };
 
-        let json = serde_json::to_string(&response).expect("serialize response");
-        assert!(json.contains(r#""kind":"presigned_url""#));
-        assert!(!json.contains("object_key"));
+        // Exact equality, not a search for the object key by name: a leaking
+        // field renamed to anything else still has to show up here.
+        assert_eq!(
+            serde_json::to_value(&response).expect("serialize response"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "path": "/docs/report.txt",
+                "revision_no": 7,
+                "content_ref": content_ref_json(),
+                "access": {
+                    "kind": "presigned_url",
+                    "method": "GET",
+                    "url": "https://bucket.example/object?X-Amz-Signature=abc",
+                    "expires_at_ms": 1
+                }
+            })
+        );
     }
 
     #[test]
@@ -169,7 +203,7 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             inode_id: crate::InodeId(42),
             revision_no: RevisionNo(7),
-            content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
+            content_ref: content_ref(),
             access: ObjectTransferAccess::PresignedUrl {
                 method: "GET".to_owned(),
                 url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
@@ -177,8 +211,22 @@ mod tests {
                 expires_at_ms: 1,
             },
         };
-        let json = serde_json::to_value(response).expect("serialize response");
-        assert_eq!(json["inode_id"], "ino_42");
-        assert!(json.get("path").is_none());
+        // Exact equality again, so the by-inode grant cannot grow a path
+        // field under any spelling.
+        assert_eq!(
+            serde_json::to_value(&response).expect("serialize response"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "inode_id": "ino_42",
+                "revision_no": 7,
+                "content_ref": content_ref_json(),
+                "access": {
+                    "kind": "presigned_url",
+                    "method": "GET",
+                    "url": "https://bucket.example/object?X-Amz-Signature=abc",
+                    "expires_at_ms": 1
+                }
+            })
+        );
     }
 }

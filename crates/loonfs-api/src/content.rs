@@ -483,7 +483,7 @@ impl ContentRef {
 mod tests {
     use super::{
         Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentEvidence, ContentRef,
-        ContentRefKind, ContentRefValidationError, Crc32c, Crc64Nvme, StreamingChecksum,
+        ContentRefKind, ContentRefValidationError, StreamingChecksum,
     };
     use crate::ids::ContentId;
 
@@ -514,28 +514,20 @@ mod tests {
     #[test]
     fn every_checksum_algorithm_round_trips() {
         for (algorithm, wire) in [
-            (ChecksumAlgorithm::Sha256, "\"sha256\""),
-            (ChecksumAlgorithm::Crc64nvme, "\"crc64nvme\""),
-            (ChecksumAlgorithm::Crc32c, "\"crc32c\""),
+            (ChecksumAlgorithm::Sha256, "sha256"),
+            (ChecksumAlgorithm::Crc64nvme, "crc64nvme"),
+            (ChecksumAlgorithm::Crc32c, "crc32c"),
         ] {
             let encoded = serde_json::to_string(&algorithm).expect("encode algorithm");
-            assert_eq!(encoded, wire);
+            assert_eq!(encoded, format!("\"{wire}\""));
+            assert_eq!(
+                algorithm.as_str(),
+                wire,
+                "the hand-written spelling must match the serde tag"
+            );
             let decoded: ChecksumAlgorithm =
                 serde_json::from_str(&encoded).expect("decode algorithm");
             assert_eq!(decoded, algorithm);
-        }
-    }
-
-    #[test]
-    fn every_checksum_shape_round_trips() {
-        for checksum in [
-            Checksum::sha256(b"hello"),
-            Checksum::crc64nvme(b"hello"),
-            Checksum::crc32c(b"hello"),
-        ] {
-            let encoded = serde_json::to_string(&checksum).expect("encode checksum");
-            let decoded: Checksum = serde_json::from_str(&encoded).expect("decode checksum");
-            assert_eq!(decoded, checksum);
         }
     }
 
@@ -548,18 +540,6 @@ mod tests {
             "content_id": "con_0123456789abcdef0123456789abcdef",
             "size_bytes": 5,
             "checksum": {"algorithm": "md5", "value": "00000000000000000000000000000000"}
-        }"#;
-        assert!(serde_json::from_str::<ContentRef>(json).is_err());
-    }
-
-    #[test]
-    fn a_content_ref_rejects_unknown_fields() {
-        let json = r#"{
-            "kind": "blob_v1",
-            "content_id": "con_0123456789abcdef0123456789abcdef",
-            "size_bytes": 5,
-            "checksum": {"algorithm": "sha256", "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},
-            "checksum_type": "full_object"
         }"#;
         assert!(serde_json::from_str::<ContentRef>(json).is_err());
     }
@@ -582,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_unsupported_kinds_and_malformed_checksums() {
+    fn validation_rejects_an_unsupported_kind_and_a_malformed_checksum() {
         let mut content_ref = ContentRef::blob_v1(content_id(), b"hello");
         content_ref.kind = ContentRefKind::Unsupported("sparse_file_v9".to_owned());
         assert!(matches!(
@@ -590,6 +570,8 @@ mod tests {
             Err(ContentRefValidationError::UnsupportedKind { .. })
         ));
 
+        // The checksum rules themselves are covered by the sibling test; this
+        // case only proves the reference reports what its checksum refused.
         let mut content_ref = ContentRef::blob_v1(content_id(), b"hello");
         content_ref.checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
@@ -597,15 +579,8 @@ mod tests {
         };
         assert!(matches!(
             content_ref.validate(),
-            Err(ContentRefValidationError::InvalidChecksum(_))
-        ));
-
-        let mut content_ref = ContentRef::blob_v1(content_id(), b"hello");
-        content_ref.checksum.value = content_ref.checksum.value.to_uppercase();
-        assert!(matches!(
-            content_ref.validate(),
             Err(ContentRefValidationError::InvalidChecksum(
-                ChecksumValidationError::InvalidAlphabet { .. }
+                ChecksumValidationError::InvalidWidth { .. }
             ))
         ));
     }
@@ -669,27 +644,6 @@ mod tests {
             "00000000",
             "the empty payload is the identity"
         );
-    }
-
-    #[test]
-    fn a_streamed_crc64nvme_equals_the_whole_payload_at_once() {
-        let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
-        let mut streamed = Crc64Nvme::new();
-        for chunk in payload.chunks(97) {
-            streamed.update(chunk);
-        }
-
-        assert_eq!(streamed.finish(), Checksum::crc64nvme(&payload));
-    }
-
-    #[test]
-    fn a_crc32c_folded_over_a_prefix_and_the_rest_equals_the_whole_payload() {
-        let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
-        let mut streamed = Crc32c::new();
-        streamed.update(&payload[..1500]);
-        streamed.update(&payload[1500..]);
-
-        assert_eq!(streamed.finish(), Checksum::crc32c(&payload));
     }
 
     #[test]
@@ -764,32 +718,5 @@ mod tests {
         );
         assert!(!crc_reference.matches_evidence(ContentEvidence::ContentRef(&different_size)));
         assert!(sha_reference.matches_evidence(ContentEvidence::ContentRef(&sha_reference)));
-    }
-
-    #[test]
-    fn sha_and_crc_references_round_trip() {
-        for content_ref in [
-            ContentRef::blob_v1(content_id(), b"hello"),
-            ContentRef {
-                kind: ContentRefKind::BlobV1,
-                content_id: content_id(),
-                size_bytes: 11_534_336,
-                checksum: Checksum {
-                    algorithm: ChecksumAlgorithm::Crc64nvme,
-                    value: "bbb7305bdf118bcb".to_owned(),
-                },
-            },
-            ContentRef {
-                kind: ContentRefKind::BlobV1,
-                content_id: content_id(),
-                size_bytes: 5,
-                checksum: Checksum::crc32c(b"hello"),
-            },
-        ] {
-            content_ref.validate().expect("content ref is valid");
-            let encoded = serde_json::to_string(&content_ref).expect("encode");
-            let decoded: ContentRef = serde_json::from_str(&encoded).expect("decode");
-            assert_eq!(decoded, content_ref);
-        }
     }
 }

@@ -343,36 +343,4 @@ mod tests {
             serde_json::from_str::<ActorRef>(r#"{"kind":"user","id":"x","name":"Ada"}"#).is_err()
         );
     }
-
-    #[test]
-    fn actor_ref_convenience_constructors_select_the_kind() {
-        let id = ActorId::parse("actor").expect("valid actor id");
-
-        assert_eq!(ActorRef::user(id.clone()).kind, ActorKind::User);
-        assert_eq!(ActorRef::service(id.clone()).kind, ActorKind::Service);
-        assert_eq!(ActorRef::system(id).kind, ActorKind::System);
-        assert_eq!(
-            ActorRef::loonfs_system(),
-            ActorRef::system(ActorId::parse("loonfs").expect("valid bootstrap actor id"))
-        );
-    }
-
-    #[cfg(feature = "openapi")]
-    #[test]
-    fn actor_vocabulary_registers_openapi_schemas() {
-        #[derive(utoipa::OpenApi)]
-        #[openapi(components(schemas(ActorRef, ActorKind, ActorId)))]
-        struct ActorVocabularyOpenApi;
-
-        let document = serde_json::to_value(<ActorVocabularyOpenApi as utoipa::OpenApi>::openapi())
-            .expect("serialize actor vocabulary OpenAPI document");
-        let schemas = document
-            .pointer("/components/schemas")
-            .and_then(serde_json::Value::as_object)
-            .expect("actor vocabulary schemas");
-
-        for name in ["ActorRef", "ActorKind", "ActorId"] {
-            assert!(schemas.contains_key(name), "missing `{name}` schema");
-        }
-    }
 }

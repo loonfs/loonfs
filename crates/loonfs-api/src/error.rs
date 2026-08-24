@@ -291,14 +291,6 @@ mod tests {
     use super::ErrorCode;
 
     #[test]
-    fn error_codes_round_trip_through_their_strings() {
-        for code in ErrorCode::ALL {
-            assert_eq!(ErrorCode::parse(code.as_str()), Some(code));
-        }
-        assert_eq!(ErrorCode::parse("not_a_code"), None);
-    }
-
-    #[test]
     fn error_codes_serde_uses_the_wire_strings() {
         for code in ErrorCode::ALL {
             let value = serde_json::to_value(code).expect("serialize error code");

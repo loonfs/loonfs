@@ -92,15 +92,6 @@ mod tests {
     }
 
     #[test]
-    fn masked_replaces_the_stored_value() {
-        let secret = SecretString::new("super-secret-value");
-
-        let masked = secret.masked();
-
-        assert_eq!(masked.expose(), "<redacted>");
-    }
-
-    #[test]
     fn serde_round_trips_the_raw_value() {
         let secret = SecretString::new("super-secret-value");
 

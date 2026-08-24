@@ -1131,17 +1131,20 @@ mod tests {
     fn head_without_content_store_is_rejected() {
         // The content store is the namespace's addressing-semantics
         // authority; a head that omits it is malformed, never defaulted.
-        let missing = serde_json::json!({
-            "namespace_id": "demo",
-            "seq": 0,
-            "head_commit_id": GENESIS_COMMIT_ID,
-            "writer_epoch": 0,
-            "next_inode_id": 2,
-            "status": { "kind": "active" }
-        });
+        // Every other required field is present, so the named field is the
+        // only reason this can fail.
+        let mut missing = head_json(None, Vec::new());
+        missing
+            .as_object_mut()
+            .expect("head payload object")
+            .remove("content_store_id");
 
-        serde_json::from_value::<HeadState>(missing)
+        let error = serde_json::from_value::<HeadState>(missing)
             .expect_err("head without its immutable identity must be rejected");
+        assert!(
+            error.to_string().contains("content_store_id"),
+            "the rejection should name the missing field: {error}"
+        );
     }
 
     /// One WAL pointer as it appears inside a durable head payload.
@@ -1179,19 +1182,14 @@ mod tests {
     }
 
     #[test]
-    fn head_decodes_with_a_tip_and_no_predecessor_hints() {
+    fn a_head_decodes_its_tip_with_and_without_predecessor_hints() {
         let tip = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
+        let older = wal_pointer_json("wal_00000000000000000001-0123456789abcdef", 1, 1);
 
-        let head = serde_json::from_value::<HeadState>(head_json(Some(tip), Vec::new()))
+        let head = serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), Vec::new()))
             .expect("the first published segment has no predecessor hints");
         assert!(head.visible_wal_tip.is_some());
         assert!(head.recent_segments.is_empty());
-    }
-
-    #[test]
-    fn predecessor_hints_do_not_repeat_the_tip() {
-        let tip = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
-        let older = wal_pointer_json("wal_00000000000000000001-0123456789abcdef", 1, 1);
 
         let head = serde_json::from_value::<HeadState>(head_json(Some(tip), vec![older.clone()]))
             .expect("predecessor hints decode independently of the authoritative tip");
