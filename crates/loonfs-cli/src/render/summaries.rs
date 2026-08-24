@@ -18,30 +18,60 @@ pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
     }
 }
 
-/// Formats the object-store probe for both `admin store probe` and
-/// `doctor --write-check`.
+/// How a store probe came out. An unsupported check did not pass, so it is
+/// its own outcome rather than a quiet success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreProbeVerdict {
+    Failed { checks: usize },
+    Unsupported { checks: usize },
+    Passed,
+}
+
+/// Decides how one probe came out. The doctor status, the summary sentence,
+/// and the exit code all read this answer rather than counting again.
+pub(crate) fn store_probe_verdict(
+    response: &loonfs_api::v0::StoreProbeResponse,
+) -> StoreProbeVerdict {
+    let counted = |outcome: StoreProbeCheckOutcome| {
+        response
+            .checks
+            .iter()
+            .filter(|check| check.outcome == outcome)
+            .count()
+    };
+    match (
+        counted(StoreProbeCheckOutcome::Failed),
+        counted(StoreProbeCheckOutcome::Unsupported),
+    ) {
+        (0, 0) => StoreProbeVerdict::Passed,
+        (0, checks) => StoreProbeVerdict::Unsupported { checks },
+        (checks, _) => StoreProbeVerdict::Failed { checks },
+    }
+}
+
+/// The one sentence that says how a probe came out, for `admin store probe`
+/// and for the `doctor --write-check` line.
+pub(crate) fn store_probe_summary_line(response: &loonfs_api::v0::StoreProbeResponse) -> String {
+    let run_id = &response.run_id;
+    let total = response.checks.len();
+    match store_probe_verdict(response) {
+        StoreProbeVerdict::Failed { checks } => {
+            format!("store probe {run_id}: {checks} of {total} checks failed")
+        }
+        StoreProbeVerdict::Unsupported { checks } => {
+            format!("store probe {run_id}: {checks} of {total} checks are unsupported")
+        }
+        StoreProbeVerdict::Passed => format!("store probe {run_id}: {total} checks passed"),
+    }
+}
+
+/// Formats the object-store probe for `admin store probe`: every check, then
+/// the verdict.
 pub(super) fn store_probe_report_lines(
     response: &loonfs_api::v0::StoreProbeResponse,
 ) -> Vec<String> {
-    let failed = response
-        .checks
-        .iter()
-        .filter(|check| check.outcome == StoreProbeCheckOutcome::Failed)
-        .count();
     let mut lines: Vec<String> = response.checks.iter().map(store_probe_check_line).collect();
-    lines.push(if failed == 0 {
-        format!(
-            "store probe {}: {} checks passed",
-            response.run_id,
-            response.checks.len()
-        )
-    } else {
-        format!(
-            "store probe {}: {failed} of {} checks failed",
-            response.run_id,
-            response.checks.len()
-        )
-    });
+    lines.push(store_probe_summary_line(response));
     lines
 }
 
@@ -197,21 +227,55 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     }
 }
 
-pub(super) fn gc_summary(report: &GcResponse) -> String {
-    let mut summary = format!(
-        "gc deleted {} wal segments, {} metadata segments, {} manifests, {} checkpoint records, {} content objects ({} retained)",
-        report.deleted.wal_segments,
-        report.deleted.metadata_segments,
-        report.deleted.manifests,
-        report.deleted.checkpoint_records,
-        report.deleted.content_objects,
-        report.retained_candidates
-    );
-    // Keep the text summary short by showing only the most common retention
-    // reason. JSON output includes the complete breakdown.
-    if let Some((reason, count)) = report.retained.top_reason() {
+/// Every family a collection pass deletes, in the order the summary names
+/// them. One list, so a total and an enumeration cannot disagree.
+fn gc_deleted_counts(deleted: &loonfs_api::DeletedObjectCounts) -> [(&'static str, u64); 6] {
+    [
+        ("wal segments", deleted.wal_segments),
+        ("metadata segments", deleted.metadata_segments),
+        ("manifests", deleted.manifests),
+        ("checkpoint records", deleted.checkpoint_records),
+        ("upload sessions", deleted.upload_sessions),
+        ("content objects", deleted.content_objects),
+    ]
+}
+
+/// Names the retention reason that dominates, where one does. The per-pass
+/// line and the run summary say it the same way; `--json` carries the
+/// complete breakdown.
+fn push_top_retention_reason(summary: &mut String, response: &GcResponse) {
+    if let Some((reason, count)) = response.retained.top_reason() {
         summary.push_str(&format!("; mostly {reason}: {count}"));
     }
+}
+
+/// What one collection pass did, in the terms an operator watching a long
+/// run needs: what went, what stayed and mostly why, and when the next thing
+/// this pass kept becomes reclaimable.
+pub(crate) fn gc_pass_line(pass: &GcResponse) -> String {
+    let deleted: u64 = gc_deleted_counts(&pass.deleted)
+        .iter()
+        .map(|(_, count)| count)
+        .sum();
+    let mut line = format!("{deleted} deleted, {} retained", pass.retained_candidates);
+    push_top_retention_reason(&mut line, pass);
+    if let Some(at_ms) = pass.next_reclamation_at_ms {
+        line.push_str(&format!("; next reclaimable at {}", format_utc_ms(at_ms)));
+    }
+    line
+}
+
+pub(super) fn gc_summary(report: &GcResponse) -> String {
+    let deleted = gc_deleted_counts(&report.deleted)
+        .into_iter()
+        .map(|(family, count)| format!("{count} {family}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut summary = format!(
+        "gc deleted {deleted} ({} retained)",
+        report.retained_candidates
+    );
+    push_top_retention_reason(&mut summary, report);
     if report.released_checkpoints.fork > 0 {
         summary.push_str(&format!(
             "; released {} fork checkpoints",
@@ -238,7 +302,7 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
 /// Renders Unix milliseconds as `YYYY-MM-DD HH:MM:SSZ` without adding a date
 /// library dependency. The conversion uses Howard Hinnant's civil-date
 /// algorithm.
-pub(crate) fn format_utc_ms(unix_ms: u64) -> String {
+pub(super) fn format_utc_ms(unix_ms: u64) -> String {
     let seconds = unix_ms / 1_000;
     let days = i64::try_from(seconds / 86_400).unwrap_or(0);
     let second_of_day = seconds % 86_400;

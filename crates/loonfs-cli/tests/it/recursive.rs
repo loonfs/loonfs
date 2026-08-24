@@ -304,7 +304,10 @@ fn recursive_transfers_roundtrip_a_tree() {
     assert_failure(&rerun);
     let rerun_data = json_data(&rerun);
     assert_eq!(rerun_data["files"], 0);
-    assert_eq!(rerun_data["directories"], 1);
+    assert_eq!(
+        rerun_data["directories"], 0,
+        "the empty directory was already there: {rerun_data}"
+    );
     assert_eq!(
         rerun_data["failures"].as_array().expect("failures").len(),
         3
@@ -324,7 +327,10 @@ fn recursive_transfers_roundtrip_a_tree() {
     assert_success(&forced);
     let forced_data = json_data(&forced);
     assert_eq!(forced_data["files"], 3);
-    assert_eq!(forced_data["directories"], 1);
+    assert_eq!(
+        forced_data["directories"], 0,
+        "--force replaces files, and creates no directory that already exists: {forced_data}"
+    );
     assert_eq!(
         forced_data["failures"].as_array().expect("failures").len(),
         0,
@@ -389,7 +395,7 @@ fn recursive_put_reuses_existing_directories_but_rejects_files() {
     let rerun = harness.run(&["--no-progress", "put", "-r", "--force", local_tree, "/tree"]);
     assert_success(&rerun);
     assert!(
-        stdout_string(&rerun).contains("stored 0 files and 1 directory"),
+        stdout_string(&rerun).contains("stored 0 files and 0 directories"),
         "{}",
         stdout_string(&rerun)
     );
@@ -564,8 +570,9 @@ fn recursive_get_names_only_the_paths_it_could_not_write_in_both_modes() {
         assert_failure(&get);
         let data = json_data(&get);
         assert_eq!(data["files"], 2, "{data}");
-        // The destination root and `other`; `docs` is the one that failed.
-        assert_eq!(data["directories"], 2, "{data}");
+        // `other` alone: the destination root was already there, and `docs`
+        // is the one that failed.
+        assert_eq!(data["directories"], 1, "{data}");
 
         // The blocked directory is named by the local path that failed, the
         // files under it by the remote paths that could not be written.

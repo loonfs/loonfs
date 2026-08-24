@@ -4,15 +4,14 @@
 use crate::backend::EmbeddedBackend;
 use crate::backend_error::map_runtime_error;
 use crate::config::{
-    load_config, non_empty_env, CliConfig, ProfileConfig, StoreConfig, ACTOR_ID_ENV,
-    ACTOR_KIND_ENV, NAMESPACE_ENV,
+    load_config, non_empty_env, remote_client_config, CliConfig, ProfileConfig, StoreConfig,
+    ACTOR_ID_ENV, ACTOR_KIND_ENV, NAMESPACE_ENV,
 };
 use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
-use loonfs_api::env::AUTH_TOKEN_ENV;
 use loonfs_api::{ActorId, ActorKind, ActorRef, NamespaceId, SecretString};
-use loonfs_client::{Client, ClientConfig};
+use loonfs_client::Client;
 use loonfs_grep::{GrepBlockCache, GrepService, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
 use std::sync::Arc;
 
@@ -198,7 +197,7 @@ impl ResolvedTarget {
                 ..
             } => Ok(Self::Remote(RemoteTarget::new(
                 server_url,
-                resolve_remote_auth_token(auth_token),
+                auth_token.as_ref(),
                 ca_cert_path.as_deref(),
                 no_retry,
             )?)),
@@ -211,21 +210,6 @@ impl ResolvedTarget {
             ResolvedTarget::Remote(_) => "remote",
         }
     }
-}
-
-fn resolve_remote_auth_token(stored: &Option<SecretString>) -> Option<SecretString> {
-    resolve_remote_auth_token_from(stored, non_empty_env)
-}
-
-fn resolve_remote_auth_token_from(
-    stored: &Option<SecretString>,
-    lookup: impl Fn(&str) -> Option<String>,
-) -> Option<SecretString> {
-    stored.clone().or_else(|| {
-        lookup(AUTH_TOKEN_ENV)
-            .filter(|token| !token.trim().is_empty())
-            .map(SecretString::from)
-    })
 }
 
 impl EmbeddedTarget {
@@ -294,17 +278,16 @@ impl EmbeddedTarget {
 impl RemoteTarget {
     fn new(
         server_url: &str,
-        auth_token: Option<SecretString>,
+        auth_token: Option<&SecretString>,
         ca_cert_path: Option<&str>,
         no_retry: bool,
     ) -> Result<Self, CliError> {
-        let client = Client::new(ClientConfig {
-            server_url: server_url.to_owned(),
+        let client = Client::new(remote_client_config(
+            server_url,
             auth_token,
-            request_timeout_ms: None,
-            disable_transient_retry: no_retry,
-            ca_cert_path: ca_cert_path.map(ToOwned::to_owned),
-        })
+            ca_cert_path,
+            no_retry,
+        ))
         .map_err(|error| CliError::invalid_config(error.to_string()))?;
         Ok(Self { client })
     }
@@ -312,37 +295,15 @@ impl RemoteTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_remote_auth_token_from, RemoteTarget};
-    use loonfs_api::env::AUTH_TOKEN_ENV;
+    use super::RemoteTarget;
     use loonfs_api::SecretString;
 
     #[test]
-    fn remote_auth_prefers_the_stored_token_then_falls_back_to_the_environment() {
-        let stored = Some(SecretString::from("stored-token"));
-        let resolved = resolve_remote_auth_token_from(&stored, |_| Some("env-token".to_owned()));
-        assert_eq!(
-            resolved.as_ref().map(SecretString::expose),
-            Some("stored-token")
-        );
-
-        let resolved = resolve_remote_auth_token_from(&None, |_| Some("env-token".to_owned()));
-        assert_eq!(
-            resolved.as_ref().map(SecretString::expose),
-            Some("env-token")
-        );
-
-        assert!(resolve_remote_auth_token_from(&None, |_| Some("  ".to_owned())).is_none());
-    }
-
-    #[test]
-    fn environment_token_is_rejected_for_non_loopback_http() {
-        let auth_token = resolve_remote_auth_token_from(&None, |name| {
-            assert_eq!(name, AUTH_TOKEN_ENV);
-            Some("environment-token".to_owned())
-        });
-        let error = RemoteTarget::new("http://example.internal", auth_token, None, false)
+    fn a_stored_token_is_rejected_for_non_loopback_http() {
+        let stored = SecretString::from("stored-token");
+        let error = RemoteTarget::new("http://example.internal", Some(&stored), None, false)
             .err()
-            .expect("environment token over non-loopback plaintext HTTP should be rejected");
+            .expect("a token over non-loopback plaintext HTTP should be rejected");
 
         assert_eq!(error.code, "invalid_config");
         assert!(

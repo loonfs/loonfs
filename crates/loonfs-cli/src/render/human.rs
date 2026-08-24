@@ -65,7 +65,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         ),
         CommandData::CheckpointCreated(checkpoint) => {
             let expiry = match checkpoint.expires_at_ms {
-                Some(expires_at_ms) => format!(", expires at {expires_at_ms}"),
+                Some(expires_at_ms) => format!(", expires at {}", format_utc_ms(expires_at_ms)),
                 None => String::new(),
             };
             format!(
@@ -618,10 +618,13 @@ fn human_doctor(checks: &[DoctorCheck]) -> String {
             ));
         }
         if let Some(response) = &check.store_probe {
+            // The check line above already carries the verdict this probe
+            // reached, so the indented report stays per-check.
             lines.extend(
-                store_probe_report_lines(response)
-                    .into_iter()
-                    .map(|line| format!("  {line}")),
+                response
+                    .checks
+                    .iter()
+                    .map(|check| format!("  {}", store_probe_check_line(check))),
             );
         }
     }

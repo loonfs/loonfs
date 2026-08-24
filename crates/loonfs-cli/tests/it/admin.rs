@@ -187,9 +187,32 @@ fn changes_checkpoints_and_grep_jsonl_follow_across_pages() {
     assert_success(&changes);
     assert_eq!(stdout_string(&changes).lines().count(), 2);
 
-    for name in ["first", "second"] {
-        assert_success(&harness.run(&["admin", "checkpoint", "create", "--name", name]));
-    }
+    assert_success(&harness.run(&["admin", "checkpoint", "create", "--name", "first"]));
+    let dated = harness.run(&[
+        "admin",
+        "checkpoint",
+        "create",
+        "--name",
+        "second",
+        "--ttl-ms",
+        "600000",
+    ]);
+    assert_success(&dated);
+    let created_line = stdout_string(&dated);
+    let expiry = created_line
+        .split("expires at ")
+        .nth(1)
+        .expect("a checkpoint with a ttl prints when it expires")
+        .trim_end()
+        .trim_end_matches(')')
+        .to_owned();
+    let listed_expiries = harness.run(&["admin", "checkpoint", "list"]);
+    assert_success(&listed_expiries);
+    assert!(
+        stdout_string(&listed_expiries).contains(&expiry),
+        "create and list must spell one expiry the same way: {created_line}{}",
+        stdout_string(&listed_expiries)
+    );
     let one_checkpoint =
         harness.run(&["--json", "admin", "checkpoint", "list", "--page-size", "1"]);
     assert_success(&one_checkpoint);
@@ -388,6 +411,17 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
     let active = harness.run(&["--json", "admin", "index", "status"]);
     assert_success(&active);
     assert_eq!(json_data(&active)["built_through_seq"], 1);
+
+    // The same wait the embedded arm runs: an index already at the target
+    // returns without a single status check.
+    let caught_up = harness.run(&["--json", "admin", "index", "enable"]);
+    assert_success(&caught_up);
+    assert_eq!(json_data(&caught_up)["waited_for_seq"], 1);
+    assert_eq!(
+        json_data(&caught_up)["steps"],
+        0,
+        "an index already at the captured target takes no steps"
+    );
 
     let found = harness.run(&["--json", "grep", "remote needle"]);
     assert_success(&found);

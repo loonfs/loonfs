@@ -4,9 +4,8 @@ use crate::args::CommandKind;
 use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
-use loonfs_api::v0::{
-    GrepGcResponse, GrepIndex, ListChangesResponse, StoreProbeCheckOutcome, StoreProbeResponse,
-};
+use crate::render::{store_probe_verdict, StoreProbeVerdict};
+use loonfs_api::v0::{GrepGcResponse, GrepIndex, ListChangesResponse, StoreProbeResponse};
 use loonfs_api::{
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteNamespaceResponse,
     FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse, MaintenanceStepResponse,
@@ -351,10 +350,9 @@ impl CommandData {
             // A probe that found a broken store prints every check's verdict
             // and still exits nonzero, because the store it was asked about
             // cannot be trusted.
-            CommandData::StoreProbed(response) => response
-                .checks
-                .iter()
-                .any(|check| check.outcome == StoreProbeCheckOutcome::Failed),
+            CommandData::StoreProbed(response) => {
+                matches!(store_probe_verdict(response), StoreProbeVerdict::Failed { .. })
+            }
             _ => false,
         }
     }

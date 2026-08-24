@@ -12,7 +12,7 @@ use crate::args::{
     MaintenanceJobArg, RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
-use crate::render::{format_utc_ms, write_stderr_progress};
+use crate::render::{gc_pass_line, write_stderr_progress};
 use crate::resolve::{parse_namespace_id, resolve_target_profile};
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
@@ -208,26 +208,6 @@ impl PassProgress {
         lines.push(format!("pass {}: {line}", self.passes));
         lines
     }
-}
-
-/// What one collection pass did, in the terms an operator watching a long
-/// run needs: what went, what stayed and mostly why, and when the next thing
-/// this pass kept becomes reclaimable.
-fn gc_pass_line(pass: &loonfs_api::GcResponse) -> String {
-    let deleted = pass.deleted.wal_segments
-        + pass.deleted.metadata_segments
-        + pass.deleted.manifests
-        + pass.deleted.checkpoint_records
-        + pass.deleted.upload_sessions
-        + pass.deleted.content_objects;
-    let mut line = format!("{deleted} deleted, {} retained", pass.retained_candidates);
-    if let Some((reason, count)) = pass.retained.top_reason() {
-        line.push_str(&format!(" (mostly {reason}: {count})"));
-    }
-    if let Some(at_ms) = pass.next_reclamation_at_ms {
-        line.push_str(&format!("; next reclaimable at {}", format_utc_ms(at_ms)));
-    }
-    line
 }
 
 fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::GcResponse) {
@@ -864,6 +844,7 @@ mod tests {
     fn a_pass_line_names_what_stayed_and_mostly_why() {
         let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
         pass.deleted.wal_segments = 2;
+        pass.deleted.upload_sessions = 3;
         pass.deleted.content_objects = 1;
         for _ in 0..4 {
             pass.retain(RetainedReason::WithinGraceWindow);
@@ -873,8 +854,8 @@ mod tests {
 
         let line = gc_pass_line(&pass);
         assert!(
-            line.contains("3 deleted, 5 retained (mostly within_grace_window: 4)"),
-            "{line}"
+            line.contains("6 deleted, 5 retained; mostly within_grace_window: 4"),
+            "every deleted family counts, upload sessions included: {line}"
         );
         assert!(
             line.contains("next reclaimable at 2023-11-14 22:13:20Z"),

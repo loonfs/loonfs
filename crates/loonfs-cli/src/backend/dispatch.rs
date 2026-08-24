@@ -1,6 +1,6 @@
 //! Dispatches each resolved operation to its embedded or remote implementation.
 
-use super::progress::rest_between_status_checks;
+use super::progress::{rest_between_status_checks, wait_for_grep_index, GrepWaitAdvance};
 use super::{FileDownload, GrepWaitProgress, MaintenanceDrainProgress, StepBudget};
 use crate::backend_error::{map_namespace_scoped_runtime_error, BackendError};
 use crate::payload::LocalPayload;
@@ -24,7 +24,6 @@ use loonfs_client::{
     MoveOptions, NamespacePath, PutFileOptions, RestoreRevisionOptions, StatPathOptions,
     UndeleteOptions, UpdateAttributesOptions,
 };
-use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
 
 /// Returns errors for commands that require a different profile type.
@@ -406,19 +405,21 @@ impl ResolvedTarget {
                     .await
             }
             Self::Remote(target) => {
-                let timer = StdMonotonicTimer::default();
-                let started_ms = timer.monotonic_now_ms();
-                let mut steps = 0;
-                loop {
-                    let lifecycle = target.client.get_grep_index(namespace_id).await?.lifecycle;
-                    let reached = lifecycle.is_built_through(target_seq);
-                    let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
-                    if reached || budget.spent(steps, elapsed_ms) {
-                        return Ok(GrepWaitProgress { steps, reached });
-                    }
-                    rest_between_status_checks().await;
-                    steps += 1;
-                }
+                wait_for_grep_index(
+                    target_seq,
+                    budget,
+                    || async {
+                        let index = target.client.get_grep_index(namespace_id).await?;
+                        Ok(index.lifecycle)
+                    },
+                    // A status check is this arm's step: the server advances
+                    // the index, so the wait only asks again.
+                    || async {
+                        rest_between_status_checks().await;
+                        Ok(GrepWaitAdvance::Advanced)
+                    },
+                )
+                .await
             }
         }
     }

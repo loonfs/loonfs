@@ -10,8 +10,9 @@ use crate::config::{
 };
 use crate::error::CliError;
 use crate::profiles::resolve_profile;
+use crate::render::{store_probe_summary_line, store_probe_verdict, StoreProbeVerdict};
 use crate::resolve::{resolve_namespace, resolve_target_profile, ResolvedTarget};
-use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeResponse};
+use loonfs_api::v0::StoreProbeResponse;
 use loonfs_api::{CapabilityDocument, PROTOCOL_VERSION};
 use std::path::Path;
 
@@ -349,46 +350,15 @@ fn capability_document_check(result: Result<CapabilityDocument, BackendError>) -
 }
 
 fn store_probe_check(response: StoreProbeResponse) -> DoctorCheck {
-    let failed_count = response
-        .checks
-        .iter()
-        .filter(|check| check.outcome == StoreProbeCheckOutcome::Failed)
-        .count();
-    let unsupported_count = response
-        .checks
-        .iter()
-        .filter(|check| check.outcome == StoreProbeCheckOutcome::Unsupported)
-        .count();
-    let status = if failed_count > 0 {
-        DoctorStatus::Failed
-    } else if unsupported_count > 0 {
-        DoctorStatus::Warning
-    } else {
-        DoctorStatus::Ok
-    };
-    let message = if failed_count > 0 {
-        format!(
-            "store probe {}: {failed_count} of {} checks failed",
-            response.run_id,
-            response.checks.len()
-        )
-    } else if unsupported_count > 0 {
-        format!(
-            "store probe {}: {unsupported_count} of {} checks are unsupported",
-            response.run_id,
-            response.checks.len()
-        )
-    } else {
-        format!(
-            "store probe {}: {} checks passed",
-            response.run_id,
-            response.checks.len()
-        )
+    let status = match store_probe_verdict(&response) {
+        StoreProbeVerdict::Failed { .. } => DoctorStatus::Failed,
+        StoreProbeVerdict::Unsupported { .. } => DoctorStatus::Warning,
+        StoreProbeVerdict::Passed => DoctorStatus::Ok,
     };
     DoctorCheck {
         name: WRITE_CHECK_NAME.to_owned(),
         status,
-        message,
+        message: store_probe_summary_line(&response),
         request_id: None,
         store_probe: Some(response),
     }
@@ -503,7 +473,7 @@ fn doctor_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::v0::StoreProbeCheckResult;
+    use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult};
     use std::collections::BTreeMap;
 
     fn capability_document(protocol_version: &str) -> CapabilityDocument {
@@ -526,18 +496,56 @@ mod tests {
         assert!(failed.message.contains("but this CLI expects"));
     }
 
+    fn probe_response(outcomes: &[StoreProbeCheckOutcome]) -> StoreProbeResponse {
+        StoreProbeResponse {
+            run_id: "probe_test".to_owned(),
+            checks: outcomes
+                .iter()
+                .enumerate()
+                .map(|(index, outcome)| StoreProbeCheckResult {
+                    name: format!("check_{index}"),
+                    outcome: *outcome,
+                    message: Some("replacement was not atomic".to_owned()),
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn store_probe_failure_is_included_and_fails_doctor() {
-        let response = StoreProbeResponse {
-            run_id: "probe_test".to_owned(),
-            checks: vec![StoreProbeCheckResult {
-                name: "compare_and_swap".to_owned(),
-                outcome: StoreProbeCheckOutcome::Failed,
-                message: Some("replacement was not atomic".to_owned()),
-            }],
-        };
+        let response = probe_response(&[StoreProbeCheckOutcome::Failed]);
         let check = store_probe_check(response.clone());
         assert_eq!(check.status, DoctorStatus::Failed);
+        assert_eq!(
+            check.message,
+            "store probe probe_test: 1 of 1 checks failed"
+        );
         assert_eq!(check.store_probe, Some(response));
+    }
+
+    #[test]
+    fn an_unsupported_check_warns_and_never_reads_as_passed() {
+        let response = probe_response(&[
+            StoreProbeCheckOutcome::Passed,
+            StoreProbeCheckOutcome::Unsupported,
+        ]);
+        let check = store_probe_check(response.clone());
+        assert_eq!(check.status, DoctorStatus::Warning);
+        assert_eq!(
+            check.message,
+            "store probe probe_test: 1 of 2 checks are unsupported"
+        );
+        assert_eq!(
+            check.message,
+            store_probe_summary_line(&response),
+            "the doctor line and the probe report say the same thing"
+        );
+
+        let passed = probe_response(&[StoreProbeCheckOutcome::Passed]);
+        assert_eq!(store_probe_check(passed.clone()).status, DoctorStatus::Ok);
+        assert_eq!(
+            store_probe_summary_line(&passed),
+            "store probe probe_test: 1 checks passed"
+        );
     }
 }
