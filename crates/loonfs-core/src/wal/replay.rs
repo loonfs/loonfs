@@ -26,14 +26,10 @@ pub(crate) fn project_validated_wal_tail(
     Ok(replayed)
 }
 
-/// Proves the durable head is exactly what replaying the WAL tail onto the
-/// basis lands on.
+/// Verifies that replaying the WAL tail produces the current head.
 ///
-/// A tail that lands somewhere else is corruption, and it is the same
-/// corruption wherever it is met: publication, flush, and the read path all
-/// fail closed here rather than storing or serving the disagreement. The tip
-/// clause applies only once the tail has a tip of its own, because an empty
-/// tail leaves the basis tip in place.
+/// An empty tail retains the basis tip, so the tip is compared only when the
+/// replay produced one.
 pub(crate) fn ensure_replayed_head_matches(
     current_head: &HeadState,
     reconstructed: &HeadState,

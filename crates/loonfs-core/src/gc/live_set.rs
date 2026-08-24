@@ -246,7 +246,7 @@ pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     }
     let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
-        .map_err(CoreError::load_head)?;
+        .map_err(CoreError::ControlObjectLoad)?;
     collect_live_set(
         store,
         namespace_id,
@@ -289,7 +289,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         charge(budget)?;
         let floor_seq = resolve_retention_floor_seq(store, head)
             .await
-            .map_err(CoreError::load_head)?;
+            .map_err(CoreError::ControlObjectLoad)?;
         let mut live = LiveSet::collecting(namespace_deleted);
         let mut manifest_object_ids = BTreeSet::new();
         if !namespace_deleted {
@@ -361,7 +361,7 @@ async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
         let record = match loaded {
             Ok(loaded) => loaded.state,
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,
-            Err(error) => return Err(CoreError::load_head(error).into()),
+            Err(error) => return Err(CoreError::ControlObjectLoad(error).into()),
         };
         let candidate = checkpoint_is_candidate(store, &record, budget, context).await?;
         // A deleted namespace has no readers. Only an active fork checkpoint

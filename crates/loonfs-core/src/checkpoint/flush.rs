@@ -222,7 +222,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
 ) -> Result<RootProjection<'a, S>> {
     let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
-        .map_err(CoreError::load_head)?;
+        .map_err(CoreError::ControlObjectLoad)?;
     let head = loaded.head.state;
     if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::MetadataProjection(
@@ -233,7 +233,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     }
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
-        .map_err(CoreError::load_head)?;
+        .map_err(CoreError::ControlObjectLoad)?;
     // The floor never advances past the materialized root, so a floor above
     // the namespace's birth sequence with no root of its own means the root
     // was lost.

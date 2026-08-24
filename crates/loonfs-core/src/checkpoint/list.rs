@@ -74,7 +74,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
 ) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
     load_head_object(store, namespace_id)
         .await
-        .map_err(CoreError::load_head)?;
+        .map_err(CoreError::ControlObjectLoad)?;
 
     if let Some(cursor) = &request.cursor {
         cursor.validate_for(namespace_id)?;
@@ -101,7 +101,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
         let loaded = match load_checkpoint_record_at_key(store, &key).await {
             Ok(loaded) => loaded,
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,
-            Err(error) => return Err(CoreError::load_head(error)),
+            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
         };
         if loaded.state.status != (CheckpointStatus::Active {}) {
             continue;

@@ -3801,9 +3801,6 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
 
 #[tokio::test]
 async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
-    // The missing-basis pass releases a record the creator could never have
-    // verified. A fork pin is not its to release: the target namespace's
-    // fate decides that, and only the fork arm reads it.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("source").expect("namespace id");
@@ -3817,8 +3814,7 @@ async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
         .await
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
-    // Advance the source root past the fork basis so the absent basis below
-    // is not the root's own, which would degrade the pass instead.
+    // Keep the source root valid after deleting the fork basis.
     write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &source, &setup)
         .await
@@ -3835,7 +3831,7 @@ async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
     assert_eq!(
         checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
         CheckpointStatus::Active {},
-        "a live target keeps its pin whatever became of the basis"
+        "a live target keeps its fork checkpoint"
     );
 }
 

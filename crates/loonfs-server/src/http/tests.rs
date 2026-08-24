@@ -561,6 +561,23 @@ async fn provider_failure_is_projected_in_the_presign_api_envelope() {
     assert!(rendered.contains("req_presign_hygiene"), "{rendered}");
 }
 
+#[tokio::test]
+async fn invalid_presign_content_is_a_bad_request() {
+    use axum::response::IntoResponse;
+
+    let response = super::handlers_uploads::presign_issuer_error(
+        ObjectStoreError::InvalidContentRef("invalid checksum".to_owned()),
+    )
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read presign error body");
+    let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
+    assert!(rendered.contains("invalid_request"), "{rendered}");
+    assert!(rendered.contains("/content"), "{rendered}");
+}
+
 #[derive(Debug)]
 struct StaleHeadOnceStore {
     inner: LocalFsStore,

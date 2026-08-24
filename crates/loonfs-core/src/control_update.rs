@@ -204,7 +204,7 @@ async fn load_upload_session_object<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => Err(CoreError::UploadNotFound {
             upload_id: upload_id.clone(),
         }),
-        Err(error) => Err(CoreError::load_head(error)),
+        Err(error) => Err(CoreError::ControlObjectLoad(error)),
     }
 }
 

@@ -35,18 +35,18 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     // not have caught anyway.
     let head = load_head_object(store, namespace_id)
         .await
-        .map_err(CoreError::load_head)?
+        .map_err(CoreError::ControlObjectLoad)?
         .state;
     // A namespace that has published no manifest has nothing to derive a
     // target floor from: its history is retained from birth either way.
     let Some(loaded_root) = load_metadata_root_object_if_present(store, namespace_id)
         .await
-        .map_err(CoreError::load_head)?
+        .map_err(CoreError::ControlObjectLoad)?
     else {
         return Ok(AdvanceRetentionResponse {
             retention_floor_seq: resolve_retention_floor_seq(store, &head)
                 .await
-                .map_err(CoreError::load_head)?,
+                .map_err(CoreError::ControlObjectLoad)?,
         });
     };
     let root = loaded_root.state;
@@ -62,7 +62,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     let target_floor = manifest_segments.manifest().payload.head_seq;
     let current_floor = resolve_retention_floor_seq(store, &head)
         .await
-        .map_err(CoreError::load_head)?;
+        .map_err(CoreError::ControlObjectLoad)?;
     if current_floor >= target_floor {
         // Already advanced, so the idempotent re-invocation writes nothing.
         return Ok(AdvanceRetentionResponse {
@@ -76,7 +76,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         let loaded = match load_wal_floor_object(store, namespace_id).await {
             Ok(loaded) => Some(loaded),
             Err(ControlObjectLoadError::MissingObject { .. }) => None,
-            Err(error) => return Err(CoreError::load_head(error)),
+            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
         };
         let published_floor = loaded.as_ref().map(|loaded| loaded.state.floor_seq);
         if let Some(floor_seq) = published_floor.filter(|floor_seq| *floor_seq >= target_floor) {

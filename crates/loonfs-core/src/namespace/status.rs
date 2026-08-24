@@ -87,7 +87,7 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
 ) -> Result<Namespace> {
     let head = crate::namespace::control::load_head_object(store, expected_namespace_id)
         .await
-        .map_err(CoreError::load_head)?
+        .map_err(CoreError::ControlObjectLoad)?
         .state;
     if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
@@ -96,7 +96,7 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
     }
     let retention_floor_seq = resolve_retention_floor_seq(store, &head)
         .await
-        .map_err(CoreError::load_head)?;
+        .map_err(CoreError::ControlObjectLoad)?;
     Ok(Namespace {
         namespace_id: head.namespace_id,
         head_seq: head.seq,

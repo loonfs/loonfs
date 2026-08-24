@@ -45,6 +45,8 @@ pub enum CoreError {
     #[error(transparent)]
     MetadataProjection(#[from] MetadataProjectionLoadError),
     #[error(transparent)]
+    ControlObjectLoad(#[from] ControlObjectLoadError),
+    #[error(transparent)]
     MetadataView(#[from] MetadataViewError),
     #[error(transparent)]
     VisiblePath(#[from] VisiblePathError),
@@ -316,11 +318,22 @@ impl From<ImmutableWriteError> for CoreError {
     }
 }
 
-impl CoreError {
-    pub(crate) fn load_head(error: ControlObjectLoadError) -> Self {
-        Self::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
+    match class {
+        StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
+        StoreFailureClass::NotFound
+        | StoreFailureClass::InvalidRequest
+        | StoreFailureClass::InvalidKey
+        | StoreFailureClass::PreconditionFailed
+        | StoreFailureClass::StoredChecksumMissing
+        | StoreFailureClass::Unsupported
+        | StoreFailureClass::Configuration
+        | StoreFailureClass::RetryableTransport
+        | StoreFailureClass::Other => ErrorCode::ServerError,
     }
+}
 
+impl CoreError {
     /// Builds [`CoreError::Store`] for a failed object-store operation on
     /// `object_key`.
     pub(crate) fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
@@ -338,6 +351,7 @@ impl CoreError {
     pub fn code(&self) -> ErrorCode {
         match self {
             CoreError::MetadataProjection(error) => classify_metadata_projection_load_error(error),
+            CoreError::ControlObjectLoad(error) => classify_control_object_load_error(error),
             CoreError::MetadataView(error) => classify_metadata_view_error(error),
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
             CoreError::DurableContent(error) => classify_durable_content_error(error),
@@ -347,7 +361,7 @@ impl CoreError {
                 ErrorCode::ServerError
             }
             CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
-                class.error_code()
+                classify_store_failure(*class)
             }
             CoreError::HeadPublish(error) => classify_head_publish_error(error),
             CoreError::InvalidPath(_)
@@ -420,6 +434,7 @@ impl CoreError {
     pub fn object_store_public_message(&self) -> Option<std::borrow::Cow<'static, str>> {
         match self {
             CoreError::MetadataProjection(error) => metadata_projection_store_message(error),
+            CoreError::ControlObjectLoad(error) => control_object_store_message(error),
             CoreError::DurableContent(DurableContentValidationError::Store { message, .. }) => {
                 Some(std::borrow::Cow::Owned(message.clone()))
             }
@@ -669,7 +684,7 @@ pub(crate) fn classify_control_object_load_error(error: &ControlObjectLoadError)
         | ControlObjectLoadError::KeyLayout { .. }
         | ControlObjectLoadError::ChecksumMismatch { .. }
         | ControlObjectLoadError::Codec { .. } => ErrorCode::NamespaceCorrupt,
-        ControlObjectLoadError::Store { class, .. } => class.error_code(),
+        ControlObjectLoadError::Store { class, .. } => classify_store_failure(*class),
     }
 }
 
@@ -737,7 +752,7 @@ fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> Error
         WriterEpochAcquireError::EmptyWriterId
         | WriterEpochAcquireError::WriterEpochOverflow { .. }
         | WriterEpochAcquireError::RetryExhausted { .. } => ErrorCode::ServerError,
-        WriterEpochAcquireError::HeadWrite { class, .. } => class.error_code(),
+        WriterEpochAcquireError::HeadWrite { class, .. } => classify_store_failure(*class),
     }
 }
 
@@ -1068,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn store_permission_denied_classifies_to_its_wire_code() {
+    fn store_failures_classify_to_their_wire_codes() {
         let denied = ObjectStoreError::PermissionDenied {
             object_key: "namespaces/demo/wal/head.json".to_owned(),
             message: "AccessDenied: bucket policy".to_owned(),
@@ -1079,6 +1094,12 @@ mod tests {
 
         let transport = ObjectStoreError::transport("namespaces/demo/wal/head.json", "timed out");
         let error = CoreError::store("namespaces/demo/wal/head.json", &transport);
+        assert_eq!(error.code(), ErrorCode::ServerError);
+
+        let invalid_range = ObjectStoreError::InvalidRange {
+            object_key: "namespaces/demo/metadata/segment".to_owned(),
+        };
+        let error = CoreError::store("namespaces/demo/metadata/segment", &invalid_range);
         assert_eq!(error.code(), ErrorCode::ServerError);
     }
 
@@ -1091,7 +1112,7 @@ mod tests {
         };
 
         let core_wrappers = [
-            CoreError::load_head(denied.clone()),
+            CoreError::ControlObjectLoad(denied.clone()),
             CoreError::WriterEpoch(WriterEpochAcquireError::LoadHead(denied.clone())),
             CoreError::from(NamespaceCatalogLoadError::LoadHead(denied.clone())),
             CoreError::from(ControlUpdateError::LoadHead(denied.clone())),

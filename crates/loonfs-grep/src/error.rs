@@ -71,7 +71,10 @@ impl GrepError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::NotEnabled | Self::Backfilling => ErrorCode::NotSupported,
-            Self::StoreUnavailable { class, .. } => class.error_code(),
+            Self::StoreUnavailable { class, .. } => match class {
+                StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
+                _ => ErrorCode::ServerError,
+            },
             Self::CorruptIndex { .. } => ErrorCode::IndexCorrupt,
             Self::PublicationConflict { .. } => ErrorCode::StaleHead,
             Self::Runtime(error) => error.code(),
@@ -128,6 +131,7 @@ mod tests {
                 StoreFailureClass::PermissionDenied,
                 ErrorCode::StoragePermissionDenied,
             ),
+            (StoreFailureClass::InvalidRequest, ErrorCode::ServerError),
             (StoreFailureClass::Other, ErrorCode::ServerError),
         ] {
             let error = GrepError::StoreUnavailable {

@@ -22,13 +22,8 @@ pub(super) enum ForkCheckpointSweep {
     NotAnActiveFork,
 }
 
-/// Releases a still-active record whose basis manifest is verifiably gone.
-/// Every check runs against fresh reads at decision time: the record must
-/// still be active, not fork-owned, older than the grace window by its own
-/// `created_at_ms` (an in-flight create is never raced), and the basis
-/// manifest must still be absent. The release is the compare-and-swap the
-/// creator's own verification failure would have performed; the released
-/// record then ages out through the normal delete path on a later pass.
+/// Releases an active, non-fork checkpoint whose basis manifest is still
+/// missing after the grace period.
 pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -40,15 +35,13 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(false),
-        Err(error) => return Err(CoreError::load_head(error)),
+        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let record = loaded.state;
     if record.status != (CheckpointStatus::Active {}) {
         return Ok(false);
     }
-    // A fork pin ends with its target namespace, and only the fork arm below
-    // reads that. An absent basis says the source is already broken; it says
-    // nothing about whether the target stopped reading through this record.
+    // Fork checkpoints remain until their target namespace is deleted.
     if matches!(record.owner, CheckpointOwner::Fork { .. }) {
         return Ok(false);
     }
@@ -84,7 +77,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => {
             return Ok(ForkCheckpointSweep::NotAnActiveFork)
         }
-        Err(error) => return Err(CoreError::load_head(error)),
+        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let record = loaded.state;
     if record.status != (CheckpointStatus::Active {}) {

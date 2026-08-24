@@ -55,7 +55,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(CheckpointSweep::Retain),
-        Err(error) => return Err(CoreError::load_head(error)),
+        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let record = loaded.state;
     if let CheckpointStatus::Released { released_at_ms } = record.status {

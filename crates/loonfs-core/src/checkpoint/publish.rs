@@ -129,7 +129,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     for _attempt in 0..CONTENTION_RETRY_LIMIT {
         let Some(loaded) = load_metadata_root_object_if_present(store, namespace_id)
             .await
-            .map_err(CoreError::load_head)?
+            .map_err(CoreError::ControlObjectLoad)?
         else {
             match create_first_metadata_root(store, namespace_id, &candidate, updated_at_ms).await?
             {
@@ -179,7 +179,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             Err(error) => {
                 let recovered = load_metadata_root_object(store, namespace_id)
                     .await
-                    .map_err(CoreError::load_head)?
+                    .map_err(CoreError::ControlObjectLoad)?
                     .state;
                 if recovered.manifest == candidate {
                     return Ok(ManifestPublicationOutcome::Published(recovered));

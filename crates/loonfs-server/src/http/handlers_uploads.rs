@@ -351,20 +351,20 @@ async fn sign_parts(
 }
 
 pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError {
-    // The code and the status both come from the registry, so an issuer
-    // failure answers exactly what the same store failure answers anywhere
-    // else in the server.
-    let code = error.class().error_code();
+    let (code, param) = match &error {
+        ObjectStoreError::InvalidContentRef(_) => (ErrorCode::InvalidRequest, Some("/content")),
+        ObjectStoreError::PermissionDenied { .. } => (ErrorCode::StoragePermissionDenied, None),
+        _ => (ErrorCode::ServerError, None),
+    };
     let response = ApiResponseError::new(
         status_for_core_error_code(code),
         code,
         &error.public_message(),
     );
-    match code {
-        // Everything an issuer calls a bad request is a content descriptor
-        // the caller wrote.
-        ErrorCode::InvalidRequest => response.with_param("/content"),
-        _ => response,
+    if let Some(param) = param {
+        response.with_param(param)
+    } else {
+        response
     }
 }
 

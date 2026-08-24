@@ -180,7 +180,7 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
                 // An unreadable head still occupies the id: report the
                 // corruption rather than a lifecycle answer this attempt
                 // cannot support.
-                Err(error) => return Err(CoreError::load_head(error)),
+                Err(error) => return Err(CoreError::ControlObjectLoad(error)),
             };
             if existing.status == (NamespaceStatus::Deleted {}) {
                 return Ok(NamespaceHeadInstall::Deleted);

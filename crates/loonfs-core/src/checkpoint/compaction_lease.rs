@@ -76,7 +76,7 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => {
             return Ok(CompactionPrefixOwner::NoOne)
         }
-        Err(error) => return Err(CoreError::load_head(error)),
+        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let object_key = loaded.object_key;
     let expected_etag = loaded.etag;
@@ -298,7 +298,7 @@ impl<'a> CompactionLease<'a> {
         let loaded = match loaded {
             Ok(loaded) => loaded,
             Err(ControlObjectLoadError::MissingObject { .. }) => return self.create(store).await,
-            Err(error) => return Err(CoreError::load_head(error)),
+            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
         };
         self.etag = Some(loaded.etag);
         Ok(())

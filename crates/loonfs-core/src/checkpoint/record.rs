@@ -143,7 +143,7 @@ pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
     match loaded {
         Ok(loaded) => Ok(Some(loaded)),
         Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
-        Err(error) => Err(CoreError::load_head(error)),
+        Err(error) => Err(CoreError::ControlObjectLoad(error)),
     }
 }
 
@@ -207,11 +207,11 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
 ) -> Result<CheckpointBasisVerification> {
     let head = load_head_object(store, &record.namespace_id)
         .await
-        .map_err(CoreError::load_head)?
+        .map_err(CoreError::ControlObjectLoad)?
         .state;
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
-        .map_err(CoreError::load_head)?;
+        .map_err(CoreError::ControlObjectLoad)?;
     if floor_seq > record.manifest.manifest_head_seq {
         return Ok(CheckpointBasisVerification::Invalid);
     }
