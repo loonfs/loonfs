@@ -127,13 +127,14 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
 }
 
 #[test]
-fn runtime_publish_allows_multi_segment_wal_tail() {
+fn runtime_publish_and_read_allow_multi_segment_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let setup = open_runtime(object_store.clone(), "publish-tail");
-    let measured = open_runtime(object_store, "publish-tail");
+    let measured_read = open_runtime(object_store.clone(), "publish-tail");
+    let measured_publish = open_runtime(object_store, "publish-tail");
 
     setup
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -153,7 +154,10 @@ fn runtime_publish_allows_multi_segment_wal_tail() {
         )
         .expect("seed second WAL segment");
 
-    measured
+    measured_read
+        .stat_path_blocking(&namespace_id, "/seed-a")
+        .expect("read projects the visible WAL tail without a segment limit");
+    measured_publish
         .create_directory_blocking(
             &namespace_id,
             "/should-succeed",
@@ -323,31 +327,6 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     assert_eq!(stats.wal_tail_projection_cache_hits, 0);
     assert_eq!(stats.wal_tail_projection_cache_uncacheable_count, 2);
     assert_eq!(stats.wal_tail_projection_cache_cached_rows, 0);
-}
-
-#[test]
-fn runtime_read_allows_multi_segment_wal_tail() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let fs = open_runtime(store(temp_dir.path()), "tail-read-test");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    fs.create_directory_blocking(
-        &namespace_id,
-        "/docs",
-        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create docs");
-    fs.create_directory_blocking(
-        &namespace_id,
-        "/more",
-        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create another WAL segment");
-
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("read projects the visible WAL tail without a segment limit");
 }
 
 #[test]

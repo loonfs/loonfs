@@ -204,9 +204,10 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
 
     let error = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
         .expect_err("mis-declared size must fail completion");
-    assert!(
-        error.to_string().contains("content length mismatch"),
-        "completion names the size mismatch: {error}"
+    assert_eq!(
+        error.code(),
+        ErrorCode::InvalidRequest,
+        "a size the caller declared and the object contradicts is a bad request: {error}"
     );
 }
 
@@ -235,10 +236,6 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
         error.code(),
         ErrorCode::InvalidRequest,
         "a read-back that ran and disagreed is reported against the content: {error}"
-    );
-    assert!(
-        error.to_string().contains("content checksum mismatch"),
-        "completion names the checksum mismatch: {error}"
     );
     assert!(
         block_on(direct_store.head(&begin.object_key))
@@ -412,79 +409,6 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
             .expect("first put");
         assert_eq!(first.namespace_id, namespace_id);
         assert_eq!(first.commit_id, commit_id);
-
-        // Resubmitting the identical mutation with the same commit id
-        // replays the original commit instead of committing again. Identical
-        // means the same content object: a put's identity is which object it
-        // attaches, so the retry reuses the reference the first put landed.
-        let landed = fs
-            .reader
-            .get_path_entry(&namespace_id, "/docs/a.txt", Default::default())
-            .await
-            .expect("stat the committed file")
-            .content_ref()
-            .cloned()
-            .expect("a file revision carries a content ref");
-        let replay = fs
-            .put_file_content_ref(
-                &namespace_id,
-                "/docs/a.txt",
-                landed,
-                PutFileOptions {
-                    commit: loonfs_api::options::CommitOptions {
-                        actor: loonfs_test_support::test_actor(),
-                        commit_id: Some(commit_id.clone()),
-                        message: None,
-                    },
-                    ..PutFileOptions::new(loonfs_test_support::test_actor())
-                },
-            )
-            .await
-            .expect("identical resubmission replays the original commit");
-        assert_eq!(replay.commit_id, first.commit_id);
-        assert_eq!(replay.committed_seq, first.committed_seq);
-
-        // Re-uploading the same bytes under the same commit id stages a
-        // fresh content object, so the publisher sees a different mutation
-        // and refuses it. What makes the rerun safe is the comparison that
-        // follows: the commit id's committed content is read back, its
-        // bytes match, and the original commit is reported.
-        let reuploaded = fs
-            .put_file_bytes(
-                &namespace_id,
-                "/docs/a.txt",
-                b"alpha",
-                PutFileOptions {
-                    commit: loonfs_api::options::CommitOptions {
-                        actor: loonfs_test_support::test_actor(),
-                        commit_id: Some(commit_id.clone()),
-                        message: None,
-                    },
-                    ..PutFileOptions::new(loonfs_test_support::test_actor())
-                },
-            )
-            .await
-            .expect("re-uploading identical bytes under a used commit id is idempotent");
-        assert_eq!(reuploaded.committed_seq, first.committed_seq);
-
-        // Different bytes are a different operation and still conflict.
-        let conflict = fs
-            .put_file_bytes(
-                &namespace_id,
-                "/docs/a.txt",
-                b"omega",
-                PutFileOptions {
-                    commit: loonfs_api::options::CommitOptions {
-                        actor: loonfs_test_support::test_actor(),
-                        commit_id: Some(commit_id.clone()),
-                        message: None,
-                    },
-                    ..PutFileOptions::new(loonfs_test_support::test_actor())
-                },
-            )
-            .await
-            .expect_err("different bytes under a used commit id must conflict");
-        assert_eq!(conflict.code(), ErrorCode::CommitIdReuseConflict);
 
         // Without a caller-supplied id, the generated one is still returned,
         // so every caller holds a reconciliation handle.

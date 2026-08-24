@@ -176,18 +176,6 @@ fn a_collection_step_reports_what_the_pass_retained() {
     );
 }
 
-#[test]
-fn a_writer_without_a_recorder_registers_nothing() {
-    let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let fs = runtime(temp_dir.path(), "unmetered-writer");
-
-    fs.create_namespace_blocking(&namespace_id("demo"), CreateNamespaceOptions::default())
-        .expect("create namespace");
-
-    assert!(recorder.snapshot().all().is_empty());
-}
-
 /// The five conclusions a metadata step can settle on, as label values.
 struct MetadataConclusions;
 

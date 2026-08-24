@@ -165,7 +165,7 @@ fn a_snapshot_orders_entries_by_name_then_labels() {
 }
 
 #[test]
-fn the_noop_recorder_keeps_nothing() {
+fn registering_on_the_noop_recorder_does_not_panic() {
     let recorder = NoopMetricsRecorder;
     recorder
         .register_counter("loonfs.test.calls", "Calls", &[])

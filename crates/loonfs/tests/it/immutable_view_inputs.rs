@@ -1,6 +1,4 @@
-//! A namespace's immutable view input — the manifest object its head
-//! resolves to — is loaded once per handle, not once per operation. These
-//! tests pin that a warm handle stops re-fetching it entirely.
+//! Immutable view inputs are cached once per handle.
 
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
@@ -60,7 +58,7 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
 }
 
 #[tokio::test]
-async fn warm_reader_stops_fetching_immutable_view_inputs() {
+async fn warm_handles_stop_fetching_immutable_view_inputs() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -95,18 +93,6 @@ async fn warm_reader_stops_fetching_immutable_view_inputs() {
         "a warm handle must not re-fetch the namespace config, the \
          content-store descriptor, or the manifest object"
     );
-}
-
-#[tokio::test]
-async fn warm_writer_stops_fetching_immutable_view_inputs() {
-    let temp_dir = tempdir().expect("tempdir");
-    let recording = Arc::new(RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::any(),
-    ));
-    let store: SharedObjectStore = recording.clone();
-    let namespace_id = NamespaceId::parse("pins").expect("valid namespace id");
-    build_namespace(&store, &namespace_id).await;
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("warm-writer")

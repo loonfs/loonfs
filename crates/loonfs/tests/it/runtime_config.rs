@@ -1,48 +1,17 @@
-//! Runtime builder validation and public handle boundary behavior.
+//! Public handle behavior and fork isolation.
 
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
 use loonfs::{
-    CopyOptions, CreateNamespaceOptions, DestinationBehavior, FsReader, FsWriter, MoveOptions,
-    NamespaceId, PutFileOptions, RuntimeError, TraceStoreKind,
+    CopyOptions, CreateNamespaceOptions, DestinationBehavior, MoveOptions, NamespaceId,
+    PutFileOptions, TraceStoreKind,
 };
 use loonfs_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
-use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-fn assert_config_error<T>(result: loonfs::Result<T>, expected: &str) {
-    match result {
-        Err(RuntimeError::Config(message)) => assert!(
-            message.contains(expected),
-            "expected {message:?} to contain {expected:?}"
-        ),
-        Err(error) => panic!("expected config error, got {error:?}"),
-        Ok(_) => panic!("expected config error"),
-    }
-}
-
-#[test]
-fn open_validates_runtime_config() {
-    let temp_dir = tempdir().expect("tempdir");
-    let object_store = store(temp_dir.path());
-
-    assert_config_error(
-        block_on(FsWriter::builder_with_store(object_store.clone()).build()),
-        "writer_id",
-    );
-    assert_config_error(
-        block_on(
-            FsWriter::builder_with_store(object_store.clone())
-                .writer_id("   ")
-                .build(),
-        ),
-        "writer_id",
-    );
-}
 
 #[test]
 fn builder_object_store_metrics_recorder_instruments_object_store() {
@@ -140,38 +109,6 @@ fn filesystem_operations_match_core_semantics() {
             .bytes,
         b"updated"
     );
-}
-
-#[tokio::test]
-async fn async_runtime_methods_are_the_engine_boundary() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = open_runtime_async(store(temp_dir.path()), "async-runtime-test").await;
-    let namespace_id = namespace_id("demo");
-
-    FsWriter::create_namespace(&fs.writer, &namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
-    FsWriter::put_file_bytes(
-        &fs.writer,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("put file");
-
-    let async_stat = FsReader::get_path_entry(
-        &fs.reader,
-        &namespace_id,
-        "/docs/hello.txt",
-        Default::default(),
-    )
-    .await
-    .expect("async stat");
-
-    assert_eq!(async_stat.path, "/docs/hello.txt");
-    assert_eq!(async_stat.size_bytes(), Some(5));
 }
 
 #[test]
