@@ -169,7 +169,7 @@ fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unreachable)]
-    // The stub store below serves one ranged read and reaches nothing else.
+    // Only `get` is used by this test store.
 
     use super::{load_index_section_bytes, BlockHandle, GrepError};
     use bytes::Bytes;

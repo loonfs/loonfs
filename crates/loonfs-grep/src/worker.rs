@@ -81,8 +81,7 @@ const MAX_GREP_WORKER_IO: usize = 8;
 const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
-/// Mid-level runs that trigger a fold into a fresh base run. Grep owns this
-/// trigger so a change to the metadata reorganization input cap cannot move it.
+// Keep grep's fold threshold independent of metadata reorganization limits.
 const GREP_MAX_MID_RUNS: usize = 8;
 
 /// Writer-side budgets for one grep build or reorganize step.
