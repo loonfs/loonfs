@@ -26,6 +26,19 @@ pub(super) fn server_busy_error(what: &str) -> ApiResponseError {
     )
 }
 
+pub(super) fn acquire_download_permit(
+    state: &AppState,
+) -> Result<OwnedSemaphorePermit, ApiResponseError> {
+    state
+        .download_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            state.metrics.download_rejected_as_busy();
+            server_busy_error("proxied content reads")
+        })
+}
+
 pub(super) fn authorize(
     policy: AuthPolicy<'_>,
     headers: &HeaderMap,

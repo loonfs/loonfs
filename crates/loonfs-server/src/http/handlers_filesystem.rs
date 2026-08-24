@@ -6,7 +6,9 @@ use super::error::ApiResponseError;
 use super::handlers_uploads::{
     content_preparation_for_puts, current_unix_ms, ContentTokenVerifier, PutContentPreparation,
 };
-use super::{authorize, AppJson, AppQuery, AppState, NamespaceIdPath, NoQuery};
+use super::{
+    acquire_download_permit, authorize, AppJson, AppQuery, AppState, NamespaceIdPath, NoQuery,
+};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -315,22 +317,13 @@ pub(super) async fn get_file_bytes(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
-    // Content reads buffer the whole file, so the permit must follow those
-    // bytes through the response body rather than ending with this handler.
-    let permit = state
-        .download_permits
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| {
-            state.metrics.download_rejected_as_busy();
-            super::server_busy_error("proxied content reads")
-        })?;
     let path = required_query_param(query.path, "path")?;
     let revision_no = query
         .revision_no
         .as_deref()
         .map(parse_revision_no)
         .transpose()?;
+    let permit = acquire_download_permit(&state)?;
     let file = match revision_no {
         Some(revision_no) => {
             state

@@ -152,10 +152,10 @@ pub(super) struct AppState {
     /// do. Absent under `maintenance = "manual"`, where the mutating index
     /// routes still work and nothing schedules itself behind them.
     pub(super) grep_maintenance: Option<GrepMaintenance>,
-    /// Bounds concurrently buffered proxied-upload bodies; with the
-    /// per-request body limit this makes worst-case upload memory
-    /// `max_concurrent_uploads * max_upload_bytes`. Requests past the cap
-    /// answer 503 `server_busy` before any buffering.
+    /// Bounds concurrently streamed proxied-upload bodies; bodies forward to
+    /// the store incrementally, so worst-case upload memory is this times one
+    /// streamed part. Requests past the cap answer 503 `server_busy` before
+    /// any transfer.
     pub(super) upload_permits: Arc<Semaphore>,
     /// Bounds concurrently materialized proxied content reads the same way:
     /// worst-case download memory is

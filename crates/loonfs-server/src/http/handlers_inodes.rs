@@ -5,7 +5,9 @@ use super::handlers_filesystem::{
     buffered_download_response, decode_optional_cursor, parse_include_attributes,
     parse_revision_no, resolve_page_limit, PageQuery,
 };
-use super::{authorize, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
+use super::{
+    acquire_download_permit, authorize, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery,
+};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
@@ -183,14 +185,7 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     query.into_params()?;
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
-    let permit = state
-        .download_permits
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| {
-            state.metrics.download_rejected_as_busy();
-            super::server_busy_error("proxied content reads")
-        })?;
+    let permit = acquire_download_permit(&state)?;
     let bytes = state
         .reader
         .get_file_revision_bytes_by_inode(&namespace_id, inode_id, revision_no)
