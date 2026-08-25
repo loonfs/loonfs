@@ -2,6 +2,10 @@
 
 #![allow(dead_code)]
 #![allow(clippy::panic)]
+#![allow(
+    clippy::result_large_err,
+    reason = "test helpers preserve the client's structured error type"
+)]
 
 use loonfs_api::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use loonfs_client::{Client, ClientConfig, ListPathEntriesOptions, NamespacePath};
