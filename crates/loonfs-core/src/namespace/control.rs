@@ -2,8 +2,8 @@
 //! and WAL floor.
 
 use crate::control_object::{
-    expect_foreign_fork_basis, expect_namespace, expect_own_manifest, load_coherent,
-    load_control_object, ControlObjectLoadError, LoadedControl,
+    expect_foreign_fork_basis, expect_namespace, expect_own_manifest, load_control_object,
+    reload_until_consistent, ControlObjectLoadError, LoadedControl,
 };
 use crate::namespace::basis::{load_head_and_metadata_basis, MetadataBasis};
 use loonfs_api::wire::control::{ControlObjectKind, HeadState, MetadataRootState, WalFloorState};
@@ -86,28 +86,26 @@ pub(crate) async fn load_head_and_metadata_root_if_present<S: ObjectStore + ?Siz
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<(LoadedHeadObject, Option<LoadedMetadataRootObject>), ControlObjectLoadError> {
-    load_coherent(
-        || async {
-            let (head, root) = futures::join!(
-                load_head_object(store, expected_namespace_id),
-                load_metadata_root_object_if_present(store, expected_namespace_id)
-            );
-            Ok((head?, root?))
-        },
-        |(head, root): &(LoadedHeadObject, Option<LoadedMetadataRootObject>)| {
-            root.as_ref()
-                .is_none_or(|root| root.state.manifest.manifest_head_seq <= head.state.seq)
-        },
-        |(head, root)| ControlObjectLoadError::RootAheadOfHead {
-            root_manifest_head_seq: root
-                .expect("an incoherent read carries a root")
-                .state
-                .manifest
-                .manifest_head_seq,
+    let (head, root) = futures::join!(
+        load_head_object(store, expected_namespace_id),
+        load_metadata_root_object_if_present(store, expected_namespace_id)
+    );
+    let head = head?;
+    let Some(root) = root? else {
+        return Ok((head, None));
+    };
+    let root_seq = root.state.manifest.manifest_head_seq;
+    let head = reload_until_consistent(
+        head,
+        || load_head_object(store, expected_namespace_id),
+        |head| root_seq <= head.state.seq,
+        |head| ControlObjectLoadError::RootAheadOfHead {
+            root_manifest_head_seq: root_seq,
             head_seq: head.state.seq,
         },
     )
-    .await
+    .await?;
+    Ok((head, Some(root)))
 }
 
 pub(crate) async fn load_head_object<S: ObjectStore + ?Sized>(

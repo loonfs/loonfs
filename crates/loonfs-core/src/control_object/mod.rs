@@ -6,5 +6,5 @@ mod load;
 pub use error::ControlObjectLoadError;
 pub(crate) use load::{
     expect_foreign_fork_basis, expect_identity_field, expect_namespace, expect_own_manifest,
-    load_coherent, load_control_object, LoadedControl,
+    load_control_object, reload_until_consistent, LoadedControl, CONTROL_READ_RELOADS,
 };

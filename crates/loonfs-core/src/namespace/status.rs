@@ -1,7 +1,7 @@
 //! Reads namespace state and storage diagnostics.
 
 use crate::checkpoint::load_namespace_manifest_envelope;
-use crate::control_object::load_coherent;
+use crate::control_object::{reload_until_consistent, ControlObjectLoadError};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::{
@@ -83,16 +83,16 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadBasis> {
-    load_coherent(
+    let loaded = load_namespace_head_basis_once(store, expected_namespace_id).await?;
+    reload_until_consistent(
+        loaded,
         || load_namespace_head_basis_once(store, expected_namespace_id),
         |loaded: &LoadedHeadBasis| loaded.retention_floor_seq <= loaded.head.seq,
         |loaded| {
-            CoreError::ControlObjectLoad(
-                crate::control_object::ControlObjectLoadError::FloorAheadOfHead {
-                    floor_seq: loaded.retention_floor_seq,
-                    head_seq: loaded.head.seq,
-                },
-            )
+            CoreError::ControlObjectLoad(ControlObjectLoadError::FloorAheadOfHead {
+                floor_seq: loaded.retention_floor_seq,
+                head_seq: loaded.head.seq,
+            })
         },
     )
     .await

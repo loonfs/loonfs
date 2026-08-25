@@ -5,10 +5,12 @@
 //! the first flush. A fork basis must match the identity and checksum stored
 //! in the head.
 
-use crate::control_object::{load_coherent, ControlObjectLoadError};
+use crate::control_object::{
+    reload_until_consistent, ControlObjectLoadError, CONTROL_READ_RELOADS,
+};
 use crate::namespace::control::{
     load_head_and_metadata_root_if_present, load_head_object, load_wal_floor_object,
-    LoadedHeadObject, LoadedMetadataRootObject,
+    LoadedHeadObject,
 };
 use loonfs_api::wire::control::{HeadState, ManifestRef};
 use loonfs_api::NamespaceId;
@@ -93,58 +95,32 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<LoadedNamespaceBasis, ControlObjectLoadError> {
-    // A missing floor means this namespace has never advanced retention, so
-    // genesis or the fork source is still a complete recovery basis. An
-    // advanced floor proves a root was published: a read with no root is
-    // coherent only below the floor, and one that never converges means the
-    // root was lost and replay is no longer authority.
-    enum RootObservation {
-        WithRoot(LoadedHeadObject, LoadedMetadataRootObject),
-        NoRoot(LoadedHeadObject, ChangeSeq),
-    }
-    impl RootObservation {
-        fn missing_root_floor(&self) -> Option<ChangeSeq> {
-            match self {
-                Self::WithRoot(..) => None,
-                Self::NoRoot(_, floor_seq) => Some(*floor_seq),
-            }
+    let mut reloads = 0;
+    loop {
+        let (head, root) = load_head_and_metadata_root_if_present(store, namespace_id).await?;
+        if let Some(root) = root {
+            return Ok(LoadedNamespaceBasis {
+                head,
+                basis: MetadataBasis::Manifest(root.state.manifest),
+            });
         }
-    }
-    let observed = load_coherent(
-        || async {
-            let (head, root) = load_head_and_metadata_root_if_present(store, namespace_id).await?;
-            match root {
-                Some(root) => Ok(RootObservation::WithRoot(head, root)),
-                None => {
-                    let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
-                    Ok(RootObservation::NoRoot(head, floor_seq))
-                }
-            }
-        },
-        |observed| match observed {
-            RootObservation::WithRoot(..) => true,
-            RootObservation::NoRoot(head, floor_seq) => {
-                *floor_seq <= namespace_birth_seq(&head.state)
-            }
-        },
-        |observed| ControlObjectLoadError::MissingRootAfterFloor {
-            namespace_id: namespace_id.clone(),
-            floor_seq: observed
-                .missing_root_floor()
-                .expect("only a rootless read can be incoherent"),
-        },
-    )
-    .await?;
-    Ok(match observed {
-        RootObservation::WithRoot(head, root) => LoadedNamespaceBasis {
-            head,
-            basis: MetadataBasis::Manifest(root.state.manifest),
-        },
-        RootObservation::NoRoot(head, _) => {
+
+        // At the birth sequence, genesis or the fork source is still a complete
+        // basis. A later floor proves a root was published, so retry before
+        // reporting it missing.
+        let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
+        if floor_seq <= namespace_birth_seq(&head.state) {
             let basis = metadata_basis_without_root(&head.state);
-            LoadedNamespaceBasis { head, basis }
+            return Ok(LoadedNamespaceBasis { head, basis });
         }
-    })
+        if reloads == CONTROL_READ_RELOADS {
+            return Err(ControlObjectLoadError::MissingRootAfterFloor {
+                namespace_id: namespace_id.clone(),
+                floor_seq,
+            });
+        }
+        reloads += 1;
+    }
 }
 
 /// Resolves the basis of a namespace whose `metadata/root.json` is absent:
@@ -197,17 +173,17 @@ pub(crate) async fn load_head_and_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<(LoadedHeadObject, ChangeSeq), ControlObjectLoadError> {
-    load_coherent(
-        || async {
-            let head = load_head_object(store, namespace_id).await?;
-            let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
-            Ok((head, floor_seq))
-        },
-        |(head, floor_seq): &(LoadedHeadObject, ChangeSeq)| *floor_seq <= head.state.seq,
-        |(head, floor_seq)| ControlObjectLoadError::FloorAheadOfHead {
+    let head = load_head_object(store, namespace_id).await?;
+    let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
+    let head = reload_until_consistent(
+        head,
+        || load_head_object(store, namespace_id),
+        |head| floor_seq <= head.state.seq,
+        |head| ControlObjectLoadError::FloorAheadOfHead {
             floor_seq,
             head_seq: head.state.seq,
         },
     )
-    .await
+    .await?;
+    Ok((head, floor_seq))
 }

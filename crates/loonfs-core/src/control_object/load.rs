@@ -15,35 +15,29 @@ pub(crate) struct LoadedControl<T> {
     pub(crate) state: T,
 }
 
-/// Reads state assembled from control objects that advance independently,
-/// reloading until one read is coherent.
-///
-/// The objects have no shared snapshot, so two reads can straddle a write and
-/// observe a pair that never existed together. Every such observation site
-/// declares its coherence rule here and reloads through this one bound; a
-/// read that never converges returns the site's incoherence error instead of
-/// escaping as an impossible snapshot.
-pub(crate) async fn load_coherent<T, E, F, Fut>(
-    mut load: F,
-    coherent: impl Fn(&T) -> bool,
-    incoherent: impl FnOnce(T) -> E,
+pub(crate) const CONTROL_READ_RELOADS: usize = 3;
+
+/// Reloads a value until it is consistent or the retry limit is reached.
+pub(crate) async fn reload_until_consistent<T, E, F, Fut>(
+    mut loaded: T,
+    mut reload: F,
+    is_consistent: impl Fn(&T) -> bool,
+    on_exhausted: impl FnOnce(T) -> E,
 ) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
-    const COHERENCE_RELOADS: usize = 3;
-    let mut loaded = load().await?;
-    for _reload in 0..COHERENCE_RELOADS {
-        if coherent(&loaded) {
-            return Ok(loaded);
-        }
-        loaded = load().await?;
-    }
-    if coherent(&loaded) {
+    if is_consistent(&loaded) {
         return Ok(loaded);
     }
-    Err(incoherent(loaded))
+    for _ in 0..CONTROL_READ_RELOADS {
+        loaded = reload().await?;
+        if is_consistent(&loaded) {
+            return Ok(loaded);
+        }
+    }
+    Err(on_exhausted(loaded))
 }
 
 pub(crate) enum EmbeddedIdentityMismatch {
