@@ -4,7 +4,9 @@
 use crate::error::CoreError;
 #[cfg(any(test, feature = "test-support"))]
 use crate::namespace::catalog::load_namespace_content_store_id;
+#[cfg(any(test, feature = "test-support"))]
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+#[cfg(any(test, feature = "test-support"))]
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -88,16 +90,30 @@ pub enum DurableContentValidationError {
     Store { object_key: String, message: String },
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<(), DurableContentValidationError> {
+    load_durable_content_bytes_for_import(store, content_store_id, content_ref)
+        .await
+        .map(|_| ())
+}
+
+/// Loads and verifies an existing object before copying it under new
+/// namespace-owned content identity.
+pub(crate) async fn load_durable_content_bytes_for_import<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    content_ref: &ContentRef,
+) -> Result<Vec<u8>, DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
     validate_content_size(store, &object_key, content_ref).await?;
 
     let bytes = load_required_object(store, &object_key).await?;
-    validate_loaded_content_bytes(object_key, content_ref, &bytes)
+    validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
+    Ok(bytes)
 }
 
 /// Prepares content from an acknowledged LoonFS-managed durable write.
@@ -119,7 +135,11 @@ pub fn prepare_stored_content(
     }
     let content_store_id = stored_content.content_store_id;
     let content_ref = stored_content.content_ref;
-    let admission = ContentAdmission::for_durable_content_write(content_store_id, content_ref);
+    let admission = ContentAdmission::for_durable_content_write(
+        catalog.namespace_id().clone(),
+        content_store_id,
+        content_ref,
+    );
     Ok(PreparedContent::from_admission(admission))
 }
 
@@ -127,6 +147,7 @@ pub fn prepare_stored_content(
 ///
 /// The verified catalog selects the store to validate. This performs one
 /// object HEAD followed by one full GET and checksum check.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
@@ -134,8 +155,11 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
 ) -> Result<PreparedContent, DurableContentValidationError> {
     let content_store_id = catalog.content_store_id();
     validate_durable_content_reference(store, content_store_id, &content_ref).await?;
-    let admission =
-        ContentAdmission::for_durable_content_write(content_store_id.clone(), content_ref);
+    let admission = ContentAdmission::for_durable_content_write(
+        catalog.namespace_id().clone(),
+        content_store_id.clone(),
+        content_ref,
+    );
     Ok(PreparedContent::from_admission(admission))
 }
 

@@ -263,7 +263,7 @@ async fn put_file_content_ref_validates_content_before_publication() {
         .await
         .expect("publish content ref");
 
-    assert_content_counts(harness.recording.snapshot(), 1, 1, 0, bytes.len());
+    assert_content_counts(harness.recording.snapshot(), 1, 1, 1, bytes.len());
 }
 
 #[tokio::test]
@@ -357,7 +357,7 @@ async fn prepared_content_for_another_store_is_rejected_without_content_io() {
 }
 
 #[tokio::test]
-async fn independent_namespaces_sharing_a_store_share_prepared_content() {
+async fn independent_namespaces_sharing_a_store_reject_each_others_prepared_content() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = RequestLog::new(temp_dir.path());
     let store = recording.store();
@@ -387,7 +387,8 @@ async fn independent_namespaces_sharing_a_store_share_prepared_content() {
         .expect("prepare through source namespace");
     recording.reset();
 
-    writer
+    let content_ref = prepared.content_ref().clone();
+    let error = writer
         .put_file_prepared(
             &target,
             "/shared.txt",
@@ -395,13 +396,14 @@ async fn independent_namespaces_sharing_a_store_share_prepared_content() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
-        .expect("shared-store target accepts source proof");
+        .expect_err("shared-store target must reject source proof");
 
+    assert_content_not_prepared(error, &content_ref);
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 }
 
 #[tokio::test]
-async fn fork_and_source_share_prepared_content_in_both_directions() {
+async fn fork_and_source_reject_each_others_prepared_content() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = RequestLog::new(temp_dir.path());
     let store = recording.store();
@@ -426,7 +428,8 @@ async fn fork_and_source_share_prepared_content_in_both_directions() {
         .expect("warm fork catalog");
     recording.reset();
 
-    writer
+    let source_content_ref = prepared_for_fork.content_ref().clone();
+    let error = writer
         .put_file_prepared(
             &fork,
             "/from-source.txt",
@@ -434,7 +437,8 @@ async fn fork_and_source_share_prepared_content_in_both_directions() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
-        .expect("fork accepts source proof");
+        .expect_err("fork must reject source proof");
+    assert_content_not_prepared(error, &source_content_ref);
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 
     let prepared_for_source = writer
@@ -442,7 +446,8 @@ async fn fork_and_source_share_prepared_content_in_both_directions() {
         .await
         .expect("prepare through fork namespace");
     recording.reset();
-    writer
+    let fork_content_ref = prepared_for_source.content_ref().clone();
+    let error = writer
         .put_file_prepared(
             &source,
             "/from-fork.txt",
@@ -450,7 +455,8 @@ async fn fork_and_source_share_prepared_content_in_both_directions() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
-        .expect("source accepts fork proof");
+        .expect_err("source must reject fork proof");
+    assert_content_not_prepared(error, &fork_content_ref);
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 }
 
@@ -463,11 +469,18 @@ async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing()
 
     let prepared = harness
         .writer
-        .prepare_content_ref(&harness.namespace_id, content_ref)
+        .prepare_content_ref(&harness.namespace_id, content_ref.clone())
         .await
         .expect("prepare content ref");
 
-    assert_content_counts(harness.recording.snapshot(), 1, 1, 0, bytes.len());
+    assert_ne!(
+        prepared.content_ref().content_id,
+        content_ref.content_id,
+        "import must mint a target-owned content identity"
+    );
+    assert_eq!(prepared.content_ref().checksum, content_ref.checksum);
+    assert_eq!(prepared.content_ref().size_bytes, content_ref.size_bytes);
+    assert_content_counts(harness.recording.snapshot(), 1, 1, 1, bytes.len());
     harness.recording.reset();
 
     harness

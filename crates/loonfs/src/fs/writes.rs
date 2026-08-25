@@ -7,7 +7,7 @@ use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::FsWriter;
 use crate::{
-    ChangeSeq, CommitId, CommitOptions, CommitResponse, ContentRef, CopyOptions, CoreError,
+    ChangeSeq, CommitId, CommitOptions, CommitResponse, ContentRef, CopyOptions,
     CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, NamespaceId, PutFileOptions,
     RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAttributesOptions,
 };
@@ -405,11 +405,13 @@ impl FsWriter {
         .await
     }
 
-    /// Publishes a file revision that points at an already-durable content ref.
+    /// Publishes a file revision from an already-durable content ref.
     ///
-    /// This explicitly slow helper reads the full object to prove durability
-    /// before publication. Callers that already hold proof should prefer
-    /// [`Self::put_file_prepared`].
+    /// This explicitly slow helper reads and verifies the full source object,
+    /// then stages a fresh copy owned by this namespace before publication.
+    /// Callers that already hold same-namespace proof should prefer
+    /// [`Self::put_file_prepared`]. The published revision points at the fresh
+    /// prepared ref, not the input ref.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.put",
@@ -446,13 +448,13 @@ impl FsWriter {
             .await
     }
 
-    /// Fully validates an existing content ref for later publication.
+    /// Imports an existing content ref for later publication.
     ///
-    /// Preparation performs one content HEAD followed by one full content
-    /// GET and digest check. Later prepared publication performs no content
-    /// I/O. The proof asserts binding, not longevity: it stays safe only
-    /// while an existing revision keeps the ref referenced, since only
-    /// unreferenced content is ever reclaimed.
+    /// Preparation performs one content HEAD, one full GET and digest check,
+    /// and one content PUT under a fresh identity owned by this namespace.
+    /// Later prepared publication performs no content I/O. The returned
+    /// prepared ref therefore differs from the input ref while describing the
+    /// same bytes.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.prepare",
@@ -492,13 +494,10 @@ impl FsWriter {
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
-        Ok(loonfs_core::content::prepare_existing_content_ref(
-            &self.core.inner.store,
-            &catalog,
-            content_ref,
-        )
-        .await
-        .map_err(CoreError::from)?)
+        Ok(self
+            .engine(namespace_id)
+            .import_content_ref(&catalog, &content_ref)
+            .await?)
     }
 
     /// Verifies an authorized content token against the namespace's durable

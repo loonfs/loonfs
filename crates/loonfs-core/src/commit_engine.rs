@@ -638,6 +638,7 @@ mod tests {
 
         let content_ref = ContentRef::blob_v1(ContentId::generate(), b"proof");
         let admission = ContentAdmission::for_durable_content_write(
+            namespace_id.clone(),
             ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id"),
             content_ref,
         );

@@ -885,10 +885,13 @@ Identity is namespace-local. A true inode-preserving rename is therefore
 namespace-local as well.
 
 Across namespaces, a move is modeled as a copy plus a delete from the source
-namespace. Same-content-store copies may reuse `content_ref`. Cross-content-
-store copies are not supported in v0 unless the content is first imported into
-the destination content store. Inode identity does not cross the namespace
-boundary.
+namespace. Sharing a content store does not by itself authorize reuse of a
+`content_ref`: each namespace's collector sees only its own metadata roots and
+upload sessions. A fork may keep refs already reachable through its pinned
+basis. Other copies re-home the bytes under a fresh destination-owned content
+identity unless a future protocol installs a durable source-side root first.
+Cross-content-store copies likewise require import into the destination
+content store. Inode identity does not cross the namespace boundary.
 
 ### 2.9 Recovery view
 
@@ -2475,9 +2478,11 @@ publishing CAS) — under these rules:
    Batch admission checks the deadline again, so the same inequality covers
    both local proofs and remote tokens. The reasoning above assumes a content
    object is referenced only by the namespace whose session created it and by
-   fork descendants reading through a pinned basis; a same-content-store copy
-   across namespaces (section 2.8) would have to root the reference on the
-   source side the way a fork does.
+   fork descendants reading through a pinned basis. Prepared evidence is
+   therefore namespace-bound even when catalogs share a content store, and an
+   embedded raw-ref import (section 2.8) writes the verified bytes under a
+   fresh destination-owned identity. A future identity-preserving copy would
+   have to root the reference on the source side the way a fork does.
 12. **A compaction job's objects are decided by its lease.** A streaming
    compaction ("Compaction") publishes nothing until it finishes and is paced
    by no budget, so its output is unreferenced for as long as the job runs.

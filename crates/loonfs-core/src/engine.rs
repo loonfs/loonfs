@@ -18,7 +18,7 @@ use crate::protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
     MultipartPartTargets, ResolvedUploadCompletion,
 };
-use crate::storage::content::FileContentStream;
+use crate::storage::content::{load_durable_content_bytes_for_import, FileContentStream};
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use crate::time::current_time_ms;
 use loonfs_api::options::{DirectMultipartUploadOptions, ListPathEntriesOptions, StatPathOptions};
@@ -742,6 +742,29 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.mutation_context()?,
         )
         .await
+    }
+
+    /// Imports an existing object under a fresh identity owned by this
+    /// namespace.
+    ///
+    /// A content reference locates bytes but does not identify the namespace
+    /// whose upload session keeps them alive. This reads and verifies the
+    /// complete source object, then stages those bytes through a new local
+    /// upload session so collection in the source namespace cannot invalidate
+    /// a later publication here.
+    pub async fn import_content_ref(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        content_ref: &ContentRef,
+    ) -> Result<PreparedContent> {
+        let catalog = self.own_catalog(catalog)?;
+        let bytes = load_durable_content_bytes_for_import(
+            &self.store,
+            catalog.content_store_id(),
+            content_ref,
+        )
+        .await?;
+        self.stage_owned_bytes(catalog, &bytes).await
     }
 
     /// Stages a streamed payload as content a session owns, hashing it on

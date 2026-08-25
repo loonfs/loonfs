@@ -142,6 +142,7 @@ mod tests {
         content_ref: loonfs_api::ContentRef,
     ) -> CommitCandidate {
         let admission = ContentAdmission::for_durable_content_write(
+            NamespaceId::parse("demo").expect("namespace id"),
             content_store_id.clone(),
             content_ref.clone(),
         );

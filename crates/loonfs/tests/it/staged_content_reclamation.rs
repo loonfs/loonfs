@@ -202,6 +202,69 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
 }
 
 #[tokio::test]
+async fn imported_content_survives_collection_in_the_source_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = store(temp_dir.path());
+    let runtime = open_runtime_async(store.clone(), "content-import").await;
+    let source = namespace(&runtime).await;
+    let target = NamespaceId::parse("target").expect("valid namespace id");
+    runtime
+        .writer
+        .fork_namespace(&source, &target)
+        .await
+        .expect("fork namespace");
+
+    let source_prepared = runtime
+        .writer
+        .prepare_file_bytes(&source, b"owned by the target after import")
+        .await
+        .expect("prepare source content");
+    let source_ref = source_prepared.content_ref().clone();
+    let source_key = content_key(&store, &source, &source_ref).await;
+    let imported = runtime
+        .writer
+        .prepare_content_ref(&target, source_ref)
+        .await
+        .expect("import source content");
+    let imported_ref = imported.content_ref().clone();
+    let imported_key = content_key(&store, &target, &imported_ref).await;
+    assert_ne!(
+        source_key, imported_key,
+        "import must mint a fresh identity"
+    );
+
+    runtime
+        .writer
+        .put_file_prepared(
+            &target,
+            "/imported.txt",
+            imported,
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("publish imported content");
+
+    let after_reclamation =
+        loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_MS + 1;
+    let source_report = collect(&store, &source, after_reclamation).await;
+    assert_eq!(source_report.deleted.content_objects, 1);
+    assert!(!exists(&store, &source_key).await);
+
+    let target_report = collect(&store, &target, after_reclamation).await;
+    assert_eq!(target_report.deleted.content_objects, 0);
+    assert!(exists(&store, &imported_key).await);
+    assert_eq!(
+        runtime
+            .reader
+            .get_file_bytes(&target, "/imported.txt")
+            .await
+            .expect("read imported file")
+            .bytes,
+        b"owned by the target after import"
+    );
+}
+
+#[tokio::test]
 async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survives() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());

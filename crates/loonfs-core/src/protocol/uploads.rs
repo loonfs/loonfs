@@ -1219,6 +1219,7 @@ fn completed_upload(
             status: completed_status(content_ref, completed_at_ms),
         },
         prepared: PreparedContent::from_admission(ContentAdmission::for_completed_upload(
+            namespace_id.clone(),
             content_store_id.clone(),
             content_ref.clone(),
             completed_at_ms.saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS),

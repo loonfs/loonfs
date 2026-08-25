@@ -147,6 +147,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             // whole request has planned and validated.
             if let Err(error) = validate_commit_content_references(
                 candidate,
+                namespace_id,
                 view.content_store_id(),
                 context.now_ms,
             ) {
