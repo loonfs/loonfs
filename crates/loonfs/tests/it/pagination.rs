@@ -5,7 +5,8 @@
 
 use crate::common::*;
 use loonfs::{
-    CreateNamespaceOptions, DestinationBehavior, ErrorCode, PageRequest, PathEntry, PutFileOptions,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
+    DestinationBehavior, ErrorCode, InodeId, MoveOptions, PageRequest, PathEntry, PutFileOptions,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::{namespace_id, page_limit};
@@ -501,4 +502,421 @@ fn directory_cursor_rejects_path_inode_mismatch() {
         )),
         ErrorCode::InvalidRequest,
     );
+}
+
+#[test]
+fn inode_children_pages_stay_on_the_renamed_directory() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-rename-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
+    }
+    let docs = fs
+        .stat_path_blocking(&namespace_id, "/docs")
+        .expect("stat listed directory");
+
+    let mut pager = fs.reader.list_inode_children_pager(
+        &namespace_id,
+        docs.inode_id,
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+        Default::default(),
+    );
+    let first = block_on(pager.next())
+        .expect("first page exists")
+        .expect("first page succeeds");
+    assert_eq!(display_names(&first.entries), vec!["a.txt", "b.txt"]);
+    assert_eq!(first.parent_inode_id, docs.inode_id);
+
+    fs.move_path_blocking(
+        &namespace_id,
+        "/docs",
+        "/renamed",
+        MoveOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("rename the listed directory between pages");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/decoy.txt",
+        b"decoy",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("rebind the old path to a fresh directory");
+
+    let second = block_on(pager.next())
+        .expect("second page exists")
+        .expect("second page resumes after the rename");
+    assert_eq!(display_names(&second.entries), vec!["c.txt"]);
+    assert_eq!(second.parent_inode_id, docs.inode_id);
+    assert_eq!(second.entries[0].path.as_str(), "/renamed/c.txt");
+    assert!(block_on(pager.next()).is_none());
+}
+
+#[test]
+fn inode_children_pages_follow_the_directory_to_a_new_ancestor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-move-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in [
+        "/left/docs/a.txt",
+        "/left/docs/b.txt",
+        "/left/docs/c.txt",
+        "/right/keep.txt",
+    ] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
+    }
+    let docs = fs
+        .stat_path_blocking(&namespace_id, "/left/docs")
+        .expect("stat listed directory");
+
+    let mut pager = fs.reader.list_inode_children_pager(
+        &namespace_id,
+        docs.inode_id,
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+        Default::default(),
+    );
+    let first = block_on(pager.next())
+        .expect("first page exists")
+        .expect("first page succeeds");
+    assert_eq!(display_names(&first.entries), vec!["a.txt", "b.txt"]);
+
+    fs.move_path_blocking(
+        &namespace_id,
+        "/left/docs",
+        "/right/docs",
+        MoveOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("move the listed directory under a different ancestor");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/left/docs/decoy.txt",
+        b"decoy",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("rebind the old path to a fresh directory");
+
+    let second = block_on(pager.next())
+        .expect("second page exists")
+        .expect("second page resumes after the move");
+    assert_eq!(display_names(&second.entries), vec!["c.txt"]);
+    assert_eq!(second.parent_inode_id, docs.inode_id);
+    assert_eq!(second.entries[0].path.as_str(), "/right/docs/c.txt");
+    assert!(block_on(pager.next()).is_none());
+}
+
+#[test]
+fn inode_children_rejects_files_and_missing_inodes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-target-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/a.txt",
+        b"a",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("put file");
+    let file = fs
+        .stat_path_blocking(&namespace_id, "/docs/a.txt")
+        .expect("stat file");
+
+    assert_core_error_kind(
+        block_on(fs.list_inode_children_page(
+            &namespace_id,
+            file.inode_id,
+            PageRequest {
+                limit: page_limit(2),
+                cursor: None,
+            },
+        )),
+        ErrorCode::PathConflict,
+    );
+    assert_core_error_kind(
+        block_on(fs.list_inode_children_page(
+            &namespace_id,
+            InodeId(4096),
+            PageRequest {
+                limit: page_limit(2),
+                cursor: None,
+            },
+        )),
+        ErrorCode::InodeNotFound,
+    );
+}
+
+#[test]
+fn inode_children_of_an_empty_directory_is_an_empty_page() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-empty-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.create_directory_blocking(
+        &namespace_id,
+        "/empty",
+        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create empty directory");
+    let empty = fs
+        .stat_path_blocking(&namespace_id, "/empty")
+        .expect("stat empty directory");
+
+    let page = block_on(fs.list_inode_children_page(
+        &namespace_id,
+        empty.inode_id,
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+    ))
+    .expect("list empty directory");
+    assert_eq!(page.parent_inode_id, empty.inode_id);
+    assert!(page.entries.is_empty());
+    assert!(page.next_cursor.is_none());
+}
+
+#[test]
+fn inode_children_rejects_a_recursively_deleted_directory() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-deleted-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/child.txt",
+        b"child",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("put child");
+    let docs = fs
+        .stat_path_blocking(&namespace_id, "/docs")
+        .expect("stat directory");
+    fs.delete_path_blocking(
+        &namespace_id,
+        "/docs",
+        DeleteOptions {
+            behavior: DeleteDirectoryBehavior::Recursive,
+            ..DeleteOptions::new(loonfs_test_support::test_actor())
+        },
+    )
+    .expect("recursively delete directory");
+
+    assert_core_error_kind(
+        block_on(fs.list_inode_children_page(
+            &namespace_id,
+            docs.inode_id,
+            PageRequest {
+                limit: page_limit(2),
+                cursor: None,
+            },
+        )),
+        ErrorCode::InodeNotFound,
+    );
+}
+
+#[test]
+fn inode_children_cursor_rejects_a_different_directory() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-cursor-mismatch-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in [
+        "/first/a.txt",
+        "/first/b.txt",
+        "/second/a.txt",
+        "/second/b.txt",
+    ] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
+    }
+    let first_directory = fs
+        .stat_path_blocking(&namespace_id, "/first")
+        .expect("stat first directory");
+    let second_directory = fs
+        .stat_path_blocking(&namespace_id, "/second")
+        .expect("stat second directory");
+    let first_page = block_on(fs.list_inode_children_page(
+        &namespace_id,
+        first_directory.inode_id,
+        PageRequest {
+            limit: page_limit(1),
+            cursor: None,
+        },
+    ))
+    .expect("first directory page");
+    let cursor =
+        decode_directory_page_cursor(first_page.next_cursor.as_deref().expect("next cursor"));
+
+    assert_core_error_kind(
+        block_on(fs.list_inode_children_page(
+            &namespace_id,
+            second_directory.inode_id,
+            PageRequest {
+                limit: page_limit(1),
+                cursor: Some(cursor),
+            },
+        )),
+        ErrorCode::InvalidRequest,
+    );
+}
+
+#[test]
+fn inode_children_cursor_from_the_future_is_rejected() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-future-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
+    }
+    let docs = fs
+        .stat_path_blocking(&namespace_id, "/docs")
+        .expect("stat directory");
+    let first = block_on(fs.list_inode_children_page(
+        &namespace_id,
+        docs.inode_id,
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+    ))
+    .expect("first directory page");
+    let mut cursor =
+        decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
+    cursor.head_seq = loonfs::ChangeSeq(cursor.head_seq.0 + 1000);
+
+    assert_core_error_kind(
+        block_on(fs.list_inode_children_page(
+            &namespace_id,
+            docs.inode_id,
+            PageRequest {
+                limit: page_limit(2),
+                cursor: Some(cursor),
+            },
+        )),
+        ErrorCode::RebootstrapRequired,
+    );
+}
+
+#[test]
+fn inode_children_of_the_root_list_by_the_root_inode() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-root-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/a.txt", "/b.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
+    }
+    let root = fs
+        .stat_path_blocking(&namespace_id, "/")
+        .expect("stat root");
+
+    let page = block_on(fs.list_inode_children_page(
+        &namespace_id,
+        root.inode_id,
+        PageRequest {
+            limit: page_limit(10),
+            cursor: None,
+        },
+    ))
+    .expect("list root children by inode");
+    assert_eq!(display_names(&page.entries), vec!["a.txt", "b.txt"]);
+    assert_eq!(page.parent_inode_id, root.inode_id);
+    assert!(page.next_cursor.is_none());
+}
+
+#[test]
+fn inode_children_empty_resumed_page_reports_the_drifted_head() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-drift-head-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
+    }
+    let docs = fs
+        .stat_path_blocking(&namespace_id, "/docs")
+        .expect("stat listed directory");
+    let first = block_on(fs.list_inode_children_page(
+        &namespace_id,
+        docs.inode_id,
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+    ))
+    .expect("first page");
+    let cursor = decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
+
+    fs.delete_path_blocking(
+        &namespace_id,
+        "/docs/c.txt",
+        DeleteOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("delete the remaining child");
+
+    let resumed = block_on(fs.list_inode_children_page(
+        &namespace_id,
+        docs.inode_id,
+        PageRequest {
+            limit: page_limit(2),
+            cursor: Some(cursor),
+        },
+    ))
+    .expect("empty resumed page");
+    assert!(resumed.entries.is_empty());
+    assert!(resumed.next_cursor.is_none());
+    assert!(resumed.head_seq > first.head_seq);
 }

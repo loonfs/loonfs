@@ -54,6 +54,7 @@ from loonfs_sdk.transfers import get_file, put_file
 RUNNER_SKIP = "run scripts/run-sdk-conformance.sh python"
 EXPECTED_CASES = [
     "changes",
+    "children_by_inode",
     "commit_replay",
     "download",
     "end_to_end",
@@ -225,6 +226,27 @@ class PaginationExpected:
     entry_count: int
     minimum_page_count: int
     head_seq: int
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class ChildrenByInodeRequest:
+    namespace_id: str
+    directory: str
+    renamed_directory: str
+    rename_commit_id: str
+    actor: ActorRef
+    entry_names: list[str]
+    page_size: int
+    rename_after_page: int
+    resume_after_page: int
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class ChildrenByInodeExpected:
+    entry_count: int
+    minimum_page_count: int
+    initial_head_seq: int
+    renamed_head_seq: int
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -558,6 +580,26 @@ def _list_path_entries(
     )
 
 
+def _list_inode_children(
+    client: LoonFS,
+    request: ChildrenByInodeRequest,
+    parent_inode_id: str,
+    cursor: str | None,
+) -> Any:
+    if cursor is None:
+        return client.inodes.list_inode_children(
+            request.namespace_id,
+            parent_inode_id,
+            limit=request.page_size,
+        )
+    return client.inodes.list_inode_children(
+        request.namespace_id,
+        parent_inode_id,
+        limit=request.page_size,
+        cursor=cursor,
+    )
+
+
 def test_error_contract(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(
         cases["error_contract"], ErrorContractRequest, ErrorContractExpected
@@ -657,6 +699,103 @@ def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None
 
     assert len(set(observed)) == len(observed), (
         "pagination returned an entry more than once"
+    )
+    assert observed == request.entry_names
+    assert resume_offset <= len(request.entry_names)
+    assert resumed == request.entry_names[resume_offset:]
+
+
+def test_children_by_inode(
+    cases: dict[str, ConformanceCase], harness: Harness
+) -> None:
+    request, expected = _decode(
+        cases["children_by_inode"], ChildrenByInodeRequest, ChildrenByInodeExpected
+    )
+    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    _apply(
+        harness.client,
+        request.namespace_id,
+        "conf-children-by-inode-directory",
+        request.actor,
+        FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
+    )
+    for index, name in reversed(list(enumerate(request.entry_names))):
+        _apply(
+            harness.client,
+            request.namespace_id,
+            f"conf-children-by-inode-entry-{index:02d}",
+            request.actor,
+            FilesystemOperation_CreateDirectory(
+                path=f"{request.directory}/{name}", parents=False
+            ),
+        )
+
+    parent_inode_id = harness.client.filesystem.get_path_entry(
+        request.namespace_id, path=request.directory
+    ).inode_id
+    observed: list[str] = []
+    cursor: str | None = None
+    saved_cursor: str | None = None
+    resume_offset: int | None = None
+    page_count = 0
+    while True:
+        page = _list_inode_children(
+            harness.client, request, parent_inode_id, cursor
+        )
+        page_count += 1
+        assert page.namespace_id == request.namespace_id
+        assert page.parent_inode_id == parent_inode_id
+        expected_head_seq = (
+            expected.initial_head_seq
+            if page_count <= request.rename_after_page
+            else expected.renamed_head_seq
+        )
+        assert page.head_seq == expected_head_seq
+        observed.extend(_listed_names(page.entries))
+        cursor = page.next_cursor
+        if page_count == request.resume_after_page:
+            saved_cursor = cursor
+            resume_offset = len(observed)
+        if page_count == request.rename_after_page:
+            renamed = _apply(
+                harness.client,
+                request.namespace_id,
+                request.rename_commit_id,
+                request.actor,
+                FilesystemOperation_MovePath(
+                    from_path=request.directory,
+                    to_path=request.renamed_directory,
+                ),
+            )
+            assert renamed.committed_seq == expected.renamed_head_seq
+            renamed_inode_id = harness.client.filesystem.get_path_entry(
+                request.namespace_id, path=request.renamed_directory
+            ).inode_id
+            assert renamed_inode_id == parent_inode_id
+        if cursor is None:
+            break
+
+    assert len(observed) == expected.entry_count
+    assert page_count >= expected.minimum_page_count
+    assert saved_cursor is not None, "resume cursor was not recorded"
+    assert resume_offset is not None, "resume position was not recorded"
+
+    resumed: list[str] = []
+    cursor = saved_cursor
+    while True:
+        page = _list_inode_children(
+            harness.client, request, parent_inode_id, cursor
+        )
+        assert page.namespace_id == request.namespace_id
+        assert page.parent_inode_id == parent_inode_id
+        assert page.head_seq == expected.renamed_head_seq
+        resumed.extend(_listed_names(page.entries))
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+
+    assert len(set(observed)) == len(observed), (
+        "children-by-inode pagination returned an entry more than once"
     )
     assert observed == request.entry_names
     assert resume_offset <= len(request.entry_names)

@@ -23,7 +23,9 @@ use crate::storage::content::{
 };
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use crate::time::current_time_ms;
-use loonfs_api::options::{DirectMultipartUploadOptions, ListPathEntriesOptions, StatPathOptions};
+use loonfs_api::options::{
+    DirectMultipartUploadOptions, ListInodeChildrenOptions, ListPathEntriesOptions, StatPathOptions,
+};
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CommitResponse, CompleteMultipartUploadRequest,
     ListChangesResponse, UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
@@ -140,6 +142,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let view = self.load_read_view(context).await?;
         view.list_path_page(path.as_ref(), request, options.include_attributes.into())
+            .await
+    }
+
+    /// Lists one page of a directory's children by inode against the pinned
+    /// runtime read context.
+    pub async fn list_inode_children_page(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<DirectoryPageCursor>,
+        options: ListInodeChildrenOptions,
+        context: &RuntimeReadContext,
+    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
+        let view = self.load_read_view(context).await?;
+        view.list_inode_children_page(inode_id, request, options.include_attributes.into())
             .await
     }
 }

@@ -26,6 +26,11 @@ pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 /// Attributes are part of the core plane, not a composed extension, so a
 /// deployment that serves the core profile serves them.
 pub const FEATURE_ATTRIBUTES: &str = "core.attributes";
+/// Gates listing a directory's children by parent inode ID. Part of the core
+/// plane and implemented by the runtime, so current deployments advertise it;
+/// the key exists so inode-driven sync clients can gate on deployments built
+/// before the route.
+pub const FEATURE_INODES_LIST_CHILDREN: &str = "core.inodes.list_children";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 /// Starting presigned `direct_multipart` upload sessions. Independent of

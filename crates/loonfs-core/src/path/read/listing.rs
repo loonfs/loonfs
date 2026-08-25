@@ -32,12 +32,12 @@ pub(super) fn validate_directory_cursor(
 ) -> Result<()> {
     if resolved.inode_kind != InodeKind::Directory {
         return Err(invalid_cursor(
-            "directory cursor resolved to a non-directory path",
+            "directory cursor resolved to a non-directory target",
         ));
     }
     if resolved.inode_id != cursor.directory_inode_id {
         return Err(invalid_cursor(format!(
-            "cursor directory inode `{}` does not match requested path inode `{}`",
+            "cursor directory inode `{}` does not match the requested directory inode `{}`",
             cursor.directory_inode_id.0, resolved.inode_id.0
         )));
     }

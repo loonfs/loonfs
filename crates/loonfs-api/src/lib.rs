@@ -78,9 +78,9 @@ pub use attributes::{
 };
 pub use capability::{
     CapabilityDocument, CapabilityDocumentError, FEATURE_ADMIN_GREP_INDEX, FEATURE_ATTRIBUTES,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
     LIMIT_GC_MIN_GRACE_WINDOW_MS, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
@@ -131,8 +131,9 @@ pub use v0::{
     DestinationBehavior, ErrorDetails, FileBytes, FileRevision, FilesystemOperation,
     FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch,
     GrepRequest, GrepResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics,
-    PathEntry, PathEntryKind, ReleaseCheckpointResponse, ReleasedCheckpointCounts,
-    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, TrashEntry, WalFlushStepOutcome,
+    ListInodeChildrenResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace,
+    NamespaceDiagnostics, PathEntry, PathEntryKind, ReleaseCheckpointResponse,
+    ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    TrashEntry, WalFlushStepOutcome,
 };

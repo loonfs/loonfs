@@ -67,6 +67,72 @@ impl PathEntriesPager {
     }
 }
 
+/// Fetches child pages of one directory inode as needed.
+///
+/// [`Self::next`] returns one page with its metadata. [`Self::collect_up_to`]
+/// returns at most the requested number of entries and saves unused entries
+/// for later calls.
+#[must_use]
+pub struct InodeChildrenPager {
+    client: Client,
+    namespace_id: NamespaceId,
+    inode_id: InodeId,
+    page_size: Option<u32>,
+    cursor: Option<String>,
+    options: ListInodeChildrenOptions,
+    pending: Option<ListInodeChildrenResponse>,
+    exhausted: bool,
+}
+
+impl InodeChildrenPager {
+    /// Returns the next children page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListInodeChildrenResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .client
+            .list_inode_children_page(
+                &self.namespace_id,
+                self.inode_id,
+                self.page_size,
+                self.cursor.as_deref(),
+                &self.options,
+            )
+            .await;
+        Some(page.inspect(|page| {
+            self.cursor = page.next_cursor.clone();
+            self.exhausted = self.cursor.is_none();
+        }))
+    }
+
+    /// Returns at most `max_items` entries.
+    ///
+    /// Unused entries from the last page remain available to later calls.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<PathEntry>> {
+        let mut entries = Vec::new();
+        while entries.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - entries.len()).min(page.entries.len());
+            if take < page.entries.len() {
+                let remaining = page.entries.split_off(take);
+                entries.extend(page.entries);
+                page.entries = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            entries.extend(page.entries);
+        }
+        Ok(entries)
+    }
+}
+
 enum FileRevisionsTarget {
     Path(NamespacePath),
     Inode {
@@ -397,6 +463,53 @@ impl Client {
             self.base_url
         );
         let mut has_query = false;
+        append_query_param(
+            &mut url,
+            &mut has_query,
+            "include_attributes",
+            &options.include_attributes.to_string(),
+        );
+        self.request_json::<(), _>(self.get(&url), None).await
+    }
+
+    /// Creates a children pager for one directory inode beginning at `cursor`.
+    pub fn list_inode_children_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+        options: &ListInodeChildrenOptions,
+    ) -> InodeChildrenPager {
+        InodeChildrenPager {
+            client: self.clone(),
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            page_size,
+            cursor,
+            options: options.clone(),
+            pending: None,
+            exhausted: false,
+        }
+    }
+
+    /// Lists one page of a directory's children by inode, using the requested
+    /// projection.
+    pub async fn list_inode_children_page(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+        options: &ListInodeChildrenOptions,
+    ) -> Result<ListInodeChildrenResponse> {
+        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
+        let mut url = format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
+            self.base_url
+        );
+        let mut has_query = false;
+        append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
         append_query_param(
             &mut url,
             &mut has_query,

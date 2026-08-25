@@ -53,6 +53,7 @@ pub(crate) const PAGINATION_OPERATIONS: &[&str] = &[
     "list_checkpoints",
     "list_file_revisions",
     "list_file_revisions_by_inode",
+    "list_inode_children",
     "list_path_entries",
     "list_trash",
 ];
@@ -158,6 +159,7 @@ pub(crate) const OPERATION_RETRY_CLASSES: &[(&str, RetryClass)] = &[
     ("list_checkpoints", RetryClass::Idempotent),
     ("list_file_revisions", RetryClass::Idempotent),
     ("list_file_revisions_by_inode", RetryClass::Idempotent),
+    ("list_inode_children", RetryClass::Idempotent),
     ("list_path_entries", RetryClass::Idempotent),
     ("list_trash", RetryClass::Idempotent),
     ("probe_store", RetryClass::NotIdempotent),

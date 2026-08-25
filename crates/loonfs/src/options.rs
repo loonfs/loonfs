@@ -16,8 +16,9 @@ use std::num::NonZeroU64;
 
 pub use loonfs_api::options::{
     CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ListPathEntriesOptions, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
+    DirectMultipartUploadOptions, ListInodeChildrenOptions, ListPathEntriesOptions, MoveOptions,
+    PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 
 /// The actions one maintenance step performs.

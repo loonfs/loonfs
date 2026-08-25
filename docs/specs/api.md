@@ -24,7 +24,7 @@ within a plane is expressed as **named features** (section 2).
 
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
-| `core/v0` | Data plane | Path and inode reads (stat, list, content, revisions), path mutations, staged uploads, the change feed, namespace state by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
+| `core/v0` | Data plane | Path and inode reads (stat, list, content, revisions), path mutations, staged uploads, the change feed, namespace state by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile, as is inode child listing (`core.inodes.list_children`). | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Read namespace storage diagnostics; create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
 | `query/v0` | Query plane | Content search over derived indexes (`GET /v0/namespaces/{namespace_id}/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized active grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
@@ -82,6 +82,7 @@ either way.
     "core.namespaces.fork": true,
     "core.namespaces.delete": true,
     "core.attributes": true,
+    "core.inodes.list_children": true,
     "query.grep": true
   },
   "limits": {
@@ -154,6 +155,7 @@ hoc.
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
+| `core.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
@@ -724,6 +726,7 @@ The table below lists the retry class for every v0 operation.
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
 | List path entries | `list_path_entries` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entries?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
+| List directory children by inode | `list_inode_children` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/children?limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
 | List file revisions by path | `list_file_revisions` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | List file revisions by inode | `list_file_revisions_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
 | Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` (`revision_no` is optional) |
@@ -1497,16 +1500,27 @@ Renaming an entry changes its path and name but not its inode id or metadata.
 An unknown or hidden inode returns `inode_not_found`. The root inode returns
 `/`. `include_attributes` behaves the same as it does for the path entry route.
 
-### 6.5 `GET /filesystem/entries`
+### 6.5 `GET /filesystem/entries` and `GET /inodes/{inode_id}/children`
 
-The envelope names the listed path and the head the listing was read from, so an empty directory still reports which state it observed and the response can grow without reshaping `entries`. Entries are full path entries with the same shape returned by `GET /filesystem/entry` (directory entries omit file-only fields).
+The envelope names the listing target and the head the listing was read from, so an empty directory still reports which state it observed and the response can grow without reshaping `entries`. The path route names its target as `path`; the inode route names it as `parent_inode_id`. Entries are full path entries with the same shape returned by `GET /filesystem/entry` (directory entries omit file-only fields).
 
 Directory listing advances in canonical `name_key` order. Concatenating pages
 in cursor order yields the complete listing in that same order; clients must
-not re-sort aggregated pages. The `path` query parameter is
-required on every page; the cursor carries the resume position, but the
-request path remains the authority for what is being listed. Responses
-include `next_cursor` only when another page is available.
+not re-sort aggregated pages. The listing target is required on every page —
+the `path` query parameter on the path route, the `inode_id` route segment on
+the inode route; the cursor carries the resume position, but the request
+target remains the authority for what is being listed. Responses include
+`next_cursor` only when another page is available.
+
+The inode route addresses the directory by its stable identity instead of a
+name, so a listing and its resumption stay on the same directory across
+concurrent renames or moves of the parent; entry paths reflect the parent's
+location at each page's head. It is gated by the `core.inodes.list_children`
+feature. An unknown or hidden target inode answers `inode_not_found`, and a
+file target answers `path_conflict`: an inode-addressed caller asked for
+children, never for the entry itself, so there is no single-entry file
+listing on this route. A directory deleted mid-listing answers
+`inode_not_found` on the resumed page.
 
 `include_attributes` works exactly as it does on the entry route and obeys the same required-siblings-together projection rule, but it defaults to `false`. This keeps the default response bounded because a page may contain up to `pagination.max_limit` entries and each attribute map may be 64 KiB. Clients that request attributes should choose a suitable page size.
 

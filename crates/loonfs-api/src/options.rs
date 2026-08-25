@@ -69,6 +69,16 @@ pub struct ListPathEntriesOptions {
     pub include_attributes: bool,
 }
 
+/// Options for listing a directory's children by parent inode.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ListInodeChildrenOptions {
+    /// Project each entry's attribute map and its revision onto the answer.
+    ///
+    /// Defaults to off for the same reason as
+    /// [`ListPathEntriesOptions::include_attributes`].
+    pub include_attributes: bool,
+}
+
 /// Options for writing and removing an inode's attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAttributesOptions {

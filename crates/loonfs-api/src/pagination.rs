@@ -166,9 +166,11 @@ pub struct Page<T, C> {
 ///
 /// The cursor intentionally contains only the minting head (`head_seq`),
 /// listed directory identity (`directory_inode_id`), and resume position
-/// (`last_name_key`). HTTP clients must pass the URL namespace and `path` on
-/// every page. Runtime/server code resolves that path at the current head
-/// and rejects the cursor unless it names `directory_inode_id`.
+/// (`last_name_key`). HTTP clients must pass the URL namespace and the
+/// directory target — the `path` parameter, or the inode ID in the route for
+/// inode-addressed listing — on every page. Runtime/server code resolves
+/// that target at the current head and rejects the cursor unless it names
+/// `directory_inode_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryPageCursor {
     /// Head sequence the issuing page was evaluated at.
