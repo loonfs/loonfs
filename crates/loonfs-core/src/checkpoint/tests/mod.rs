@@ -86,8 +86,8 @@ use loonfs_api::{
     ManifestNo, ManifestObjectId, NameKey, NamespaceId, RevisionNo, RunNo,
 };
 use loonfs_objectstore::keys::{
-    metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key, wal_head,
-    wal_segment,
+    metadata_manifest_object, metadata_manifest_prefix, metadata_root, metadata_segment_object_key,
+    wal_floor, wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -212,7 +212,7 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
         .await
         .expect("read head")
         .state;
-    crate::namespace::basis::resolve_retention_floor_seq(store, &head)
+    crate::namespace::control_snapshot::resolve_retention_floor_seq(store, &head)
         .await
         .expect("resolve retention floor")
 }

@@ -10,9 +10,10 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
-use crate::namespace::basis::{load_head_and_metadata_basis, MetadataBasis, MetadataBasisIdentity};
+use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::control::load_head_object;
+use crate::namespace::control_snapshot::load_head_and_metadata_basis;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::{
     ensure_replayed_head_matches, load_validated_wal_chain, project_validated_wal_tail,

@@ -8,10 +8,10 @@ use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::{
     load_head_object, load_metadata_root_object_if_present, load_wal_floor_object,
 };
+use crate::namespace::control_snapshot::resolve_retention_floor_seq;
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, WalFloorState};
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;

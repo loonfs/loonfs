@@ -24,8 +24,7 @@ use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::basis::resolve_retention_floor_seq;
-use crate::namespace::control::{load_head_object, load_metadata_root_object_if_present};
+use crate::namespace::control_snapshot::load_control_snapshot;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
     MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
@@ -192,13 +191,14 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // before any segment object is written and gates the root
     // compare-and-swap below.
     let publication_started_ms = timer.monotonic_now_ms();
+    // A streaming compaction keeps the floor read with this root.
+    let snapshot = load_control_snapshot(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    let floor_seq = snapshot.retention_floor_seq;
     // A namespace that has published no manifest of its own has no runs to
     // fold: reorganization has nothing to do until its first flush.
-    let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?
-        .map(|loaded| loaded.state)
-    else {
+    let Some(root) = snapshot.root.map(|loaded| loaded.state) else {
         return Ok(report(
             namespace_id,
             MetadataReorganizeOutcome::NotNeeded { delta_runs: 0 },
@@ -232,17 +232,6 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             MetadataReorganizeOutcome::NotNeeded { delta_runs },
         ));
     };
-    // The floor is read before the plan rather than after it, because a plan
-    // that hands the group to a streaming compaction carries the floor that
-    // job will judge every row against, and the spec it carries is immutable
-    // for the job's life.
-    let head = load_head_object(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?
-        .state;
-    let floor_seq = resolve_retention_floor_seq(store, &head)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
     let selection = select_reorganization_input(
         &segments,
         group,

@@ -23,9 +23,8 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
 use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::MetadataState;
-use crate::namespace::basis::{
-    load_head_and_metadata_basis, resolve_retention_floor_seq, MetadataBasis,
-};
+use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control_snapshot::load_control_snapshot;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{
     ensure_replayed_head_matches, load_validated_wal_chain, project_validated_wal_tail,
@@ -227,10 +226,12 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> Result<RootProjection<'a, S>> {
-    let loaded = load_head_and_metadata_basis(store, namespace_id)
+    let snapshot = load_control_snapshot(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let head = loaded.head.state;
+    let basis = snapshot.basis();
+    let floor_seq = snapshot.retention_floor_seq;
+    let head = snapshot.head.state;
     if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -238,13 +239,9 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    let floor_seq = resolve_retention_floor_seq(store, &head)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    let basis =
-        load_basis_metadata_segments(store, None, namespace_id, &loaded.basis, head.created_at_ms)
-            .await?;
-    let manifest_segments = basis.segments;
+    let loaded_basis =
+        load_basis_metadata_segments(store, None, namespace_id, &basis, head.created_at_ms).await?;
+    let manifest_segments = loaded_basis.segments;
     let manifest_head = head_from_manifest(&head, manifest_segments.manifest());
     let wal_chain = load_validated_wal_chain(
         store,
@@ -266,7 +263,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
             tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
         project_validated_wal_tail(
             &manifest_head,
-            &basis.base_state,
+            &loaded_basis.base_state,
             Some(head.writer_epoch),
             &wal_chain,
         )
@@ -276,7 +273,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     ensure_replayed_head_matches(&head, &replayed.resulting_head)?;
     Ok(RootProjection {
         head,
-        basis: loaded.basis,
+        basis,
         floor_seq,
         manifest_segments,
         tail_state: replayed.resulting_metadata_state,

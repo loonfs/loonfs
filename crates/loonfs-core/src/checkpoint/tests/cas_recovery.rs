@@ -225,15 +225,16 @@ impl ObjectStore for FloorRaiseOnCasConflictStore {
     }
 }
 
+/// Returns one stale response for a selected key.
 #[derive(Debug)]
-struct StaleHeadOnceStore {
+struct StaleObjectOnceStore {
     inner: LocalFsStore,
-    head_key: String,
-    stale_head: std::sync::Mutex<Option<ObjectBody>>,
+    key: String,
+    stale: std::sync::Mutex<Option<ObjectBody>>,
 }
 
 #[async_trait]
-impl ObjectStore for StaleHeadOnceStore {
+impl ObjectStore for StaleObjectOnceStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
     }
@@ -247,8 +248,8 @@ impl ObjectStore for StaleHeadOnceStore {
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        if key == self.head_key {
-            if let Some(stale) = self.stale_head.lock().expect("stale head lock").take() {
+        if key == self.key {
+            if let Some(stale) = self.stale.lock().expect("stale object lock").take() {
                 return Ok(Some(stale));
             }
         }
@@ -1184,10 +1185,10 @@ async fn read_anchor_reloads_the_head_when_the_root_is_ahead() {
         .await
         .expect("create checkpoint");
 
-    let store = StaleHeadOnceStore {
+    let store = StaleObjectOnceStore {
         inner,
-        head_key: wal_head(&namespace_id),
-        stale_head: std::sync::Mutex::new(Some(stale_head)),
+        key: wal_head(&namespace_id),
+        stale: std::sync::Mutex::new(Some(stale_head)),
     };
     let projection = load_current_projection(&store, &namespace_id)
         .await
@@ -1230,10 +1231,10 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .await
         .expect("advance retention");
 
-    let status_store = StaleHeadOnceStore {
+    let status_store = StaleObjectOnceStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("status store"),
-        head_key: wal_head(&namespace_id),
-        stale_head: std::sync::Mutex::new(Some(stale_head.clone())),
+        key: wal_head(&namespace_id),
+        stale: std::sync::Mutex::new(Some(stale_head.clone())),
     };
     let namespace = load_namespace(&status_store, &namespace_id)
         .await
@@ -1241,10 +1242,10 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     assert_eq!(namespace.head_seq, ChangeSeq(1));
     assert_eq!(namespace.retention_floor_seq, ChangeSeq(1));
 
-    let feed_store = StaleHeadOnceStore {
+    let feed_store = StaleObjectOnceStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("change-feed store"),
-        head_key: wal_head(&namespace_id),
-        stale_head: std::sync::Mutex::new(Some(stale_head)),
+        key: wal_head(&namespace_id),
+        stale: std::sync::Mutex::new(Some(stale_head)),
     };
     let changes = list_changes_after(
         &feed_store,
@@ -1256,6 +1257,105 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     .expect("change feed reloads the stale head");
     assert_eq!(changes.through_seq, ChangeSeq(1));
     assert!(changes.changes.is_empty());
+}
+
+#[tokio::test]
+async fn diagnostics_reload_a_root_behind_the_floor() {
+    // A floor above the observed root proves that the root read is stale.
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&inner, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&inner, &namespace_id, "/one.txt", b"one\n", &context, None)
+        .await
+        .expect("write one");
+    create_checkpoint(&inner, &namespace_id, &context)
+        .await
+        .expect("first checkpoint");
+    let stale_root = inner
+        .get_with_metadata(&metadata_root(&namespace_id))
+        .await
+        .expect("read first root")
+        .expect("first root exists");
+
+    write_file_bytes(&inner, &namespace_id, "/two.txt", b"two\n", &context, None)
+        .await
+        .expect("write two");
+    create_checkpoint(&inner, &namespace_id, &context)
+        .await
+        .expect("second checkpoint");
+    advance_retention_floor(&inner, &namespace_id, &context)
+        .await
+        .expect("advance retention");
+    let current_manifest_no = load_metadata_root_object(&inner, &namespace_id)
+        .await
+        .expect("read current root")
+        .state
+        .manifest
+        .manifest_no;
+
+    let store = StaleObjectOnceStore {
+        inner,
+        key: metadata_root(&namespace_id),
+        stale: std::sync::Mutex::new(Some(stale_root)),
+    };
+    let diagnostics = load_namespace_diagnostics(&store, &namespace_id)
+        .await
+        .expect("diagnostics reload the stale root");
+    assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(2));
+    assert_eq!(diagnostics.current_manifest_no, Some(current_manifest_no));
+    assert_eq!(diagnostics.wal_tail_segments, 0);
+}
+
+#[tokio::test]
+async fn steady_state_reads_stay_off_the_objects_they_do_not_need() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&inner, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&inner, &namespace_id, "/one.txt", b"one\n", &context, None)
+        .await
+        .expect("write one");
+    create_checkpoint(&inner, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    let store = CountingStore::new(inner, KeyPredicate::exact(metadata_root(&namespace_id)));
+    load_namespace(&store, &namespace_id)
+        .await
+        .expect("load namespace");
+    list_changes_after(
+        &store,
+        &namespace_id,
+        ChangeSeq(0),
+        EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
+    )
+    .await
+    .expect("list changes");
+    assert_eq!(
+        store.snapshot().operations(OperationClass::Read),
+        0,
+        "status and the change feed resolve from head and floor alone"
+    );
+
+    let basis_store = CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("basis store"),
+        KeyPredicate::exact(wal_floor(&namespace_id)),
+    );
+    load_current_metadata_view(&basis_store, &namespace_id)
+        .await
+        .expect("basis load");
+    assert_eq!(
+        basis_store.snapshot().operations(OperationClass::Read),
+        0,
+        "a basis load with a root present never reads the floor"
+    );
 }
 
 #[tokio::test]

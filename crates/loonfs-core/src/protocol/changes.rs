@@ -2,7 +2,7 @@
 //! commit's durable WAL deltas mapped to semantic filesystem events.
 
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::basis::load_head_and_retention_floor;
+use crate::namespace::control_snapshot::load_head_and_retention_floor;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use loonfs_api::v0::{CommittedChange, FilesystemChange, ListChangesResponse};
 use loonfs_api::wire::control::NamespaceStatus;

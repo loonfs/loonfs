@@ -16,8 +16,8 @@ use crate::control_update::{
 };
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::FORK_CHECKPOINT_LEASE_MS;
-use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::load_head_object;
+use crate::namespace::control_snapshot::resolve_retention_floor_seq;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, CheckpointOwner, CheckpointRecordState, CheckpointStatus,

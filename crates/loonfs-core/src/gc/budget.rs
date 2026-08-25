@@ -4,10 +4,8 @@
 ///
 /// One unit is charged for:
 ///
-/// * the head and the metadata root together — one unit for the pair,
-///   because they are read concurrently and neither is a root without the
-///   other;
-/// * the retention floor;
+/// * the namespace control snapshot: head, metadata root, and retention floor
+///   read concurrently;
 /// * one checkpoint record read while marking, plus one more for the fork
 ///   target head that decides whether that record's target is gone;
 /// * one manifest opened, whether to mark its segments or by the content

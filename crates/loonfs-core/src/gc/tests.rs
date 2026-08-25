@@ -38,7 +38,7 @@ use loonfs_api::{
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_compaction_lease, metadata_compaction_segment,
     metadata_manifest_object, metadata_manifest_prefix, metadata_root, metadata_segment,
-    metadata_segment_object_key, metadata_segment_prefix, wal_head, wal_segment,
+    metadata_segment_object_key, metadata_segment_prefix, wal_floor, wal_head, wal_segment,
     wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
@@ -1437,8 +1437,12 @@ async fn a_budget_below_the_roots_reads_no_chain_and_says_it_ran_out() {
     read.sort();
     assert_eq!(
         read,
-        vec![metadata_root(&namespace_id), wal_head(&namespace_id)],
-        "the pair the pass charged itself for is all it read"
+        vec![
+            metadata_root(&namespace_id),
+            wal_floor(&namespace_id),
+            wal_head(&namespace_id)
+        ],
+        "one budget unit covers the concurrent control snapshot"
     );
 }
 
@@ -1770,8 +1774,8 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
     );
     assert_eq!(
         store.count(OperationClass::Read),
-        1,
-        "the third unit bought exactly one record read"
+        2,
+        "two units remain after the control snapshot"
     );
 }
 

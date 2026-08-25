@@ -10,9 +10,7 @@ use crate::checkpoint::{load_namespace_manifest_envelope_if_present, ManifestLoa
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::basis::{
-    load_head_and_metadata_basis, resolve_retention_floor_seq, LoadedNamespaceBasis,
-};
+use crate::namespace::control_snapshot::{load_control_snapshot, NamespaceControlSnapshot};
 use crate::wal::{load_wal_chain_within, WalChainLoad, WalChainLoadRequest};
 use futures::StreamExt;
 use loonfs_api::wire::control::{
@@ -237,7 +235,7 @@ impl SweepVerifier {
     }
 }
 
-/// Reloads the namespace head and basis before collecting a new live set.
+/// Reloads the namespace control objects before collecting a new live set.
 pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -249,13 +247,13 @@ pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     if !budget.try_charge() {
         return Ok(LiveSetCollection::BudgetExhausted);
     }
-    let loaded = load_head_and_metadata_basis(store, namespace_id)
+    let snapshot = load_control_snapshot(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     collect_live_set(
         store,
         namespace_id,
-        &loaded,
+        &snapshot,
         grace_window_ms,
         reused_anchor,
         budget,
@@ -264,24 +262,24 @@ pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Collects from the head and basis the pass already read and charged for.
+/// Collects from the control snapshot the pass already read and charged for.
 pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    loaded: &LoadedNamespaceBasis,
+    snapshot: &NamespaceControlSnapshot,
     grace_window_ms: u64,
     reused_anchor: Option<ReferenceAnchor>,
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> Result<LiveSetCollection> {
-    let head = &loaded.head.state;
+    let head = &snapshot.head.state;
     // A namespace with no root of its own roots no manifest here: the
     // genesis basis has none, and a fork target's basis is a source-prefix
     // object that the source's own pass protects through the fork-owned
     // checkpoint record. Neither is ever a candidate of this pass.
-    let root_manifest_object_id = loaded.basis.is_owned_by(namespace_id).then(|| {
-        loaded
-            .basis
+    let basis = snapshot.basis();
+    let root_manifest_object_id = basis.is_owned_by(namespace_id).then(|| {
+        basis
             .manifest()
             .expect("owned basis")
             .manifest_object_id
@@ -289,12 +287,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     });
     let namespace_deleted = head.status == NamespaceStatus::Deleted {};
     let collected: CollectResult<LiveSet> = async {
-        // Without a stored floor, retain WAL from the namespace's first
-        // sequence.
-        charge(budget)?;
-        let floor_seq = resolve_retention_floor_seq(store, head)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
+        let floor_seq = snapshot.retention_floor_seq;
         let mut live = LiveSet::collecting(namespace_deleted);
         let mut manifest_object_ids = BTreeSet::new();
         if !namespace_deleted {

@@ -1,12 +1,9 @@
 //! Reads namespace state and storage diagnostics.
 
 use crate::checkpoint::load_namespace_manifest_envelope;
-use crate::control_object::{reload_until_consistent, ControlObjectLoadError};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::basis::{
-    load_head_and_metadata_basis, load_head_and_retention_floor, resolve_retention_floor_seq,
-};
+use crate::namespace::control_snapshot::{load_control_snapshot, load_head_and_retention_floor};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::{ChangeSeq, ManifestNo, Namespace, NamespaceDiagnostics, NamespaceId};
@@ -29,73 +26,46 @@ struct LoadedHeadBasis {
     retention_floor_seq: ChangeSeq,
 }
 
-async fn load_namespace_head_basis_once<S: ObjectStore + ?Sized>(
+async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadBasis> {
-    let loaded = load_head_and_metadata_basis(store, expected_namespace_id)
+    let snapshot = load_control_snapshot(store, expected_namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let head = loaded.head.state;
+    let basis = snapshot.basis();
+    let retention_floor_seq = snapshot.retention_floor_seq;
+    let head = snapshot.head.state;
     if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: expected_namespace_id.clone(),
         });
     }
-    // The floor object is addressed by the head alone, so it is read beside
-    // the basis manifest rather than after it. The tail is measured from the
-    // basis manifest's coverage, whoever owns it: a fork target that has not
-    // flushed measures from its fork point.
-    let (basis, retention_floor_seq) = futures::join!(
-        async {
-            match loaded.basis.manifest() {
-                Some(basis) => load_namespace_manifest_envelope(
-                    store,
-                    &basis.owner_namespace_id,
-                    &basis.manifest_object_id,
-                )
-                .await
-                .map(|manifest| {
-                    let own_manifest_no = loaded
-                        .basis
-                        .is_owned_by(expected_namespace_id)
-                        .then_some(basis.manifest_no);
-                    (own_manifest_no, manifest.payload.head_seq)
-                }),
-                None => Ok((None, ChangeSeq(0))),
-            }
-        },
-        resolve_retention_floor_seq(store, &head)
-    );
-    let (current_manifest_no, basis_head_seq) = basis.map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-    })?;
-    let retention_floor_seq = retention_floor_seq.map_err(CoreError::ControlObjectLoad)?;
+    // An unflushed fork measures its WAL tail from the fork point.
+    let (current_manifest_no, basis_head_seq) = match basis.manifest() {
+        Some(manifest) => {
+            let envelope = load_namespace_manifest_envelope(
+                store,
+                &manifest.owner_namespace_id,
+                &manifest.manifest_object_id,
+            )
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
+            let own_manifest_no = basis
+                .is_owned_by(expected_namespace_id)
+                .then_some(manifest.manifest_no);
+            (own_manifest_no, envelope.payload.head_seq)
+        }
+        None => (None, ChangeSeq(0)),
+    };
     Ok(LoadedHeadBasis {
         head,
         current_manifest_no,
         basis_head_seq,
         retention_floor_seq,
     })
-}
-
-async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<LoadedHeadBasis> {
-    let loaded = load_namespace_head_basis_once(store, expected_namespace_id).await?;
-    reload_until_consistent(
-        loaded,
-        || load_namespace_head_basis_once(store, expected_namespace_id),
-        |loaded: &LoadedHeadBasis| loaded.retention_floor_seq <= loaded.head.seq,
-        |loaded| {
-            CoreError::ControlObjectLoad(ControlObjectLoadError::FloorAheadOfHead {
-                floor_seq: loaded.retention_floor_seq,
-                head_seq: loaded.head.seq,
-            })
-        },
-    )
-    .await
 }
 
 /// Loads the current state of a live namespace.

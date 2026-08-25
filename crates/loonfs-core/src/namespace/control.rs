@@ -3,9 +3,10 @@
 
 use crate::control_object::{
     expect_foreign_fork_basis, expect_namespace, expect_own_manifest, load_control_object,
-    reload_until_consistent, ControlObjectLoadError, LoadedControl,
+    ControlObjectLoadError, LoadedControl,
 };
-use crate::namespace::basis::{load_head_and_metadata_basis, MetadataBasis};
+use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control_snapshot::load_head_and_metadata_basis;
 use loonfs_api::wire::control::{ControlObjectKind, HeadState, MetadataRootState, WalFloorState};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::{metadata_root, wal_floor, wal_head};
@@ -75,37 +76,6 @@ pub(crate) async fn load_metadata_root_object_if_present<S: ObjectStore + ?Sized
         Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
         Err(error) => Err(error),
     }
-}
-
-/// Reads the WAL head and metadata root concurrently.
-///
-/// A new namespace may not have a root until its first flush. If the root is
-/// ahead of the head read at the same time, reload the head because the two
-/// reads may have occurred on opposite sides of a commit.
-pub(crate) async fn load_head_and_metadata_root_if_present<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<(LoadedHeadObject, Option<LoadedMetadataRootObject>), ControlObjectLoadError> {
-    let (head, root) = futures::join!(
-        load_head_object(store, expected_namespace_id),
-        load_metadata_root_object_if_present(store, expected_namespace_id)
-    );
-    let head = head?;
-    let Some(root) = root? else {
-        return Ok((head, None));
-    };
-    let root_seq = root.state.manifest.manifest_head_seq;
-    let head = reload_until_consistent(
-        head,
-        || load_head_object(store, expected_namespace_id),
-        |head| root_seq <= head.state.seq,
-        |head| ControlObjectLoadError::RootAheadOfHead {
-            root_manifest_head_seq: root_seq,
-            head_seq: head.state.seq,
-        },
-    )
-    .await?;
-    Ok((head, Some(root)))
 }
 
 pub(crate) async fn load_head_object<S: ObjectStore + ?Sized>(

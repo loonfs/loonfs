@@ -8,6 +8,7 @@ pub(crate) mod basis;
 pub(crate) mod bootstrap;
 pub(crate) mod catalog;
 pub(crate) mod control;
+pub(crate) mod control_snapshot;
 pub(crate) mod delete;
 pub(crate) mod fork;
 pub(crate) mod status;

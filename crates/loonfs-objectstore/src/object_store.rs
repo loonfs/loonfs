@@ -359,6 +359,9 @@ pub(crate) async fn collect_stream(mut body: ByteStream) -> Result<Bytes> {
 ///
 /// Implementations must satisfy the
 /// [required guarantees](../../../docs/specs/format.md#11-required-guarantees).
+///
+/// Direct reads are read-after-write consistent for each key. Prefix listings
+/// may lag behind direct reads.
 #[async_trait]
 pub trait ObjectStore: Send + Sync + Debug {
     /// Reads metadata for one key, returning `None` when the object is absent.

@@ -13,10 +13,10 @@ use crate::metadata::{
     LeafRevisionPrefetch, MetadataState, MetadataView, MetadataViewSession, ResolvedVisiblePath,
     RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
-#[cfg(test)]
-use crate::namespace::basis::load_head_and_metadata_basis;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+#[cfg(test)]
+use crate::namespace::control_snapshot::load_head_and_metadata_basis;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
 use crate::wal::{
