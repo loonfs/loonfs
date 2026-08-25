@@ -2381,13 +2381,17 @@ publishing CAS) — under these rules:
    An object's provider timestamp says when it appeared, not when it stopped
    being referenced, and those differ for every object a publication once
    named. `T` therefore also runs from the unreferencing, which the
-   **reference manifest** dates. Call R the newest surviving manifest under
-   the namespace's own prefix whose provider timestamp is at least `T` old:
-   it is a durable snapshot of what the namespace referenced when the window
-   opened. R roots what it names exactly as `metadata/root.json` does — its
-   own key, its `segments`, its content references, and every WAL
-   segment above its `head_seq` — so an unreferenced object is deleted only
-   when the current root set, R, and the object's own age all agree. A
+   **reference manifest generation** dates. A lost root compare-and-swap can
+   leave multiple immutable manifest candidates with one `manifest_no`, and
+   an older root no longer records which candidate won. Call R the newest
+   manifest generation under the namespace's own prefix whose surviving
+   candidates all have provider timestamps at least `T` old. R roots every
+   candidate key in that generation, the union of their `segments` and
+   content references, and every WAL segment above the lowest `head_seq` any
+   candidate carries. The published candidate is therefore included even
+   when its same-generation siblings are abandoned. An unreferenced object
+   is deleted only when the current root set, R, and the object's own age all
+   agree. A
    namespace that has published no manifest needs no R: nothing has ever
    stopped referencing anything under it, and its floor cannot have advanced
    past its birth sequence without a root. A namespace whose manifests are
