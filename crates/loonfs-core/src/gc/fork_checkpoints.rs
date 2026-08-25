@@ -8,18 +8,19 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_head_object;
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, NamespaceStatus};
+use loonfs_api::wire::control::{
+    CheckpointOwner, CheckpointRecordState, CheckpointStatus, NamespaceStatus,
+};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 
 pub(super) enum ForkCheckpointSweep {
-    /// The record was flipped `active -> released` under its etag.
+    /// The record was released.
     Released,
-    /// The record must survive this pass (target ambiguous or still live, or
-    /// the release compare-and-swap lost a race).
+    /// The record must survive this pass.
     Retained,
-    /// Not an active fork-owned record; the normal delete path decides.
+    /// The normal checkpoint path handles this record.
     NotAnActiveFork,
 }
 
@@ -62,11 +63,7 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     Ok(true)
 }
 
-/// Decides one fork-owned sweep candidate immediately before acting
-/// (rule 3): re-reads the record, re-proves the target namespace is gone,
-/// and releases the record by compare-and-swap on the just-observed etag.
-/// The etag check means one pass releases and any other observes it; the
-/// forking side is serialized by its own lease, not by this swap.
+/// Rechecks a fork checkpoint and releases it if its target no longer uses it.
 pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
@@ -87,12 +84,20 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     else {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     };
-    if !fork_target_proven_gone(store, &target_namespace_id, expires_at_ms, context).await? {
-        return Ok(ForkCheckpointSweep::Retained);
+    match classify_fork_checkpoint(
+        store,
+        &loaded.state,
+        &target_namespace_id,
+        expires_at_ms,
+        context,
+    )
+    .await?
+    {
+        ForkCheckpointReachability::Reclaimable => {}
+        ForkCheckpointReachability::ReferencedByLiveTarget
+        | ForkCheckpointReachability::InFlight
+        | ForkCheckpointReachability::Ambiguous => return Ok(ForkCheckpointSweep::Retained),
     }
-    // A released fork record may have acquired a live target between an
-    // earlier target-head read and release CAS. Prove the target gone before
-    // allowing the normal released-record path to consider reaping it.
     if loaded.state.status != (CheckpointStatus::Active {}) {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     }
@@ -104,34 +109,33 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Proves a fork target namespace is gone (rule 10's fork arm). Either its
-/// head says the namespace is terminally deleted, or the head is absent —
-/// and since the head is the target's only installation write, an absent
-/// head means the fork never landed.
-///
-/// The absent case waits for the record's lease. A fork in flight right now
-/// has not written its head yet, and its lease covers the whole attempt with
-/// margin to spare, so only an attempt that is really gone can have let the
-/// lease pass. Other objects under the target prefix prove nothing either
-/// way, because no installation writes any before the head.
-///
-/// A live target is the other half of the rule, and it is unconditional: a
-/// target head that exists and is not deleted keeps the record whatever the
-/// lease says. That is what protects a fork that published just before its
-/// lease ran out, and it is why nothing has to clear the lease afterwards.
-pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
+/// Whether a fork checkpoint is still needed.
+pub(super) enum ForkCheckpointReachability {
+    ReferencedByLiveTarget,
+    InFlight,
+    Reclaimable,
+    Ambiguous,
+}
+
+/// Compares a fork checkpoint with the target head that may reference it.
+/// An absent target remains in flight until the checkpoint lease expires.
+pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
+    record: &CheckpointRecordState,
     target_namespace_id: &NamespaceId,
     lease_expires_at_ms: u64,
     context: &MutationContext,
-) -> Result<bool> {
-    match load_head_object(store, target_namespace_id).await {
-        Ok(loaded) => Ok(loaded.state.status == NamespaceStatus::Deleted {}),
+) -> Result<ForkCheckpointReachability> {
+    let head = match load_head_object(store, target_namespace_id).await {
+        Ok(loaded) => loaded.state,
         Err(ControlObjectLoadError::MissingObject { .. }) => {
-            Ok(lease_expires_at_ms <= context.now_ms)
+            return Ok(if lease_expires_at_ms <= context.now_ms {
+                ForkCheckpointReachability::Reclaimable
+            } else {
+                ForkCheckpointReachability::InFlight
+            })
         }
         Err(error) => match &error {
-            // An unreadable target head is not verifiably deleted; retain.
             ControlObjectLoadError::Store { object_key, .. } => {
                 tracing::warn!(
                     namespace_id = %target_namespace_id,
@@ -139,11 +143,32 @@ pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
                     error = %error,
                     "the fork target head did not read; retaining its source checkpoint"
                 );
-                Ok(false)
+                return Ok(ForkCheckpointReachability::Ambiguous);
             }
-            _ => Err(CoreError::NamespaceCorrupt(format!(
-                "the fork target head does not load: {error}"
-            ))),
+            _ => {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "the fork target head does not load: {error}"
+                )))
+            }
         },
+    };
+    if head.status == (NamespaceStatus::Deleted {}) {
+        return Ok(ForkCheckpointReachability::Reclaimable);
     }
+    let Some(basis) = head.fork_basis else {
+        return Ok(ForkCheckpointReachability::Reclaimable);
+    };
+    if basis.manifest.owner_namespace_id != record.namespace_id
+        || basis.source_checkpoint_id != record.checkpoint_id
+    {
+        return Ok(ForkCheckpointReachability::Reclaimable);
+    }
+    if basis.manifest != record.manifest {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "the fork target `{target_namespace_id}` reads through checkpoint `{}` but names a \
+             different manifest reference",
+            record.checkpoint_id
+        )));
+    }
+    Ok(ForkCheckpointReachability::ReferencedByLiveTarget)
 }

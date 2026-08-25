@@ -238,10 +238,9 @@ pub enum CheckpointOwner {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at_ms: Option<u64>,
     },
-    /// A fork target keeping its source basis alive. Released once the
-    /// target namespace is terminally deleted, or once the attempt's lease
-    /// expires with no target head to show for it. A live target keeps the
-    /// record whatever the lease says.
+    /// Keeps a source basis alive for a fork target. GC releases it once the
+    /// target no longer references it, or when its lease expires before the
+    /// target is created.
     Fork {
         /// Fork namespace whose continued existence keeps the source basis pinned.
         target_namespace_id: NamespaceId,

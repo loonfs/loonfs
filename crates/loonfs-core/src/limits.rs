@@ -188,9 +188,12 @@ pub const MAX_SIGNED_PARTS_PER_REQUEST: usize = 1_000;
 
 /// Lease for the source checkpoint created by a fork attempt.
 ///
-/// Two GC grace windows cover checkpoint creation followed by target-head
-/// installation and verification.
+/// Two GC grace windows cover checkpoint creation and target installation.
 pub const FORK_CHECKPOINT_LEASE_MS: u64 = 2 * GC_MIN_GRACE_WINDOW_MS;
+
+/// Time reserved for the target-head write after renewing a fork checkpoint.
+pub const FORK_INSTALL_MARGIN_MS: u64 =
+    PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS;
 
 /// Lease duration for an upload session.
 pub const UPLOAD_SESSION_LEASE_MS: u64 = 24 * 60 * 60 * 1000;
@@ -223,28 +226,16 @@ const _: () = assert!(
      the commit that receipt admits, and that commit's publication"
 );
 
-/// Margin the post-publish fork guard requires between now and the source
-/// record's lease expiry before it lets a target stand.
-///
-/// The guard's evidence is one record read, and one provider operation's
-/// total wall time is `PROVIDER_OPERATION_DEADLINE_MS +
-/// PROVIDER_ATTEMPT_TIMEOUT_MS` (the deadline gates starting an attempt
-/// rather than preempting one). A record observed with more lease than that
-/// left cannot have been legally expiry-released while the guard was
-/// looking at it, so the observation still holds when the guard acts on it.
-pub const FORK_GUARD_MARGIN_MS: u64 = PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS;
-
-// The fork lease has two jobs, and both are inequalities over the constants
-// above rather than judgement calls, so they are checked where a broken
-// derivation is a compile error instead of a test failure: it must cover a
-// whole fork attempt, and it must leave the guard something to check.
+// The fork lease must cover a whole fork attempt, which is an inequality over
+// the constants above rather than a judgement call, so it is checked where a
+// broken derivation is a compile error instead of a test failure.
 const _: () = assert!(
     FORK_CHECKPOINT_LEASE_MS >= GC_MIN_GRACE_WINDOW_MS,
     "a fork attempt may take as long as any other publication"
 );
 const _: () = assert!(
-    FORK_GUARD_MARGIN_MS < FORK_CHECKPOINT_LEASE_MS,
-    "a fork that finishes promptly must still clear the guard margin"
+    FORK_INSTALL_MARGIN_MS < FORK_CHECKPOINT_LEASE_MS,
+    "a renewed fork checkpoint must outlast target installation"
 );
 
 #[cfg(test)]

@@ -1683,44 +1683,19 @@ context. The protocol is:
    `expires_at_ms = now + FORK_CHECKPOINT_LEASE_MS`. This record is the
    reachability root that keeps the source's basis manifest and segments alive
    for as long as the target lives; nothing under the target's prefix protects
-   them. Every attempt takes its own record; no attempt reuses, refreshes, or
-   revives an earlier one's.
-3. Read the pinned manifest to get the target's next inode id. Build the active target head with the source's `content_store_id` and a `fork_basis` containing the record's `manifest` reference and checkpoint id. The reference's `manifest_head_seq` is the target's fork sequence. Write the head with create-if-absent.
-4. Read the source checkpoint record once. The fork succeeds only if the
-   record is active **and** its fork owner's
-   `expires_at_ms > now + FORK_GUARD_MARGIN_MS`.
-   Otherwise delete the target through the ordinary namespace-delete path and
-   return the checkpoint failure.
+   them. Each attempt creates a new record.
+3. Read the pinned manifest to get the target's next inode id. Build the active target head with the source's `content_store_id` and a `fork_basis` containing the record's `manifest` reference and checkpoint id. The reference's `manifest_head_seq` is the target's fork sequence.
+4. Renew the source checkpoint with compare-and-swap. The record must be active, fork-owned, and assigned to this target. The new expiry must be later than the stored expiry and at least `now + FORK_CHECKPOINT_LEASE_MS`. The remaining lease must cover the target-head write. If either check fails, the fork stops before creating the target.
+5. Write the target head with create-if-absent.
 
 The target copies the source's `content_store_id` because a fork shares file
 bytes copy-on-write. It inherits the source's materialized name keys
 unchanged, which is sound because name-key folding is a fixed rule of the
 format (section 2.3.1) rather than a per-namespace choice.
 
-Step 4 exists because steps 2 and 3 are two separate writes to two different
-objects. A forker that stalls between them can have its record released
-underneath it, and without the check the target would survive with an
-unprotected basis — a namespace that reads correctly today and reports
-corruption after the next GC pass. The margin is what makes the check sound
-where a bare re-read raced: garbage collection releases a fork record only
-once its lease has passed, so a lease with more than one provider operation
-left cannot legally be released between the read and the caller acting on it.
-Past that point the target head is the protection — a fork record whose
-target namespace exists and is not deleted is retained by every pass,
-whatever its lease says, so nothing has to clear the lease afterwards. The
-owner rule precedes the record status: if the target lands between a GC
-target-head read and the checkpoint release CAS, that now-`released` fork
-record is still retained while the target is live. This covers a forker that
-crashes before its post-install guard can observe the raced release.
-Deleting the target through the ordinary delete path, rather than erasing the
-head, keeps the failure inside the one lifecycle every other operation
-already understands.
+The renewal races with garbage collection on the same record. If GC releases the record first, the renewal fails. If the renewal succeeds first, its later expiry changes the record and causes a stale release to fail its compare-and-swap. Once the target exists, its `fork_basis` keeps the checkpoint reachable. An abandoned attempt leaves only a checkpoint that GC can release after its lease expires.
 
-`FORK_CHECKPOINT_LEASE_MS` is derived, not tuned: two GC grace floors
-(section 6, rule 1), one for the create and one for everything after it, each
-being one publication plus provider bounds plus clock skew.
-`FORK_GUARD_MARGIN_MS` is one provider operation's total wall time — the
-staleness bound on the guard's own read.
+`FORK_CHECKPOINT_LEASE_MS` is two GC grace windows (section 6, rule 1): one for checkpoint creation and one for target installation.
 
 The fork does not copy content blobs or source metadata segments, and it does not write a target manifest, root, or floor. The target starts its own WAL one sequence above `fork_basis.manifest.manifest_head_seq`. New WAL segments, checkpoints, and metadata segments are stored under the target namespace. Until the first target flush creates a root, readers resolve the basis from the head (section 2.9.1).
 
@@ -2410,8 +2385,8 @@ publishing CAS) — under these rules:
    decisions, so no deletion consults an arbitrarily stale root set.
 4. Roots: `metadata/root.json`; the reference manifest R (rule 1); active
    checkpoint records whose owner still
-   stands — a user pin until its expiry passes, a fork pin until its target
-   is provably gone (rule 10), whatever its lease says; and the visible chain from
+   stands — a user pin until its expiry passes, a fork pin until nothing can
+   read through it any more (rule 10); and the visible chain from
    `wal/head.json.visible_wal_tip` down to the floor. A namespace with no
    root of its own has no manifest or segment to protect under its own prefix;
    its basis, if it has a foreign one, is protected on the source side by
@@ -2445,15 +2420,9 @@ publishing CAS) — under these rules:
    a later pass. Content objects are never enumerated by listing the content
    store, which is shared by every namespace whose head names it; they are
    reached only through the upload session that owns them (rule 11).
-10. **Abandoned forks.** A fork that crashes after writing its leased source
-   checkpoint record but before installing its target head leaves that
-   record with no target at all. Such a record is released once its lease
-   has passed and the target head is still absent: the lease covers a whole
-   fork attempt with margin to spare (section 3.9.2), so only an attempt
-   that is really gone can have let it pass. This is the only debris an
-   interrupted install can leave, and it lives on the source, never under
-   the target's prefix — the target either has a complete head or has
-   nothing.
+10. **Fork checkpoints require an exact reference.** A fork-owned record remains a root while its active target's `fork_basis` names the record's source namespace, checkpoint id, and manifest. An absent target keeps the record until its lease expires. A deleted target, a target without a fork basis, or a target that names another source or checkpoint makes the record releasable immediately. This also allows GC to release records created by failed fork attempts against an existing target.
+
+    If the target head cannot be read, GC retains the record. If the source namespace and checkpoint id match but the manifest differs, the namespace is corrupt and the pass fails.
 11. **Uploads and content, split at `completed`.** One sweep of `uploads/`
    owns both halves, because a session record is the only handle on the
    content object it created.
@@ -2593,11 +2562,10 @@ orphaned data for the next pass rather than a record whose data vanished.
 To keep that true, every readable checkpoint record roots its basis for the
 duration of a pass, whatever its lifecycle, expiry, or owner — no exceptions.
 State, expiry, and owner fate gate only whether the record itself is a
-candidate. A fork-owned record whose target namespace is verifiably
-terminally deleted (target head `state = deleted`, re-checked at delete time)
-or provably abandoned (rule 10) is released by compare-and-swap on the
-record's freshly observed etag — never deleted while active. A released
-record is deleted outright once its `released_at_ms` is a grace window old;
+candidate. A fork-owned record that no target uses (rule 10) is rechecked and
+released with compare-and-swap on its current ETag. An active record is never
+deleted directly, and a released fork record is retained if its target still
+names it. A released record is deleted once its `released_at_ms` is a grace window old;
 because release is terminal, no second state is needed between deciding to
 delete and deleting, and a crash between the release CAS and the delete
 leaves a record the next pass reaps unconditionally.

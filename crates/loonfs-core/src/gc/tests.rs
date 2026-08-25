@@ -3820,6 +3820,38 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
     );
 
     store.clear();
+    let head_key = wal_head(&clone);
+    let bytes = store
+        .get(&head_key, None)
+        .await
+        .expect("read target head")
+        .expect("target head exists");
+    let mut head = decode_control_object::<loonfs_api::wire::control::HeadState>(
+        &bytes,
+        ControlObjectKind::WalHead,
+    )
+    .expect("decode target head")
+    .state;
+    let basis = head.fork_basis.as_mut().expect("a fork target has a basis");
+    basis.manifest.manifest_no = ManifestNo(basis.manifest.manifest_no.0 + 1);
+    let drifted =
+        loonfs_api::wire::control::HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
+            .expect("drifted head envelope");
+    store
+        .put_overwrite(
+            &head_key,
+            Bytes::from(
+                loonfs_api::wire::control::encode_control_object(&drifted).expect("encode head"),
+            ),
+        )
+        .await
+        .expect("write drifted target head");
+    let error = gc_namespace(&store, &source, &config(), &setup)
+        .await
+        .expect_err("a target naming this record with another manifest is corruption");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(error.message().contains(fork_record.checkpoint_id.as_str()));
+
     store
         .put_overwrite(&wal_head(&clone), Bytes::from_static(b"not json"))
         .await
@@ -3928,11 +3960,7 @@ async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
     );
 }
 
-/// The target-head read and checkpoint release CAS are separate object-store
-/// operations. If the target lands between them and the forker then crashes,
-/// GC can observe a released fork record beside a live target. The owner still
-/// protects the target's foreign basis in that state; both the record and its
-/// basis must survive later passes.
+/// A released fork checkpoint still protects a live target that names it.
 #[tokio::test]
 async fn gc_retains_a_released_fork_record_when_its_target_lives() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3949,9 +3977,7 @@ async fn gc_retains_a_released_fork_record_when_its_target_lives() {
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
 
-    // Move the source root beyond the fork basis, then synthesize the durable
-    // state left by the model-checked race: target active, source pin released,
-    // and no forker left to run the post-install guard.
+    // Move the source root beyond the fork basis, then release its checkpoint.
     write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &source, &setup)
         .await
@@ -4119,11 +4145,25 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
     assert_eq!(
         checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
         CheckpointStatus::Active {},
-        "the abandoned record is untouched; its lease ends it"
+        "the retry leaves the abandoned record alone"
+    );
+
+    // The target now reads through the retry's checkpoint, so the abandoned
+    // record protects nothing and is reclaimable inside its own lease.
+    let inside_the_lease = context(setup.now_ms + 1);
+    let report = gc_namespace(&store, &source, &config(), &inside_the_lease)
+        .await
+        .expect("gc pass with a target that reads through another record");
+    assert_eq!(report.released_checkpoints.fork, 1);
+    assert_eq!(
+        checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
+        CheckpointStatus::Released {
+            released_at_ms: inside_the_lease.now_ms
+        }
     );
     load_current_metadata_view(&store, &clone)
         .await
-        .expect("target readable after retry")
+        .expect("target readable after retry and collection")
         .resolve_path("/docs/one.txt", AttributeInclusion::Omit)
         .await
         .expect("forked file readable");
