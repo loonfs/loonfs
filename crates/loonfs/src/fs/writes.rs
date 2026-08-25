@@ -255,9 +255,9 @@ impl FsWriter {
     /// unpublished object is reclaimed after the content-reclamation grace
     /// period.
     ///
-    /// `PreparedContent` has no local expiry, but callers should publish it
-    /// promptly because garbage collection protects the object only for that
-    /// grace period while it remains unpublished.
+    /// The returned proof remains valid through the completed upload's receipt
+    /// horizon. Publication rejects it after that deadline so garbage
+    /// collection cannot reclaim the object before a later commit uses it.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.prepare",

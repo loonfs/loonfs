@@ -639,7 +639,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .response)
     }
 
-    /// Completes an upload session and returns proof for later publication.
+    /// Completes an upload session and returns time-bounded proof for later
+    /// publication.
     ///
     /// Service-proxied completion performs no content-blob I/O. Direct-put
     /// completion performs one content-blob HEAD and no content-blob GET.
@@ -648,7 +649,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .await
     }
 
-    /// Completes a multipart upload and returns proof for later publication.
+    /// Completes a multipart upload and returns time-bounded proof for later
+    /// publication.
     pub async fn complete_multipart_upload_prepared(
         &self,
         upload_id: &UploadId,

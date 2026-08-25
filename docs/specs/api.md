@@ -406,15 +406,12 @@ tokens on the existing wire requests.
 
 Staging is staging wherever it happens, so `prepare_file_bytes` opens an
 upload session for the object it writes, exactly as a remote upload does: the
-session record lands before the bytes and completes after them, and the
-reference the caller receives is a completed session's content. That is what
-bounds how long the value is worth holding. A prepared reference carries no
-clock and never expires by itself, but the bytes behind it are protected only
-while its session is inside the content-reclamation grace — the same window
-that bounds a remote upload's receipts (section 6.3; format spec, "Garbage
-collection", rule 11). Past it, content nothing references is reclaimed
-whether the reference that named it is still in a caller's hands or not, so
-prepared content is for publishing now rather than for keeping.
+session record lands before the bytes and completes after them. The opaque
+prepared value carries an admission deadline no later than the completed
+session's last possible receipt, and publication checks it again when the
+batch is admitted. This is the same horizon that bounds remote upload tokens
+(section 6.3; format spec, "Garbage collection", rule 11), so content cannot
+be reclaimed and then admitted through an older in-process proof.
 
 ### 5.1 Commit identity and race guards
 
@@ -1261,11 +1258,11 @@ window remains open. The separate `content_ref` remains available afterward.
 
 Path-oriented `put_file` operations then reference the completed `content_ref`.
 The client includes the matching `content_token` in `content_tokens` unchanged;
-the server verifies it before admission and publication checks only the
-resulting in-memory proof. A missing proof answers `content_not_prepared`
-without reading the content object. A malformed or expired token that names
-the put's ref also answers `content_not_prepared`; tokens naming other refs are
-ignored.
+the server verifies it before admission and publication checks the resulting
+in-memory proof's binding and deadline. A missing or expired proof answers
+`content_not_prepared` without reading the content object. A malformed or
+expired token that names the put's ref also answers `content_not_prepared`;
+tokens naming other refs are ignored.
 
 ```json
 {

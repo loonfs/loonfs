@@ -2,8 +2,8 @@
 //!
 //! A token can be created only from a durable, completed upload session. It
 //! proves that the named content was verified before publication. Token
-//! expiry is checked once when converting it to [`PreparedContent`]. The
-//! resulting in-process proof remains valid for that process lifetime.
+//! expiry is preserved when converting it to [`PreparedContent`] and checked
+//! again when a publish batch admits the proof.
 
 use crate::limits::CONTENT_RECEIPT_TTL_MS;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -50,6 +50,7 @@ impl CompletedUploadReceipt {
 pub(crate) struct ContentAdmission {
     content_store_id: ContentStoreId,
     content_ref: ContentRef,
+    expires_at_ms: u64,
 }
 
 impl ContentAdmission {
@@ -60,6 +61,19 @@ impl ContentAdmission {
         Self {
             content_store_id,
             content_ref,
+            expires_at_ms: u64::MAX,
+        }
+    }
+
+    pub(crate) fn for_completed_upload(
+        content_store_id: ContentStoreId,
+        content_ref: ContentRef,
+        expires_at_ms: u64,
+    ) -> Self {
+        Self {
+            content_store_id,
+            content_ref,
+            expires_at_ms,
         }
     }
 
@@ -67,8 +81,11 @@ impl ContentAdmission {
         &self,
         content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
+        now_ms: u64,
     ) -> bool {
-        self.content_store_id == *content_store_id && self.content_ref == *content_ref
+        self.content_store_id == *content_store_id
+            && self.content_ref == *content_ref
+            && now_ms <= self.expires_at_ms
     }
 }
 
@@ -198,8 +215,11 @@ pub fn verify_content_token(
         return Err(ContentTokenError::Expired);
     }
 
-    let admission =
-        ContentAdmission::for_durable_content_write(payload.content_store_id, payload.content_ref);
+    let admission = ContentAdmission::for_completed_upload(
+        payload.content_store_id,
+        payload.content_ref,
+        payload.expires_at_ms,
+    );
     Ok(PreparedContent::from_admission(admission))
 }
 
@@ -271,7 +291,7 @@ mod tests {
         assert_eq!(prepared.content_ref(), &content);
         assert!(prepared
             .into_admission()
-            .admits(catalog.content_store_id(), &content));
+            .admits(catalog.content_store_id(), &content, 1_000));
     }
 
     #[test]
@@ -299,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_token_admission_does_not_decay_after_token_expiry() {
+    fn verified_token_admission_expires_with_the_token() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
         let issued_at_ms = 1_000;
@@ -318,11 +338,17 @@ mod tests {
         )
         .expect("verify token before expiry");
 
-        // The prepared proof carries no clock: expiry was the token's
-        // concern, checked exactly once by the verification above.
-        assert!(prepared
-            .into_admission()
-            .admits(catalog.content_store_id(), &content));
+        let admission = prepared.into_admission();
+        assert!(admission.admits(
+            catalog.content_store_id(),
+            &content,
+            issued_at_ms + CONTENT_RECEIPT_TTL_MS,
+        ));
+        assert!(!admission.admits(
+            catalog.content_store_id(),
+            &content,
+            issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1,
+        ));
     }
 
     #[test]

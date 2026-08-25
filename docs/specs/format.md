@@ -2469,15 +2469,14 @@ publishing CAS) — under these rules:
    needs no delete-time re-verification. The constants live beside `T` in
    `loonfs-core`'s `limits` module and the inequality is a compile-time
    assertion. A publication in the same process that completed the session
-   holds its admission directly instead of carrying a receipt, so nothing
-   expires it; what bounds it is the same grace, and a host that stages
-   content and publishes it much later has to publish inside that grace for
-   the same reason a remote client has to re-read its session for a fresh
-   receipt. The reasoning above assumes a content object is referenced
-   only by the namespace whose session created it and by fork descendants
-   reading through a pinned basis; a same-content-store copy across
-   namespaces (section 2.8) would have to root the reference on the source
-   side the way a fork does.
+   holds its admission directly instead of carrying a receipt, but that proof
+   carries a deadline no later than the last token the session could issue.
+   Batch admission checks the deadline again, so the same inequality covers
+   both local proofs and remote tokens. The reasoning above assumes a content
+   object is referenced only by the namespace whose session created it and by
+   fork descendants reading through a pinned basis; a same-content-store copy
+   across namespaces (section 2.8) would have to root the reference on the
+   source side the way a fork does.
 12. **A compaction job's objects are decided by its lease.** A streaming
    compaction ("Compaction") publishes nothing until it finishes and is paced
    by no budget, so its output is unreferenced for as long as the job runs.
