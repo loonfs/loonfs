@@ -24,8 +24,7 @@ use crate::error::Result;
 use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{
-    advanced_floor_without_root, load_head_and_metadata_basis, namespace_birth_seq,
-    resolve_retention_floor_seq, MetadataBasis,
+    load_head_and_metadata_basis, resolve_retention_floor_seq, MetadataBasis,
 };
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{
@@ -236,12 +235,6 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    // The floor never advances past the materialized root, so a floor above
-    // the namespace's birth sequence with no root of its own means the root
-    // was lost.
-    if !loaded.basis.is_owned_by(namespace_id) && floor_seq > namespace_birth_seq(&head) {
-        return Err(advanced_floor_without_root(namespace_id, floor_seq));
-    }
     let basis =
         load_basis_metadata_segments(store, None, namespace_id, &loaded.basis, head.created_at_ms)
             .await?;

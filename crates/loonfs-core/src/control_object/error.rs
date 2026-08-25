@@ -22,6 +22,13 @@ pub enum ControlObjectLoadError {
         head_seq: loonfs_api::ChangeSeq,
     },
     #[error(
+        "namespace `{namespace_id}` retention floor stands at `{floor_seq}`, but its metadata root object is missing"
+    )]
+    MissingRootAfterFloor {
+        namespace_id: NamespaceId,
+        floor_seq: loonfs_api::ChangeSeq,
+    },
+    #[error(
         "control object namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
     NamespaceMismatch {

@@ -235,6 +235,48 @@ async fn recovery_rejects_a_root_head_seq_that_disagrees_with_its_manifest() {
 }
 
 #[tokio::test]
+async fn current_reads_reject_a_missing_root_after_retention_advances() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("materialize the committed state");
+    advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance retention");
+
+    store
+        .delete(&loonfs_objectstore::keys::metadata_root(&namespace_id))
+        .await
+        .expect("lose the recovery root");
+
+    let error = match load_current_metadata_view(&store, &namespace_id).await {
+        Ok(_) => panic!("retained WAL must not mask a root lost after floor advancement"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+    assert!(
+        error.to_string().contains("root object is missing"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
