@@ -628,16 +628,17 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
 }
 
 #[tokio::test]
-async fn a_fork_whose_source_pin_is_released_deletes_its_own_target() {
+async fn fork_deletes_target_when_source_checkpoint_is_released() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = ReleasePinAfterHeadStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        NamespaceId::parse("clone").expect("valid namespace id"),
-        ForkPinAfterHead::Released,
-    );
-    let context = mutation_context();
     let source = namespace_id("source");
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
+    let store = RewriteForkCheckpointStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        source.clone(),
+        clone.clone(),
+        ForkCheckpointRewrite::ReleaseAfterTargetInstall,
+    );
+    let context = mutation_context();
     seed_source_namespace_for_fork(&store, &source, &context).await;
 
     let error = fork_namespace(&store, &source, &clone, &context)
@@ -656,33 +657,37 @@ async fn a_fork_whose_source_pin_is_released_deletes_its_own_target() {
 }
 
 #[tokio::test]
-async fn a_fork_whose_source_lease_runs_out_deletes_its_own_target() {
+async fn fork_does_not_create_target_when_source_checkpoint_is_expiring() {
     let temp_dir = tempdir().expect("tempdir");
     let context = mutation_context();
-    let store = ReleasePinAfterHeadStore::new(
+    let source = namespace_id("source");
+    let clone = NamespaceId::parse("clone").expect("valid namespace id");
+    let store = RewriteForkCheckpointStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        NamespaceId::parse("clone").expect("valid namespace id"),
-        ForkPinAfterHead::LeaseAtTheGuardMargin {
+        source.clone(),
+        clone.clone(),
+        ForkCheckpointRewrite::ShortenBeforeTargetInstall {
             now_ms: context.now_ms,
         },
     );
-    let source = namespace_id("source");
-    let clone = NamespaceId::parse("clone").expect("valid namespace id");
     seed_source_namespace_for_fork(&store, &source, &context).await;
 
     let error = fork_namespace(&store, &source, &clone, &context)
         .await
         .expect_err("a lease inside the guard margin fails the fork");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
-    assert_eq!(
-        head_state(&store, &clone).await.status,
-        loonfs_api::wire::control::NamespaceStatus::Deleted {},
-        "the fork deletes the target it published"
+    assert!(
+        store
+            .head(&wal_head(&clone))
+            .await
+            .expect("probe target head")
+            .is_none(),
+        "the fork must not create a target when its checkpoint may expire during installation"
     );
 }
 
 #[tokio::test]
-async fn a_fork_with_lease_to_spare_survives_a_concurrent_gc_pass() {
+async fn fork_survives_concurrent_gc_with_sufficient_lease() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let context = mutation_context();
@@ -996,41 +1001,36 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
         .is_none());
 }
 
-/// What happens to the fork's source pin the moment the target head lands.
 #[derive(Debug, Clone, Copy)]
-enum ForkPinAfterHead {
-    /// A garbage-collection pass released the pin while a stalled forker
-    /// slept.
-    Released,
-    /// The forker stalled until its lease was all but gone: the record is
-    /// still active, but with exactly the guard margin left, which is not
-    /// margin enough to trust.
-    LeaseAtTheGuardMargin { now_ms: u64 },
+enum ForkCheckpointRewrite {
+    ReleaseAfterTargetInstall,
+    ShortenBeforeTargetInstall { now_ms: u64 },
 }
 
-/// A store that rewrites the fork's source checkpoint the moment the target
-/// head lands, standing in for the window between the two writes.
 #[derive(Debug)]
-struct ReleasePinAfterHeadStore {
+struct RewriteForkCheckpointStore {
     inner: LocalFsStore,
+    source_head_key: String,
     target_head_key: String,
-    after_head: ForkPinAfterHead,
+    rewrite: ForkCheckpointRewrite,
 }
 
-impl ReleasePinAfterHeadStore {
+impl RewriteForkCheckpointStore {
     fn new(
         inner: LocalFsStore,
+        source_namespace_id: NamespaceId,
         target_namespace_id: NamespaceId,
-        after_head: ForkPinAfterHead,
+        rewrite: ForkCheckpointRewrite,
     ) -> Self {
         Self {
             inner,
+            source_head_key: wal_head(&source_namespace_id),
             target_head_key: wal_head(&target_namespace_id),
-            after_head,
+            rewrite,
         }
     }
 
-    async fn rewrite_every_fork_pin(&self) {
+    async fn rewrite_fork_checkpoints(&self) {
         for key in self
             .inner
             .list_prefix("namespaces/")
@@ -1051,13 +1051,13 @@ impl ReleasePinAfterHeadStore {
             if !matches!(record.owner, CheckpointOwner::Fork { .. }) {
                 continue;
             }
-            match self.after_head {
-                ForkPinAfterHead::Released => {
+            match self.rewrite {
+                ForkCheckpointRewrite::ReleaseAfterTargetInstall => {
                     record.status = CheckpointStatus::Released {
                         released_at_ms: 2_000,
                     };
                 }
-                ForkPinAfterHead::LeaseAtTheGuardMargin { now_ms } => {
+                ForkCheckpointRewrite::ShortenBeforeTargetInstall { now_ms } => {
                     let CheckpointOwner::Fork { expires_at_ms, .. } = &mut record.owner else {
                         panic!("the record was checked as fork-owned")
                     };
@@ -1081,7 +1081,7 @@ impl ReleasePinAfterHeadStore {
 }
 
 #[async_trait::async_trait]
-impl ObjectStore for ReleasePinAfterHeadStore {
+impl ObjectStore for RewriteForkCheckpointStore {
     async fn head(
         &self,
         key: &str,
@@ -1102,7 +1102,16 @@ impl ObjectStore for ReleasePinAfterHeadStore {
         &self,
         key: &str,
     ) -> Result<Option<loonfs_objectstore::ObjectBody>, loonfs_objectstore::ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
+        let body = self.inner.get_with_metadata(key).await?;
+        if key == self.source_head_key
+            && matches!(
+                self.rewrite,
+                ForkCheckpointRewrite::ShortenBeforeTargetInstall { .. }
+            )
+        {
+            self.rewrite_fork_checkpoints().await;
+        }
+        Ok(body)
     }
 
     async fn put(
@@ -1112,8 +1121,13 @@ impl ObjectStore for ReleasePinAfterHeadStore {
         mode: loonfs_objectstore::PutMode,
     ) -> Result<loonfs_objectstore::ObjectMetadata, loonfs_objectstore::ObjectStoreError> {
         let metadata = self.inner.put(key, bytes, mode).await?;
-        if key == self.target_head_key {
-            self.rewrite_every_fork_pin().await;
+        if key == self.target_head_key
+            && matches!(
+                self.rewrite,
+                ForkCheckpointRewrite::ReleaseAfterTargetInstall
+            )
+        {
+            self.rewrite_fork_checkpoints().await;
         }
         Ok(metadata)
     }

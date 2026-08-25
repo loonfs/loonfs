@@ -223,15 +223,11 @@ const _: () = assert!(
      the commit that receipt admits, and that commit's publication"
 );
 
-/// Margin the post-publish fork guard requires between now and the source
-/// record's lease expiry before it lets a target stand.
+/// Time a fork checkpoint must remain valid after it is checked.
 ///
-/// The guard's evidence is one record read, and one provider operation's
-/// total wall time is `PROVIDER_OPERATION_DEADLINE_MS +
-/// PROVIDER_ATTEMPT_TIMEOUT_MS` (the deadline gates starting an attempt
-/// rather than preempting one). A record observed with more lease than that
-/// left cannot have been legally expiry-released while the guard was
-/// looking at it, so the observation still holds when the guard acts on it.
+/// This covers the full wall time of the next provider operation. The
+/// deadline limits when an attempt may start, and the attempt timeout limits
+/// how long that final attempt may run.
 pub const FORK_GUARD_MARGIN_MS: u64 = PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS;
 
 // The fork lease has two jobs, and both are inequalities over the constants

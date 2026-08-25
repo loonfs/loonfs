@@ -1,6 +1,4 @@
-//! Namespace forking: installs a target namespace whose head points at a
-//! fork-owned source checkpoint, sharing content bytes and reading the
-//! source's metadata until the target flushes its own.
+//! Forks a namespace from a checkpoint of the source.
 
 use crate::checkpoint::{
     create_checkpoint, load_checkpoint_record, load_namespace_manifest_envelope,
@@ -24,18 +22,11 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<Namespace> {
-    // The guard at the end needs to know how long this attempt has been
-    // running, so it starts here, before the first write.
+    // Include the whole fork in the lease-age calculation.
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
-    // Fork routes through a fork-owned source checkpoint: the record is the
-    // reachability root protecting every source-owned metadata file the
-    // target will reference, for as long as the target lives.
-    //
-    // Every attempt creates its own leased record. There is no reuse of an
-    // earlier attempt's record and no way back from a release, so an attempt
-    // that dies before publishing its target simply lets the lease pass, and
-    // garbage collection releases and reaps the record on that alone.
+    // The checkpoint keeps source metadata alive while the target refers to it.
+    // Garbage collection removes the checkpoint if the fork fails.
     let checkpoint = create_checkpoint(
         store,
         source_namespace_id,
@@ -67,15 +58,13 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .state;
-    // Start the target from the manifest pinned by the source checkpoint.
     let fork_basis = ForkBasis {
         manifest: source_record.manifest.clone(),
         source_checkpoint_id: source_record.checkpoint_id.clone(),
     };
     let fork_seq = fork_basis.manifest.manifest_head_seq;
 
-    // The target shares the source's content store and begins from the source
-    // manifest until it publishes its own.
+    // The target shares the source's content and starts from its pinned manifest.
     let head = HeadState {
         namespace_id: new_namespace_id.clone(),
         content_store_id: source_head.content_store_id.clone(),
@@ -93,10 +82,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         recent_segments: Vec::new(),
         status: NamespaceStatus::Active {},
     };
-    // The same check runs on both sides of the install. Before: a forker
-    // that stalled since creating the record must not install a target whose
-    // pin garbage collection may already have reaped. The margin covers the
-    // one provider operation the install is.
+    // Refuse to create a target if its checkpoint may expire during installation.
     ensure_fork_checkpoint_lease_holds(
         store,
         source_namespace_id,
@@ -121,13 +107,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         }
     }
 
-    // A forker that stalled between creating the record and publishing the
-    // target could have slept past its own lease, and a garbage-collection
-    // pass could have released the pin, leaving a target whose basis nothing
-    // protects. The guard closes that window: an inactive record, or one too
-    // close to its lease to trust, means this target must not exist, so it
-    // is deleted through the ordinary delete path and the checkpoint failure
-    // is what the caller sees.
+    // Confirm that the checkpoint remained valid while the target was installed.
+    // If it did not, retire the target before returning the error.
     if let Err(error) = ensure_fork_checkpoint_lease_holds(
         store,
         source_namespace_id,
@@ -147,9 +128,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         )
         .await
         {
-            // Both halves failed. The caller hears why the fork failed,
-            // which is the actionable half; the target that could not be
-            // deleted is left for an operator, named here.
             tracing::error!(
                 namespace_id = %new_namespace_id,
                 source_namespace_id = %source_namespace_id,
@@ -163,18 +141,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     crate::namespace::status::load_namespace(store, new_namespace_id).await
 }
 
-/// Proves, immediately before and again after the target head install, that
-/// the source record still pins the basis and will keep pinning it long
-/// enough for the new target to take over that job.
-///
-/// The record must be active, and its lease must outlast this read by
-/// [`FORK_GUARD_MARGIN_MS`]. The margin is what makes the check sound where a
-/// bare re-read raced: garbage collection releases a fork record only once
-/// its lease has passed, so a lease with more than one provider operation
-/// left cannot legally be released between the read and the caller acting on
-/// it. After that point the target head itself is the protection — a fork
-/// record whose target namespace exists and is not deleted is retained by
-/// every pass, lease or no lease.
+/// Checks that the fork checkpoint is active and remains valid through one
+/// provider operation.
 async fn ensure_fork_checkpoint_lease_holds<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
