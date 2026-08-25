@@ -4,6 +4,7 @@
 
 use super::candidates::{
     prepare_candidate_request, validate_commit_content_references, BatchDedup, CandidateAdmission,
+    SettlementStability,
 };
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
@@ -89,6 +90,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         ]);
     }
     let mut outcomes: Vec<Option<Result<ApiCommitResponse>>> = vec![None; candidates.len()];
+    let mut stable_outcomes = vec![false; candidates.len()];
     let mut session = PublishPlanningSession::new(&view.head);
     let mut accepted_indexes = Vec::new();
     let mut accepted_commits = Vec::new();
@@ -116,14 +118,15 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 phase = "prepare_commit"
             ))
             .await
-            .unwrap_or_else(|error| CandidateAdmission::Settled(Err(error)));
+            .unwrap_or_else(|error| CandidateAdmission::contingent(Err(error)));
             let candidate_request = match admission {
                 CandidateAdmission::Prepared(candidate_request) => candidate_request,
                 CandidateAdmission::AliasOf(primary_index) => {
                     dedup.record_alias(index, primary_index);
                     continue;
                 }
-                CandidateAdmission::Settled(outcome) => {
+                CandidateAdmission::Settled { outcome, stability } => {
+                    stable_outcomes[index] = stability == SettlementStability::Stable;
                     outcomes[index] = Some(outcome);
                     continue;
                 }
@@ -136,6 +139,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 validate_commit_content_references(candidate, view.content_store_id())
             {
                 session.discard_candidate(allocation);
+                stable_outcomes[index] = true;
                 outcomes[index] = Some(Err(error));
                 continue;
             }
@@ -195,7 +199,15 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     .await
     {
         Ok(wal) => wal,
-        Err(error) => return abort_batch(outcomes, &dedup, &accepted_indexes, &error),
+        Err(error) => {
+            return abort_batch(
+                outcomes,
+                &stable_outcomes,
+                &dedup,
+                &accepted_indexes,
+                &error,
+            )
+        }
     };
 
     let last_plan = &accepted_commits
@@ -206,7 +218,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         Ok(value) => value,
         Err(error) => {
             let error = CoreError::Internal(format!("head publish preparation failed: {error}"));
-            return abort_batch(outcomes, &dedup, &accepted_indexes, &error);
+            return abort_batch(
+                outcomes,
+                &stable_outcomes,
+                &dedup,
+                &accepted_indexes,
+                &error,
+            );
         }
     };
     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(put_started_ms);
@@ -215,7 +233,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             elapsed_ms,
             budget_ms: WAL_PUBLISH_BUDGET_MS,
         });
-        return abort_batch(outcomes, &dedup, &accepted_indexes, &error);
+        return abort_batch(
+            outcomes,
+            &stable_outcomes,
+            &dedup,
+            &accepted_indexes,
+            &error,
+        );
     }
     let head_etag = match cas_batch_head(
         store,
@@ -227,7 +251,15 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     .await
     {
         Ok(metadata) => metadata.etag,
-        Err(error) => return abort_batch(outcomes, &dedup, &accepted_indexes, &error),
+        Err(error) => {
+            return abort_batch(
+                outcomes,
+                &stable_outcomes,
+                &dedup,
+                &accepted_indexes,
+                &error,
+            )
+        }
     };
 
     let wal_records = wal.envelope.payload.records.clone();
@@ -254,11 +286,17 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
 /// the remaining slots and invalidates the caller's loaded projection.
 fn abort_batch(
     mut outcomes: Vec<Option<Result<ApiCommitResponse>>>,
+    stable_outcomes: &[bool],
     dedup: &BatchDedup,
     accepted_indexes: &[usize],
     error: &CoreError,
 ) -> PublishBatchAgainstViewResult {
-    fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, accepted_indexes, error);
+    fail_outcomes_contingent_on_unpublished_batch(
+        &mut outcomes,
+        stable_outcomes,
+        accepted_indexes,
+        error,
+    );
     PublishBatchAgainstViewResult {
         results: dedup.finish(outcomes),
         effect: PublishViewEffect::Invalidated,
@@ -364,11 +402,13 @@ async fn cas_batch_head<S: ObjectStore + ?Sized>(
 /// that was never durably true (format.md section 3.1.5).
 ///
 /// Rejections recorded before any acceptance were decided against the loaded
-/// durable publish view and stand. Idempotent `Ok` completions replay durable
-/// commit receipts and stand. Alias slots stay unfilled here and inherit
-/// their primary's final outcome.
+/// durable publish view and stand. So do explicitly stable decisions such as
+/// durable receipt results, request-shape failures, content-proof failures,
+/// and same-batch commit-id conflicts. Alias slots stay unfilled here and
+/// inherit their primary's final outcome.
 fn fail_outcomes_contingent_on_unpublished_batch(
     outcomes: &mut [Option<Result<ApiCommitResponse>>],
+    stable_outcomes: &[bool],
     accepted_indexes: &[usize],
     error: &CoreError,
 ) {
@@ -378,8 +418,12 @@ fn fail_outcomes_contingent_on_unpublished_batch(
     for &index in accepted_indexes {
         outcomes[index] = Some(Err(error.clone()));
     }
-    for outcome in outcomes.iter_mut().skip(first_accepted_index + 1) {
-        if matches!(outcome, Some(Err(_))) {
+    for (index, outcome) in outcomes
+        .iter_mut()
+        .enumerate()
+        .skip(first_accepted_index + 1)
+    {
+        if !stable_outcomes[index] && matches!(outcome, Some(Err(_))) {
             *outcome = Some(Err(error.clone()));
         }
     }

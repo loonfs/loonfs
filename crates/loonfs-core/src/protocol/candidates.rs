@@ -28,8 +28,36 @@ pub(super) enum CandidateAdmission {
     /// alias slot inherits the primary's final outcome.
     AliasOf(usize),
     /// The outcome was decided during admission: an idempotent replay of a
-    /// durable commit receipt, or a rejection.
-    Settled(Result<ApiCommitResponse>),
+    /// durable commit receipt, or a rejection. Stability records whether the
+    /// decision can stand if tentative earlier candidates fail to publish.
+    Settled {
+        outcome: Result<ApiCommitResponse>,
+        stability: SettlementStability,
+    },
+}
+
+impl CandidateAdmission {
+    fn stable(outcome: Result<ApiCommitResponse>) -> Self {
+        Self::Settled {
+            outcome,
+            stability: SettlementStability::Stable,
+        }
+    }
+
+    pub(super) fn contingent(outcome: Result<ApiCommitResponse>) -> Self {
+        Self::Settled {
+            outcome,
+            stability: SettlementStability::Contingent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SettlementStability {
+    /// Decided without relying on tentative filesystem state.
+    Stable,
+    /// May have been decided against state advanced by an earlier candidate.
+    Contingent,
 }
 
 #[derive(Debug, Clone)]
@@ -76,7 +104,7 @@ impl BatchDedup {
             // Neither claim has committed, so there is no landed commit to
             // name: the caller cannot reconcile this one by reading the
             // feed, and the conflict is the whole answer.
-            return Some(CandidateAdmission::Settled(Err(
+            return Some(CandidateAdmission::stable(Err(
                 CoreError::CommitIdReuseConflict {
                     commit_id: commit_id.to_string(),
                     committed_seq: None,
@@ -134,7 +162,10 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     dedup: &mut BatchDedup,
 ) -> Result<CandidateAdmission> {
     let mutation = candidate.request();
-    let semantic_identity = candidate.semantic_identity(namespace_id)?;
+    let semantic_identity = match candidate.semantic_identity(namespace_id) {
+        Ok(semantic_identity) => semantic_identity,
+        Err(error) => return Ok(CandidateAdmission::stable(Err(error))),
+    };
     if let Some(admission) = resolve_commit_id_reuse(
         namespace_id,
         view,
@@ -147,7 +178,9 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     {
         return Ok(admission);
     }
-    validate_new_primary(candidate)?;
+    if let Err(error) = validate_new_primary(candidate) {
+        return Ok(CandidateAdmission::stable(Err(error)));
+    }
     let mut allocation = session.begin_candidate();
     match session
         .prepare_commit(
@@ -165,7 +198,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         })),
         Err(error) => {
             session.discard_candidate(allocation);
-            Err(error)
+            Ok(CandidateAdmission::contingent(Err(error)))
         }
     }
 }
@@ -194,7 +227,7 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
     semantic_identity: &CommitFingerprint,
 ) -> Result<Option<CandidateAdmission>> {
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
-        return Ok(Some(CandidateAdmission::Settled(
+        return Ok(Some(CandidateAdmission::stable(
             if existing.semantic_commit_fingerprint != semantic_identity.as_str() {
                 // The receipt holds where the id landed and what landed
                 // there; reporting both is what turns a caller's

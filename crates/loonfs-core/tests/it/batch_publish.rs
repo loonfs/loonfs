@@ -821,6 +821,80 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
 }
 
 #[tokio::test]
+async fn failed_wal_write_preserves_later_durable_receipt_conflict() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    let durable_store = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&durable_store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    let committed = submit_commit(
+        &durable_store,
+        &namespace_id,
+        commit_request(
+            "durable-receipt",
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/durable").expect("path"),
+                parents: false,
+            },
+        ),
+        &context,
+    )
+    .await
+    .expect("publish durable receipt");
+    assert_eq!(committed.committed_seq, ChangeSeq(1));
+
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Prefix("namespaces/demo/wal/segments/".to_owned()),
+        InjectedCreateFailure::PreconditionFailed {
+            write_attempted_object: false,
+            additional_writes: Vec::new(),
+        },
+    );
+    let failed = publish_namespace_commits_batch(
+        &store,
+        &namespace_id,
+        vec![
+            CommitCandidate::new(commit_request(
+                "accepted-before-receipt-conflict",
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/accepted").expect("path"),
+                    parents: false,
+                },
+            )),
+            CommitCandidate::new(commit_request(
+                "durable-receipt",
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/different").expect("path"),
+                    parents: false,
+                },
+            )),
+        ],
+        &context,
+    )
+    .await;
+
+    assert!(matches!(failed[0], Err(CoreError::WalWrite { .. })));
+    match failed[1]
+        .as_ref()
+        .expect_err("durable receipt conflict must stand")
+    {
+        CoreError::CommitIdReuseConflict {
+            committed_seq,
+            committed_fingerprint,
+            ..
+        } => {
+            assert_eq!(*committed_seq, Some(ChangeSeq(1)));
+            assert!(committed_fingerprint.is_some());
+        }
+        error => panic!("expected durable receipt conflict, got {error:?}"),
+    }
+}
+
+#[tokio::test]
 async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
