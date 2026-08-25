@@ -188,11 +188,20 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
             manifest.payload.manifest_no,
             manifest.payload.head_seq,
         ),
-        ManifestPublicationOutcome::Superseded(current) => (
-            FlushWalOutcome::RootAdvanced,
-            current.manifest.manifest_no,
-            current.manifest.manifest_head_seq,
-        ),
+        ManifestPublicationOutcome::Superseded(current) => {
+            // A same-sequence reorganization can replace our predecessor
+            // without covering the newer WAL head this flush targeted. That
+            // root safely wins, but it has not satisfied the flush: reload
+            // its equivalent runs, replay the tail, and try again.
+            if current.manifest.manifest_head_seq < head_seq {
+                return Ok(TryFlushWal::RaceLost);
+            }
+            (
+                FlushWalOutcome::RootAdvanced,
+                current.manifest.manifest_no,
+                current.manifest.manifest_head_seq,
+            )
+        }
         ManifestPublicationOutcome::RootCasRaceLost => {
             return Ok(TryFlushWal::RaceLost);
         }

@@ -638,6 +638,81 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
 }
 
 #[tokio::test]
+async fn flush_retries_when_a_same_seq_replacement_wins_behind_its_target() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&inner, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // Prepare the shape of a pure compaction: a logically equivalent
+    // replacement at the root's existing sequence.
+    let basis = load_current_projection(&inner, &namespace_id)
+        .await
+        .expect("load compaction basis");
+    let replacement = build_manifest_from_projection(
+        &inner,
+        &namespace_id,
+        &basis,
+        ManifestNo(basis.root.manifest.manifest_no.0 + 1),
+    )
+    .await;
+    write_namespace_manifest(&inner, &replacement)
+        .await
+        .expect("write replacement manifest");
+    let competing_root = MetadataRootState {
+        namespace_id: namespace_id.clone(),
+        manifest: ManifestRef {
+            owner_namespace_id: namespace_id.clone(),
+            manifest_no: replacement.payload.manifest_no,
+            manifest_object_id: replacement.payload.manifest_object_id.clone(),
+            manifest_head_seq: replacement.payload.head_seq,
+            manifest_payload_checksum: replacement.payload_checksum.clone(),
+        },
+        updated_at_ms: context.now_ms + 1,
+    };
+
+    // The flush observes a newer WAL head against the old root. Its first
+    // root swap loses to the prepared same-sequence replacement.
+    write_file_bytes(
+        &inner,
+        &namespace_id,
+        "/later.txt",
+        b"later\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write later commit");
+    let target = load_head_object(&inner, &namespace_id)
+        .await
+        .expect("load target head")
+        .state
+        .seq;
+    assert!(replacement.payload.head_seq < target);
+
+    let store = RootCasTransportAfterCompetingRootStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        loonfs_objectstore::keys::metadata_root(&namespace_id),
+        competing_root,
+    );
+    let response = flush::flush_wal(&store, &namespace_id, &context)
+        .await
+        .expect("flush retries from the replacement root");
+
+    assert_eq!(response.target_head_seq, target);
+    assert_eq!(response.manifest_head_seq, target);
+    assert_eq!(response.outcome, loonfs_api::FlushWalOutcome::Published);
+    let root = load_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("load published root")
+        .state;
+    assert_eq!(root.manifest.manifest_head_seq, target);
+}
+
+#[tokio::test]
 async fn lower_seq_root_publication_yields_to_the_newer_root() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
