@@ -15,6 +15,37 @@ pub(crate) struct LoadedControl<T> {
     pub(crate) state: T,
 }
 
+/// Reads state assembled from control objects that advance independently,
+/// reloading until one read is coherent.
+///
+/// The objects have no shared snapshot, so two reads can straddle a write and
+/// observe a pair that never existed together. Every such observation site
+/// declares its coherence rule here and reloads through this one bound; a
+/// read that never converges returns the site's incoherence error instead of
+/// escaping as an impossible snapshot.
+pub(crate) async fn load_coherent<T, E, F, Fut>(
+    mut load: F,
+    coherent: impl Fn(&T) -> bool,
+    incoherent: impl FnOnce(T) -> E,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    const COHERENCE_RELOADS: usize = 3;
+    let mut loaded = load().await?;
+    for _reload in 0..COHERENCE_RELOADS {
+        if coherent(&loaded) {
+            return Ok(loaded);
+        }
+        loaded = load().await?;
+    }
+    if coherent(&loaded) {
+        return Ok(loaded);
+    }
+    Err(incoherent(loaded))
+}
+
 pub(crate) enum EmbeddedIdentityMismatch {
     Namespace {
         expected: NamespaceId,

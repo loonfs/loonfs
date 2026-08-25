@@ -5,10 +5,10 @@
 //! the first flush. A fork basis must match the identity and checksum stored
 //! in the head.
 
-use crate::control_object::ControlObjectLoadError;
+use crate::control_object::{load_coherent, ControlObjectLoadError};
 use crate::namespace::control::{
     load_head_and_metadata_root_if_present, load_head_object, load_wal_floor_object,
-    LoadedHeadObject,
+    LoadedHeadObject, LoadedMetadataRootObject,
 };
 use loonfs_api::wire::control::{HeadState, ManifestRef};
 use loonfs_api::NamespaceId;
@@ -93,35 +93,58 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<LoadedNamespaceBasis, ControlObjectLoadError> {
-    const MISSING_ROOT_RELOADS: usize = 3;
-    let mut reloads = 0;
-    loop {
-        let (head, root) = load_head_and_metadata_root_if_present(store, namespace_id).await?;
-        if let Some(root) = root {
-            return Ok(LoadedNamespaceBasis {
-                head,
-                basis: MetadataBasis::Manifest(root.state.manifest),
-            });
-        }
-
-        // A missing floor means this namespace has never advanced retention,
-        // so genesis or the fork source is still a complete recovery basis.
-        // An advanced floor proves a root was published. Reload the pair once
-        // more in case these reads straddled that first publication; if the
-        // root remains absent, it was lost and replay is no longer authority.
-        let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
-        if floor_seq <= namespace_birth_seq(&head.state) {
-            let basis = metadata_basis_without_root(&head.state);
-            return Ok(LoadedNamespaceBasis { head, basis });
-        }
-        if reloads == MISSING_ROOT_RELOADS {
-            return Err(ControlObjectLoadError::MissingRootAfterFloor {
-                namespace_id: namespace_id.clone(),
-                floor_seq,
-            });
-        }
-        reloads += 1;
+    // A missing floor means this namespace has never advanced retention, so
+    // genesis or the fork source is still a complete recovery basis. An
+    // advanced floor proves a root was published: a read with no root is
+    // coherent only below the floor, and one that never converges means the
+    // root was lost and replay is no longer authority.
+    enum RootObservation {
+        WithRoot(LoadedHeadObject, LoadedMetadataRootObject),
+        NoRoot(LoadedHeadObject, ChangeSeq),
     }
+    impl RootObservation {
+        fn missing_root_floor(&self) -> Option<ChangeSeq> {
+            match self {
+                Self::WithRoot(..) => None,
+                Self::NoRoot(_, floor_seq) => Some(*floor_seq),
+            }
+        }
+    }
+    let observed = load_coherent(
+        || async {
+            let (head, root) = load_head_and_metadata_root_if_present(store, namespace_id).await?;
+            match root {
+                Some(root) => Ok(RootObservation::WithRoot(head, root)),
+                None => {
+                    let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
+                    Ok(RootObservation::NoRoot(head, floor_seq))
+                }
+            }
+        },
+        |observed| match observed {
+            RootObservation::WithRoot(..) => true,
+            RootObservation::NoRoot(head, floor_seq) => {
+                *floor_seq <= namespace_birth_seq(&head.state)
+            }
+        },
+        |observed| ControlObjectLoadError::MissingRootAfterFloor {
+            namespace_id: namespace_id.clone(),
+            floor_seq: observed
+                .missing_root_floor()
+                .expect("only a rootless read can be incoherent"),
+        },
+    )
+    .await?;
+    Ok(match observed {
+        RootObservation::WithRoot(head, root) => LoadedNamespaceBasis {
+            head,
+            basis: MetadataBasis::Manifest(root.state.manifest),
+        },
+        RootObservation::NoRoot(head, _) => {
+            let basis = metadata_basis_without_root(&head.state);
+            LoadedNamespaceBasis { head, basis }
+        }
+    })
 }
 
 /// Resolves the basis of a namespace whose `metadata/root.json` is absent:
@@ -174,20 +197,17 @@ pub(crate) async fn load_head_and_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<(LoadedHeadObject, ChangeSeq), ControlObjectLoadError> {
-    const FLOOR_AHEAD_HEAD_RELOADS: usize = 3;
-    let mut head = load_head_object(store, namespace_id).await?;
-    let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
-    for _reload in 0..FLOOR_AHEAD_HEAD_RELOADS {
-        if floor_seq <= head.state.seq {
-            return Ok((head, floor_seq));
-        }
-        head = load_head_object(store, namespace_id).await?;
-    }
-    if floor_seq <= head.state.seq {
-        return Ok((head, floor_seq));
-    }
-    Err(ControlObjectLoadError::FloorAheadOfHead {
-        floor_seq,
-        head_seq: head.state.seq,
-    })
+    load_coherent(
+        || async {
+            let head = load_head_object(store, namespace_id).await?;
+            let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
+            Ok((head, floor_seq))
+        },
+        |(head, floor_seq): &(LoadedHeadObject, ChangeSeq)| *floor_seq <= head.state.seq,
+        |(head, floor_seq)| ControlObjectLoadError::FloorAheadOfHead {
+            floor_seq,
+            head_seq: head.state.seq,
+        },
+    )
+    .await
 }
