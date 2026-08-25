@@ -1798,7 +1798,7 @@ async fn a_missing_floor_reads_as_retain_everything() {
         .await
         .expect("head")
         .state;
-    let floor = crate::namespace::basis::resolve_retention_floor_seq(&store, &head)
+    let floor = crate::namespace::control_snapshot::resolve_retention_floor_seq(&store, &head)
         .await
         .expect("missing floor defaults");
     assert_eq!(floor, ChangeSeq(0));

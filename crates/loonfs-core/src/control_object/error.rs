@@ -22,6 +22,13 @@ pub enum ControlObjectLoadError {
         head_seq: loonfs_api::ChangeSeq,
     },
     #[error(
+        "retention floor seq `{floor_seq}` is beyond the seq `{root_manifest_head_seq}` covered by the reloaded metadata root"
+    )]
+    FloorAheadOfRoot {
+        floor_seq: loonfs_api::ChangeSeq,
+        root_manifest_head_seq: loonfs_api::ChangeSeq,
+    },
+    #[error(
         "namespace `{namespace_id}` retention floor stands at `{floor_seq}`, but its metadata root object is missing"
     )]
     MissingRootAfterFloor {

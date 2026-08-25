@@ -359,6 +359,13 @@ pub(crate) async fn collect_stream(mut body: ByteStream) -> Result<Bytes> {
 ///
 /// Implementations must satisfy the
 /// [required guarantees](../../../docs/specs/format.md#11-required-guarantees).
+///
+/// Those guarantees hold per key: after a successful create, overwrite, or
+/// compare-and-swap of one key, a later direct read of that key never returns
+/// an older version. Namespace control objects are reconciled against each
+/// other on that basis, so one targeted reread settles a read that straddled
+/// another writer's transition. Prefix listings are weaker and may still lag a
+/// write that a direct read of the same key already reflects.
 #[async_trait]
 pub trait ObjectStore: Send + Sync + Debug {
     /// Reads metadata for one key, returning `None` when the object is absent.

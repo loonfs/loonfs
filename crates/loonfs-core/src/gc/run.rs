@@ -17,7 +17,7 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_STAGING_GRACE_MS;
-use crate::namespace::basis::load_head_and_metadata_basis;
+use crate::namespace::control_snapshot::load_control_snapshot;
 use futures::StreamExt;
 use loonfs_api::{ContentStoreId, GcResponse, NamespaceId, RetainedReason, UploadId};
 use loonfs_objectstore::ObjectStore;
@@ -65,22 +65,23 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // The head is the namespace: without one there is nothing to collect,
     // and nothing could have been written under the prefix either, because
     // the head is every installation's first and only write. It also names
-    // the content store a session's object lives in. The metadata root is
-    // read alongside it and charged with it as one unit.
+    // the content store a session's object lives in. The snapshot reads the
+    // root and floor alongside it: this unit covers the head and root, and
+    // collection charges for the floor.
     budget.charge();
-    let loaded = match load_head_and_metadata_basis(store, namespace_id).await {
-        Ok(loaded) => loaded,
+    let snapshot = match load_control_snapshot(store, namespace_id).await {
+        Ok(snapshot) => snapshot,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
-    let content_store_id = loaded.head.state.content_store_id.clone();
+    let content_store_id = snapshot.head.state.content_store_id.clone();
 
     // Every invocation rebuilds all roots before interpreting the cursor.
     // The cursor can skip enumeration only; it never carries safety state.
     let initial_live = match collect_live_set(
         store,
         namespace_id,
-        &loaded,
+        &snapshot,
         policy.grace_window_ms,
         None,
         &mut budget,

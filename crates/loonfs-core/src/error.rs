@@ -689,7 +689,8 @@ pub(crate) fn classify_control_object_load_error(error: &ControlObjectLoadError)
     match error {
         ControlObjectLoadError::MissingObject { .. } => ErrorCode::NamespaceNotFound,
         ControlObjectLoadError::RootAheadOfHead { .. }
-        | ControlObjectLoadError::FloorAheadOfHead { .. } => ErrorCode::StaleHead,
+        | ControlObjectLoadError::FloorAheadOfHead { .. }
+        | ControlObjectLoadError::FloorAheadOfRoot { .. } => ErrorCode::StaleHead,
         ControlObjectLoadError::MissingRootAfterFloor { .. }
         | ControlObjectLoadError::NamespaceMismatch { .. }
         | ControlObjectLoadError::IdentityMismatch { .. }
