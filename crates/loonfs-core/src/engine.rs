@@ -21,7 +21,9 @@ use crate::protocol::{
 use crate::storage::content::FileContentStream;
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use crate::time::current_time_ms;
-use loonfs_api::options::{DirectMultipartUploadOptions, ListPathEntriesOptions, StatPathOptions};
+use loonfs_api::options::{
+    DirectMultipartUploadOptions, ListInodeChildrenOptions, ListPathEntriesOptions, StatPathOptions,
+};
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CommitResponse, CompleteMultipartUploadRequest,
     ListChangesResponse, UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
@@ -147,7 +149,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
+        options: ListInodeChildrenOptions,
         context: &RuntimeReadContext,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let view = self.load_read_view(context).await?;

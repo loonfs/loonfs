@@ -564,6 +564,69 @@ fn inode_children_pages_stay_on_the_renamed_directory() {
 }
 
 #[test]
+fn inode_children_pages_follow_the_directory_to_a_new_ancestor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "inode-children-move-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in [
+        "/left/docs/a.txt",
+        "/left/docs/b.txt",
+        "/left/docs/c.txt",
+        "/right/keep.txt",
+    ] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
+    }
+    let docs = fs
+        .stat_path_blocking(&namespace_id, "/left/docs")
+        .expect("stat listed directory");
+
+    let mut pager = fs.reader.list_inode_children_pager(
+        &namespace_id,
+        docs.inode_id,
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+        Default::default(),
+    );
+    let first = block_on(pager.next())
+        .expect("first page exists")
+        .expect("first page succeeds");
+    assert_eq!(display_names(&first.entries), vec!["a.txt", "b.txt"]);
+
+    fs.move_path_blocking(
+        &namespace_id,
+        "/left/docs",
+        "/right/docs",
+        MoveOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("move the listed directory under a different ancestor");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/left/docs/decoy.txt",
+        b"decoy",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("rebind the old path to a fresh directory");
+
+    let second = block_on(pager.next())
+        .expect("second page exists")
+        .expect("second page resumes after the move");
+    assert_eq!(display_names(&second.entries), vec!["c.txt"]);
+    assert_eq!(second.parent_inode_id, docs.inode_id);
+    assert_eq!(second.entries[0].path.as_str(), "/right/docs/c.txt");
+    assert!(block_on(pager.next()).is_none());
+}
+
+#[test]
 fn inode_children_rejects_files_and_missing_inodes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-target-test");

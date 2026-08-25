@@ -825,6 +825,10 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         ("/v0/namespaces/{namespace_id}/filesystem/entries", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/revisions", "get"),
         (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
+            "get",
+        ),
+        (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
             "get",
         ),
@@ -847,6 +851,10 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         ("/v0/namespaces/{namespace_id}/filesystem/entry", true),
         ("/v0/namespaces/{namespace_id}/filesystem/entries", false),
         ("/v0/namespaces/{namespace_id}/inodes/{inode_id}", true),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
+            false,
+        ),
     ] {
         let parameter = query_parameter(paths, path, "get", "include_attributes");
         assert_eq!(parameter.get("required"), Some(&Value::Bool(false)));

@@ -6,7 +6,7 @@ use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
 use loonfs_api::{ApiError, DeleteDirectoryBehavior, ErrorCode, InodeId, RevisionNo};
 use loonfs_client::{
-    ClientError, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions, MoveOptions,
+    ClientError, CreateDirectoryOptions, DeleteOptions, ListInodeChildrenOptions, MoveOptions,
     NamespacePath, PutFileOptions, UpdateAttributesOptions,
 };
 use loonfs_test_support::http::raw_agent;
@@ -506,7 +506,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
                 file_id,
                 None,
                 None,
-                &ListPathEntriesOptions::default(),
+                &ListInodeChildrenOptions::default(),
             )
             .await,
         409,

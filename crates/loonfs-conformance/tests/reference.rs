@@ -14,7 +14,8 @@ use loonfs_api::{
 };
 use loonfs_client::{
     Client, ClientConfig, ClientError, CommitOptions, CreateDirectoryOptions, DeleteOptions,
-    ListPathEntriesOptions, MoveOptions, NamespacePath, PutFileOptions, StatPathOptions,
+    ListInodeChildrenOptions, ListPathEntriesOptions, MoveOptions, NamespacePath, PutFileOptions,
+    StatPathOptions,
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
@@ -762,7 +763,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
                 parent_inode_id,
                 Some(request.page_size),
                 cursor.as_deref(),
-                &ListPathEntriesOptions::default(),
+                &ListInodeChildrenOptions::default(),
             )
             .await
             .expect("list children-by-inode page");
@@ -820,7 +821,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
         parent_inode_id,
         Some(request.page_size),
         Some(saved_cursor),
-        &ListPathEntriesOptions::default(),
+        &ListInodeChildrenOptions::default(),
     );
     let mut resumed = Vec::new();
     while let Some(page) = pager.next().await {

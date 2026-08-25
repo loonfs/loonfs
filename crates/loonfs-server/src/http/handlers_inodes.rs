@@ -12,7 +12,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::Json;
-use loonfs::{ListPathEntriesOptions, StatPathOptions};
+use loonfs::{ListInodeChildrenOptions, StatPathOptions};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
@@ -135,7 +135,7 @@ pub(super) async fn list_inode_children(
     let namespace_id = namespace_id_path.into_id()?;
     let inode_id = parse_inode_id(&path.into_params()?.inode_id)?;
     let query = query.into_params()?;
-    let mut options = ListPathEntriesOptions::default();
+    let mut options = ListInodeChildrenOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }

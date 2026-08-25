@@ -79,7 +79,7 @@ pub struct InodeChildrenPager {
     inode_id: InodeId,
     page_size: Option<u32>,
     cursor: Option<String>,
-    options: ListPathEntriesOptions,
+    options: ListInodeChildrenOptions,
     pending: Option<ListInodeChildrenResponse>,
     exhausted: bool,
 }
@@ -479,7 +479,7 @@ impl Client {
         inode_id: InodeId,
         page_size: Option<u32>,
         cursor: Option<String>,
-        options: &ListPathEntriesOptions,
+        options: &ListInodeChildrenOptions,
     ) -> InodeChildrenPager {
         InodeChildrenPager {
             client: self.clone(),
@@ -501,7 +501,7 @@ impl Client {
         inode_id: InodeId,
         limit: Option<u32>,
         cursor: Option<&str>,
-        options: &ListPathEntriesOptions,
+        options: &ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
         let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         let mut url = format!(

@@ -7,10 +7,10 @@ use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, CommittedChange,
     ContentRef, CoreError, CurrentFileState, FileBytes, FileContentStream, FileRevision, InodeId,
-    ListChangesOptions, ListChangesResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesOptions, ListPathEntriesResponse, Namespace, NamespaceId, PathEntry,
-    ReadFileStreamOptions, RevisionNo, RuntimeError, SharedObjectStore, StatPathOptions,
-    TrashEntry,
+    ListChangesOptions, ListChangesResponse, ListFileRevisionsResponse, ListInodeChildrenOptions,
+    ListInodeChildrenResponse, ListPathEntriesOptions, ListPathEntriesResponse, Namespace,
+    NamespaceId, PathEntry, ReadFileStreamOptions, RevisionNo, RuntimeError, SharedObjectStore,
+    StatPathOptions, TrashEntry,
 };
 use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageCursor, PageRequest,
@@ -93,7 +93,7 @@ pub struct InodeChildrenPager {
     namespace_id: NamespaceId,
     inode_id: InodeId,
     request: PageRequest<DirectoryPageCursor>,
-    options: ListPathEntriesOptions,
+    options: ListInodeChildrenOptions,
     pending: Option<ListInodeChildrenResponse>,
     exhausted: bool,
 }
@@ -487,11 +487,7 @@ impl FsReader {
         let page = engine
             .list_path_page(listed_path.as_str(), request, options, &read_context)
             .await?;
-        let head_seq = page
-            .items
-            .first()
-            .map(|entry| entry.head_seq)
-            .unwrap_or(read_context.head.seq);
+        let head_seq = read_context.head.seq;
         let next_cursor = page.next_cursor;
         let response = ListPathEntriesResponse {
             namespace_id: namespace_id.clone(),
@@ -510,7 +506,7 @@ impl FsReader {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
+        options: ListInodeChildrenOptions,
     ) -> InodeChildrenPager {
         InodeChildrenPager {
             reader: self.clone(),
@@ -547,18 +543,14 @@ impl FsReader {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
+        options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let page = engine
             .list_inode_children_page(inode_id, request, options, &read_context)
             .await?;
-        let head_seq = page
-            .items
-            .first()
-            .map(|entry| entry.head_seq)
-            .unwrap_or(read_context.head.seq);
+        let head_seq = read_context.head.seq;
         let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
         Ok(ListInodeChildrenResponse {
             namespace_id: namespace_id.clone(),
