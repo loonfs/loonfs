@@ -73,4 +73,4 @@ The test checks the server, R2 access, and an upload and download.
 - Keep `max_instances` set to `1`. LoonFS expects one active server writer.
 - The first request may take a few minutes while the Container starts.
 - The Container stops after ten idle minutes and starts again on demand.
-- `/health` and `/readiness` are public. All other routes require the auth token.
+- `/health` and `/readiness` are public. `/metrics` and `/v0/*` require the auth token.

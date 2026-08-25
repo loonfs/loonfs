@@ -72,7 +72,13 @@ export class LoonFSContainer extends Container<Env> {
 }
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
+  fetch(request: Request, env: Env) {
+    const path = new URL(request.url).pathname;
+    const isLoonFSPath =
+      ["/health", "/readiness", "/metrics"].includes(path) || path.startsWith("/v0/");
+    if (!isLoonFSPath) {
+      return new Response("Not Found", { status: 404 });
+    }
     return getContainer(env.LOONFS_CONTAINER, "primary").fetch(request);
   },
 } satisfies ExportedHandler<Env>;
