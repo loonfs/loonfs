@@ -977,6 +977,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
+    let covering_manifest_no = ManifestNo(materialization.root.manifest.manifest_no.0 + 1);
     let manifest_without_checkpoint = build_namespace_manifest_from_metadata_state(
         &store,
         &namespace_id,
@@ -987,7 +988,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestNo(1),
+        covering_manifest_no,
     )
     .await
     .expect("build manifest");
@@ -1011,13 +1012,13 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     // With standalone records, pinning a basis that already covers the head
     // writes a checkpoint file against it instead of building a new
     // manifest.
-    assert_eq!(checkpoint.manifest_no, ManifestNo(1));
+    assert_eq!(checkpoint.manifest_no, covering_manifest_no);
     let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest.manifest_no, ManifestNo(1));
+    assert_eq!(record.manifest.manifest_no, covering_manifest_no);
     assert_eq!(
         record.manifest.manifest_payload_checksum,
         manifest_without_checkpoint.payload_checksum

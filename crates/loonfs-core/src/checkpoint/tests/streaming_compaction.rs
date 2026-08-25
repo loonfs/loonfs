@@ -3319,13 +3319,8 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
     );
 }
 
-/// Fails every root compare-and-swap, and cancels the job the first time it
-/// tries one. Every other compare-and-swap — the job's own lease heartbeat —
-/// goes through, because losing that one would fence the job instead.
-///
-/// That is the shape a shutdown takes during finalization: attempts are still
-/// available, the races are still there to take, and the job must stop taking
-/// them.
+/// Cancels the job when its first root compare-and-swap fails. Lease updates
+/// still succeed so cancellation, rather than fencing, stops the job.
 #[derive(Debug)]
 struct CancelAtTheFirstPublicationStore {
     inner: LocalFsStore,

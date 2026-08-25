@@ -11,16 +11,19 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
 use loonfs_api::{ManifestObjectId, NamespaceId};
-use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_root};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 
+/// The result of trying to publish a manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ManifestPublicationOutcome {
+    /// The candidate is the current root.
     Published(MetadataRootState),
-    /// Someone already published something at least as new; the caller's
-    /// manifest stays durable and valid, the newer root simply wins.
-    Superseded(MetadataRootState),
-    /// The root changed, but the candidate can still be retried.
+    /// The current root already covers the candidate's state.
+    CoveredByCurrent(MetadataRootState),
+    /// The expected predecessor changed without covering the candidate.
+    PredecessorChanged(MetadataRootState),
+    /// The root changed during the compare-and-swap and should be retried.
     RootCasRaceLost,
 }
 
@@ -109,13 +112,8 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     expected_predecessor: Option<ManifestObjectId>,
     updated_at_ms: u64,
 ) -> Result<ManifestPublicationOutcome> {
-    // Manifest publication CASes metadata/root.json, never the WAL head:
-    // head watchers see only commits. Updates are monotonic in
-    // manifest_head_seq; a same-seq replacement may reference a different
-    // manifest (pure compaction), and a lower-seq attempt no-ops in favor of
-    // whatever newer root someone else already published.
-    //
-    // Callers own the retry policy because rebuilding costs vary by operation.
+    // Manifest publication updates the metadata root, not the WAL head. A
+    // candidate may replace only the predecessor it was built from.
     let candidate = manifest_ref_for(namespace_id, manifest);
     let Some(loaded) = load_metadata_root_object_if_present(store, namespace_id)
         .await
@@ -124,16 +122,23 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
         return match create_first_metadata_root(store, namespace_id, &candidate, updated_at_ms)
             .await?
         {
-            Some(published) => Ok(ManifestPublicationOutcome::Published(published)),
+            Some(root) => Ok(ManifestPublicationOutcome::Published(root)),
             None => {
-                resolve_lost_root_swap(store, namespace_id, &candidate, &expected_predecessor).await
+                classify_current_root(
+                    store,
+                    namespace_id,
+                    &candidate,
+                    expected_predecessor.as_ref(),
+                )
+                .await
             }
         };
     };
-    match root_decision(loaded.state, &candidate, &expected_predecessor) {
-        ManifestPublicationOutcome::RootCasRaceLost => {}
-        decided => return Ok(decided),
+    match root_transition(&loaded.state, &candidate, expected_predecessor.as_ref()) {
+        RootTransition::InstallAgainstCurrent => {}
+        transition => return Ok(outcome_from(loaded.state, transition)),
     }
+    ensure_legal_successor(namespace_id, &candidate, &loaded.state.manifest)?;
     let next = MetadataRootState {
         namespace_id: namespace_id.clone(),
         manifest: candidate.clone(),
@@ -152,12 +157,23 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     {
         Ok(_) => Ok(ManifestPublicationOutcome::Published(next)),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            resolve_lost_root_swap(store, namespace_id, &candidate, &expected_predecessor).await
+            classify_current_root(
+                store,
+                namespace_id,
+                &candidate,
+                expected_predecessor.as_ref(),
+            )
+            .await
         }
         // Re-read the root to resolve an unknown write outcome.
         Err(error) => {
-            match resolve_lost_root_swap(store, namespace_id, &candidate, &expected_predecessor)
-                .await?
+            match classify_current_root(
+                store,
+                namespace_id,
+                &candidate,
+                expected_predecessor.as_ref(),
+            )
+            .await?
             {
                 ManifestPublicationOutcome::RootCasRaceLost => {
                     Err(CoreError::store(&loaded.object_key, &error))
@@ -168,35 +184,49 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Decides whether the current root accepts, supersedes, or leaves the candidate retryable.
-///
-/// A candidate may replace only its expected predecessor. This prevents stale
-/// work from overwriting a sibling publication, even at a higher head sequence.
-fn root_decision(
-    root: MetadataRootState,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootTransition {
+    InstallAgainstCurrent,
+    Published,
+    CoveredByCurrent,
+    PredecessorChanged,
+}
+
+/// A candidate may replace only the predecessor it was built from.
+fn root_transition(
+    root: &MetadataRootState,
     candidate: &ManifestRef,
-    expected_predecessor: &Option<ManifestObjectId>,
-) -> ManifestPublicationOutcome {
+    expected_predecessor: Option<&ManifestObjectId>,
+) -> RootTransition {
     if root.manifest == *candidate {
-        return ManifestPublicationOutcome::Published(root);
+        return RootTransition::Published;
     }
-    if root_supersedes_candidate(&root, candidate) {
-        return ManifestPublicationOutcome::Superseded(root);
+    if root_supersedes_candidate(root, candidate) {
+        return RootTransition::CoveredByCurrent;
     }
     match expected_predecessor {
         Some(predecessor) if root.manifest.manifest_object_id == *predecessor => {
-            ManifestPublicationOutcome::RootCasRaceLost
+            RootTransition::InstallAgainstCurrent
         }
-        _ => ManifestPublicationOutcome::Superseded(root),
+        _ => RootTransition::PredecessorChanged,
     }
 }
 
-/// Re-reads the root after a lost or unconfirmed swap.
-async fn resolve_lost_root_swap<S: ObjectStore + ?Sized>(
+fn outcome_from(root: MetadataRootState, transition: RootTransition) -> ManifestPublicationOutcome {
+    match transition {
+        RootTransition::InstallAgainstCurrent => ManifestPublicationOutcome::RootCasRaceLost,
+        RootTransition::Published => ManifestPublicationOutcome::Published(root),
+        RootTransition::CoveredByCurrent => ManifestPublicationOutcome::CoveredByCurrent(root),
+        RootTransition::PredecessorChanged => ManifestPublicationOutcome::PredecessorChanged(root),
+    }
+}
+
+/// Re-reads the root after a lost or unconfirmed compare-and-swap.
+async fn classify_current_root<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     candidate: &ManifestRef,
-    expected_predecessor: &Option<ManifestObjectId>,
+    expected_predecessor: Option<&ManifestObjectId>,
 ) -> Result<ManifestPublicationOutcome> {
     let Some(loaded) = load_metadata_root_object_if_present(store, namespace_id)
         .await
@@ -204,7 +234,26 @@ async fn resolve_lost_root_swap<S: ObjectStore + ?Sized>(
     else {
         return Ok(ManifestPublicationOutcome::RootCasRaceLost);
     };
-    Ok(root_decision(loaded.state, candidate, expected_predecessor))
+    let transition = root_transition(&loaded.state, candidate, expected_predecessor);
+    Ok(outcome_from(loaded.state, transition))
+}
+
+/// Rejects a candidate that does not advance its predecessor.
+fn ensure_legal_successor(
+    namespace_id: &NamespaceId,
+    candidate: &ManifestRef,
+    predecessor: &ManifestRef,
+) -> Result<()> {
+    if candidate.owner_namespace_id == *namespace_id
+        && candidate.manifest_no > predecessor.manifest_no
+        && candidate.manifest_head_seq >= predecessor.manifest_head_seq
+    {
+        return Ok(());
+    }
+    Err(CoreError::Internal(format!(
+        "manifest `{}` is not a legal successor of `{}` in namespace `{namespace_id}`",
+        candidate.manifest_object_id, predecessor.manifest_object_id
+    )))
 }
 
 /// Publishes the namespace's first `metadata/root.json`.
@@ -216,7 +265,7 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
     candidate: &ManifestRef,
     updated_at_ms: u64,
 ) -> Result<Option<MetadataRootState>> {
-    let object_key = loonfs_objectstore::keys::metadata_root(namespace_id);
+    let object_key = metadata_root(namespace_id);
     let next = MetadataRootState {
         namespace_id: namespace_id.clone(),
         manifest: candidate.clone(),

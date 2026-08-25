@@ -544,7 +544,7 @@ async fn create_checkpoint_fails_when_its_manifest_key_holds_a_different_payload
 }
 
 #[tokio::test]
-async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser_is_superseded() {
+async fn same_root_publications_keep_the_first_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -566,12 +566,21 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    let first_manifest =
-        build_manifest_from_projection(&store, &namespace_id, &materialization, ManifestNo(1))
-            .await;
-    let second_manifest =
-        build_manifest_from_projection(&store, &namespace_id, &materialization, ManifestNo(1))
-            .await;
+    let sibling_manifest_no = ManifestNo(materialization.root.manifest.manifest_no.0 + 1);
+    let first_manifest = build_manifest_from_projection(
+        &store,
+        &namespace_id,
+        &materialization,
+        sibling_manifest_no,
+    )
+    .await;
+    let second_manifest = build_manifest_from_projection(
+        &store,
+        &namespace_id,
+        &materialization,
+        sibling_manifest_no,
+    )
+    .await;
     assert_eq!(
         first_manifest.payload.manifest_no,
         second_manifest.payload.manifest_no
@@ -617,13 +626,13 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
     .await
     .expect("second publication should yield to the published root");
     match second_outcome {
-        ManifestPublicationOutcome::Superseded(root) => {
+        ManifestPublicationOutcome::CoveredByCurrent(root) => {
             assert_eq!(
                 root.manifest.manifest_object_id,
                 first_manifest.payload.manifest_object_id
             );
         }
-        other => panic!("expected second publication to be superseded, got {other:?}"),
+        other => panic!("expected the second publication to be covered, got {other:?}"),
     }
 
     let manifest_objects = store
@@ -796,15 +805,15 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
     .expect("manifest publication should classify the newer root");
 
     match outcome {
-        ManifestPublicationOutcome::Superseded(current) => {
+        ManifestPublicationOutcome::CoveredByCurrent(current) => {
             assert_eq!(current.manifest.manifest_no, later_checkpoint.manifest_no);
         }
-        other => panic!("expected superseded outcome, got {other:?}"),
+        other => panic!("expected a covering root, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
+async fn root_cas_conflict_reports_a_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
@@ -840,7 +849,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestNo(1),
+        ManifestNo(materialization.root.manifest.manifest_no.0 + 1),
     )
     .await
     .expect("build manifest");
@@ -857,7 +866,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         context.now_ms,
     )
     .await
-    .expect("root publication should report CAS race");
+    .expect("root publication should report CAS contention");
 
     assert_eq!(outcome, ManifestPublicationOutcome::RootCasRaceLost);
 }
@@ -897,7 +906,7 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
             metadata_state: &materialization.metadata_state,
         },
         MetadataLsmPolicy::default(),
-        ManifestNo(1),
+        ManifestNo(materialization.root.manifest.manifest_no.0 + 1),
     )
     .await
     .expect("build manifest");
@@ -924,7 +933,7 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
                 manifest.payload.manifest_object_id
             );
         }
-        other => panic!("expected recovered published root, got {other:?}"),
+        other => panic!("expected the candidate to be found current, got {other:?}"),
     }
 }
 
@@ -951,12 +960,21 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
     let materialization = load_current_projection(&raw_store, &namespace_id)
         .await
         .expect("materialization");
-    let candidate_manifest =
-        build_manifest_from_projection(&raw_store, &namespace_id, &materialization, ManifestNo(1))
-            .await;
-    let competing_manifest =
-        build_manifest_from_projection(&raw_store, &namespace_id, &materialization, ManifestNo(2))
-            .await;
+    let candidate_manifest_no = ManifestNo(materialization.root.manifest.manifest_no.0 + 1);
+    let candidate_manifest = build_manifest_from_projection(
+        &raw_store,
+        &namespace_id,
+        &materialization,
+        candidate_manifest_no,
+    )
+    .await;
+    let competing_manifest = build_manifest_from_projection(
+        &raw_store,
+        &namespace_id,
+        &materialization,
+        ManifestNo(candidate_manifest_no.0 + 1),
+    )
+    .await;
     write_namespace_manifest(&raw_store, &candidate_manifest)
         .await
         .expect("write candidate manifest");
@@ -992,7 +1010,7 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
     .expect("root publication should recover by observing the competing root");
 
     match outcome {
-        ManifestPublicationOutcome::Superseded(root) => {
+        ManifestPublicationOutcome::CoveredByCurrent(root) => {
             assert_eq!(
                 root.manifest.manifest_no,
                 competing_manifest.payload.manifest_no
@@ -1002,7 +1020,7 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
                 competing_manifest.payload.manifest_object_id
             );
         }
-        other => panic!("expected superseded root after ambiguous CAS, got {other:?}"),
+        other => panic!("expected a covering root after an ambiguous CAS, got {other:?}"),
     }
 }
 
@@ -1119,7 +1137,7 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
                 materialization.root.manifest.manifest_head_seq
             );
         }
-        other => panic!("expected published compacted root, got {other:?}"),
+        other => panic!("expected the compacted root to install, got {other:?}"),
     }
     // Reads keep working against the replaced root.
     let after = load_current_projection(&store, &namespace_id)
@@ -1242,10 +1260,8 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
 
 #[tokio::test]
 async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
-    // The review's flush race: a publisher builds from root A while a
-    // sibling publishes B from the same basis, then tries to win on a
-    // higher head. Its carried-forward state predates B, so head ordering
-    // must not decide the winner — the predecessor gate must.
+    // Build two candidates from the same root. The candidate with the newer
+    // WAL head must not overwrite a sibling whose state it does not include.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1260,7 +1276,7 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         .await
         .expect("sibling basis");
 
-    // The stale publisher observes a newer head against the same root.
+    // The second candidate observes a newer head against the same root.
     write_file_bytes(&store, &namespace_id, "/two.txt", b"two\n", &context, None)
         .await
         .expect("write two");
@@ -1319,13 +1335,13 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
     .await
     .expect("stale publication");
     match stale_outcome {
-        ManifestPublicationOutcome::Superseded(root) => {
+        ManifestPublicationOutcome::PredecessorChanged(root) => {
             assert_eq!(
                 root.manifest.manifest_object_id, sibling.payload.manifest_object_id,
                 "the sibling's acknowledged publication must survive"
             );
         }
-        other => panic!("a stale-basis candidate must be superseded, got {other:?}"),
+        other => panic!("a stale-basis candidate must not install, got {other:?}"),
     }
 
     let root_after = load_metadata_root_object(&store, &namespace_id)

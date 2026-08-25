@@ -338,7 +338,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
                 bottom_anchored_merge_blocked,
             },
         )),
-        ManifestPublicationOutcome::Superseded(_) | ManifestPublicationOutcome::RootCasRaceLost => {
+        ManifestPublicationOutcome::CoveredByCurrent(_)
+        | ManifestPublicationOutcome::PredecessorChanged(_)
+        | ManifestPublicationOutcome::RootCasRaceLost => {
             Ok(report(namespace_id, MetadataReorganizeOutcome::Superseded))
         }
     }

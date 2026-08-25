@@ -672,8 +672,9 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             ManifestPublicationOutcome::Published(_) => {
                 return Ok(Finalization::Published(manifest.payload.manifest_no))
             }
-            ManifestPublicationOutcome::Superseded(_) => "a newer root",
-            ManifestPublicationOutcome::RootCasRaceLost => "the root compare-and-swap",
+            ManifestPublicationOutcome::CoveredByCurrent(_) => "covered_by_current",
+            ManifestPublicationOutcome::PredecessorChanged(_) => "predecessor_changed",
+            ManifestPublicationOutcome::RootCasRaceLost => "root_cas_race",
         };
         tracing::debug!(
             namespace_id = namespace_id.as_str(),
