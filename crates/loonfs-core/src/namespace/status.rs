@@ -3,7 +3,9 @@
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::basis::{load_head_and_metadata_basis, resolve_retention_floor_seq};
+use crate::namespace::basis::{
+    load_head_and_metadata_basis, load_head_and_retention_floor, resolve_retention_floor_seq,
+};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_api::{ChangeSeq, ManifestNo, Namespace, NamespaceDiagnostics, NamespaceId};
@@ -26,7 +28,7 @@ struct LoadedHeadBasis {
     retention_floor_seq: ChangeSeq,
 }
 
-async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
+async fn load_namespace_head_basis_once<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadBasis> {
@@ -76,23 +78,43 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     })
 }
 
+async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace_id: &NamespaceId,
+) -> Result<LoadedHeadBasis> {
+    const FLOOR_AHEAD_HEAD_RELOADS: usize = 3;
+    let mut loaded = load_namespace_head_basis_once(store, expected_namespace_id).await?;
+    for _reload in 0..FLOOR_AHEAD_HEAD_RELOADS {
+        if loaded.retention_floor_seq <= loaded.head.seq {
+            return Ok(loaded);
+        }
+        loaded = load_namespace_head_basis_once(store, expected_namespace_id).await?;
+    }
+    if loaded.retention_floor_seq <= loaded.head.seq {
+        return Ok(loaded);
+    }
+    Err(CoreError::ControlObjectLoad(
+        crate::control_object::ControlObjectLoadError::FloorAheadOfHead {
+            floor_seq: loaded.retention_floor_seq,
+            head_seq: loaded.head.seq,
+        },
+    ))
+}
+
 /// Loads the current state of a live namespace.
 pub async fn load_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<Namespace> {
-    let head = crate::namespace::control::load_head_object(store, expected_namespace_id)
+    let (head, retention_floor_seq) = load_head_and_retention_floor(store, expected_namespace_id)
         .await
-        .map_err(CoreError::ControlObjectLoad)?
-        .state;
+        .map_err(CoreError::ControlObjectLoad)?;
+    let head = head.state;
     if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: expected_namespace_id.clone(),
         });
     }
-    let retention_floor_seq = resolve_retention_floor_seq(store, &head)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
     Ok(Namespace {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
@@ -154,18 +176,15 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceDiagnostics> {
-    let head = crate::namespace::control::load_head_object(store, expected_namespace_id)
+    let (head, retention_floor_seq) = load_head_and_retention_floor(store, expected_namespace_id)
         .await
-        .map_err(CoreError::ControlObjectLoad)?
-        .state;
+        .map_err(CoreError::ControlObjectLoad)?;
+    let head = head.state;
     if head.status != (NamespaceStatus::Deleted {}) {
         return Err(CoreError::Internal(format!(
             "namespace `{expected_namespace_id}` is live; deleted diagnostics require a deleted namespace"
         )));
     }
-    let retention_floor_seq = resolve_retention_floor_seq(store, &head)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
     Ok(NamespaceDiagnostics {
         namespace_id: head.namespace_id,
         head_seq: head.seq,

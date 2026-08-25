@@ -8,7 +8,8 @@
 use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;
 use crate::namespace::control::{
-    load_head_and_metadata_root_if_present, load_wal_floor_object, LoadedHeadObject,
+    load_head_and_metadata_root_if_present, load_head_object, load_wal_floor_object,
+    LoadedHeadObject,
 };
 use loonfs_api::wire::control::{HeadState, ManifestRef};
 use loonfs_api::NamespaceId;
@@ -140,6 +141,33 @@ pub(crate) async fn resolve_retention_floor_seq<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => Ok(namespace_birth_seq(head)),
         Err(error) => Err(error),
     }
+}
+
+/// Reads a head and retention floor that could have existed together.
+///
+/// The objects advance independently. A floor newer than the first head read
+/// can therefore be a benign cross-read race, but it must not escape as a
+/// snapshot with history retained beyond the reported namespace head.
+pub(crate) async fn load_head_and_retention_floor<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<(LoadedHeadObject, ChangeSeq), ControlObjectLoadError> {
+    const FLOOR_AHEAD_HEAD_RELOADS: usize = 3;
+    let mut head = load_head_object(store, namespace_id).await?;
+    let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
+    for _reload in 0..FLOOR_AHEAD_HEAD_RELOADS {
+        if floor_seq <= head.state.seq {
+            return Ok((head, floor_seq));
+        }
+        head = load_head_object(store, namespace_id).await?;
+    }
+    if floor_seq <= head.state.seq {
+        return Ok((head, floor_seq));
+    }
+    Err(ControlObjectLoadError::FloorAheadOfHead {
+        floor_seq,
+        head_seq: head.state.seq,
+    })
 }
 
 /// Reports a basis that resolved past a materialized root that is not there.

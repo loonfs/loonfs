@@ -55,7 +55,7 @@ use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{
     load_head_object, load_metadata_root_object, load_wal_floor_object,
 };
-use crate::namespace::status::load_namespace_diagnostics;
+use crate::namespace::status::{load_namespace, load_namespace_diagnostics};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
 use crate::protocol::list_changes_after;

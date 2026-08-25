@@ -16,6 +16,11 @@ pub enum ControlObjectLoadError {
         root_manifest_head_seq: loonfs_api::ChangeSeq,
         head_seq: loonfs_api::ChangeSeq,
     },
+    #[error("retention floor seq `{floor_seq}` is beyond the reloaded head seq `{head_seq}`")]
+    FloorAheadOfHead {
+        floor_seq: loonfs_api::ChangeSeq,
+        head_seq: loonfs_api::ChangeSeq,
+    },
     #[error(
         "control object namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
