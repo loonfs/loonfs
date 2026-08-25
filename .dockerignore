@@ -1,0 +1,19 @@
+# Cloudflare Wrangler sends the server Dockerfile to BuildKit over stdin, so
+# Docker cannot discover crates/loonfs-server/Dockerfile.dockerignore beside
+# it. Keep the repository-root context bounded for that build path too.
+target/
+.git/
+.github/
+.claude/
+.codex/
+.lab/
+.pytest_cache/
+.ruff_cache/
+**/node_modules/
+scripts/
+docs/
+sdk/
+verification/
+assets/
+crates/loonfs-server/deploy/
+*.md

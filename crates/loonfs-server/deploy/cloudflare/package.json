@@ -1,0 +1,21 @@
+{
+  "name": "loonfs-cloudflare-deployment",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260825.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.126.0"
+  }
+}
