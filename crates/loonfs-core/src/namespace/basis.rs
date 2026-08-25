@@ -6,7 +6,6 @@
 //! in the head.
 
 use crate::control_object::ControlObjectLoadError;
-use crate::error::CoreError;
 use crate::namespace::control::{
     load_head_and_metadata_root_if_present, load_head_object, load_wal_floor_object,
     LoadedHeadObject,
@@ -94,12 +93,35 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<LoadedNamespaceBasis, ControlObjectLoadError> {
-    let (head, root) = load_head_and_metadata_root_if_present(store, namespace_id).await?;
-    let basis = match root {
-        Some(root) => MetadataBasis::Manifest(root.state.manifest),
-        None => metadata_basis_without_root(&head.state),
-    };
-    Ok(LoadedNamespaceBasis { head, basis })
+    const MISSING_ROOT_RELOADS: usize = 3;
+    let mut reloads = 0;
+    loop {
+        let (head, root) = load_head_and_metadata_root_if_present(store, namespace_id).await?;
+        if let Some(root) = root {
+            return Ok(LoadedNamespaceBasis {
+                head,
+                basis: MetadataBasis::Manifest(root.state.manifest),
+            });
+        }
+
+        // A missing floor means this namespace has never advanced retention,
+        // so genesis or the fork source is still a complete recovery basis.
+        // An advanced floor proves a root was published. Reload the pair once
+        // more in case these reads straddled that first publication; if the
+        // root remains absent, it was lost and replay is no longer authority.
+        let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
+        if floor_seq <= namespace_birth_seq(&head.state) {
+            let basis = metadata_basis_without_root(&head.state);
+            return Ok(LoadedNamespaceBasis { head, basis });
+        }
+        if reloads == MISSING_ROOT_RELOADS {
+            return Err(ControlObjectLoadError::MissingRootAfterFloor {
+                namespace_id: namespace_id.clone(),
+                floor_seq,
+            });
+        }
+        reloads += 1;
+    }
 }
 
 /// Resolves the basis of a namespace whose `metadata/root.json` is absent:
@@ -168,19 +190,4 @@ pub(crate) async fn load_head_and_retention_floor<S: ObjectStore + ?Sized>(
         floor_seq,
         head_seq: head.state.seq,
     })
-}
-
-/// Reports a basis that resolved past a materialized root that is not there.
-///
-/// The retention invariant keeps the floor at or below the materialized
-/// root, so a floor above the namespace's birth sequence with no root object
-/// means the root was lost, not that the namespace is young.
-pub(crate) fn advanced_floor_without_root(
-    namespace_id: &NamespaceId,
-    floor_seq: ChangeSeq,
-) -> CoreError {
-    CoreError::NamespaceCorrupt(format!(
-        "namespace `{namespace_id}` has no materialized metadata root but its retention floor \
-         stands at `{floor_seq}`; the root object is missing"
-    ))
 }
