@@ -9,7 +9,7 @@ use loonfs::publish::{
 use loonfs::{
     BeginUploadRequest, CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions,
     DestinationBehavior, ErrorCode, FsWriter, NamespaceId, PutFileOptions, RevisionNo,
-    RuntimeError, SharedObjectStore,
+    RuntimeError, SharedObjectStore, CONTENT_READ_CHUNK_BYTES,
 };
 use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
 use loonfs_api::{ContentId, ContentStoreId};
@@ -458,6 +458,66 @@ async fn fork_and_source_reject_each_others_prepared_content() {
         .expect_err("source must reject fork proof");
     assert_content_not_prepared(error, &fork_content_ref);
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn prepare_content_ref_rejects_bytes_that_do_not_match_the_ref() {
+    let harness = TestHarness::new("content-import-mismatch").await;
+    let content_ref = harness.stage_content(b"real bytes").await;
+    let mut lying_ref = content_ref.clone();
+    lying_ref.checksum = loonfs_api::Checksum::crc64nvme(b"other bytes");
+
+    let error = harness
+        .writer
+        .prepare_content_ref(&harness.namespace_id, lying_ref)
+        .await
+        .expect_err("import must reject a ref whose checksum does not match the bytes");
+    assert!(
+        error.to_string().contains("content checksum mismatch"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_content_ref_accepts_a_matching_crc64nvme_ref() {
+    let harness = TestHarness::new("content-import-crc64nvme").await;
+    let bytes = b"direct-uploaded bytes";
+    let mut content_ref = harness.stage_content(bytes).await;
+    content_ref.checksum = loonfs_api::Checksum::crc64nvme(bytes);
+
+    let prepared = harness
+        .writer
+        .prepare_content_ref(&harness.namespace_id, content_ref)
+        .await
+        .expect("import must validate with the source ref's checksum algorithm");
+
+    assert_eq!(prepared.content_ref().size_bytes, bytes.len() as u64);
+    assert_eq!(
+        prepared.content_ref().checksum,
+        loonfs_api::Checksum::sha256(bytes),
+        "the destination may use its own checksum algorithm"
+    );
+}
+
+#[tokio::test]
+async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
+    let harness = TestHarness::new("content-import-ranges").await;
+    let bytes = vec![b'x'; CONTENT_READ_CHUNK_BYTES as usize + 17];
+    let content_ref = harness.stage_content(&bytes).await;
+    harness.recording.reset();
+
+    let prepared = harness
+        .writer
+        .prepare_content_ref(&harness.namespace_id, content_ref)
+        .await
+        .expect("import a source larger than one read chunk");
+
+    assert_eq!(prepared.content_ref().size_bytes, bytes.len() as u64);
+    assert_eq!(
+        prepared.content_ref().checksum,
+        loonfs_api::Checksum::sha256(&bytes)
+    );
+    assert_content_counts(harness.recording.snapshot(), 1, 2, 1, bytes.len());
 }
 
 #[tokio::test]

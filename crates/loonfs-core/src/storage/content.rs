@@ -9,7 +9,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 #[cfg(any(test, feature = "test-support"))]
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 #[cfg(any(test, feature = "test-support"))]
 use loonfs_api::NamespaceId;
 use loonfs_api::{
@@ -96,24 +96,88 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<(), DurableContentValidationError> {
-    load_durable_content_bytes_for_import(store, content_store_id, content_ref)
-        .await
-        .map(|_| ())
-}
-
-/// Loads and verifies an existing object before copying it under new
-/// namespace-owned content identity.
-pub(crate) async fn load_durable_content_bytes_for_import<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
-    content_ref: &ContentRef,
-) -> Result<Vec<u8>, DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
     validate_content_size(store, &object_key, content_ref).await?;
-
     let bytes = load_required_object(store, &object_key).await?;
-    validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
-    Ok(bytes)
+    validate_loaded_content_bytes(object_key, content_ref, &bytes)
+}
+
+/// Opens a chunked reader over an existing object for import: one HEAD, then
+/// ranged reads pumped through a one-chunk channel, so nothing holds the
+/// whole object. Drive the pump and the staging consumer together.
+pub(crate) async fn open_content_import_reader<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    content_store_id: &ContentStoreId,
+    content_ref: &ContentRef,
+) -> Result<
+    (
+        String,
+        impl std::future::Future<Output = Checksum> + 'a,
+        ByteStream,
+    ),
+    DurableContentValidationError,
+> {
+    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
+    validate_content_size(store, &object_key, content_ref).await?;
+    let size_bytes = content_ref.size_bytes;
+    let checksum_algorithm = content_ref.checksum.algorithm;
+    let (mut sender, receiver) = futures::channel::mpsc::channel(1);
+    let pump_key = object_key.clone();
+    let pump = async move {
+        let mut checksum = StreamingChecksum::for_algorithm(checksum_algorithm);
+        let mut offset = 0u64;
+        while offset < size_bytes {
+            let end = offset
+                .saturating_add(CONTENT_READ_CHUNK_BYTES)
+                .min(size_bytes);
+            let range = ByteRange {
+                start_inclusive: offset,
+                end_exclusive: end,
+            };
+            let chunk = match store.get(&pump_key, Some(range)).await {
+                Ok(Some(bytes)) => Ok(bytes),
+                Ok(None) => Err(ObjectStoreError::transport(
+                    &pump_key,
+                    "content object disappeared during import",
+                )),
+                Err(error) => Err(error),
+            };
+            let failed = chunk.is_err();
+            if let Ok(bytes) = &chunk {
+                checksum.update(bytes);
+            }
+            if sender.send(chunk).await.is_err() || failed {
+                return checksum.finish();
+            }
+            offset = end;
+        }
+        checksum.finish()
+    };
+    Ok((object_key, pump, receiver.boxed()))
+}
+
+/// Checks that a staged import carries the bytes the source ref claimed.
+pub(crate) fn ensure_imported_ref_matches(
+    object_key: String,
+    expected: &ContentRef,
+    staged: &ContentRef,
+    source_checksum: &Checksum,
+) -> Result<(), DurableContentValidationError> {
+    if staged.size_bytes != expected.size_bytes {
+        return Err(DurableContentValidationError::ContentLengthMismatch {
+            object_key,
+            expected: expected.size_bytes,
+            actual: staged.size_bytes,
+        });
+    }
+    if source_checksum != &expected.checksum {
+        return Err(DurableContentValidationError::ContentChecksumMismatch {
+            object_key,
+            expected: describe_checksum(&expected.checksum),
+            actual: describe_checksum(source_checksum),
+        });
+    }
+    Ok(())
 }
 
 /// Prepares content from an acknowledged LoonFS-managed durable write.
