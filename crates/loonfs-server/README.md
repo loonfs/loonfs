@@ -51,6 +51,11 @@ Validate a config without starting the server:
 loonfs-server --config /etc/loonfs/server.toml --check-config
 ```
 
+Container hosts without configuration-file mounts may supply the same TOML
+through `LOONFS_SERVER_CONFIG_TOML` and omit `--config`. Keep credentials and
+the two server secrets in their dedicated environment variables rather than
+putting them in the inline TOML.
+
 The command prints one line and exits. It runs the checks a start runs
 before it serves: the config fields, the TLS certificate and key, and the
 local block cache directory. It does not bind the configured address and it

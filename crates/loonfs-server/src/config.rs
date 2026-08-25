@@ -554,6 +554,15 @@ pub fn load_server_config(path: impl AsRef<Path>) -> Result<ServerConfig, Server
     let bytes = fs::read(path.as_ref()).map_err(|err| ServerConfigError::Io(err.to_string()))?;
     let source =
         std::str::from_utf8(&bytes).map_err(|err| ServerConfigError::Decode(err.to_string()))?;
+    parse_server_config(source)
+}
+
+/// Parses and validates a server configuration supplied directly as TOML.
+///
+/// Container hosts that cannot mount a configuration file use this entry
+/// point. Provider and server secrets should still come from their dedicated
+/// environment variables instead of being included in `source`.
+pub fn parse_server_config(source: &str) -> Result<ServerConfig, ServerConfigError> {
     let mut config: ServerConfig =
         toml::from_str(source).map_err(|err| ServerConfigError::Decode(err.to_string()))?;
     config.apply_env_fallbacks(
