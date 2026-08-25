@@ -331,6 +331,21 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
+    let root = load_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("load metadata root")
+        .state;
+    let referenced_segment_count =
+        load_verified_manifest_segments(&store, &namespace_id, &root.manifest.manifest_object_id)
+            .await
+            .expect("load current manifest")
+            .manifest()
+            .payload
+            .segments
+            .iter()
+            .map(metadata_segment_object_key)
+            .collect::<BTreeSet<_>>()
+            .len();
     store.reset();
     let advanced = advance_retention_floor(&store, &namespace_id, &context)
         .await
@@ -340,6 +355,11 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         store.count(OperationClass::Read),
         0,
         "retention should advance from manifest descriptors without materializing rows"
+    );
+    assert_eq!(
+        store.count(OperationClass::Head),
+        referenced_segment_count,
+        "retention should verify each distinct referenced segment"
     );
 
     assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
@@ -359,6 +379,138 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .await
         .expect("manifest head")
         .is_some());
+}
+
+#[tokio::test]
+async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    let root = load_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("load metadata root")
+        .state;
+    let segments =
+        load_verified_manifest_segments(&store, &namespace_id, &root.manifest.manifest_object_id)
+            .await
+            .expect("load current manifest");
+    let missing_key = segments
+        .manifest()
+        .payload
+        .segments
+        .first()
+        .map(metadata_segment_object_key)
+        .expect("current manifest references a segment");
+    store
+        .delete(&missing_key)
+        .await
+        .expect("delete referenced segment");
+
+    let error = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect_err("missing basis segment blocks floor advancement");
+    assert!(matches!(
+        error,
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::MissingSegment { object_key }
+        )) if object_key == missing_key
+    ));
+    assert_eq!(
+        read_floor_seq(&store, &namespace_id).await,
+        ChangeSeq(0),
+        "the missing basis remains replayable from the prior floor"
+    );
+}
+
+#[tokio::test]
+async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked() {
+    let temp_dir = tempdir().expect("tempdir");
+    let setup_store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&setup_store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &setup_store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&setup_store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    let root = load_metadata_root_object(&setup_store, &namespace_id)
+        .await
+        .expect("load metadata root")
+        .state;
+    let segments = load_verified_manifest_segments(
+        &setup_store,
+        &namespace_id,
+        &root.manifest.manifest_object_id,
+    )
+    .await
+    .expect("load current manifest");
+    let selected_key = segments
+        .manifest()
+        .payload
+        .segments
+        .first()
+        .map(metadata_segment_object_key)
+        .expect("current manifest references a segment");
+    let failed_key = selected_key.clone();
+    let store = FailStore::matching(
+        setup_store,
+        move |operation| {
+            operation.key() == selected_key
+                && matches!(
+                    operation.kind(),
+                    loonfs_test_support::stores::OperationKind::Head
+                )
+        },
+        InjectedError::Transport("injected segment probe failure".to_owned()),
+    );
+    store.fail_next(1);
+
+    let error = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect_err("failed basis probe blocks floor advancement");
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert!(matches!(
+        error,
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::ReadSegment { object_key, .. }
+        )) if object_key == failed_key
+    ));
+    assert_eq!(store.attempts(), 1);
+    assert_eq!(
+        read_floor_seq(store.inner(), &namespace_id).await,
+        ChangeSeq(0),
+        "the failed probe leaves the prior floor in place"
+    );
 }
 
 #[tokio::test]

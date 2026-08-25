@@ -1,6 +1,8 @@
 //! Retention floor advancement against the current verified manifest.
 
+use super::error::ManifestLoadError;
 use super::load::{ensure_root_matches_manifest, load_verified_manifest_segments};
+use super::runs::MAX_MAINTENANCE_SEGMENT_IO;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{retry_while_contended, CasAttempt};
@@ -12,8 +14,44 @@ use crate::namespace::control::{
 };
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, WalFloorState};
+use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
+use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use std::collections::BTreeSet;
+
+async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
+    store: &S,
+    manifest: &NamespaceManifestEnvelope,
+) -> std::result::Result<(), ManifestLoadError> {
+    let object_keys = manifest
+        .payload
+        .segments
+        .iter()
+        .map(metadata_segment_object_key)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    for chunk in object_keys.chunks(MAX_MAINTENANCE_SEGMENT_IO) {
+        futures::future::try_join_all(chunk.iter().map(|object_key| async move {
+            match store
+                .head(object_key)
+                .await
+                .map_err(|error| ManifestLoadError::ReadSegment {
+                    object_key: object_key.clone(),
+                    message: error.public_message().into_owned(),
+                })? {
+                Some(_) => Ok(()),
+                None => Err(ManifestLoadError::MissingSegment {
+                    object_key: object_key.clone(),
+                }),
+            }
+        }))
+        .await?;
+    }
+    Ok(())
+}
 
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
@@ -26,13 +64,10 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     // commits land. Root monotonicity keeps a mid-flight root swap benign:
     // any replacement covers at least this basis's coverage above the floor.
     //
-    // Nothing here probes the basis manifest's segments before the floor
-    // moves. Advancing surrenders the WAL replay promise below the target,
-    // and what keeps that safe is the deleter: GC must never remove an
-    // object reachable from the current manifest or a retained checkpoint or
-    // pin (format spec, "Garbage collection"). Corruption that slips past it
-    // is caught by read-path checksums, which an existence probe here could
-    // not have caught anyway.
+    // The deleter's reachability checks provide the atomic safety guarantee,
+    // but an advisory existence probe below prevents a segment that has
+    // already disappeared from surrendering the WAL recovery path. Read-path
+    // checksums still detect corruption that an existence probe cannot.
     let head = load_head_object(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
@@ -69,6 +104,11 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             retention_floor_seq: current_floor,
         });
     }
+    verify_manifest_segments_exist(store, manifest_segments.manifest())
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+        })?;
 
     // Monotonic floor publication: never decrease. The first advance
     // creates the object, because create and fork write no floor.
