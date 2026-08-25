@@ -9,7 +9,7 @@
 
 use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
-use super::load::load_verified_manifest_segments_with_cache;
+use super::load::{ensure_manifest_reference_matches, load_verified_manifest_segments_with_cache};
 use super::record::load_checkpoint_record;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::MetadataView;
@@ -94,13 +94,11 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
         other => CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(other)),
     })?;
     let manifest = segments.manifest();
-    if manifest.payload_checksum != record.manifest.manifest_payload_checksum
-        || manifest.payload.head_seq != record.manifest.manifest_head_seq
-    {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "checkpoint `{checkpoint_id}` basis does not match its manifest"
-        )));
-    }
+    ensure_manifest_reference_matches(
+        &format!("checkpoint `{checkpoint_id}` basis"),
+        &record.manifest,
+        manifest,
+    )?;
 
     let checkpoint_seq = record.manifest.manifest_head_seq;
     let view = MetadataView::over_manifest_segments(&segments, checkpoint_seq);

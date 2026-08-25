@@ -5,7 +5,7 @@
 //! retention floor. Failed verification releases the record. Release is
 //! one-way, and garbage collection later removes aged released records.
 
-use super::load::load_namespace_manifest_envelope;
+use super::load::{ensure_manifest_reference_matches, load_namespace_manifest_envelope};
 use super::ManifestLoadError;
 use crate::control_object::{
     expect_identity_field, expect_namespace, expect_own_manifest, load_control_object,
@@ -241,18 +241,16 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
             ))
         }
     };
-    if manifest.payload_checksum != record.manifest.manifest_payload_checksum {
-        // Both durable objects loaded successfully, so their disagreement is
-        // corruption rather than a retention race that a new checkpoint can fix.
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "checkpoint `{}` for namespace `{}` records manifest `{}` payload checksum `{}`, but the manifest carries `{}`",
-            record.checkpoint_id,
-            record.namespace_id,
-            record.manifest.manifest_object_id,
-            record.manifest.manifest_payload_checksum,
-            manifest.payload_checksum,
-        )));
-    }
+    // Both durable objects loaded successfully, so any disagreement is
+    // corruption rather than a retention race that a new checkpoint can fix.
+    ensure_manifest_reference_matches(
+        &format!(
+            "checkpoint `{}` for namespace `{}`",
+            record.checkpoint_id, record.namespace_id
+        ),
+        &record.manifest,
+        &manifest,
+    )?;
     Ok(CheckpointBasisVerification::Verified)
 }
 
