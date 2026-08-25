@@ -89,6 +89,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         ]);
     }
     let mut outcomes: Vec<Option<Result<ApiCommitResponse>>> = vec![None; candidates.len()];
+    let mut independent_outcomes = vec![false; candidates.len()];
     let mut session = PublishPlanningSession::new(&view.head);
     let mut accepted_indexes = Vec::new();
     let mut accepted_commits = Vec::new();
@@ -115,15 +116,18 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 "loonfs.phase",
                 phase = "prepare_commit"
             ))
-            .await
-            .unwrap_or_else(|error| CandidateAdmission::Settled(Err(error)));
+            .await;
             let candidate_request = match admission {
                 CandidateAdmission::Prepared(candidate_request) => candidate_request,
                 CandidateAdmission::AliasOf(primary_index) => {
                     dedup.record_alias(index, primary_index);
                     continue;
                 }
-                CandidateAdmission::Settled(outcome) => {
+                CandidateAdmission::Settled {
+                    outcome,
+                    independent,
+                } => {
+                    independent_outcomes[index] = independent;
                     outcomes[index] = Some(outcome);
                     continue;
                 }
@@ -136,6 +140,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 validate_commit_content_references(candidate, view.content_store_id())
             {
                 session.discard_candidate(allocation);
+                independent_outcomes[index] = true;
                 outcomes[index] = Some(Err(error));
                 continue;
             }
@@ -195,7 +200,15 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     .await
     {
         Ok(wal) => wal,
-        Err(error) => return abort_batch(outcomes, &dedup, &accepted_indexes, &error),
+        Err(error) => {
+            return abort_batch(
+                outcomes,
+                &independent_outcomes,
+                &dedup,
+                &accepted_indexes,
+                &error,
+            )
+        }
     };
 
     let last_plan = &accepted_commits
@@ -206,7 +219,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         Ok(value) => value,
         Err(error) => {
             let error = CoreError::Internal(format!("head publish preparation failed: {error}"));
-            return abort_batch(outcomes, &dedup, &accepted_indexes, &error);
+            return abort_batch(
+                outcomes,
+                &independent_outcomes,
+                &dedup,
+                &accepted_indexes,
+                &error,
+            );
         }
     };
     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(put_started_ms);
@@ -215,7 +234,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             elapsed_ms,
             budget_ms: WAL_PUBLISH_BUDGET_MS,
         });
-        return abort_batch(outcomes, &dedup, &accepted_indexes, &error);
+        return abort_batch(
+            outcomes,
+            &independent_outcomes,
+            &dedup,
+            &accepted_indexes,
+            &error,
+        );
     }
     let head_etag = match cas_batch_head(
         store,
@@ -227,11 +252,18 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     .await
     {
         Ok(metadata) => metadata.etag,
-        Err(error) => return abort_batch(outcomes, &dedup, &accepted_indexes, &error),
+        Err(error) => {
+            return abort_batch(
+                outcomes,
+                &independent_outcomes,
+                &dedup,
+                &accepted_indexes,
+                &error,
+            )
+        }
     };
 
     let wal_records = wal.envelope.payload.records.clone();
-    // Build responses from the WAL records already in memory.
     for (outcome_index, record) in accepted_indexes.into_iter().zip(&wal_records) {
         outcomes[outcome_index] =
             Some(committed_change_from_wal_record(record).map(|change| {
@@ -248,17 +280,20 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
 }
 
-/// Aborts a batch whose accepted candidates never became durable.
-///
-/// Fails every outcome contingent on the unpublished batch, then finalizes
-/// the remaining slots and invalidates the caller's loaded projection.
+/// Applies the publication error and invalidates the loaded projection.
 fn abort_batch(
     mut outcomes: Vec<Option<Result<ApiCommitResponse>>>,
+    independent_outcomes: &[bool],
     dedup: &BatchDedup,
     accepted_indexes: &[usize],
     error: &CoreError,
 ) -> PublishBatchAgainstViewResult {
-    fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, accepted_indexes, error);
+    fail_outcomes_contingent_on_unpublished_batch(
+        &mut outcomes,
+        independent_outcomes,
+        accepted_indexes,
+        error,
+    );
     PublishBatchAgainstViewResult {
         results: dedup.finish(outcomes),
         effect: PublishViewEffect::Invalidated,
@@ -353,22 +388,11 @@ async fn cas_batch_head<S: ObjectStore + ?Sized>(
     result.map_err(CoreError::from)
 }
 
-/// Fails every outcome that was contingent on this batch publishing durably.
-///
-/// The accepted candidates take the batch error: they never committed. So do
-/// rejections recorded after the first acceptance, because their verdicts
-/// were decided against session state advanced by tentatively accepted
-/// candidates — state that never became durable. Reporting them would hand a
-/// client a definitive semantic error (path conflict, missing path, stale
-/// revision, ...) it correctly treats as non-retryable, for a precondition
-/// that was never durably true (format.md section 3.1.5).
-///
-/// Rejections recorded before any acceptance were decided against the loaded
-/// durable publish view and stand. Idempotent `Ok` completions replay durable
-/// commit receipts and stand. Alias slots stay unfilled here and inherit
-/// their primary's final outcome.
+/// Replaces outcomes that depended on tentative batch state with the
+/// publication error. Independent outcomes remain unchanged.
 fn fail_outcomes_contingent_on_unpublished_batch(
     outcomes: &mut [Option<Result<ApiCommitResponse>>],
+    independent_outcomes: &[bool],
     accepted_indexes: &[usize],
     error: &CoreError,
 ) {
@@ -378,8 +402,12 @@ fn fail_outcomes_contingent_on_unpublished_batch(
     for &index in accepted_indexes {
         outcomes[index] = Some(Err(error.clone()));
     }
-    for outcome in outcomes.iter_mut().skip(first_accepted_index + 1) {
-        if matches!(outcome, Some(Err(_))) {
+    for (index, outcome) in outcomes
+        .iter_mut()
+        .enumerate()
+        .skip(first_accepted_index + 1)
+    {
+        if !independent_outcomes[index] && matches!(outcome, Some(Err(_))) {
             *outcome = Some(Err(error.clone()));
         }
     }

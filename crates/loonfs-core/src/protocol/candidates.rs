@@ -21,15 +21,32 @@ pub(super) struct PreparedCandidateCommit {
 
 /// How one batch candidate resolved during admission.
 pub(super) enum CandidateAdmission {
-    /// A new primary request, planned and validated in one pass, ready for
-    /// content coverage and materialization.
+    /// A new request ready for content validation and materialization.
     Prepared(PreparedCandidateCommit),
-    /// A same-batch duplicate of the primary at the given outcome slot; the
-    /// alias slot inherits the primary's final outcome.
+    /// A duplicate that receives the earlier request's outcome.
     AliasOf(usize),
-    /// The outcome was decided during admission: an idempotent replay of a
-    /// durable commit receipt, or a rejection.
-    Settled(Result<ApiCommitResponse>),
+    /// An outcome decided during admission. Independent outcomes do not rely
+    /// on tentative changes from earlier requests in the batch.
+    Settled {
+        outcome: Result<ApiCommitResponse>,
+        independent: bool,
+    },
+}
+
+impl CandidateAdmission {
+    fn independent(outcome: Result<ApiCommitResponse>) -> Self {
+        Self::Settled {
+            outcome,
+            independent: true,
+        }
+    }
+
+    pub(super) fn contingent(outcome: Result<ApiCommitResponse>) -> Self {
+        Self::Settled {
+            outcome,
+            independent: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -38,11 +55,7 @@ struct InBatchRequest {
     semantic_identity: CommitFingerprint,
 }
 
-/// Duplicate-commit-id bookkeeping for one publish batch.
-///
-/// Tracks which outcome slot first claimed each commit id (the primary) and
-/// which later slots alias it, so alias slots can inherit their primary's
-/// final outcome once the batch resolves.
+/// Tracks the first request for each commit ID and any aliases.
 #[derive(Default)]
 pub(super) struct BatchDedup {
     in_batch_requests: HashMap<CommitId, InBatchRequest>,
@@ -50,12 +63,7 @@ pub(super) struct BatchDedup {
 }
 
 impl BatchDedup {
-    /// Admits the candidate at `index` against earlier same-batch requests.
-    ///
-    /// Returns `None` for a new primary (recorded for later duplicates to
-    /// find) and `Some` when the commit id was already claimed in this batch:
-    /// an alias when the semantic identity matches, a settled rejection when
-    /// it conflicts. The caller records aliases with [`Self::record_alias`].
+    /// Returns an alias or conflict when the commit ID already exists in the batch.
     fn admit(
         &mut self,
         index: usize,
@@ -73,10 +81,8 @@ impl BatchDedup {
             return None;
         };
         if existing.semantic_identity != *semantic_identity {
-            // Neither claim has committed, so there is no landed commit to
-            // name: the caller cannot reconcile this one by reading the
-            // feed, and the conflict is the whole answer.
-            return Some(CandidateAdmission::Settled(Err(
+            // No commit has landed, so the conflict has no sequence.
+            return Some(CandidateAdmission::independent(Err(
                 CoreError::CommitIdReuseConflict {
                     commit_id: commit_id.to_string(),
                     committed_seq: None,
@@ -87,8 +93,6 @@ impl BatchDedup {
         Some(CandidateAdmission::AliasOf(existing.primary_index))
     }
 
-    /// Records that the slot at `alias_index` inherits the outcome of the
-    /// primary slot at `primary_index` when the batch resolves.
     pub(super) fn record_alias(&mut self, alias_index: usize, primary_index: usize) {
         self.aliases.push((alias_index, primary_index));
     }
@@ -119,11 +123,7 @@ impl BatchDedup {
     }
 }
 
-/// Prepares one batch candidate as a validated commit plan, resolving
-/// commit-id reuse against durable receipts and same-batch primaries.
-///
-/// Hard failures return `Err`; the caller settles the candidate's outcome
-/// slot with them exactly as with [`CandidateAdmission::Settled`].
+/// Prepares a request and resolves commit-ID reuse.
 pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
@@ -132,10 +132,13 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     index: usize,
     committed_at_ms: u64,
     dedup: &mut BatchDedup,
-) -> Result<CandidateAdmission> {
+) -> CandidateAdmission {
     let mutation = candidate.request();
-    let semantic_identity = candidate.semantic_identity(namespace_id)?;
-    if let Some(admission) = resolve_commit_id_reuse(
+    let semantic_identity = match candidate.semantic_identity(namespace_id) {
+        Ok(semantic_identity) => semantic_identity,
+        Err(error) => return CandidateAdmission::independent(Err(error)),
+    };
+    match resolve_commit_id_reuse(
         namespace_id,
         view,
         dedup,
@@ -143,11 +146,15 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         &mutation.commit_id,
         &semantic_identity,
     )
-    .await?
+    .await
     {
-        return Ok(admission);
+        Ok(Some(admission)) => return admission,
+        Ok(None) => {}
+        Err(error) => return CandidateAdmission::independent(Err(error)),
     }
-    validate_new_primary(candidate)?;
+    if let Err(error) = validate_new_primary(candidate) {
+        return CandidateAdmission::independent(Err(error));
+    }
     let mut allocation = session.begin_candidate();
     match session
         .prepare_commit(
@@ -159,19 +166,19 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         )
         .await
     {
-        Ok(validated) => Ok(CandidateAdmission::Prepared(PreparedCandidateCommit {
+        Ok(validated) => CandidateAdmission::Prepared(PreparedCandidateCommit {
             validated,
             allocation,
-        })),
+        }),
         Err(error) => {
             session.discard_candidate(allocation);
-            Err(error)
+            CandidateAdmission::contingent(Err(error))
         }
     }
 }
 
 fn validate_new_primary(candidate: &CommitCandidate) -> Result<()> {
-    // For new primaries, request limits precede rejected content preparation.
+    // Check request limits before content preparation errors.
     candidate.validate_request_limits()?;
     match candidate.content_preparation() {
         ContentPreparation::Ready(_) => Ok(()),
@@ -179,12 +186,7 @@ fn validate_new_primary(candidate: &CommitCandidate) -> Result<()> {
     }
 }
 
-/// Settles a candidate whose commit id was already used, either by a durable
-/// commit receipt (idempotent replay or reuse conflict) or by an earlier
-/// candidate in the same batch (alias or reuse conflict).
-///
-/// Returns `None` when the commit id is new: the candidate is recorded as
-/// the primary for that id and must be prepared.
+/// Resolves a commit ID against durable receipts and earlier requests in the batch.
 async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
@@ -194,11 +196,8 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
     semantic_identity: &CommitFingerprint,
 ) -> Result<Option<CandidateAdmission>> {
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
-        return Ok(Some(CandidateAdmission::Settled(
+        return Ok(Some(CandidateAdmission::independent(
             if existing.semantic_commit_fingerprint != semantic_identity.as_str() {
-                // The receipt holds where the id landed and what landed
-                // there; reporting both is what turns a caller's
-                // reconciliation into one feed read and one comparison.
                 Err(CoreError::CommitIdReuseConflict {
                     commit_id: commit_id.to_string(),
                     committed_seq: Some(existing.committed_seq),
@@ -266,10 +265,7 @@ impl CommitContentAdmissions<'_> {
     }
 }
 
-/// Checks every new external content ref against in-memory preparation proofs.
-///
-/// Copy and restore reuse content already retained by the namespace, whose
-/// durability is guaranteed; only a put introduces bytes that need proof.
+/// Checks that each put has a matching content preparation proof.
 pub(super) fn validate_commit_content_references(
     candidate: &CommitCandidate,
     content_store_id: &ContentStoreId,

@@ -722,7 +722,6 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
 
     let batch = || async {
         vec![
-            // Rejected against the durable materialization: nothing was accepted yet.
             CommitCandidate::new(commit_request(
                 "reject-materialization",
                 FilesystemOperation::DeletePath {
@@ -731,7 +730,6 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     expected_inode_id: None,
                 },
             )),
-            // Accepted into the batch.
             prepared_candidate(
                 &store,
                 &namespace_id,
@@ -746,8 +744,6 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 ),
             )
             .await,
-            // Rejected only because of the accepted candidate's speculative
-            // in-batch create.
             prepared_candidate(
                 &store,
                 &namespace_id,
@@ -762,7 +758,6 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 ),
             )
             .await,
-            // Alias of the materialization-decided rejection.
             CommitCandidate::new(commit_request(
                 "reject-materialization",
                 FilesystemOperation::DeletePath {
@@ -792,8 +787,6 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let alias = failed[3].as_ref().expect_err("alias mirrors its primary");
     assert_eq!(alias.code(), ErrorCode::PathNotFound);
 
-    // Nothing became durable, so the retry the batch error asks for derives
-    // every verdict from durable state.
     let head = load_namespace_head_control(&store, &namespace_id)
         .await
         .expect("load head");
@@ -817,6 +810,72 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     assert_eq!(
         retried[3].as_ref().expect_err("still missing").code(),
         ErrorCode::PathNotFound
+    );
+}
+
+#[tokio::test]
+async fn failed_batch_preserves_an_independent_commit_id_conflict() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    submit_commit(
+        &store,
+        &namespace_id,
+        commit_request(
+            "durable-receipt",
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/durable").expect("path"),
+                parents: false,
+            },
+        ),
+        &context,
+    )
+    .await
+    .expect("publish durable receipt");
+
+    let store = InjectCreateFailureStore::new(
+        store,
+        KeyMatcher::Prefix("namespaces/demo/wal/segments/".to_owned()),
+        InjectedCreateFailure::PreconditionFailed {
+            write_attempted_object: false,
+            additional_writes: Vec::new(),
+        },
+    );
+    let failed = publish_namespace_commits_batch(
+        &store,
+        &namespace_id,
+        vec![
+            CommitCandidate::new(commit_request(
+                "accepted-before-receipt-conflict",
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/accepted").expect("path"),
+                    parents: false,
+                },
+            )),
+            CommitCandidate::new(commit_request(
+                "durable-receipt",
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/different").expect("path"),
+                    parents: false,
+                },
+            )),
+        ],
+        &context,
+    )
+    .await;
+
+    assert!(matches!(failed[0], Err(CoreError::WalWrite { .. })));
+    assert_eq!(
+        failed[1]
+            .as_ref()
+            .expect_err("commit ID conflict must stand")
+            .code(),
+        ErrorCode::CommitIdReuseConflict
     );
 }
 
