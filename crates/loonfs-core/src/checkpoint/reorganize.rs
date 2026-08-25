@@ -326,7 +326,8 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     )
     .await?
     {
-        ManifestPublicationOutcome::Published(_) => Ok(report(
+        ManifestPublicationOutcome::Installed(_)
+        | ManifestPublicationOutcome::AlreadyCurrent(_) => Ok(report(
             namespace_id,
             MetadataReorganizeOutcome::UnitPublished {
                 group,
@@ -338,7 +339,8 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
                 bottom_anchored_merge_blocked,
             },
         )),
-        ManifestPublicationOutcome::Superseded(_) | ManifestPublicationOutcome::RootCasRaceLost => {
+        ManifestPublicationOutcome::CoveredByCurrent(_)
+        | ManifestPublicationOutcome::PredecessorChanged(_) => {
             Ok(report(namespace_id, MetadataReorganizeOutcome::Superseded))
         }
     }

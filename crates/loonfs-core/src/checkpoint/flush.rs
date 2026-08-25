@@ -61,8 +61,8 @@ pub(super) enum TryFlushWal {
     /// The attempt finished with a valid basis, whether or not it published
     /// that basis itself.
     Settled(Box<FlushedBasis>),
-    /// The root compare-and-swap raced another publisher to exhaustion;
-    /// retry against a fresh projection.
+    /// The root moved to a manifest that does not cover this attempt's
+    /// target; retry against a fresh projection.
     RaceLost,
 }
 
@@ -183,26 +183,23 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     )
     .await?
     {
-        ManifestPublicationOutcome::Published(_) => (
+        ManifestPublicationOutcome::Installed(_)
+        | ManifestPublicationOutcome::AlreadyCurrent(_) => (
             FlushWalOutcome::Published,
             manifest.payload.manifest_no,
             manifest.payload.head_seq,
         ),
-        ManifestPublicationOutcome::Superseded(current) => {
-            // A same-sequence reorganization can replace our predecessor
-            // without covering the newer WAL head this flush targeted. That
-            // root safely wins, but it has not satisfied the flush: reload
-            // its equivalent runs, replay the tail, and try again.
-            if current.manifest.manifest_head_seq < head_seq {
-                return Ok(TryFlushWal::RaceLost);
-            }
-            (
-                FlushWalOutcome::RootAdvanced,
-                current.manifest.manifest_no,
-                current.manifest.manifest_head_seq,
-            )
-        }
-        ManifestPublicationOutcome::RootCasRaceLost => {
+        // The candidate's head sequence is this flush's target, so a root
+        // that covers the candidate covers the target too.
+        ManifestPublicationOutcome::CoveredByCurrent(current) => (
+            FlushWalOutcome::RootAdvanced,
+            current.manifest.manifest_no,
+            current.manifest.manifest_head_seq,
+        ),
+        // A same-sequence reorganization can replace the predecessor without
+        // covering the newer WAL head. That root safely wins, but it has not
+        // satisfied the flush: reload its runs, replay the tail, try again.
+        ManifestPublicationOutcome::PredecessorChanged(_) => {
             return Ok(TryFlushWal::RaceLost);
         }
     };
