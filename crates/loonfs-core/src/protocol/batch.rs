@@ -145,9 +145,11 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let allocation = candidate_request.allocation;
             // Validation first, uniformly: coverage is checked once the
             // whole request has planned and validated.
-            if let Err(error) =
-                validate_commit_content_references(candidate, view.content_store_id())
-            {
+            if let Err(error) = validate_commit_content_references(
+                candidate,
+                view.content_store_id(),
+                context.now_ms,
+            ) {
                 session.discard_candidate(allocation);
                 slots[index] = BatchOutcomeSlot::SettledIndependent(Err(error));
                 continue;

@@ -204,16 +204,21 @@ pub const CONTENT_RECEIPT_TTL_MS: u64 = 60 * 60 * 1000;
 /// Time during which a completed upload may issue new content receipts.
 pub const COMPLETED_UPLOAD_RECEIPT_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
+/// Latest admission horizon for proof derived from one completed upload.
+/// This covers its receipt window and the lifetime of the final token.
+pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
+    COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS;
+
 /// Minimum age of unreferenced content from a completed upload before
 /// collection. The value covers the receipt window, receipt lifetime, and a
 /// final publication.
 pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
-    COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS + GC_MIN_GRACE_WINDOW_MS;
+    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS;
 
 /// The grace floor's inequality, shared by the compile-time assertion below
 /// and the test that proves the assertion has teeth.
 const fn outlasts_every_receipt(grace_ms: u64) -> bool {
-    grace_ms >= COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS + GC_MIN_GRACE_WINDOW_MS
+    grace_ms >= COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS
 }
 
 // Content reclamation is the one sweep that deletes bytes a user handed us,
@@ -247,8 +252,12 @@ mod tests {
     fn the_content_grace_floor_rejects_a_window_one_receipt_short() {
         assert!(outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS));
         assert!(!outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS - 1));
-        assert!(!outlasts_every_receipt(
+        assert_eq!(
+            COMPLETED_UPLOAD_ADMISSION_WINDOW_MS,
             COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS
+        );
+        assert!(!outlasts_every_receipt(
+            COMPLETED_UPLOAD_ADMISSION_WINDOW_MS
         ));
         // 7 days of re-minting + 1 hour of receipt life + 20.5 minutes of
         // publication.

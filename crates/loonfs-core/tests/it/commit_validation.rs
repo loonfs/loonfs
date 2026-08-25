@@ -18,7 +18,7 @@ use loonfs_api::{
 use loonfs_core::content::{
     mint_content_token, store_bytes_as_content, verify_content_token, ContentTokenError,
 };
-use loonfs_core::limits::CONTENT_RECEIPT_TTL_MS;
+use loonfs_core::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{Error as CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -276,6 +276,70 @@ async fn valid_content_admission_skips_durable_content_validation() {
 
     responses[0].as_ref().expect("admitted put commits");
     // A live admission is the fast path: no content read at all.
+    assert_eq!(store.count(OperationClass::Read), 0);
+}
+
+#[tokio::test]
+async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = content_blob_counting_store(temp_dir.path());
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let engine = namespace_engine(&store, &namespace_id, &context);
+    let upload = engine
+        .begin_upload(loonfs_api::v0::BeginUploadRequest::ServiceProxied {})
+        .await
+        .expect("begin upload");
+    engine
+        .upload_content(upload.upload_id(), b"deadline")
+        .await
+        .expect("stage content");
+    let completed = engine
+        .complete_upload_prepared(upload.upload_id())
+        .await
+        .expect("complete upload");
+    let completed_at_ms = match &completed.response.status {
+        UploadSessionStatus::Completed {
+            completed_at_ms, ..
+        } => *completed_at_ms,
+        status => panic!("expected completed upload, got {status:?}"),
+    };
+    let content_ref = completed
+        .response
+        .content_ref()
+        .expect("completed content ref")
+        .clone();
+    let expired_context = loonfs_core::MutationContext {
+        writer_id: context.writer_id.clone(),
+        now_ms: completed_at_ms
+            .saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS)
+            .saturating_add(1),
+    };
+
+    store.reset();
+    let error = publish_namespace_commits_batch(
+        &store,
+        &namespace_id,
+        vec![CommitCandidate::prepared(
+            CommitRequest::single(
+                commit_id("put-expired-prepared-content"),
+                loonfs_test_support::test_actor(),
+                None,
+                put_file("/docs/expired.txt", content_ref),
+            ),
+            vec![completed.prepared],
+        )],
+        &expired_context,
+    )
+    .await
+    .remove(0)
+    .expect_err("expired prepared proof must not admit content");
+
+    assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     assert_eq!(store.count(OperationClass::Read), 0);
 }
 

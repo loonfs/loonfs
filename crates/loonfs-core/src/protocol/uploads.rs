@@ -16,8 +16,9 @@ use crate::control_update::{
 };
 use crate::error::{CoreError, Result};
 use crate::limits::{
-    COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, MAX_MULTIPART_PARTS, MAX_MULTIPART_PART_BYTES,
-    MAX_SIGNED_PARTS_PER_REQUEST, MIN_MULTIPART_PART_BYTES, UPLOAD_SESSION_LEASE_MS,
+    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, MAX_MULTIPART_PARTS,
+    MAX_MULTIPART_PART_BYTES, MAX_SIGNED_PARTS_PER_REQUEST, MIN_MULTIPART_PART_BYTES,
+    UPLOAD_SESSION_LEASE_MS,
 };
 use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
 use crate::namespace::control::load_namespace_head_control;
@@ -1193,7 +1194,8 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
 pub struct CompletedUpload {
     /// Wire response for the completion or its idempotent replay.
     pub response: UploadSession,
-    /// Admission for a publication in this process, which needs no token.
+    /// Admission for a publication in this process, which needs no token but
+    /// expires at the completed session's final admission horizon.
     pub prepared: PreparedContent,
     /// Receipt for a publication elsewhere, or `None` once the session has
     /// stopped minting them.
@@ -1216,9 +1218,10 @@ fn completed_upload(
             mode,
             status: completed_status(content_ref, completed_at_ms),
         },
-        prepared: PreparedContent::from_admission(ContentAdmission::for_durable_content_write(
+        prepared: PreparedContent::from_admission(ContentAdmission::for_completed_upload(
             content_store_id.clone(),
             content_ref.clone(),
+            completed_at_ms.saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS),
         )),
         receipt: receipt_within_window(
             namespace_id,

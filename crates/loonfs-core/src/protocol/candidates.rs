@@ -212,13 +212,14 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
 struct CommitContentAdmissions<'a> {
     content_store_id: &'a ContentStoreId,
     admissions: &'a [ContentAdmission],
+    now_ms: u64,
 }
 
 impl CommitContentAdmissions<'_> {
     fn admits(&self, content_ref: &ContentRef) -> bool {
         self.admissions
             .iter()
-            .any(|admission| admission.admits(self.content_store_id, content_ref))
+            .any(|admission| admission.admits(self.content_store_id, content_ref, self.now_ms))
     }
 }
 
@@ -226,9 +227,11 @@ impl CommitContentAdmissions<'_> {
 pub(super) fn validate_commit_content_references(
     candidate: &CommitCandidate,
     content_store_id: &ContentStoreId,
+    now_ms: u64,
 ) -> Result<()> {
     let admissions = CommitContentAdmissions {
         content_store_id,
+        now_ms,
         admissions: match candidate.content_preparation() {
             ContentPreparation::Ready(admissions) => admissions,
             ContentPreparation::Rejected(_) => {

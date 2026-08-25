@@ -133,7 +133,8 @@ pub mod publish {
 ///
 /// A server mints a short-lived token after durable upload completion.
 /// [`FsWriter::prepare_content_token`] verifies the token against the
-/// namespace catalog and returns process-local proof that remains valid.
+/// namespace catalog and returns process-local proof that keeps the token's
+/// publication deadline.
 /// Most embedded applications do not need this module.
 pub mod content_tokens {
     pub use loonfs_api::v0::ContentToken;
