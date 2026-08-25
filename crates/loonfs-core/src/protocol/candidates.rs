@@ -24,12 +24,11 @@ pub(super) struct PreparedCandidateCommit {
 pub(super) enum CandidateAdmission {
     /// A new request ready for content validation and materialization.
     Prepared(PreparedCandidateCommit),
-    /// A candidate whose slot admission already decided.
+    /// A result decided during admission.
     Settled(BatchOutcomeSlot),
 }
 
 impl CandidateAdmission {
-    /// Decided against durable state or the request itself.
     fn independent(outcome: Result<ApiCommitResponse>) -> Self {
         Self::Settled(BatchOutcomeSlot::SettledIndependent(outcome))
     }

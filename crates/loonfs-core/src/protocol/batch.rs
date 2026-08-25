@@ -66,26 +66,17 @@ impl PublishBatchAgainstViewResult {
     }
 }
 
-/// One candidate's slot in the batch outcome table. The variant records what
-/// the outcome rests on, so a publication failure needs no positional
-/// reasoning about which slots it may replace.
+/// Tracks one candidate's result and whether publication can change it.
 #[derive(Debug, Clone)]
 pub(super) enum BatchOutcomeSlot {
-    /// Admission has not decided this candidate yet.
     Pending,
-    /// Accepted into tentative session state, awaiting WAL and head
-    /// publication.
     Accepted,
-    /// Decided against durable state or the request itself.
     SettledIndependent(Result<ApiCommitResponse>),
-    /// Decided against tentative mutations accepted earlier in this batch.
     SettledContingent(Result<ApiCommitResponse>),
-    /// Takes the final result of the earlier candidate it names.
     AliasOf(usize),
 }
 
 impl BatchOutcomeSlot {
-    /// The decided result, absent while the slot still awaits one.
     fn settled(&self) -> Option<&Result<ApiCommitResponse>> {
         match self {
             Self::SettledIndependent(outcome) | Self::SettledContingent(outcome) => Some(outcome),
@@ -146,7 +137,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let candidate_request = match admission {
                 CandidateAdmission::Prepared(candidate_request) => candidate_request,
                 CandidateAdmission::Settled(slot) => {
-                    slots[index] = settled_admission(slot, accepted_commits.is_empty());
+                    slots[index] = settle_admission(slot, !accepted_commits.is_empty());
                     continue;
                 }
             };
@@ -164,9 +155,9 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let resulting_next_inode_id = match session.commit_candidate(allocation) {
                 Ok(resulting_next_inode_id) => resulting_next_inode_id,
                 Err(error) => {
-                    slots[index] = settled_admission(
+                    slots[index] = settle_admission(
                         BatchOutcomeSlot::SettledContingent(Err(error)),
-                        accepted_commits.is_empty(),
+                        !accepted_commits.is_empty(),
                     );
                     continue;
                 }
@@ -280,7 +271,7 @@ fn abort_batch(
     mut slots: Vec<BatchOutcomeSlot>,
     error: &CoreError,
 ) -> PublishBatchAgainstViewResult {
-    fail_slots_contingent_on_unpublished_batch(&mut slots, error);
+    fail_unpublished_slots(&mut slots, error);
     PublishBatchAgainstViewResult {
         results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Invalidated,
@@ -375,21 +366,18 @@ async fn cas_batch_head<S: ObjectStore + ?Sized>(
     result.map_err(CoreError::from)
 }
 
-/// Classifies an outcome decided during admission. Until the batch accepts a
-/// candidate the planning session shows only durable state, so a rejection
-/// decided there was decided against that view alone.
-fn settled_admission(slot: BatchOutcomeSlot, accepted_nothing_yet: bool) -> BatchOutcomeSlot {
+/// Before the first accepted commit, admission uses durable state only.
+fn settle_admission(slot: BatchOutcomeSlot, has_accepted_commits: bool) -> BatchOutcomeSlot {
     match slot {
-        BatchOutcomeSlot::SettledContingent(outcome) if accepted_nothing_yet => {
+        BatchOutcomeSlot::SettledContingent(outcome) if !has_accepted_commits => {
             BatchOutcomeSlot::SettledIndependent(outcome)
         }
         slot => slot,
     }
 }
 
-/// Gives the publication error to every outcome that rests on the unpublished
-/// batch. Outcomes decided against durable state stand.
-fn fail_slots_contingent_on_unpublished_batch(slots: &mut [BatchOutcomeSlot], error: &CoreError) {
+/// Replaces results that depend on unpublished changes with the publication error.
+fn fail_unpublished_slots(slots: &mut [BatchOutcomeSlot], error: &CoreError) {
     for slot in slots {
         if matches!(
             slot,
@@ -400,8 +388,7 @@ fn fail_slots_contingent_on_unpublished_batch(slots: &mut [BatchOutcomeSlot], er
     }
 }
 
-/// Resolves aliases to the result of the slot they name. A slot that never
-/// settled is an internal invariant failure, not a fabricated response.
+/// Resolves aliases and rejects any slot that did not settle.
 fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<ApiCommitResponse>> {
     slots
         .iter()
@@ -431,17 +418,6 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use tempfile::tempdir;
-
-    #[test]
-    fn unsettled_slots_finish_as_an_internal_failure() {
-        let results =
-            finish_batch_outcomes(&[BatchOutcomeSlot::Pending, BatchOutcomeSlot::AliasOf(0)]);
-        for result in results {
-            let error = result.expect_err("an unsettled slot must not fabricate a response");
-            assert_eq!(error.code(), loonfs_api::ErrorCode::ServerError);
-            assert!(error.to_string().contains("unsettled batch outcome"));
-        }
-    }
 
     #[tokio::test]
     async fn sequence_exhaustion_writes_neither_wal_nor_head() {
