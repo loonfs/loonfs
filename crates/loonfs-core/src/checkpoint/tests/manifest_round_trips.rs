@@ -180,6 +180,61 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
 }
 
 #[tokio::test]
+async fn recovery_rejects_a_root_head_seq_that_disagrees_with_its_manifest() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("materialize the committed state");
+
+    let loaded_root = load_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("load root");
+    assert_eq!(loaded_root.state.manifest.manifest_head_seq, ChangeSeq(1));
+    let mut root = loaded_root.state;
+    root.manifest.manifest_head_seq = ChangeSeq(0);
+    let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
+        loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
+        root,
+    )
+    .expect("root envelope");
+    let bytes = loonfs_api::wire::control::encode_control_object(&envelope)
+        .expect("encode contradictory root");
+    store
+        .put_overwrite(
+            &loonfs_objectstore::keys::metadata_root(&namespace_id),
+            Bytes::from(bytes),
+        )
+        .await
+        .expect("install contradictory root");
+
+    let error = load_current_projection(&store, &namespace_id)
+        .await
+        .expect_err("the root coordinates must bind the manifest payload");
+    match error {
+        CoreError::NamespaceCorrupt(message) => {
+            assert!(message.contains("manifest_head_seq"), "{message}");
+        }
+        other => panic!("expected namespace corruption, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

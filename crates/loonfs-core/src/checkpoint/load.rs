@@ -24,7 +24,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{genesis_next_inode_id, MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
-use loonfs_api::wire::control::{genesis_commit_id, HeadState, MetadataRootState};
+use loonfs_api::wire::control::{genesis_commit_id, HeadState, ManifestRef, MetadataRootState};
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, MetadataSegmentRef,
     NamespaceManifestEnvelope, NamespaceManifestKind, NamespaceManifestPayload,
@@ -53,15 +53,67 @@ pub(super) fn ensure_root_matches_manifest(
     root: &MetadataRootState,
     manifest: &NamespaceManifestEnvelope,
 ) -> crate::error::Result<()> {
-    if manifest.payload_checksum != root.manifest.manifest_payload_checksum {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "metadata root for namespace `{namespace_id}` references manifest `{}` with checksum `{}`, but the manifest carries `{}`",
-            root.manifest.manifest_no,
-            root.manifest.manifest_payload_checksum,
-            manifest.payload_checksum,
-        )));
-    }
-    Ok(())
+    ensure_manifest_reference_matches(
+        &format!("metadata root for namespace `{namespace_id}`"),
+        &root.manifest,
+        manifest,
+    )
+}
+
+/// Verifies every coordinate by which a durable control object binds one
+/// immutable manifest.
+///
+/// Loading by owner and object id already proves the object's storage
+/// location. The remaining fields are still authority: callers use the
+/// manifest number for future allocation and the head sequence for replay
+/// and retention boundaries. A checksum match alone must not let those
+/// coordinates disagree with the payload it pins.
+pub(crate) fn ensure_manifest_reference_matches(
+    reference_name: &str,
+    reference: &ManifestRef,
+    manifest: &NamespaceManifestEnvelope,
+) -> crate::error::Result<()> {
+    let payload = &manifest.payload;
+    let mismatch = if reference.owner_namespace_id != payload.namespace_id {
+        Some((
+            "owner_namespace_id",
+            reference.owner_namespace_id.to_string(),
+            payload.namespace_id.to_string(),
+        ))
+    } else if reference.manifest_no != payload.manifest_no {
+        Some((
+            "manifest_no",
+            reference.manifest_no.to_string(),
+            payload.manifest_no.to_string(),
+        ))
+    } else if reference.manifest_object_id != payload.manifest_object_id {
+        Some((
+            "manifest_object_id",
+            reference.manifest_object_id.to_string(),
+            payload.manifest_object_id.to_string(),
+        ))
+    } else if reference.manifest_head_seq != payload.head_seq {
+        Some((
+            "manifest_head_seq",
+            reference.manifest_head_seq.to_string(),
+            payload.head_seq.to_string(),
+        ))
+    } else if reference.manifest_payload_checksum != manifest.payload_checksum {
+        Some((
+            "manifest_payload_checksum",
+            reference.manifest_payload_checksum.clone(),
+            manifest.payload_checksum.clone(),
+        ))
+    } else {
+        None
+    };
+    let Some((field, referenced, actual)) = mismatch else {
+        return Ok(());
+    };
+    Err(CoreError::NamespaceCorrupt(format!(
+        "{reference_name} records manifest `{}` field `{field}` as `{referenced}`, but the manifest carries `{actual}`",
+        reference.manifest_object_id,
+    )))
 }
 
 /// The genesis basis: one root-inode row and no metadata files.
@@ -139,16 +191,11 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
     })?;
-    if segments.manifest().payload_checksum != manifest.manifest_payload_checksum {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "namespace `{namespace_id}` resolves its metadata basis to manifest `{}` in namespace \
-             `{}` with checksum `{}`, but the manifest carries `{}`",
-            manifest.manifest_object_id,
-            manifest.owner_namespace_id,
-            manifest.manifest_payload_checksum,
-            segments.manifest().payload_checksum,
-        )));
-    }
+    ensure_manifest_reference_matches(
+        &format!("namespace `{namespace_id}` metadata basis"),
+        manifest,
+        segments.manifest(),
+    )?;
     let manifest_head_seq = segments.manifest().payload.head_seq;
     Ok(LoadedMetadataBasis {
         identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), manifest_head_seq),
