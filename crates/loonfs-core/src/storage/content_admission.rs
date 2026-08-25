@@ -54,6 +54,8 @@ pub(crate) struct ContentAdmission {
 }
 
 impl ContentAdmission {
+    /// Unbounded admission for a ref the caller keeps externally rooted;
+    /// no deadline is derivable from the reference alone.
     pub(crate) fn for_durable_content_write(
         content_store_id: ContentStoreId,
         content_ref: ContentRef,

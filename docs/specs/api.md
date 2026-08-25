@@ -407,8 +407,8 @@ tokens on the existing wire requests.
 Staging is staging wherever it happens, so `prepare_file_bytes` opens an
 upload session for the object it writes, exactly as a remote upload does: the
 session record lands before the bytes and completes after them. The opaque
-prepared value carries an admission deadline no later than the completed
-session's last possible receipt, and publication checks it again when the
+prepared value carries an admission deadline no later than the expiry of the
+last token the completed session could issue, and publication checks it when the
 batch is admitted. This is the same horizon that bounds remote upload tokens
 (section 6.3; format spec, "Garbage collection", rule 11), so content cannot
 be reclaimed and then admitted through an older in-process proof.

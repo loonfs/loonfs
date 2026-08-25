@@ -450,7 +450,9 @@ impl FsWriter {
     ///
     /// Preparation performs one content HEAD followed by one full content
     /// GET and digest check. Later prepared publication performs no content
-    /// I/O.
+    /// I/O. The proof asserts binding, not longevity: it stays safe only
+    /// while an existing revision keeps the ref referenced, since only
+    /// unreferenced content is ever reclaimed.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.prepare",
