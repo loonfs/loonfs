@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "loonfs-cloudflare",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-25",
+  "workers_dev": true,
+  "keep_vars": true,
+  "observability": {
+    "enabled": true
+  },
+  "secrets": {
+    "required": [
+      "LOONFS_AUTH_TOKEN",
+      "LOONFS_CONTENT_TOKEN_SECRET",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY"
+    ]
+  },
+  "containers": [
+    {
+      "class_name": "LoonFSContainer",
+      "image": "../../Dockerfile",
+      "image_build_context": "../../../..",
+      "instance_type": "basic",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LOONFS_CONTAINER",
+        "class_name": "LoonFSContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["LoonFSContainer"]
+    }
+  ]
+}
