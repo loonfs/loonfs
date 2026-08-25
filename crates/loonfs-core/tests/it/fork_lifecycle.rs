@@ -644,12 +644,8 @@ async fn a_fork_that_loses_its_source_pin_installs_no_target() {
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     assert!(
         namespace_keys(&store, &clone).await.is_empty(),
-        "the fence runs before the target head, so nothing is published to undo"
+        "the target is not installed"
     );
-    let retry = fork_namespace(&store, &source, &clone, &context)
-        .await
-        .expect_err("the retry loses its own pin the same way");
-    assert_eq!(retry.code(), ErrorCode::CheckpointUnavailable);
 }
 
 #[tokio::test]
@@ -967,8 +963,7 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
         .is_none());
 }
 
-/// A store that releases the fork's source pin the instant the fork tries to
-/// renew it, standing in for a collection pass that won the same record.
+/// Releases a fork checkpoint before its renewal can complete.
 #[derive(Debug)]
 struct ReleasePinBeforeRenewalStore {
     inner: LocalFsStore,

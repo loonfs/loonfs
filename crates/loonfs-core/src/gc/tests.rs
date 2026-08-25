@@ -3819,8 +3819,6 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         CheckpointStatus::Active {}
     );
 
-    // A target that reads through this record but names another manifest is
-    // not a stale reference; nothing legal writes that head.
     store.clear();
     let head_key = wal_head(&clone);
     let bytes = store
@@ -3962,11 +3960,7 @@ async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
     );
 }
 
-/// The renewal fences an attempt whose lease still runs, but an attempt that
-/// stalled past its lease can install a target after a pass released its
-/// record. GC then observes a released fork record beside a live target that
-/// names it exactly. Both the record and its basis must survive later passes:
-/// collection must not turn a damaged state into data loss.
+/// A released fork checkpoint still protects a live target that names it.
 #[tokio::test]
 async fn gc_retains_a_released_fork_record_when_its_target_lives() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3983,8 +3977,7 @@ async fn gc_retains_a_released_fork_record_when_its_target_lives() {
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
 
-    // Move the source root beyond the fork basis, then synthesize that state:
-    // target active, source pin released.
+    // Move the source root beyond the fork basis, then release its checkpoint.
     write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &source, &setup)
         .await

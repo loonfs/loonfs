@@ -1683,14 +1683,9 @@ context. The protocol is:
    `expires_at_ms = now + FORK_CHECKPOINT_LEASE_MS`. This record is the
    reachability root that keeps the source's basis manifest and segments alive
    for as long as the target lives; nothing under the target's prefix protects
-   them. Every attempt takes its own record; no attempt reuses, refreshes, or
-   revives an earlier one's.
+   them. Each attempt creates a new record.
 3. Read the pinned manifest to get the target's next inode id. Build the active target head with the source's `content_store_id` and a `fork_basis` containing the record's `manifest` reference and checkpoint id. The reference's `manifest_head_seq` is the target's fork sequence.
-4. Renew the source checkpoint record by compare-and-swap on the etag it was
-   read with, setting `expires_at_ms` to at least
-   `now + FORK_CHECKPOINT_LEASE_MS`. The renewal requires an active,
-   fork-owned record whose owner names this target. A terminal, missing, or
-   foreign record fails the fork, and so does an unknown write outcome.
+4. Renew the source checkpoint with compare-and-swap. The record must be active, fork-owned, and assigned to this target. The new expiry must be later than the stored expiry and at least `now + FORK_CHECKPOINT_LEASE_MS`. The remaining lease must cover the target-head write. If either check fails, the fork stops before creating the target.
 5. Write the target head with create-if-absent.
 
 The target copies the source's `content_store_id` because a fork shares file
@@ -1698,35 +1693,9 @@ bytes copy-on-write. It inherits the source's materialized name keys
 unchanged, which is sound because name-key folding is a fixed rule of the
 format (section 2.3.1) rather than a per-namespace choice.
 
-Step 4 is the handoff between the forker and garbage collection, and it is
-the reason no step after the head write has anything left to check. Both
-sides transition the same record from the same observed etag:
+The renewal races with garbage collection on the same record. If GC releases the record first, the renewal fails. If the renewal succeeds first, its later expiry changes the record and causes a stale release to fail its compare-and-swap. Once the target exists, its `fork_basis` keeps the checkpoint reachable. An abandoned attempt leaves only a checkpoint that GC can release after its lease expires.
 
-```text
-GC:     active C@etag -> released C
-Fork:   active C@etag -> active C with a fresh lease
-```
-
-If the release lands first, the renewal reloads a terminal record and the
-fork fails before any target exists. If the renewal lands first, the
-collector's release fails: a renewal always writes a strictly later expiry
-(a wall-clock lease adjusted for how long the attempt has run, and never
-below the stored expiry plus one), so the record's bytes and etag no longer
-match what the collector read. A crash after renewal leaves an orphaned pin that its
-own lease ends. A crash after the head write needs no cleanup: the head's
-`fork_basis` is durable evidence that this exact record is reachable, and
-every successor head carries it forward verbatim (section 2.9).
-
-One window is not fenced. An attempt that stalls longer than a full fresh
-lease between its renewal and its head write can still install a target
-after a collector released the record. The rule
-that a live target exactly referencing a record retains it (section 6,
-rule 10) is the backstop: the record survives as an anomaly rather than
-being reaped under a live target.
-
-`FORK_CHECKPOINT_LEASE_MS` is derived, not tuned: two GC grace floors
-(section 6, rule 1), one for the create and one for everything after it, each
-being one publication plus provider bounds plus clock skew.
+`FORK_CHECKPOINT_LEASE_MS` is two GC grace windows (section 6, rule 1): one for checkpoint creation and one for target installation.
 
 The fork does not copy content blobs or source metadata segments, and it does not write a target manifest, root, or floor. The target starts its own WAL one sequence above `fork_basis.manifest.manifest_head_seq`. New WAL segments, checkpoints, and metadata segments are stored under the target namespace. Until the first target flush creates a root, readers resolve the basis from the head (section 2.9.1).
 
@@ -2451,32 +2420,9 @@ publishing CAS) — under these rules:
    a later pass. Content objects are never enumerated by listing the content
    store, which is shared by every namespace whose head names it; they are
    reached only through the upload session that owns them (rule 11).
-10. **Fork pins are held by exact reference.** A fork-owned record is a root
-   only while its target head is active and that head's `fork_basis` names
-   this record's checkpoint id and its manifest reference. The head is the
-   only object a fork installation writes and no successor head may rewrite
-   its `fork_basis` (section 2.9), so it is permanent evidence either way.
-   A target that is absent, terminally deleted, carries no fork basis, or
-   reads through some other checkpoint releases the record. Two of those
-   arms need care:
+10. **Fork checkpoints require an exact reference.** A fork-owned record remains a root while its active target's `fork_basis` names the record's source namespace, checkpoint id, and manifest. An absent target keeps the record until its lease expires. A deleted target, a target without a fork basis, or a target that names another source or checkpoint makes the record releasable immediately. This also allows GC to release records created by failed fork attempts against an existing target.
 
-   *Absent target.* Releasing waits for the record's own lease. The forker
-   renews that lease by compare-and-swap on the record immediately before
-   installing (section 3.9.2), so a collector that observes an expired lease
-   has already won against every attempt that could still install. This is
-   the only debris an interrupted install can leave, and it lives on the
-   source, never under the target's prefix — the target either has a
-   complete head or has nothing.
-
-   *Target that reads through another checkpoint.* A second fork attempt
-   against a name that is already taken pins a basis no target will ever
-   read. Its record is reclaimable at once; the lease has nothing to say
-   about a target that already exists.
-
-   A target head the store will not hand over is not evidence of anything,
-   and retains the record until a later pass can read it. A head that names
-   this record's checkpoint id with a different manifest reference is
-   namespace corruption and fails the pass.
+    If the target head cannot be read, GC retains the record. If the source namespace and checkpoint id match but the manifest differs, the namespace is corrupt and the pass fails.
 11. **Uploads and content, split at `completed`.** One sweep of `uploads/`
    owns both halves, because a session record is the only handle on the
    content object it created.
@@ -2616,13 +2562,10 @@ orphaned data for the next pass rather than a record whose data vanished.
 To keep that true, every readable checkpoint record roots its basis for the
 duration of a pass, whatever its lifecycle, expiry, or owner — no exceptions.
 State, expiry, and owner fate gate only whether the record itself is a
-candidate. A fork-owned record no target reads through any more (rule 10) is
-released by compare-and-swap on the record's freshly observed etag,
-re-classified immediately before that swap — never deleted while active. A
-released fork record whose target still names it exactly is retained instead:
-that pairing is an anomaly the fork handoff makes rare, and collection must
-not turn a damaged state into data loss. A released
-record is deleted outright once its `released_at_ms` is a grace window old;
+candidate. A fork-owned record that no target uses (rule 10) is rechecked and
+released with compare-and-swap on its current ETag. An active record is never
+deleted directly, and a released fork record is retained if its target still
+names it. A released record is deleted once its `released_at_ms` is a grace window old;
 because release is terminal, no second state is needed between deciding to
 delete and deleting, and a crash between the release CAS and the delete
 leaves a record the next pass reaps unconditionally.

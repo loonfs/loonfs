@@ -198,24 +198,17 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     released.ok_or_else(|| CoreError::contention_exhausted(object_key))
 }
 
-/// Renews a fork-owned lease under the record's etag, immediately before the
-/// forker installs its target head.
+/// Renews a fork checkpoint immediately before installing its target.
 ///
-/// The compare-and-swap is the handoff with garbage collection: a release
-/// that lands first makes this reload a terminal record and fail before any
-/// target exists, and a renewal always rewrites the record to a strictly
-/// later expiry, so a collector's stale release fails against bytes that no
-/// longer match what it read. Renewing a whole lease
-/// beats proving that a narrow margin covers one more write; a crash after
-/// renewal only keeps an orphaned pin a while longer. `docs/specs/format.md`
-/// section 3.9.2 names the one window this does not fence.
+/// This compare-and-swap races with GC release. The new expiry must differ
+/// from the stored value so a stale release cannot use the old ETag.
 pub(crate) async fn renew_fork_checkpoint_for_install<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
     expected_target_namespace_id: &NamespaceId,
     now_ms: u64,
-) -> Result<()> {
+) -> Result<u64> {
     let object_key = &checkpoint_record(source_namespace_id, checkpoint_id);
     let unavailable = &|reason: String| {
         CoreError::CheckpointUnavailable(format!(
@@ -245,21 +238,19 @@ pub(crate) async fn renew_fork_checkpoint_for_install<S: ObjectStore + ?Sized>(
                 "the record pins target `{target_namespace_id}`"
             )));
         }
-        // Strictly later than the stored expiry, so the rewrite always
-        // changes the record and a stale release CAS cannot land on a
-        // content-derived etag.
-        *expires_at_ms = expires_at_ms
-            .saturating_add(1)
-            .max(now_ms.saturating_add(FORK_CHECKPOINT_LEASE_MS));
+        let later_expiry = expires_at_ms
+            .checked_add(1)
+            .ok_or_else(|| unavailable("the lease expiry cannot be extended".to_owned()))?;
+        *expires_at_ms = later_expiry.max(now_ms.saturating_add(FORK_CHECKPOINT_LEASE_MS));
+        let renewed_expiry = *expires_at_ms;
         let encoded = encode_checkpoint_record(&next)?;
         match store
             .compare_and_swap(object_key, &loaded.etag, encoded)
             .await
         {
-            Ok(_) => Ok(CasAttempt::Settled(())),
+            Ok(_) => Ok(CasAttempt::Settled(renewed_expiry)),
             Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
-            // An unknown outcome fails here rather than installing a target
-            // this attempt cannot prove is pinned.
+            // Do not install a target unless the renewal is confirmed.
             Err(error) => Err(CoreError::store(object_key, &error)),
         }
     })

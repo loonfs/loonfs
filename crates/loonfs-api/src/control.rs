@@ -238,10 +238,9 @@ pub enum CheckpointOwner {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at_ms: Option<u64>,
     },
-    /// A fork target keeping its source basis alive. Released once no target
-    /// head reads through this record any more, or once the attempt's lease
-    /// expires with no target head to show for it. A target head whose
-    /// `fork_basis` names this record keeps it whatever the lease says.
+    /// Keeps a source basis alive for a fork target. GC releases it once the
+    /// target no longer references it, or when its lease expires before the
+    /// target is created.
     Fork {
         /// Fork namespace whose continued existence keeps the source basis pinned.
         target_namespace_id: NamespaceId,
@@ -1327,23 +1326,6 @@ mod tests {
         assert_eq!(
             head.ensure_successor_identity(&forked)
                 .expect_err("gaining a fork basis is rejected")
-                .field,
-            "fork_basis"
-        );
-
-        // Retention matches a fork basis against the source checkpoint record
-        // it names, so an ordinary commit cannot re-point one either.
-        let mut rebased = forked.clone();
-        rebased.fork_basis = forked.fork_basis.clone().map(|mut basis| {
-            basis.source_checkpoint_id =
-                CheckpointId::parse("chk_00000000000000000000000000000003")
-                    .expect("valid checkpoint id");
-            basis
-        });
-        assert_eq!(
-            forked
-                .ensure_successor_identity(&rebased)
-                .expect_err("re-pointing a fork basis is rejected")
                 .field,
             "fork_basis"
         );

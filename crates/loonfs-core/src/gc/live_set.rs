@@ -395,9 +395,7 @@ async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> CollectResult<bool> {
-    // User checkpoints expire by time. A fork checkpoint remains a root while
-    // its target head still reads through it, even if a racing pass already
-    // moved the record to `released`.
+    // A fork checkpoint remains a root while its target still references it.
     match &record.owner {
         CheckpointOwner::User { .. } => {
             Ok(record.status != (CheckpointStatus::Active {})

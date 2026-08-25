@@ -16,13 +16,11 @@ use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 
 pub(super) enum ForkCheckpointSweep {
-    /// The record was flipped `active -> released` under its etag.
+    /// The record was released.
     Released,
-    /// The record must survive this pass (its target still reaches it, an
-    /// attempt may still install one, the head did not read, or the release
-    /// compare-and-swap lost a race).
+    /// The record must survive this pass.
     Retained,
-    /// Not an active fork-owned record; the normal delete path decides.
+    /// The normal checkpoint path handles this record.
     NotAnActiveFork,
 }
 
@@ -65,10 +63,7 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     Ok(true)
 }
 
-/// Decides one fork-owned sweep candidate immediately before acting
-/// (rule 3): re-reads the record, re-classifies its target, and releases the
-/// record by compare-and-swap on the just-observed etag. That swap is what a
-/// forker's renewal contends with.
+/// Rechecks a fork checkpoint and releases it if its target no longer uses it.
 pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
@@ -103,8 +98,6 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
         | ForkCheckpointReachability::InFlight
         | ForkCheckpointReachability::Ambiguous => return Ok(ForkCheckpointSweep::Retained),
     }
-    // Classification runs before this so a released record whose target still
-    // names it exactly is retained, not handed to the released-record reaper.
     if loaded.state.status != (CheckpointStatus::Active {}) {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     }
@@ -116,32 +109,16 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Where one fork-owned record stands against its target namespace.
+/// Whether a fork checkpoint is still needed.
 pub(super) enum ForkCheckpointReachability {
-    /// The target head is active and its fork basis names this exact record.
     ReferencedByLiveTarget,
-    /// No target head yet, and the attempt's lease has not passed.
     InFlight,
-    /// No target can ever read through this record again.
     Reclaimable,
-    /// The target head did not read, so this pass decides nothing.
     Ambiguous,
 }
 
-/// Classifies a fork-owned record against the durable evidence its target
-/// leaves behind (rule 10's fork arm).
-///
-/// The target head is the only object a fork installation writes, and
-/// `HeadState::ensure_successor_identity` refuses to rewrite `fork_basis`, so
-/// a head naming this record is permanent proof the basis is reachable and a
-/// head naming anything else is permanent proof it is not. Name existence is
-/// not enough on its own: a second fork attempt against a target that already
-/// exists creates a record no target will ever read through.
-///
-/// An absent head means no attempt has landed, and the lease decides whether
-/// one still can. The forker renews the lease under this record's etag
-/// immediately before installing, so a collector reading an expired lease has
-/// already won the race against every attempt that could still install.
+/// Compares a fork checkpoint with the target head that may reference it.
+/// An absent target remains in flight until the checkpoint lease expires.
 pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,
@@ -159,7 +136,6 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
             })
         }
         Err(error) => match &error {
-            // An unreadable target head is not evidence of anything; retain.
             ControlObjectLoadError::Store { object_key, .. } => {
                 tracing::warn!(
                     namespace_id = %target_namespace_id,
@@ -182,7 +158,9 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
     let Some(basis) = head.fork_basis else {
         return Ok(ForkCheckpointReachability::Reclaimable);
     };
-    if basis.source_checkpoint_id != record.checkpoint_id {
+    if basis.manifest.owner_namespace_id != record.namespace_id
+        || basis.source_checkpoint_id != record.checkpoint_id
+    {
         return Ok(ForkCheckpointReachability::Reclaimable);
     }
     if basis.manifest != record.manifest {

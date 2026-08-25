@@ -188,9 +188,12 @@ pub const MAX_SIGNED_PARTS_PER_REQUEST: usize = 1_000;
 
 /// Lease for the source checkpoint created by a fork attempt.
 ///
-/// Two GC grace windows cover checkpoint creation followed by target-head
-/// installation and verification.
+/// Two GC grace windows cover checkpoint creation and target installation.
 pub const FORK_CHECKPOINT_LEASE_MS: u64 = 2 * GC_MIN_GRACE_WINDOW_MS;
+
+/// Time reserved for the target-head write after renewing a fork checkpoint.
+pub const FORK_INSTALL_MARGIN_MS: u64 =
+    PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS;
 
 /// Lease duration for an upload session.
 pub const UPLOAD_SESSION_LEASE_MS: u64 = 24 * 60 * 60 * 1000;
@@ -229,6 +232,10 @@ const _: () = assert!(
 const _: () = assert!(
     FORK_CHECKPOINT_LEASE_MS >= GC_MIN_GRACE_WINDOW_MS,
     "a fork attempt may take as long as any other publication"
+);
+const _: () = assert!(
+    FORK_INSTALL_MARGIN_MS < FORK_CHECKPOINT_LEASE_MS,
+    "a renewed fork checkpoint must outlast target installation"
 );
 
 #[cfg(test)]

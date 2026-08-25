@@ -1,12 +1,6 @@
 //! Namespace forking: installs a target namespace whose head points at a
 //! fork-owned source checkpoint, sharing content bytes and reading the
 //! source's metadata until the target flushes its own.
-//!
-//! One window is not fenced: an attempt that stalls longer than a full
-//! fresh lease between its renewal and its head write can still install a
-//! target after a collector released the record. Garbage collection's
-//! backstop is that a live target naming a record exactly retains it
-//! whatever the record's status says.
 
 use crate::checkpoint::record::renew_fork_checkpoint_for_install;
 use crate::checkpoint::{
@@ -15,7 +9,7 @@ use crate::checkpoint::{
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::FORK_CHECKPOINT_LEASE_MS;
+use crate::limits::{FORK_CHECKPOINT_LEASE_MS, FORK_INSTALL_MARGIN_MS};
 use crate::namespace::bootstrap::{install_namespace_head, NamespaceHeadInstall};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{
@@ -30,18 +24,11 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<Namespace> {
-    // The renewal stamps how long this attempt has already run, so the
-    // timer starts before the first write.
+    // Include time already spent on the fork when renewing its lease.
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
-    // Fork routes through a fork-owned source checkpoint: the record is the
-    // reachability root protecting every source-owned metadata file the
-    // target will reference, for as long as the target lives.
-    //
-    // Every attempt creates its own leased record. There is no reuse of an
-    // earlier attempt's record and no way back from a release, so an attempt
-    // that dies before publishing its target simply lets the lease pass, and
-    // garbage collection releases and reaps the record on that alone.
+    // Each attempt creates a checkpoint that keeps the target's source
+    // metadata alive. GC removes abandoned checkpoints after their lease.
     let checkpoint = create_checkpoint(
         store,
         source_namespace_id,
@@ -73,15 +60,13 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .state;
-    // Start the target from the manifest pinned by the source checkpoint.
     let fork_basis = ForkBasis {
         manifest: source_record.manifest.clone(),
         source_checkpoint_id: source_record.checkpoint_id.clone(),
     };
     let fork_seq = fork_basis.manifest.manifest_head_seq;
 
-    // The target shares the source's content store and begins from the source
-    // manifest until it publishes its own.
+    // The target shares content bytes and starts from the source manifest.
     let head = HeadState {
         namespace_id: new_namespace_id.clone(),
         content_store_id: source_head.content_store_id.clone(),
@@ -99,9 +84,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         recent_segments: Vec::new(),
         status: NamespaceStatus::Active {},
     };
-    // The handoff: the target head is written only after a compare-and-swap
-    // proved this attempt still owns an active pin.
-    renew_fork_checkpoint_for_install(
+    // Renew before creating the target so this races safely with GC release.
+    let checkpoint_expires_at_ms = renew_fork_checkpoint_for_install(
         store,
         source_namespace_id,
         &source_record.checkpoint_id,
@@ -111,6 +95,16 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
     )
     .await?;
+    let install_started_at_ms = context
+        .now_ms
+        .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms));
+    if checkpoint_expires_at_ms <= install_started_at_ms.saturating_add(FORK_INSTALL_MARGIN_MS) {
+        return Err(CoreError::CheckpointUnavailable(format!(
+            "fork of `{source_namespace_id}` into `{new_namespace_id}` cannot install before its \
+             source checkpoint `{}` expires",
+            source_record.checkpoint_id
+        )));
+    }
     match install_namespace_head(store, new_namespace_id, &head).await? {
         NamespaceHeadInstall::Landed => {}
         NamespaceHeadInstall::Exists => {
