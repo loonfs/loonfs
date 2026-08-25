@@ -12,11 +12,12 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::Json;
-use loonfs::StatPathOptions;
+use loonfs::{ListPathEntriesOptions, StatPathOptions};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
-    public_inode_id, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, PageRequest,
+    public_inode_id, DirectoryPageCursor, FileRevisionsPageCursor, InodeId,
+    ListFileRevisionsResponse, PageRequest,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -86,6 +87,72 @@ pub(super) async fn get_inode(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(entry))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ListInodeChildrenQuery {
+    limit: Option<String>,
+    cursor: Option<String>,
+    include_attributes: Option<String>,
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        operation_id = "list_inode_children",
+        path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
+        tag = "inodes",
+        summary = "List directory children by inode",
+        description = "Lists one page of a directory's children addressed by parent inode ID, in canonical name-key order. Inode addressing keeps a listing and its resumption on the same directory across concurrent renames or moves of the parent.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("inode_id" = String, Path, description = "Directory inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
+            ("cursor" = Option<String>, Query, description = "Opaque directory page cursor"),
+            ("include_attributes" = inline(Option<super::handlers_filesystem::OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.")
+        ),
+        responses(
+            (status = 200, description = "One page of directory children", body = loonfs_api::ListInodeChildrenResponse),
+            (status = 400, description = "Invalid inode ID, limit, cursor, or include_attributes", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or visible inode not found", body = ApiError),
+            (status = 409, description = "Inode is not a directory", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn list_inode_children(
+    State(state): State<AppState>,
+    namespace_id_path: NamespaceIdPath,
+    path: AppPath<InodePathParams>,
+    headers: HeaderMap,
+    query: AppQuery<ListInodeChildrenQuery>,
+) -> Result<Json<loonfs_api::ListInodeChildrenResponse>, ApiResponseError> {
+    authorize(state.config.auth_policy(), &headers)?;
+    let namespace_id = namespace_id_path.into_id()?;
+    let inode_id = parse_inode_id(&path.into_params()?.inode_id)?;
+    let query = query.into_params()?;
+    let mut options = ListPathEntriesOptions::default();
+    if let Some(value) = query.include_attributes.as_deref() {
+        options.include_attributes = parse_include_attributes(value)?;
+    }
+    let listing = state
+        .reader
+        .list_inode_children_page(
+            &namespace_id,
+            inode_id,
+            PageRequest::<DirectoryPageCursor> {
+                limit: resolve_page_limit(query.limit)?,
+                cursor: decode_optional_cursor(query.cursor)?,
+            },
+            options,
+        )
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(listing))
 }
 
 #[cfg_attr(

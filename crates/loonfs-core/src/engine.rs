@@ -140,6 +140,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         view.list_path_page(path.as_ref(), request, options.include_attributes.into())
             .await
     }
+
+    /// Lists one page of a directory's children by inode against the pinned
+    /// runtime read context.
+    pub async fn list_inode_children_page(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
+        context: &RuntimeReadContext,
+    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
+        let view = self.load_read_view(context).await?;
+        view.list_inode_children_page(inode_id, request, options.include_attributes.into())
+            .await
+    }
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {

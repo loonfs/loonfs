@@ -42,7 +42,7 @@ use self::handlers_filesystem::{
     list_path_entries, list_trash,
 };
 use self::handlers_inodes::{
-    get_file_revision_bytes_by_inode, get_inode, list_file_revisions_by_inode,
+    get_file_revision_bytes_by_inode, get_inode, list_file_revisions_by_inode, list_inode_children,
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, delete_namespace, fork_namespace, get_namespace,
@@ -333,6 +333,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
             get(get_inode),
+        )
+        .route(
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
+            get(list_inode_children),
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",

@@ -669,6 +669,52 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             InodeKind::Directory => {}
         }
 
+        self.directory_children_page(&mut session, &resolved, request, attributes)
+            .await
+    }
+
+    /// Lists one page of a directory's children addressed by inode.
+    ///
+    /// Unknown or hidden inodes answer [`CoreError::InodeNotFound`]. A
+    /// non-directory target is a kind conflict rather than a single-entry
+    /// listing: an inode-addressed caller asked for children, not for the
+    /// entry itself.
+    pub(crate) async fn list_inode_children_page(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<DirectoryPageCursor>,
+        attributes: AttributeInclusion,
+    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
+        validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
+
+        let mut session = self.metadata_view().session();
+        let mut ancestor_paths = HashMap::new();
+        let resolved = resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
+            .await?
+            .ok_or(CoreError::InodeNotFound(inode_id))?;
+        if resolved.inode_kind != InodeKind::Directory {
+            return Err(CoreError::ExpectedDirectory {
+                path: resolved.absolute_path.clone(),
+                kind: resolved.inode_kind,
+            });
+        }
+        if let Some(cursor) = request.cursor.as_ref() {
+            validate_directory_cursor(cursor, &resolved)?;
+        }
+        self.directory_children_page(&mut session, &resolved, request, attributes)
+            .await
+    }
+
+    /// Scans one page of `resolved`'s visible children and builds their
+    /// entries. The caller has established that `resolved` is a directory
+    /// and validated any cursor against it.
+    async fn directory_children_page(
+        &self,
+        session: &mut MetadataViewSession<'_, '_, S>,
+        resolved: &ResolvedVisiblePath,
+        request: PageRequest<DirectoryPageCursor>,
+        attributes: AttributeInclusion,
+    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let start_after = request
             .cursor
             .as_ref()
@@ -728,10 +774,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             for child in children {
                 entries.push(
                     self.build_authoritative_path_entry_from_visible_child(
-                        &mut session,
-                        &resolved,
-                        child,
-                        attributes,
+                        session, resolved, child, attributes,
                     )
                     .await?,
                 );

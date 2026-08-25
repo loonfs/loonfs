@@ -7,9 +7,10 @@ use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, CommittedChange,
     ContentRef, CoreError, CurrentFileState, FileBytes, FileContentStream, FileRevision, InodeId,
-    ListChangesOptions, ListChangesResponse, ListFileRevisionsResponse, ListPathEntriesOptions,
-    ListPathEntriesResponse, Namespace, NamespaceId, PathEntry, ReadFileStreamOptions, RevisionNo,
-    RuntimeError, SharedObjectStore, StatPathOptions, TrashEntry,
+    ListChangesOptions, ListChangesResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    ListPathEntriesOptions, ListPathEntriesResponse, Namespace, NamespaceId, PathEntry,
+    ReadFileStreamOptions, RevisionNo, RuntimeError, SharedObjectStore, StatPathOptions,
+    TrashEntry,
 };
 use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageCursor, PageRequest,
@@ -46,6 +47,71 @@ impl PathEntriesPager {
             .list_path_entries_page(
                 &self.namespace_id,
                 &self.absolute_path,
+                self.request.clone(),
+                self.options.clone(),
+            )
+            .await;
+        Some(page.and_then(|page| {
+            advance_typed_cursor(&mut self.request, page.next_cursor.as_deref())?;
+            self.exhausted = self.request.cursor.is_none();
+            Ok(page)
+        }))
+    }
+
+    /// Returns at most `max_items` entries.
+    ///
+    /// Unused entries from the last page remain available to later calls.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<PathEntry>> {
+        let mut entries = Vec::new();
+        while entries.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - entries.len()).min(page.entries.len());
+            if take < page.entries.len() {
+                let remaining = page.entries.split_off(take);
+                entries.extend(page.entries);
+                page.entries = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            entries.extend(page.entries);
+        }
+        Ok(entries)
+    }
+}
+
+/// Fetches child pages of one directory inode as needed.
+///
+/// [`Self::next`] returns one page with its metadata. [`Self::collect_up_to`]
+/// returns at most the requested number of entries and saves unused entries
+/// for later calls.
+#[must_use]
+pub struct InodeChildrenPager {
+    reader: FsReader,
+    namespace_id: NamespaceId,
+    inode_id: InodeId,
+    request: PageRequest<DirectoryPageCursor>,
+    options: ListPathEntriesOptions,
+    pending: Option<ListInodeChildrenResponse>,
+    exhausted: bool,
+}
+
+impl InodeChildrenPager {
+    /// Returns the next children page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListInodeChildrenResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .reader
+            .list_inode_children_page(
+                &self.namespace_id,
+                self.inode_id,
                 self.request.clone(),
                 self.options.clone(),
             )
@@ -418,7 +484,6 @@ impl FsReader {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
         let page = engine
             .list_path_page(listed_path.as_str(), request, options, &read_context)
             .await?;
@@ -426,7 +491,6 @@ impl FsReader {
             .items
             .first()
             .map(|entry| entry.head_seq)
-            .or(request_head_seq)
             .unwrap_or(read_context.head.seq);
         let next_cursor = page.next_cursor;
         let response = ListPathEntriesResponse {
@@ -437,6 +501,72 @@ impl FsReader {
             next_cursor: None,
         };
         Ok((response, next_cursor))
+    }
+
+    /// Creates a children pager for one directory inode beginning at
+    /// `request.cursor`.
+    pub fn list_inode_children_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: PageRequest<DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
+    ) -> InodeChildrenPager {
+        InodeChildrenPager {
+            reader: self.clone(),
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            request,
+            options,
+            pending: None,
+            exhausted: false,
+        }
+    }
+
+    /// Lists one page of a directory's children by inode, projecting what
+    /// `options` asks for.
+    ///
+    /// The parent is addressed by its stable inode identity, so a page and
+    /// its resumption always describe the same directory even when the
+    /// parent is concurrently renamed or moved.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.list_inode_children",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "list_inode_children",
+            method = "list_inode_children_page",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn list_inode_children_page(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: PageRequest<DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
+    ) -> Result<ListInodeChildrenResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let page = engine
+            .list_inode_children_page(inode_id, request, options, &read_context)
+            .await?;
+        let head_seq = page
+            .items
+            .first()
+            .map(|entry| entry.head_seq)
+            .unwrap_or(read_context.head.seq);
+        let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
+        Ok(ListInodeChildrenResponse {
+            namespace_id: namespace_id.clone(),
+            parent_inode_id: inode_id,
+            head_seq,
+            entries: page.items,
+            next_cursor,
+        })
     }
 
     /// Reads a file's current content plus the metadata entry it came from.

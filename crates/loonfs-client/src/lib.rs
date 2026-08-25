@@ -39,13 +39,13 @@ use loonfs_api::{
     ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
     CreateCheckpointRequest, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
     FileRevision, FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, Namespace, NamespaceDiagnostics, NamespaceId,
-    PathEntry, PutRetryAttempt, PutRetryErrorClassification, PutRetryReceipt,
-    ReleaseCheckpointResponse, RevisionNo, SecretString, StreamingChecksum, TrashEntry, UploadId,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    Namespace, NamespaceDiagnostics, NamespaceId, PathEntry, PutRetryAttempt,
+    PutRetryErrorClassification, PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo,
+    SecretString, StreamingChecksum, TrashEntry, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};
@@ -55,7 +55,9 @@ pub use admin::CheckpointsPager;
 pub use config::ClientConfig;
 pub use error::ClientError;
 pub use payload::{PayloadSource, PayloadStream};
-pub use reads::{ChangesPager, FileRevisionsPager, PathEntriesPager, TrashPager};
+pub use reads::{
+    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, TrashPager,
+};
 use transport::{StdMonotonicTimer, TransportRetryPolicy, WireRequest, IO_INACTIVITY_TIMEOUT};
 pub use ClientError as Error;
 

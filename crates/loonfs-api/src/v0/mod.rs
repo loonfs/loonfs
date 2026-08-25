@@ -39,8 +39,8 @@ pub use operations::{
     StoreProbeResponse, WalFlushStepOutcome,
 };
 pub use reads::{
-    AttributesProjection, FileBytes, ListPathEntriesResponse, ListTrashResponse, PathEntry,
-    PathEntryKind, TrashEntry,
+    AttributesProjection, FileBytes, ListInodeChildrenResponse, ListPathEntriesResponse,
+    ListTrashResponse, PathEntry, PathEntryKind, TrashEntry,
 };
 pub use search::{
     GrepGcRequest, GrepGcResponse, GrepIndex, GrepIndexLifecycle, GrepMatch, GrepRequest,

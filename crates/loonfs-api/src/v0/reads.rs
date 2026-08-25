@@ -208,6 +208,36 @@ pub struct ListPathEntriesResponse {
     pub next_cursor: Option<String>,
 }
 
+/// One directory listing addressed by parent inode, and the namespace head
+/// it was answered at.
+///
+/// The envelope names the parent by its stable inode identity rather than a
+/// path, so a page and its resumption always describe the same directory
+/// even when the parent is concurrently renamed or moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ListInodeChildrenResponse {
+    /// Namespace that was read.
+    pub namespace_id: NamespaceId,
+    /// Directory inode whose children were returned.
+    #[serde(with = "crate::public_inode_id")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
+    pub parent_inode_id: InodeId,
+    /// Namespace head sequence this listing was read from.
+    pub head_seq: ChangeSeq,
+    /// Directory entries for this page.
+    ///
+    /// Entries are returned in canonical name-key order. Higher-level display
+    /// surfaces may sort entries separately for presentation.
+    pub entries: Vec<PathEntry>,
+    /// Cursor for the next page, if more entries remain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 /// File bytes plus the metadata entry they came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

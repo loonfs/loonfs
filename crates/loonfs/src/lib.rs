@@ -82,15 +82,15 @@ pub use loonfs_api::{
     DeleteNamespaceResponse, DeletedObjectCounts, DestinationBehavior, DirectoryPageCursor,
     EffectiveLimit, FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalOutcome,
     FlushWalResponse, GcRequest, GcResponse, InodeId, InodeKind, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, ManifestNo, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
-    NameKey, Namespace, NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy,
-    PathEntry, PathEntryKind, ReleaseCheckpointResponse, ReleasedCheckpointCounts,
-    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, RevisionNo, TrashEntry, UploadId,
-    WalFlushStepOutcome, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
-    PROFILE_CORE_V0, PROTOCOL_VERSION,
+    ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, ManifestNo, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, NameKey, Namespace, NamespaceDiagnostics, NamespaceId, Page,
+    PageRequest, PaginationPolicy, PathEntry, PathEntryKind, ReleaseCheckpointResponse,
+    ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    RevisionNo, TrashEntry, UploadId, WalFlushStepOutcome, FEATURE_ATTRIBUTES,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheObserver, DecodedBlockCacheStats,
@@ -180,8 +180,8 @@ pub use loonfs_objectstore::{
 pub use cache::RuntimeCacheStats;
 pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
 pub use fs::{
-    ChangesPager, CheckpointsPager, FileRevisionsPager, MetadataCompactionOutcome,
-    PathEntriesPager, TrashPager,
+    ChangesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
+    MetadataCompactionOutcome, PathEntriesPager, TrashPager,
 };
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use maintenance_runner::{

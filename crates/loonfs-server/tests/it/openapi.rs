@@ -228,6 +228,10 @@ fn openapi_documents_current_server_paths() {
         ("/v0/namespaces/{namespace_id}/filesystem/revisions", "get"),
         ("/v0/namespaces/{namespace_id}/inodes/{inode_id}", "get"),
         (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
+            "get",
+        ),
+        (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
             "get",
         ),
@@ -280,6 +284,12 @@ fn openapi_documents_current_server_paths() {
         "/v0/namespaces/{namespace_id}/filesystem/entries",
         "get",
         &["path", "limit", "cursor"],
+    );
+    assert_query_params(
+        paths,
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
+        "get",
+        &["limit", "cursor"],
     );
     assert_query_params(
         paths,
@@ -343,6 +353,10 @@ fn openapi_documents_current_server_paths() {
     for (path, method) in [
         ("/v0/namespaces/{namespace_id}/inodes/{inode_id}", "get"),
         (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
+            "get",
+        ),
+        (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
             "get",
         ),
@@ -375,6 +389,11 @@ fn openapi_documents_current_server_paths() {
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
             "get",
             "get_inode",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
+            "get",
+            "list_inode_children",
         ),
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",

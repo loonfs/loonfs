@@ -2438,6 +2438,141 @@
         "x-loonfs-retry": "idempotent"
       }
     },
+    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children": {
+      "get": {
+        "tags": [
+          "inodes"
+        ],
+        "summary": "List directory children by inode",
+        "description": "Lists one page of a directory's children addressed by parent inode ID, in canonical name-key order. Inode addressing keeps a listing and its resumption on the same directory across concurrent renames or moves of the parent.",
+        "operationId": "list_inode_children",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inode_id",
+            "in": "path",
+            "description": "Directory inode ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^ino_[1-9][0-9]*$"
+            },
+            "example": "ino_123"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque directory page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_attributes",
+            "in": "query",
+            "description": "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of directory children",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListInodeChildrenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid inode ID, limit, cursor, or include_attributes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or visible inode not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Inode is not a directory",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "idempotent",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.entries"
+        }
+      }
+    },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions": {
       "get": {
         "tags": [
@@ -4863,6 +4998,43 @@
               "$ref": "#/components/schemas/FileRevision"
             },
             "description": "Retained revisions in order."
+          }
+        }
+      },
+      "ListInodeChildrenResponse": {
+        "type": "object",
+        "description": "One directory listing addressed by parent inode, and the namespace head\nit was answered at.\n\nThe envelope names the parent by its stable inode identity rather than a\npath, so a page and its resumption always describe the same directory\neven when the parent is concurrently renamed or moved.",
+        "required": [
+          "namespace_id",
+          "parent_inode_id",
+          "head_seq",
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PathEntry"
+            },
+            "description": "Directory entries for this page.\n\nEntries are returned in canonical name-key order. Higher-level display\nsurfaces may sort entries separately for presentation."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence this listing was read from."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "next_cursor": {
+            "type": "string",
+            "description": "Cursor for the next page, if more entries remain."
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           }
         }
       },

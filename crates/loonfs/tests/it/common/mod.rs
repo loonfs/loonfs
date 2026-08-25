@@ -216,6 +216,17 @@ impl TestRuntime {
             .await
     }
 
+    pub(crate) async fn list_inode_children_page(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: loonfs::InodeId,
+        request: PageRequest<DirectoryPageCursor>,
+    ) -> loonfs::Result<loonfs::ListInodeChildrenResponse> {
+        self.reader
+            .list_inode_children_page(namespace_id, inode_id, request, Default::default())
+            .await
+    }
+
     pub(crate) async fn list_file_revisions_page(
         &self,
         namespace_id: &NamespaceId,

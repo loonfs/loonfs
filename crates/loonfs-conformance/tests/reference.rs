@@ -28,6 +28,7 @@ async fn rust_client_matches_the_reference_corpus() {
 
     for case in &cases {
         match case.name.as_str() {
+            "children_by_inode" => run_children_by_inode(&harness, case).await,
             "error_contract" => run_error_contract(&harness, case).await,
             "commit_replay" => run_commit_replay(&harness, case).await,
             "upload_direct_put" => run_direct_put(&harness, case).await,
@@ -688,6 +689,155 @@ struct PaginationExpected {
     entry_count: usize,
     minimum_page_count: usize,
     head_seq: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildrenByInodeRequest {
+    namespace_id: String,
+    directory: String,
+    renamed_directory: String,
+    rename_commit_id: String,
+    actor: ActorRef,
+    entry_names: Vec<String>,
+    page_size: u32,
+    rename_after_page: usize,
+    resume_after_page: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildrenByInodeExpected {
+    entry_count: usize,
+    minimum_page_count: usize,
+    initial_head_seq: u64,
+    renamed_head_seq: u64,
+}
+
+async fn run_children_by_inode(harness: &Harness, case: &Case) {
+    let (request, expected) = parse_values::<ChildrenByInodeRequest, ChildrenByInodeExpected>(case);
+    let namespace = namespace_id(&request.namespace_id);
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create children-by-inode namespace");
+    let directory = namespace_path(&request.namespace_id, &request.directory);
+    harness
+        .client
+        .create_directory(
+            &directory,
+            &CreateDirectoryOptions::new(request.actor.clone()),
+        )
+        .await
+        .expect("create children-by-inode directory");
+    for name in request.entry_names.iter().rev() {
+        let path = namespace_path(
+            &request.namespace_id,
+            &format!("{}/{}", request.directory, name),
+        );
+        harness
+            .client
+            .create_directory(&path, &CreateDirectoryOptions::new(request.actor.clone()))
+            .await
+            .expect("create child entry");
+    }
+
+    let parent_inode_id = harness
+        .client
+        .get_path_entry(&directory, &StatPathOptions::default())
+        .await
+        .expect("stat children-by-inode directory")
+        .inode_id;
+    let mut observed = Vec::new();
+    let mut cursor = None;
+    let mut page_count = 0usize;
+    let mut saved_cursor = None;
+    let mut resume_offset = None;
+    loop {
+        let page = harness
+            .client
+            .list_inode_children_page(
+                &namespace,
+                parent_inode_id,
+                Some(request.page_size),
+                cursor.as_deref(),
+                &ListPathEntriesOptions::default(),
+            )
+            .await
+            .expect("list children-by-inode page");
+        page_count += 1;
+        assert_eq!(page.namespace_id, namespace);
+        assert_eq!(page.parent_inode_id, parent_inode_id);
+        let expected_head_seq = if page_count <= request.rename_after_page {
+            expected.initial_head_seq
+        } else {
+            expected.renamed_head_seq
+        };
+        assert_eq!(page.head_seq.0, expected_head_seq);
+        observed.extend(page.entries.iter().map(|entry| {
+            entry
+                .display_name
+                .as_ref()
+                .expect("listed name")
+                .to_string()
+        }));
+        cursor = page.next_cursor;
+        if page_count == request.resume_after_page {
+            saved_cursor = cursor.clone();
+            resume_offset = Some(observed.len());
+        }
+        if page_count == request.rename_after_page {
+            let renamed_directory =
+                namespace_path(&request.namespace_id, &request.renamed_directory);
+            let mut options = MoveOptions::new(request.actor.clone());
+            options.commit = commit_options(&request.actor, &request.rename_commit_id);
+            let renamed = harness
+                .client
+                .move_path(&directory, &renamed_directory, &options)
+                .await
+                .expect("rename children-by-inode directory");
+            assert_eq!(renamed.committed_seq.0, expected.renamed_head_seq);
+            let renamed_inode_id = harness
+                .client
+                .get_path_entry(&renamed_directory, &StatPathOptions::default())
+                .await
+                .expect("stat renamed children-by-inode directory")
+                .inode_id;
+            assert_eq!(renamed_inode_id, parent_inode_id);
+        }
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(observed.len(), expected.entry_count);
+    assert!(page_count >= expected.minimum_page_count);
+
+    let saved_cursor = saved_cursor.expect("saved mid-walk cursor");
+    let resume_offset = resume_offset.expect("saved mid-walk offset");
+    let mut pager = harness.client.list_inode_children_pager(
+        &namespace,
+        parent_inode_id,
+        Some(request.page_size),
+        Some(saved_cursor),
+        &ListPathEntriesOptions::default(),
+    );
+    let mut resumed = Vec::new();
+    while let Some(page) = pager.next().await {
+        let page = page.expect("resume children-by-inode page");
+        assert_eq!(page.namespace_id, namespace);
+        assert_eq!(page.parent_inode_id, parent_inode_id);
+        assert_eq!(page.head_seq.0, expected.renamed_head_seq);
+        resumed.extend(page.entries.iter().map(|entry| {
+            entry
+                .display_name
+                .as_ref()
+                .expect("listed name")
+                .to_string()
+        }));
+    }
+    validate_page_walk(&request.entry_names, &observed, resume_offset, &resumed)
+        .expect("children-by-inode pagination invariants");
 }
 
 async fn run_pagination(harness: &Harness, case: &Case) {

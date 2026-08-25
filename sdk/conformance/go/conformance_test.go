@@ -36,6 +36,7 @@ type conformanceCase struct {
 
 var expectedCases = []string{
 	"changes",
+	"children_by_inode",
 	"commit_replay",
 	"download",
 	"end_to_end",
@@ -85,6 +86,8 @@ func TestSDKConformance(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.Name, func(t *testing.T) {
 			switch testCase.Name {
+			case "children_by_inode":
+				runChildrenByInode(t, h, testCase)
 			case "error_contract":
 				runErrorContract(t, h, testCase)
 			case "commit_replay":
@@ -845,6 +848,185 @@ type paginationExpected struct {
 	EntryCount       int   `json:"entry_count"`
 	MinimumPageCount int   `json:"minimum_page_count"`
 	HeadSeq          int64 `json:"head_seq"`
+}
+
+type childrenByInodeRequest struct {
+	NamespaceID      string          `json:"namespace_id"`
+	Directory        string          `json:"directory"`
+	RenamedDirectory string          `json:"renamed_directory"`
+	RenameCommitID   string          `json:"rename_commit_id"`
+	Actor            loonfs.ActorRef `json:"actor"`
+	EntryNames       []string        `json:"entry_names"`
+	PageSize         int             `json:"page_size"`
+	RenameAfterPage  int             `json:"rename_after_page"`
+	ResumeAfterPage  int             `json:"resume_after_page"`
+}
+
+type childrenByInodeExpected struct {
+	EntryCount       int   `json:"entry_count"`
+	MinimumPageCount int   `json:"minimum_page_count"`
+	InitialHeadSeq   int64 `json:"initial_head_seq"`
+	RenamedHeadSeq   int64 `json:"renamed_head_seq"`
+}
+
+func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[childrenByInodeRequest, childrenByInodeExpected](t, testCase)
+	createNamespace(t, h.client, request.NamespaceID)
+	applyCreateDirectory(
+		t,
+		h.client,
+		request.NamespaceID,
+		"conf-children-by-inode-directory",
+		&request.Actor,
+		request.Directory,
+	)
+	for index := len(request.EntryNames) - 1; index >= 0; index-- {
+		name := request.EntryNames[index]
+		applyCreateDirectory(
+			t,
+			h.client,
+			request.NamespaceID,
+			fmt.Sprintf("conf-children-by-inode-entry-%02d", index),
+			&request.Actor,
+			request.Directory+"/"+name,
+		)
+	}
+
+	parentInodeID := identityOf(statPath(t, h.client, request.NamespaceID, request.Directory)).inodeID
+	if parentInodeID == "" {
+		t.Fatal("children-by-inode parent has no inode_id")
+	}
+	observed := make([]string, 0, len(request.EntryNames))
+	pageCount := 0
+	var savedCursor *string
+	resumeOffset := -1
+	ctx := context.Background()
+	page, err := h.client.Inodes.ListInodeChildren(
+		ctx,
+		&loonfs.ListInodeChildrenRequest{
+			NamespaceID: request.NamespaceID,
+			InodeID:     parentInodeID,
+			Limit:       &request.PageSize,
+		},
+	)
+	if err != nil {
+		t.Fatalf("list first children-by-inode page: %v", err)
+	}
+	for {
+		if page.Response == nil {
+			t.Fatal("children-by-inode page has no response")
+		}
+		pageCount++
+		if string(page.Response.NamespaceID) != request.NamespaceID {
+			t.Errorf("page %d namespace_id = %q, want %q", pageCount, page.Response.NamespaceID, request.NamespaceID)
+		}
+		if page.Response.ParentInodeID != parentInodeID {
+			t.Errorf("page %d parent_inode_id = %q, want %q", pageCount, page.Response.ParentInodeID, parentInodeID)
+		}
+		expectedHeadSeq := expected.RenamedHeadSeq
+		if pageCount <= request.RenameAfterPage {
+			expectedHeadSeq = expected.InitialHeadSeq
+		}
+		if int64(page.Response.HeadSeq) != expectedHeadSeq {
+			t.Errorf("page %d head_seq = %d, want %d", pageCount, page.Response.HeadSeq, expectedHeadSeq)
+		}
+		observed = append(observed, listedNames(t, page.Results)...)
+		if pageCount == request.ResumeAfterPage {
+			if page.Response.NextCursor != nil {
+				value := *page.Response.NextCursor
+				savedCursor = &value
+			}
+			resumeOffset = len(observed)
+		}
+		if pageCount == request.RenameAfterPage {
+			noReplace := loonfs.DestinationBehaviorNoReplace
+			renamed := applyCommit(t, h.client, &loonfs.CommitRequest{
+				NamespaceID: request.NamespaceID,
+				Actor:       &request.Actor,
+				CommitID:    loonfs.CommitID(request.RenameCommitID),
+				Operations: []*loonfs.FilesystemOperation{
+					{
+						MovePath: &loonfs.FilesystemOperationMovePath{
+							Behavior: &noReplace,
+							FromPath: loonfs.AbsolutePath(request.Directory),
+							ToPath:   loonfs.AbsolutePath(request.RenamedDirectory),
+						},
+					},
+				},
+			})
+			if int64(renamed.CommittedSeq) != expected.RenamedHeadSeq {
+				t.Errorf("rename committed_seq = %d, want %d", renamed.CommittedSeq, expected.RenamedHeadSeq)
+			}
+			renamedInodeID := identityOf(statPath(
+				t,
+				h.client,
+				request.NamespaceID,
+				request.RenamedDirectory,
+			)).inodeID
+			if renamedInodeID != parentInodeID {
+				t.Errorf("renamed parent inode_id = %q, want %q", renamedInodeID, parentInodeID)
+			}
+		}
+		if page.Response.NextCursor == nil {
+			break
+		}
+		page, err = page.GetNextPage(ctx)
+		if err != nil {
+			t.Fatalf("list next children-by-inode page: %v", err)
+		}
+	}
+	if len(observed) != expected.EntryCount {
+		t.Errorf("entry count = %d, want %d", len(observed), expected.EntryCount)
+	}
+	if pageCount < expected.MinimumPageCount {
+		t.Errorf("page count = %d, want at least %d", pageCount, expected.MinimumPageCount)
+	}
+	if savedCursor == nil {
+		t.Fatal("resume cursor was not recorded")
+	}
+	if resumeOffset < 0 {
+		t.Fatal("resume position was not recorded")
+	}
+
+	resumed := make([]string, 0, len(request.EntryNames)-resumeOffset)
+	page, err = h.client.Inodes.ListInodeChildren(
+		ctx,
+		&loonfs.ListInodeChildrenRequest{
+			NamespaceID: request.NamespaceID,
+			InodeID:     parentInodeID,
+			Limit:       &request.PageSize,
+			Cursor:      savedCursor,
+		},
+	)
+	if err != nil {
+		t.Fatalf("resume children-by-inode pagination: %v", err)
+	}
+	for {
+		if page.Response == nil {
+			t.Fatal("resumed children-by-inode page has no response")
+		}
+		if string(page.Response.NamespaceID) != request.NamespaceID {
+			t.Errorf("resumed namespace_id = %q, want %q", page.Response.NamespaceID, request.NamespaceID)
+		}
+		if page.Response.ParentInodeID != parentInodeID {
+			t.Errorf("resumed parent_inode_id = %q, want %q", page.Response.ParentInodeID, parentInodeID)
+		}
+		if int64(page.Response.HeadSeq) != expected.RenamedHeadSeq {
+			t.Errorf("resumed head_seq = %d, want %d", page.Response.HeadSeq, expected.RenamedHeadSeq)
+		}
+		resumed = append(resumed, listedNames(t, page.Results)...)
+		if page.Response.NextCursor == nil {
+			break
+		}
+		page, err = page.GetNextPage(ctx)
+		if err != nil {
+			t.Fatalf("resume next children-by-inode page: %v", err)
+		}
+	}
+	if err := validatePageWalk(request.EntryNames, observed, resumeOffset, resumed); err != nil {
+		t.Fatalf("children-by-inode pagination invariants: %v", err)
+	}
 }
 
 func runPagination(t *testing.T, h *harness, testCase conformanceCase) {

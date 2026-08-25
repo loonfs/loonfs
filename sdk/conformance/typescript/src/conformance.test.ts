@@ -28,6 +28,7 @@ const PROXY_UPLOAD_MAX_BYTES = "upload.max_content_bytes";
 const CASE_FIELDS = ["expected", "intent", "name", "request"];
 const EXPECTED_CASES = [
     "changes",
+    "children_by_inode",
     "commit_replay",
     "download",
     "end_to_end",
@@ -91,6 +92,25 @@ interface PaginationExpected {
     entry_count: number;
     minimum_page_count: number;
     head_seq: number;
+}
+
+interface ChildrenByInodeRequest {
+    namespace_id: string;
+    directory: string;
+    renamed_directory: string;
+    rename_commit_id: string;
+    actor: ActorValue;
+    entry_names: string[];
+    page_size: number;
+    rename_after_page: number;
+    resume_after_page: number;
+}
+
+interface ChildrenByInodeExpected {
+    entry_count: number;
+    minimum_page_count: number;
+    initial_head_seq: number;
+    renamed_head_seq: number;
 }
 
 interface ChangesRequest {
@@ -282,6 +302,23 @@ const PAGINATION_REQUEST_FIELDS = [
     "resume_after_page",
 ] as const;
 const PAGINATION_EXPECTED_FIELDS = ["entry_count", "minimum_page_count", "head_seq"] as const;
+const CHILDREN_BY_INODE_REQUEST_FIELDS = [
+    "namespace_id",
+    "directory",
+    "renamed_directory",
+    "rename_commit_id",
+    "actor",
+    "entry_names",
+    "page_size",
+    "rename_after_page",
+    "resume_after_page",
+] as const;
+const CHILDREN_BY_INODE_EXPECTED_FIELDS = [
+    "entry_count",
+    "minimum_page_count",
+    "initial_head_seq",
+    "renamed_head_seq",
+] as const;
 const CHANGES_REQUEST_FIELDS = [
     "namespace_id",
     "path",
@@ -397,6 +434,25 @@ function decodePagination(
     return [
         testCase.request as unknown as PaginationRequest,
         testCase.expected as unknown as PaginationExpected,
+    ];
+}
+
+function decodeChildrenByInode(
+    testCase: ConformanceCase,
+): [ChildrenByInodeRequest, ChildrenByInodeExpected] {
+    strictObject(
+        testCase.request,
+        CHILDREN_BY_INODE_REQUEST_FIELDS,
+        `${testCase.name} request`,
+    );
+    strictObject(
+        testCase.expected,
+        CHILDREN_BY_INODE_EXPECTED_FIELDS,
+        `${testCase.name} expected`,
+    );
+    return [
+        testCase.request as unknown as ChildrenByInodeRequest,
+        testCase.expected as unknown as ChildrenByInodeExpected,
     ];
 }
 
@@ -1043,6 +1099,115 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
     }
 
     assert.equal(new Set(observed).size, observed.length, "pagination returned an entry more than once");
+    assert.deepEqual(observed, request.entry_names);
+    assert.ok(resumeOffset <= request.entry_names.length);
+    assert.deepEqual(resumed, request.entry_names.slice(resumeOffset));
+});
+
+conformanceTest("children_by_inode", async (activeHarness, testCase) => {
+    const [request, expected] = decodeChildrenByInode(testCase);
+    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
+    await activeHarness.client.filesystem.createCommit(
+        directoryCommit(
+            request.namespace_id,
+            "conf-children-by-inode-directory",
+            request.actor,
+            request.directory,
+        ),
+    );
+    for (const [index, name] of [...request.entry_names].reverse().entries()) {
+        await activeHarness.client.filesystem.createCommit(
+            directoryCommit(
+                request.namespace_id,
+                `conf-children-by-inode-entry-${index.toString().padStart(2, "0")}`,
+                request.actor,
+                `${request.directory}/${name}`,
+            ),
+        );
+    }
+
+    const parent = await activeHarness.client.filesystem.getPathEntry({
+        namespace_id: request.namespace_id,
+        path: request.directory,
+    });
+    const parentInodeId = parent.inode_id;
+    const observed: string[] = [];
+    let pageCount = 0;
+    let savedCursor: string | undefined;
+    let resumeOffset: number | undefined;
+    let page = await activeHarness.client.inodes.listInodeChildren({
+        namespace_id: request.namespace_id,
+        inode_id: parentInodeId,
+        limit: request.page_size,
+    });
+    let cursor: string | undefined;
+    while (true) {
+        pageCount += 1;
+        assert.equal(page.response.namespace_id, request.namespace_id);
+        assert.equal(page.response.parent_inode_id, parentInodeId);
+        const expectedHeadSeq =
+            pageCount <= request.rename_after_page
+                ? expected.initial_head_seq
+                : expected.renamed_head_seq;
+        assert.equal(page.response.head_seq, expectedHeadSeq);
+        observed.push(...listedNames(page.data));
+        cursor = page.response.next_cursor ?? undefined;
+        if (pageCount === request.resume_after_page) {
+            savedCursor = cursor;
+            resumeOffset = observed.length;
+        }
+        if (pageCount === request.rename_after_page) {
+            const renamed = await activeHarness.client.filesystem.createCommit(
+                moveCommit(
+                    request.namespace_id,
+                    request.rename_commit_id,
+                    request.actor,
+                    request.directory,
+                    request.renamed_directory,
+                ),
+            );
+            assert.equal(renamed.committed_seq, expected.renamed_head_seq);
+            const renamedParent = await activeHarness.client.filesystem.getPathEntry({
+                namespace_id: request.namespace_id,
+                path: request.renamed_directory,
+            });
+            assert.equal(renamedParent.inode_id, parentInodeId);
+        }
+        if (cursor === undefined) {
+            break;
+        }
+        await page.getNextPage();
+    }
+
+    assert.equal(observed.length, expected.entry_count);
+    assert.ok(pageCount >= expected.minimum_page_count);
+    assert.ok(savedCursor !== undefined, "resume cursor was not recorded");
+    assert.ok(resumeOffset !== undefined, "resume position was not recorded");
+
+    const resumed: string[] = [];
+    page = await activeHarness.client.inodes.listInodeChildren({
+        namespace_id: request.namespace_id,
+        inode_id: parentInodeId,
+        limit: request.page_size,
+        cursor: savedCursor,
+    });
+    while (true) {
+        assert.equal(page.response.namespace_id, request.namespace_id);
+        assert.equal(page.response.parent_inode_id, parentInodeId);
+        assert.equal(page.response.head_seq, expected.renamed_head_seq);
+        resumed.push(...listedNames(page.data));
+        cursor = page.response.next_cursor ?? undefined;
+        if (cursor === undefined) {
+            break;
+        }
+        await page.getNextPage();
+    }
+
+    assert.equal(
+        new Set(observed).size,
+        observed.length,
+        "children-by-inode pagination returned an entry more than once",
+    );
     assert.deepEqual(observed, request.entry_names);
     assert.ok(resumeOffset <= request.entry_names.length);
     assert.deepEqual(resumed, request.entry_names.slice(resumeOffset));

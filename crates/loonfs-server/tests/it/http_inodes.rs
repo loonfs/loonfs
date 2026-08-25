@@ -4,13 +4,15 @@
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
-use loonfs_api::{ApiError, ErrorCode, InodeId, RevisionNo};
+use loonfs_api::{ApiError, DeleteDirectoryBehavior, ErrorCode, InodeId, RevisionNo};
 use loonfs_client::{
-    ClientError, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
+    ClientError, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions, MoveOptions,
+    NamespacePath, PutFileOptions, UpdateAttributesOptions,
 };
 use loonfs_test_support::http::raw_agent;
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use tempfile::tempdir;
 
 fn assert_api_code<T: std::fmt::Debug>(
@@ -294,6 +296,247 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_lists_inode_children_in_name_key_order_and_paginates() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "http-inode-children",
+        "http-inode-children",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    for name in ["Zebra.txt", "apple.txt", "B.txt"] {
+        let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("child path");
+        harness
+            .client
+            .put_file_bytes(&path, name.as_bytes(), &PutFileOptions::new(actor.clone()))
+            .await
+            .expect("put child");
+    }
+    harness
+        .client
+        .update_attributes(
+            &NamespacePath::parse("demo", "/docs/apple.txt").expect("annotated path"),
+            &UpdateAttributesOptions {
+                set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
+                ..UpdateAttributesOptions::new(actor)
+            },
+        )
+        .await
+        .expect("annotate child");
+    let parent_inode_id = harness
+        .client
+        .get_path_entry(
+            &NamespacePath::parse("demo", "/docs").expect("directory path"),
+            &Default::default(),
+        )
+        .await
+        .expect("stat directory")
+        .inode_id;
+    let public_parent_inode_id = loonfs_api::public_inode_id::encode(parent_inode_id);
+
+    let first: Value = serde_json::from_reader(
+        raw_agent()
+            .get(&format!(
+                "{}/v0/namespaces/{namespace}/inodes/{public_parent_inode_id}/children?limit=2",
+                harness.server_url
+            ))
+            .set("authorization", "Bearer test-token")
+            .call()
+            .expect("first children page")
+            .into_reader(),
+    )
+    .expect("decode first children page");
+    assert_eq!(first["namespace_id"], "demo");
+    assert_eq!(first["parent_inode_id"], public_parent_inode_id);
+    let head_seq = first["head_seq"].as_u64().expect("head sequence");
+    assert!(head_seq > 0);
+    let entries = first["entries"].as_array().expect("first page entries");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry["path"].as_str().expect("entry path"))
+            .collect::<Vec<_>>(),
+        vec!["/docs/apple.txt", "/docs/B.txt"]
+    );
+    for entry in entries {
+        assert!(entry.get("attributes").is_none());
+        assert!(entry.get("attributes_revision_no").is_none());
+        assert!(entry.get("attributes_updated_by").is_none());
+        assert!(entry.get("attributes_updated_at_ms").is_none());
+    }
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("next cursor")
+        .to_owned();
+
+    let second = harness
+        .client
+        .list_inode_children_page(
+            &namespace,
+            parent_inode_id,
+            Some(2),
+            Some(&cursor),
+            &Default::default(),
+        )
+        .await
+        .expect("second children page");
+    assert_eq!(second.namespace_id, namespace);
+    assert_eq!(second.parent_inode_id, parent_inode_id);
+    assert_eq!(second.head_seq.0, head_seq);
+    assert_eq!(
+        second
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/docs/Zebra.txt"]
+    );
+    assert!(second.next_cursor.is_none());
+
+    let projected: Value = serde_json::from_reader(
+        raw_agent()
+            .get(&format!(
+                "{}/v0/namespaces/{namespace}/inodes/{public_parent_inode_id}/children?include_attributes=true",
+                harness.server_url
+            ))
+            .set("authorization", "Bearer test-token")
+            .call()
+            .expect("projected children page")
+            .into_reader(),
+    )
+    .expect("decode projected children page");
+    let entries = projected["entries"].as_array().expect("projected entries");
+    assert_eq!(entries.len(), 3);
+    for entry in entries {
+        assert!(entry.get("attributes").is_some());
+        assert!(entry.get("attributes_revision_no").is_some());
+        match entry["path"].as_str().expect("entry path") {
+            "/docs/apple.txt" => {
+                assert_eq!(entry["attributes"]["owner"], "platform");
+                assert_eq!(entry["attributes_revision_no"], 1);
+                assert!(entry.get("attributes_updated_by").is_some());
+                assert!(entry.get("attributes_updated_at_ms").is_some());
+            }
+            _ => {
+                assert_eq!(entry["attributes"], serde_json::json!({}));
+                assert_eq!(entry["attributes_revision_no"], 0);
+            }
+        }
+    }
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_inode_children_errors_use_directory_identity_codes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "http-inode-children-errors",
+        "http-inode-children-errors",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let child = NamespacePath::parse("demo", "/docs/child.txt").expect("child path");
+    harness
+        .client
+        .put_file_bytes(&child, b"body", &PutFileOptions::new(actor.clone()))
+        .await
+        .expect("put child");
+    let directory = NamespacePath::parse("demo", "/docs").expect("directory path");
+    let directory_id = harness
+        .client
+        .get_path_entry(&directory, &Default::default())
+        .await
+        .expect("stat directory")
+        .inode_id;
+    let file_id = harness
+        .client
+        .get_path_entry(&child, &Default::default())
+        .await
+        .expect("stat file")
+        .inode_id;
+
+    assert_api_code(
+        harness
+            .client
+            .list_inode_children_page(
+                &namespace,
+                directory_id,
+                None,
+                Some("not-a-cursor"),
+                &Default::default(),
+            )
+            .await,
+        400,
+        ErrorCode::InvalidRequest,
+    );
+    assert_api_code(
+        harness
+            .client
+            .list_inode_children_page(
+                &namespace,
+                InodeId(u64::MAX),
+                None,
+                None,
+                &Default::default(),
+            )
+            .await,
+        404,
+        ErrorCode::InodeNotFound,
+    );
+    assert_api_code(
+        harness
+            .client
+            .list_inode_children_page(
+                &namespace,
+                file_id,
+                None,
+                None,
+                &ListPathEntriesOptions::default(),
+            )
+            .await,
+        409,
+        ErrorCode::PathConflict,
+    );
+
+    harness
+        .client
+        .delete_path(
+            &directory,
+            &DeleteOptions {
+                behavior: DeleteDirectoryBehavior::Recursive,
+                ..DeleteOptions::new(actor)
+            },
+        )
+        .await
+        .expect("recursively delete directory");
+    assert_api_code(
+        harness
+            .client
+            .list_inode_children_page(&namespace, directory_id, None, None, &Default::default())
+            .await,
+        404,
+        ErrorCode::InodeNotFound,
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inode_routes_reject_invalid_ids_after_authorization() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -343,6 +586,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
 
     let routes = [
         ("GET", ""),
+        ("GET", "/children"),
         ("GET", "/revisions"),
         ("GET", "/revisions/1/content"),
         ("POST", "/revisions/1/downloads"),
