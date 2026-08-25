@@ -1,16 +1,29 @@
 //! The reference server binary: load config, open the runtime, serve HTTP
 //! until shutdown.
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use std::io::Write as _;
 use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
-#[command(name = "loonfs-server", version)]
+#[command(
+    name = "loonfs-server",
+    version,
+    group(
+        ArgGroup::new("config_source")
+            .required(true)
+            .multiple(false)
+            .args(["config", "config_toml"])
+    )
+)]
 struct Args {
     /// Config file to load.
     #[arg(long)]
-    config: String,
+    config: Option<String>,
+    /// Inline config TOML. Prefer LOONFS_SERVER_CONFIG_TOML so the value does
+    /// not appear in process arguments.
+    #[arg(long, env = "LOONFS_SERVER_CONFIG_TOML", hide_env_values = true)]
+    config_toml: Option<String>,
     /// Validate the startup config and exit without serving.
     #[arg(long)]
     check_config: bool,
@@ -26,7 +39,14 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // when `LOONFS_TRACE` holds a value this build rejects.
     let args = Args::parse();
     loonfs_server::init_tracing_from_env()?;
-    let config = loonfs_server::load_server_config(&args.config)?;
+    let config = match args.config {
+        Some(path) => loonfs_server::load_server_config(path)?,
+        None => loonfs_server::parse_server_config(
+            args.config_toml
+                .as_deref()
+                .expect("clap should require exactly one config source"),
+        )?,
+    };
     let mut exit_code = ExitCode::SUCCESS;
     if args.check_config || args.probe_store {
         // Either flag includes the startup checks, and combined flags run

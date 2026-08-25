@@ -65,8 +65,20 @@ fn write_tls_identity(dir: &Path) -> (PathBuf, PathBuf) {
 
 fn run_server(config_path: &Path, flags: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_loonfs-server"));
-    command.arg("--config").arg(config_path).args(flags);
+    command
+        .env_remove("LOONFS_SERVER_CONFIG_TOML")
+        .arg("--config")
+        .arg(config_path)
+        .args(flags);
     command.output().expect("run loonfs-server")
+}
+
+fn run_server_from_toml(config_toml: &str, flags: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_loonfs-server"))
+        .env("LOONFS_SERVER_CONFIG_TOML", config_toml)
+        .args(flags)
+        .output()
+        .expect("run loonfs-server with inline config")
 }
 
 #[tokio::test]
@@ -166,6 +178,43 @@ fn check_config_accepts_a_valid_config_and_names_what_it_validated() {
     );
     // The documented caveat: constructing a local-fs store creates its root.
     assert!(store_root.is_dir(), "local-fs check creates the store root");
+}
+
+#[test]
+fn check_config_accepts_toml_from_the_environment() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_root = dir.path().join("store");
+    let config_toml = format!(
+        r#"
+bind = "127.0.0.1:9400"
+auth_token = "inline-config-token"
+content_token_secret = "inline-content-secret"
+writer_id = "inline-config-writer"
+
+[store]
+kind = "local-fs"
+root = "{}"
+"#,
+        store_root.display()
+    );
+
+    let output = run_server_from_toml(&config_toml, &["--check-config"]);
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        output.status.success(),
+        "expected success, got {:?}: {stdout}{stderr}",
+        output.status
+    );
+    assert_eq!(
+        stdout.trim(),
+        "config ok: bind 127.0.0.1:9400, store local-fs"
+    );
+    assert!(!stdout.contains("inline-config-token"), "{stdout}");
+    assert!(!stdout.contains("inline-content-secret"), "{stdout}");
+    assert!(!stderr.contains("inline-config-token"), "{stderr}");
+    assert!(!stderr.contains("inline-content-secret"), "{stderr}");
 }
 
 #[test]
