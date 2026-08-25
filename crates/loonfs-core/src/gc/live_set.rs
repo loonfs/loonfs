@@ -19,7 +19,10 @@ use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordState, CheckpointStatus, HeadState, NamespaceStatus,
 };
 use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ContentId, ManifestObjectId, NamespaceId};
+use loonfs_api::{
+    manifest_object_id_manifest_no, wal_segment_id_start_seq, ChangeSeq, ContentId,
+    ManifestObjectId, NamespaceId,
+};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix,
     metadata_segment_object_key, wal_segment_id_from_key,
@@ -101,11 +104,13 @@ pub(super) enum ReferenceAnchor {
 /// Information from one manifest needed during sweeping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AnchoredManifest {
-    manifest_object_id: ManifestObjectId,
-    /// Highest sequence materialized by the anchor. Readers pinned to it may
-    /// still replay later WAL segments.
+    /// Every same-generation manifest candidate. One may have been the
+    /// published root; immutable losers cannot be distinguished later.
+    manifest_object_ids: BTreeSet<ManifestObjectId>,
+    /// Lowest sequence materialized by any candidate. Retaining WAL above
+    /// this point covers every candidate in the generation.
     head_seq: ChangeSeq,
-    /// Object keys of the metadata segments the anchor named.
+    /// Union of the metadata segments the generation's candidates named.
     segments: BTreeSet<String>,
 }
 
@@ -493,7 +498,8 @@ async fn collect_reference_anchor<S: ObjectStore + ?Sized>(
     // Protect the anchor's segments and manifest so later passes can use the
     // same evidence.
     if let ReferenceAnchor::Manifest(anchor) = &live.anchor {
-        live.manifests.insert(anchor.manifest_object_id.clone());
+        live.manifests
+            .extend(anchor.manifest_object_ids.iter().cloned());
         live.segments.extend(anchor.segments.iter().cloned());
     }
     Ok(())
@@ -559,15 +565,19 @@ async fn collect_retained_wal<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-/// Finds the reference manifest R and reads what it named.
+/// Finds the reference manifest generation R and reads what it named.
 ///
-/// Manifest keys sort by logical manifest position, which is publication
-/// order, so the scan walks the listing from the oldest manifest and stops at
-/// the first one the window still covers. The last aged manifest before that
-/// is R. Stopping at the first young one rather than taking the newest aged
-/// timestamp is the conservative reading of a provider clock: one manifest
-/// reporting an early stamp cannot pull the anchor forward past a manifest
-/// that reads as young.
+/// Manifest keys sort by manifest number, which is publication generation.
+/// A lost root CAS can leave several immutable candidates at one number, and
+/// the current root does not record which sibling won in an older generation.
+/// The scan therefore advances only past a generation whose surviving
+/// candidates are all old. R protects the union of that generation's
+/// references and WAL above its lowest head sequence.
+///
+/// Stopping the whole generation at the first young candidate is the
+/// conservative reading of a provider clock: one sibling reporting an early
+/// stamp cannot pull the anchor forward past another sibling that reads as
+/// young.
 ///
 /// The age test is the sweep's own (`gc/reap.rs`), on the same provider
 /// timestamp, so a manifest with no timestamp reads as young here exactly as
@@ -582,8 +592,11 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
 ) -> CollectResult<ReferenceAnchor> {
     let prefix = metadata_manifest_prefix(namespace_id);
     let mut keys = store.list_prefix_stream(&prefix);
-    let mut published_any = false;
-    let mut aged = None;
+    let mut manifest_candidate_seen = false;
+    let mut current_generation_no = None;
+    let mut current_generation = Vec::new();
+    let mut aged_generation = Vec::new();
+    let mut found_young = false;
     while let Some(item) = keys.next().await {
         let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
         // Keys this collector does not recognize are never manifests of
@@ -591,7 +604,17 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
         let Some(Ok(manifest_object_id)) = manifest_object_id_of(&key) else {
             continue;
         };
-        published_any = true;
+        let manifest_no = manifest_object_id_manifest_no(manifest_object_id.as_str())
+            .expect("a parsed manifest object id carries its manifest number");
+        if current_generation_no.is_some_and(|current| current != manifest_no) {
+            if !current_generation.is_empty() {
+                aged_generation = std::mem::take(&mut current_generation);
+            }
+            current_generation_no = Some(manifest_no);
+        } else if current_generation_no.is_none() {
+            current_generation_no = Some(manifest_no);
+        }
+        manifest_candidate_seen = true;
         charge(budget)?;
         let Some(metadata) = store
             .head(&key)
@@ -604,57 +627,75 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
             context.now_ms.saturating_sub(written_at_ms) >= grace_window_ms
         });
         if !aged_out {
+            found_young = true;
             break;
         }
-        aged = Some((manifest_object_id, key));
+        current_generation.push((manifest_object_id, key));
+    }
+    if !found_young && !current_generation.is_empty() {
+        aged_generation = current_generation;
     }
 
-    let Some((manifest_object_id, key)) = aged else {
+    if aged_generation.is_empty() {
         // Nothing published, nothing unreferenced: a namespace with no
         // manifest of its own has never taken an object out of a file set,
         // and its floor cannot have advanced past its birth without a root.
-        return Ok(match published_any {
+        return Ok(match manifest_candidate_seen {
             true => ReferenceAnchor::Missing,
             false => ReferenceAnchor::NotNeeded,
         });
-    };
-    charge(budget)?;
-    let manifest = match load_namespace_manifest_envelope_if_present(
-        store,
-        namespace_id,
-        &manifest_object_id,
-        &key,
-    )
-    .await
-    {
-        Ok(Some(manifest)) => manifest,
-        Ok(None) => return Ok(ReferenceAnchor::Missing),
-        Err(error) => match error.failure_class() {
-            ManifestLoadFailureClass::Store => {
-                tracing::warn!(
-                    namespace_id = %namespace_id,
-                    object_key = key,
-                    error = %error,
-                    "the reference manifest did not read; retaining every aged candidate"
-                );
-                return Ok(ReferenceAnchor::Missing);
-            }
-            ManifestLoadFailureClass::Corrupt => {
-                return Err(CoreError::NamespaceCorrupt(format!(
-                    "the reference manifest does not load: {error}"
-                ))
-                .into());
-            }
-        },
-    };
+    }
+
+    let mut manifest_object_ids = BTreeSet::new();
+    let mut head_seq = None;
+    let mut segments = BTreeSet::new();
+    for (manifest_object_id, key) in aged_generation {
+        charge(budget)?;
+        let manifest = match load_namespace_manifest_envelope_if_present(
+            store,
+            namespace_id,
+            &manifest_object_id,
+            &key,
+        )
+        .await
+        {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => return Ok(ReferenceAnchor::Missing),
+            Err(error) => match error.failure_class() {
+                ManifestLoadFailureClass::Store => {
+                    tracing::warn!(
+                        namespace_id = %namespace_id,
+                        object_key = key,
+                        error = %error,
+                        "a reference-generation manifest did not read; retaining every aged candidate"
+                    );
+                    return Ok(ReferenceAnchor::Missing);
+                }
+                ManifestLoadFailureClass::Corrupt => {
+                    return Err(CoreError::NamespaceCorrupt(format!(
+                        "a reference-generation manifest does not load: {error}"
+                    ))
+                    .into());
+                }
+            },
+        };
+        manifest_object_ids.insert(manifest_object_id);
+        head_seq = Some(
+            head_seq.map_or(manifest.payload.head_seq, |current: ChangeSeq| {
+                current.min(manifest.payload.head_seq)
+            }),
+        );
+        segments.extend(
+            manifest
+                .payload
+                .segments
+                .iter()
+                .map(metadata_segment_object_key),
+        );
+    }
     Ok(ReferenceAnchor::Manifest(Box::new(AnchoredManifest {
-        manifest_object_id,
-        head_seq: manifest.payload.head_seq,
-        segments: manifest
-            .payload
-            .segments
-            .iter()
-            .map(metadata_segment_object_key)
-            .collect(),
+        manifest_object_ids,
+        head_seq: head_seq.expect("a nonempty reference generation has a head sequence"),
+        segments,
     })))
 }

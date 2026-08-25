@@ -11,7 +11,9 @@ use super::uploads::{collect_referenced_content, CollectedReferences};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
 use crate::checkpoint::tests::{
-    compact_a_family_group_into_staging, create_checkpoint, mutation_context, write_test_file,
+    build_namespace_manifest_from_metadata_state, compact_a_family_group_into_staging,
+    create_checkpoint, load_current_projection, mutation_context, write_test_file,
+    ManifestMetadataSource,
 };
 use crate::checkpoint::MetadataCompactionView;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
@@ -30,7 +32,8 @@ use loonfs_api::wire::control::{
     UploadSessionState,
 };
 use loonfs_api::{
-    CheckpointId, ContentRef, ContentStoreId, ManifestObjectId, NamespaceId, UploadId,
+    ChangeSeq, CheckpointId, ContentRef, ContentStoreId, ManifestNo, ManifestObjectId, NamespaceId,
+    UploadId,
 };
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_compaction_lease, metadata_compaction_segment,
@@ -2022,6 +2025,96 @@ async fn a_read_pinned_before_a_fold_still_reads_after_the_sweep() {
         "folded-away segments must still be reclaimed, one window later"
     );
     stat_root(&store, &namespace_id).await;
+}
+
+#[tokio::test]
+async fn an_old_unpublished_manifest_cannot_replace_the_published_grace_anchor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    for round in 0..3 {
+        write_test_file(
+            &inner,
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            &format!("gc-orphan-anchor-{round}"),
+            &setup,
+        )
+        .await;
+        crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
+            .await
+            .expect("flush wal");
+    }
+
+    let projection = load_current_projection(&inner, &namespace_id)
+        .await
+        .expect("load current projection");
+    let next_manifest_no = ManifestNo(projection.root.manifest.manifest_no.0 + 1);
+    let mut orphan = build_namespace_manifest_from_metadata_state(
+        &inner,
+        &namespace_id,
+        ManifestMetadataSource {
+            head: &projection.head,
+            basis_manifest_no: Some(projection.root.manifest.manifest_no),
+            retention_floor_seq: ChangeSeq(0),
+            metadata_state: &projection.metadata_state,
+        },
+        crate::checkpoint::MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..Default::default()
+        },
+        next_manifest_no,
+    )
+    .await
+    .expect("build unpublished manifest");
+    orphan.payload.manifest_object_id =
+        ManifestObjectId::parse(format!("man_{:020}-0000000000000000", next_manifest_no.0))
+            .expect("ordered orphan manifest id");
+    orphan = loonfs_api::wire::manifest::NamespaceManifestEnvelope::from_payload(orphan.payload)
+        .expect("re-envelope orphan manifest");
+    crate::checkpoint::write_namespace_manifest(&inner, &orphan)
+        .await
+        .expect("write unpublished manifest");
+
+    let already_written = namespace_key_set(&inner, &namespace_id).await;
+    let store = aged_before_now(inner, already_written);
+    let pinned = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("pin the published root");
+
+    let report = crate::checkpoint::reorganize_metadata_step(
+        &store,
+        &namespace_id,
+        &setup,
+        crate::checkpoint::MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..Default::default()
+        },
+        MetadataCompactionView::default(),
+    )
+    .await
+    .expect("publish one replacement manifest");
+    assert!(matches!(
+        report.outcome,
+        crate::checkpoint::MetadataReorganizeOutcome::UnitPublished { .. }
+    ));
+
+    let after_publication = context(now_after_newest_object(store.inner(), &namespace_id, 1).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &after_publication)
+        .await
+        .expect("gc pass after replacement publication");
+    assert!(
+        report.deleted.metadata_segments > 0,
+        "the pass should find old segments the replacement no longer references"
+    );
+    pinned
+        .resolve_path("/docs/file-0.txt", AttributeInclusion::Omit)
+        .await
+        .expect("the published grace anchor remains readable");
 }
 
 /// Every reason's count, summed — what `retained_candidates` must equal.

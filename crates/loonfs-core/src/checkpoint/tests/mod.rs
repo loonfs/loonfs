@@ -171,10 +171,10 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
 }
 
 #[derive(Debug)]
-struct CurrentProjection {
-    head: HeadState,
-    root: MetadataRootState,
-    metadata_state: MetadataState,
+pub(crate) struct CurrentProjection {
+    pub(crate) head: HeadState,
+    pub(crate) root: MetadataRootState,
+    pub(crate) metadata_state: MetadataState,
 }
 
 /// Creates a namespace and publishes its first manifest.
@@ -521,7 +521,7 @@ fn manifest_object_id(manifest_no: ManifestNo) -> ManifestObjectId {
         .expect("valid manifest object id")
 }
 
-async fn load_current_projection<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<CurrentProjection, CoreError> {
@@ -798,10 +798,10 @@ use super::runs::delta_run_count;
 // author arbitrary layouts without driving the full checkpoint pipeline.
 #[cfg(test)]
 pub(crate) struct ManifestMetadataSource<'a> {
-    pub(super) head: &'a HeadState,
-    pub(super) basis_manifest_no: Option<ManifestNo>,
-    pub(super) retention_floor_seq: ChangeSeq,
-    pub(super) metadata_state: &'a MetadataState,
+    pub(crate) head: &'a HeadState,
+    pub(crate) basis_manifest_no: Option<ManifestNo>,
+    pub(crate) retention_floor_seq: ChangeSeq,
+    pub(crate) metadata_state: &'a MetadataState,
 }
 
 #[cfg(test)]

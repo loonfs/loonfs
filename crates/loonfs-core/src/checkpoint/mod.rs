@@ -66,6 +66,8 @@ pub(crate) use self::load::{
     load_namespace_manifest_envelope_if_present, load_verified_manifest_segments,
     LoadedMetadataBasis,
 };
+#[cfg(test)]
+pub(crate) use self::publish::write_namespace_manifest;
 pub(crate) use self::record::load_checkpoint_record;
 pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
