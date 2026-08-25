@@ -18,7 +18,9 @@ use crate::protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
     MultipartPartTargets, ResolvedUploadCompletion,
 };
-use crate::storage::content::{load_durable_content_bytes_for_import, FileContentStream};
+use crate::storage::content::{
+    ensure_imported_ref_matches, open_content_import_reader, FileContentStream,
+};
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use crate::time::current_time_ms;
 use loonfs_api::options::{DirectMultipartUploadOptions, ListPathEntriesOptions, StatPathOptions};
@@ -748,23 +750,28 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// namespace.
     ///
     /// A content reference locates bytes but does not identify the namespace
-    /// whose upload session keeps them alive. This reads and verifies the
-    /// complete source object, then stages those bytes through a new local
-    /// upload session so collection in the source namespace cannot invalidate
-    /// a later publication here.
+    /// whose upload session keeps them alive. This streams the source object
+    /// chunk by chunk into a new local upload session, verifying the claimed
+    /// size and checksum against what was staged, so collection in the source
+    /// namespace cannot invalidate a later publication here.
     pub async fn import_content_ref(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         content_ref: &ContentRef,
     ) -> Result<PreparedContent> {
         let catalog = self.own_catalog(catalog)?;
-        let bytes = load_durable_content_bytes_for_import(
-            &self.store,
-            catalog.content_store_id(),
-            content_ref,
+        let context = self.mutation_context()?;
+        let (object_key, pump, body) =
+            open_content_import_reader(&self.store, catalog.content_store_id(), content_ref)
+                .await?;
+        let ((), staged) = futures::future::join(
+            pump,
+            crate::protocol::stage_owned_stream(&self.store, catalog, body, &context),
         )
-        .await?;
-        self.stage_owned_bytes(catalog, &bytes).await
+        .await;
+        let prepared = staged?;
+        ensure_imported_ref_matches(object_key, content_ref, prepared.content_ref())?;
+        Ok(prepared)
     }
 
     /// Stages a streamed payload as content a session owns, hashing it on

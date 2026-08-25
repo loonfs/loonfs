@@ -461,6 +461,25 @@ async fn fork_and_source_reject_each_others_prepared_content() {
 }
 
 #[tokio::test]
+async fn prepare_content_ref_rejects_bytes_that_do_not_match_the_ref() {
+    let harness = TestHarness::new("content-import-mismatch").await;
+    let content_ref = harness.stage_content(b"real bytes").await;
+    let mut lying_ref = content_ref.clone();
+    lying_ref.checksum =
+        loonfs_api::Checksum::compute(lying_ref.checksum.algorithm, b"other bytes");
+
+    let error = harness
+        .writer
+        .prepare_content_ref(&harness.namespace_id, lying_ref)
+        .await
+        .expect_err("import must reject a ref whose checksum does not match the bytes");
+    assert!(
+        error.to_string().contains("content checksum mismatch"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing() {
     let harness = TestHarness::new("prepare-content-ref").await;
     let bytes = b"externally staged content";
