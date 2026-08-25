@@ -191,10 +191,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // before any segment object is written and gates the root
     // compare-and-swap below.
     let publication_started_ms = timer.monotonic_now_ms();
-    // The floor is read with the root rather than after the plan, because a
-    // plan that hands the group to a streaming compaction carries the floor
-    // that job will judge every row against, and the spec it carries is
-    // immutable for the job's life.
+    // A streaming compaction keeps the floor read with this root.
     let snapshot = load_control_snapshot(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;

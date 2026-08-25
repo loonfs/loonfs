@@ -225,8 +225,7 @@ impl ObjectStore for FloorRaiseOnCasConflictStore {
     }
 }
 
-/// Serves one captured version of `key` to the first reader, then the store's
-/// own current bytes.
+/// Returns one stale response for a selected key.
 #[derive(Debug)]
 struct StaleObjectOnceStore {
     inner: LocalFsStore,
@@ -1262,9 +1261,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
 
 #[tokio::test]
 async fn diagnostics_reload_a_root_behind_the_floor() {
-    // Retention only advances the floor to what the current root covers, so a
-    // floor above the observed root proves the root read is stale. One reread
-    // must settle it rather than reporting the superseded manifest.
+    // A floor above the observed root proves that the root read is stale.
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1315,9 +1312,6 @@ async fn diagnostics_reload_a_root_behind_the_floor() {
 
 #[tokio::test]
 async fn steady_state_reads_stay_off_the_objects_they_do_not_need() {
-    // The consolidated snapshot must not quietly widen these paths: namespace
-    // status never reads the root, and a rooted basis load never reads the
-    // floor.
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

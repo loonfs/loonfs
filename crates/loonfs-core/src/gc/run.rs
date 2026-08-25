@@ -62,12 +62,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // comes after.
     let mut budget = PassBudget::new(policy.max_objects);
 
-    // The head is the namespace: without one there is nothing to collect,
-    // and nothing could have been written under the prefix either, because
-    // the head is every installation's first and only write. It also names
-    // the content store a session's object lives in. The snapshot reads the
-    // root and floor alongside it: this unit covers the head and root, and
-    // collection charges for the floor.
+    // Read the namespace's head, root, and floor as one budget unit.
     budget.charge();
     let snapshot = match load_control_snapshot(store, namespace_id).await {
         Ok(snapshot) => snapshot,

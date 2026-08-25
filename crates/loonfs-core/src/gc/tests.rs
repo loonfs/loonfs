@@ -1442,7 +1442,7 @@ async fn a_budget_below_the_roots_reads_no_chain_and_says_it_ran_out() {
             wal_floor(&namespace_id),
             wal_head(&namespace_id)
         ],
-        "the control snapshot the pass opens with is all it read"
+        "one budget unit covers the concurrent control snapshot"
     );
 }
 
@@ -1774,8 +1774,8 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
     );
     assert_eq!(
         store.count(OperationClass::Read),
-        1,
-        "the third unit bought exactly one record read"
+        2,
+        "two units remain after the control snapshot"
     );
 }
 

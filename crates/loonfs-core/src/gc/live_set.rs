@@ -287,8 +287,6 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     });
     let namespace_deleted = head.status == NamespaceStatus::Deleted {};
     let collected: CollectResult<LiveSet> = async {
-        // Charge for the floor read the snapshot already performed.
-        charge(budget)?;
         let floor_seq = snapshot.retention_floor_seq;
         let mut live = LiveSet::collecting(namespace_deleted);
         let mut manifest_object_ids = BTreeSet::new();

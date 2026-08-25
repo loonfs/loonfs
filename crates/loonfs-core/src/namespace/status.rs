@@ -41,8 +41,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
             namespace_id: expected_namespace_id.clone(),
         });
     }
-    // The tail is measured from the basis manifest's coverage, whoever owns
-    // it: a fork target that has not flushed measures from its fork point.
+    // An unflushed fork measures its WAL tail from the fork point.
     let (current_manifest_no, basis_head_seq) = match basis.manifest() {
         Some(manifest) => {
             let envelope = load_namespace_manifest_envelope(
