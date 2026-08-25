@@ -15,6 +15,31 @@ pub(crate) struct LoadedControl<T> {
     pub(crate) state: T,
 }
 
+pub(crate) const CONTROL_READ_RELOADS: usize = 3;
+
+/// Reloads a value until it is consistent or the retry limit is reached.
+pub(crate) async fn reload_until_consistent<T, E, F, Fut>(
+    mut loaded: T,
+    mut reload: F,
+    is_consistent: impl Fn(&T) -> bool,
+    on_exhausted: impl FnOnce(T) -> E,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    if is_consistent(&loaded) {
+        return Ok(loaded);
+    }
+    for _ in 0..CONTROL_READ_RELOADS {
+        loaded = reload().await?;
+        if is_consistent(&loaded) {
+            return Ok(loaded);
+        }
+    }
+    Err(on_exhausted(loaded))
+}
+
 pub(crate) enum EmbeddedIdentityMismatch {
     Namespace {
         expected: NamespaceId,

@@ -5,7 +5,9 @@
 //! the first flush. A fork basis must match the identity and checksum stored
 //! in the head.
 
-use crate::control_object::ControlObjectLoadError;
+use crate::control_object::{
+    reload_until_consistent, ControlObjectLoadError, CONTROL_READ_RELOADS,
+};
 use crate::namespace::control::{
     load_head_and_metadata_root_if_present, load_head_object, load_wal_floor_object,
     LoadedHeadObject,
@@ -93,7 +95,6 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<LoadedNamespaceBasis, ControlObjectLoadError> {
-    const MISSING_ROOT_RELOADS: usize = 3;
     let mut reloads = 0;
     loop {
         let (head, root) = load_head_and_metadata_root_if_present(store, namespace_id).await?;
@@ -104,17 +105,15 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
             });
         }
 
-        // A missing floor means this namespace has never advanced retention,
-        // so genesis or the fork source is still a complete recovery basis.
-        // An advanced floor proves a root was published. Reload the pair once
-        // more in case these reads straddled that first publication; if the
-        // root remains absent, it was lost and replay is no longer authority.
+        // At the birth sequence, genesis or the fork source is still a complete
+        // basis. A later floor proves a root was published, so retry before
+        // reporting it missing.
         let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
         if floor_seq <= namespace_birth_seq(&head.state) {
             let basis = metadata_basis_without_root(&head.state);
             return Ok(LoadedNamespaceBasis { head, basis });
         }
-        if reloads == MISSING_ROOT_RELOADS {
+        if reloads == CONTROL_READ_RELOADS {
             return Err(ControlObjectLoadError::MissingRootAfterFloor {
                 namespace_id: namespace_id.clone(),
                 floor_seq,
@@ -174,20 +173,17 @@ pub(crate) async fn load_head_and_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<(LoadedHeadObject, ChangeSeq), ControlObjectLoadError> {
-    const FLOOR_AHEAD_HEAD_RELOADS: usize = 3;
-    let mut head = load_head_object(store, namespace_id).await?;
+    let head = load_head_object(store, namespace_id).await?;
     let floor_seq = resolve_retention_floor_seq(store, &head.state).await?;
-    for _reload in 0..FLOOR_AHEAD_HEAD_RELOADS {
-        if floor_seq <= head.state.seq {
-            return Ok((head, floor_seq));
-        }
-        head = load_head_object(store, namespace_id).await?;
-    }
-    if floor_seq <= head.state.seq {
-        return Ok((head, floor_seq));
-    }
-    Err(ControlObjectLoadError::FloorAheadOfHead {
-        floor_seq,
-        head_seq: head.state.seq,
-    })
+    let head = reload_until_consistent(
+        head,
+        || load_head_object(store, namespace_id),
+        |head| floor_seq <= head.state.seq,
+        |head| ControlObjectLoadError::FloorAheadOfHead {
+            floor_seq,
+            head_seq: head.state.seq,
+        },
+    )
+    .await?;
+    Ok((head, floor_seq))
 }
