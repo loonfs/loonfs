@@ -3,7 +3,7 @@
 //! Garbage collection refreshes this set in bounded chunks while sweeping.
 
 use super::budget::PassBudget;
-use super::fork_checkpoints::fork_target_proven_gone;
+use super::fork_checkpoints::{classify_fork_checkpoint, ForkCheckpointReachability};
 use super::reap::{lease_expired, manifest_object_id_of};
 use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::checkpoint::{load_namespace_manifest_envelope_if_present, ManifestLoadFailureClass};
@@ -396,9 +396,8 @@ async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> CollectResult<bool> {
     // User checkpoints expire by time. A fork checkpoint remains a root while
-    // its target namespace exists even if a racing pass already moved the
-    // record to `released`: the target head can land between that pass's head
-    // read and checkpoint CAS, and the forker can then crash before its guard.
+    // its target head still reads through it, even if a racing pass already
+    // moved the record to `released`.
     match &record.owner {
         CheckpointOwner::User { .. } => {
             Ok(record.status != (CheckpointStatus::Active {})
@@ -409,10 +408,17 @@ async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
             expires_at_ms,
         } => {
             charge(budget)?;
-            Ok(
-                fork_target_proven_gone(store, target_namespace_id, *expires_at_ms, context)
-                    .await?,
-            )
+            Ok(matches!(
+                classify_fork_checkpoint(
+                    store,
+                    record,
+                    target_namespace_id,
+                    *expires_at_ms,
+                    context
+                )
+                .await?,
+                ForkCheckpointReachability::Reclaimable
+            ))
         }
     }
 }

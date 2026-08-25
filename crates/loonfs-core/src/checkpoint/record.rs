@@ -15,11 +15,13 @@ use crate::control_update::{
     create_control_object_under_generated_id, retry_while_contended, CasAttempt,
 };
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::limits::FORK_CHECKPOINT_LEASE_MS;
 use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::load_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, CheckpointRecordState, CheckpointStatus, ControlObjectKind,
+    encode_control_state, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
+    ControlObjectKind,
 };
 use loonfs_api::{CheckpointId, NamespaceId};
 use loonfs_objectstore::keys::checkpoint_record;
@@ -194,6 +196,75 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     })
     .await?;
     released.ok_or_else(|| CoreError::contention_exhausted(object_key))
+}
+
+/// Renews a fork-owned lease under the record's etag, immediately before the
+/// forker installs its target head.
+///
+/// The compare-and-swap is the handoff with garbage collection: a release
+/// that lands first makes this reload a terminal record and fail before any
+/// target exists, and a renewal always rewrites the record to a strictly
+/// later expiry, so a collector's stale release fails against bytes that no
+/// longer match what it read. Renewing a whole lease
+/// beats proving that a narrow margin covers one more write; a crash after
+/// renewal only keeps an orphaned pin a while longer. `docs/specs/format.md`
+/// section 3.9.2 names the one window this does not fence.
+pub(crate) async fn renew_fork_checkpoint_for_install<S: ObjectStore + ?Sized>(
+    store: &S,
+    source_namespace_id: &NamespaceId,
+    checkpoint_id: &CheckpointId,
+    expected_target_namespace_id: &NamespaceId,
+    now_ms: u64,
+) -> Result<()> {
+    let object_key = &checkpoint_record(source_namespace_id, checkpoint_id);
+    let unavailable = &|reason: String| {
+        CoreError::CheckpointUnavailable(format!(
+            "fork of `{source_namespace_id}` into `{expected_target_namespace_id}` cannot renew \
+             its source checkpoint `{checkpoint_id}`: {reason}"
+        ))
+    };
+    let renewed = retry_while_contended(|| async move {
+        let Some(loaded) =
+            load_checkpoint_record(store, source_namespace_id, checkpoint_id).await?
+        else {
+            return Err(unavailable("the record is gone".to_owned()));
+        };
+        let mut next = loaded.state;
+        if next.status != (CheckpointStatus::Active {}) {
+            return Err(unavailable(format!("the record is `{}`", next.status)));
+        }
+        let CheckpointOwner::Fork {
+            target_namespace_id,
+            expires_at_ms,
+        } = &mut next.owner
+        else {
+            return Err(unavailable("the record is not fork-owned".to_owned()));
+        };
+        if target_namespace_id != expected_target_namespace_id {
+            return Err(unavailable(format!(
+                "the record pins target `{target_namespace_id}`"
+            )));
+        }
+        // Strictly later than the stored expiry, so the rewrite always
+        // changes the record and a stale release CAS cannot land on a
+        // content-derived etag.
+        *expires_at_ms = expires_at_ms
+            .saturating_add(1)
+            .max(now_ms.saturating_add(FORK_CHECKPOINT_LEASE_MS));
+        let encoded = encode_checkpoint_record(&next)?;
+        match store
+            .compare_and_swap(object_key, &loaded.etag, encoded)
+            .await
+        {
+            Ok(_) => Ok(CasAttempt::Settled(())),
+            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
+            // An unknown outcome fails here rather than installing a target
+            // this attempt cannot prove is pinned.
+            Err(error) => Err(CoreError::store(object_key, &error)),
+        }
+    })
+    .await?;
+    renewed.ok_or_else(|| CoreError::contention_exhausted(object_key))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

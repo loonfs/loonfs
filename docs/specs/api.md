@@ -870,8 +870,8 @@ For example, a create response is:
 `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns active
 checkpoints in ascending `checkpoint_id` order. Each entry is the same
 checkpoint object returned by create. User checkpoints can be released by
-id. Fork checkpoints retain their `fork` owner and remain until their target
-namespace is deleted.
+id. Fork checkpoints retain their `fork` owner and remain while their target
+namespace still reads through them.
 
 ```json
 {"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}]}
@@ -973,7 +973,7 @@ that reason, and the fields sum to the total:
 | `no_reference_manifest` | Unreachable and aged, but the namespace has published no manifest old enough to say what it referenced when the grace window opened. A reader that pinned its anchor inside the window may still be reading the object, so the pass keeps it until a manifest ages past the window. |
 | `degraded_roots` | Root resolution failed somewhere in the pass, so manifest and segment deletion was suppressed wholesale. `retention_degraded` is set too. |
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
-| `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, an unreadable record, a fork target not provably gone, a released record still inside its grace, or an active pin doing its job. |
+| `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, an unreadable record, a fork record its target may still reach, a released record still inside its grace, or an active pin doing its job. |
 | `upload_session_window` | An upload session waiting out a window a clock resolves — the same waits `next_reclamation_at_ms` reports. |
 | `upload_session_undecided` | An upload session held for a reason no clock resolves: a lost compare-and-swap, a record that vanished mid-pass, or a reference set the pass could not establish. |
 | `content_scan_deferred` | A completed session whose content reclamation was skipped because the reference scan did not fit in `max_objects`. `content_reclamation_deferred` is set too. |
@@ -2325,9 +2325,9 @@ The server forks from the source namespace's current head. The new namespace
 shares the source namespace's content store and starts with independent future
 namespace metadata. The fork creates a fork-owned source checkpoint so the
 source-owned immutable metadata segments stay available for as long as the
-target may still read them, then installs the target namespace's head in one
-conditional write, then checks that the source checkpoint still holds. That
-head carries the fork provenance for the target's whole life.
+target may still read them, renews that checkpoint's lease under the etag it
+was read with, then installs the target namespace's head in one conditional
+write. That head carries the fork provenance for the target's whole life.
 
 The response contains the new namespace's initial state. Its head
 sequence and retention floor are set to the source namespace's sequence at
@@ -2335,8 +2335,8 @@ the fork point.
 
 If the target ID already exists or has been deleted, the server returns the
 same `namespace_exists` or `namespace_deleted` error as namespace creation.
-If the source checkpoint disappears before the operation completes, the
-server deletes the new target and returns `checkpoint_unavailable`.
+If the source checkpoint cannot be renewed, the server returns
+`checkpoint_unavailable` and no target namespace is installed.
 
 ### 6.13 `GET /grep`
 

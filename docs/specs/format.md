@@ -1685,42 +1685,48 @@ context. The protocol is:
    for as long as the target lives; nothing under the target's prefix protects
    them. Every attempt takes its own record; no attempt reuses, refreshes, or
    revives an earlier one's.
-3. Read the pinned manifest to get the target's next inode id. Build the active target head with the source's `content_store_id` and a `fork_basis` containing the record's `manifest` reference and checkpoint id. The reference's `manifest_head_seq` is the target's fork sequence. Write the head with create-if-absent.
-4. Read the source checkpoint record once. The fork succeeds only if the
-   record is active **and** its fork owner's
-   `expires_at_ms > now + FORK_GUARD_MARGIN_MS`.
-   Otherwise delete the target through the ordinary namespace-delete path and
-   return the checkpoint failure.
+3. Read the pinned manifest to get the target's next inode id. Build the active target head with the source's `content_store_id` and a `fork_basis` containing the record's `manifest` reference and checkpoint id. The reference's `manifest_head_seq` is the target's fork sequence.
+4. Renew the source checkpoint record by compare-and-swap on the etag it was
+   read with, setting `expires_at_ms` to at least
+   `now + FORK_CHECKPOINT_LEASE_MS`. The renewal requires an active,
+   fork-owned record whose owner names this target. A terminal, missing, or
+   foreign record fails the fork, and so does an unknown write outcome.
+5. Write the target head with create-if-absent.
 
 The target copies the source's `content_store_id` because a fork shares file
 bytes copy-on-write. It inherits the source's materialized name keys
 unchanged, which is sound because name-key folding is a fixed rule of the
 format (section 2.3.1) rather than a per-namespace choice.
 
-Step 4 exists because steps 2 and 3 are two separate writes to two different
-objects. A forker that stalls between them can have its record released
-underneath it, and without the check the target would survive with an
-unprotected basis — a namespace that reads correctly today and reports
-corruption after the next GC pass. The margin is what makes the check sound
-where a bare re-read raced: garbage collection releases a fork record only
-once its lease has passed, so a lease with more than one provider operation
-left cannot legally be released between the read and the caller acting on it.
-Past that point the target head is the protection — a fork record whose
-target namespace exists and is not deleted is retained by every pass,
-whatever its lease says, so nothing has to clear the lease afterwards. The
-owner rule precedes the record status: if the target lands between a GC
-target-head read and the checkpoint release CAS, that now-`released` fork
-record is still retained while the target is live. This covers a forker that
-crashes before its post-install guard can observe the raced release.
-Deleting the target through the ordinary delete path, rather than erasing the
-head, keeps the failure inside the one lifecycle every other operation
-already understands.
+Step 4 is the handoff between the forker and garbage collection, and it is
+the reason no step after the head write has anything left to check. Both
+sides transition the same record from the same observed etag:
+
+```text
+GC:     active C@etag -> released C
+Fork:   active C@etag -> active C with a fresh lease
+```
+
+If the release lands first, the renewal reloads a terminal record and the
+fork fails before any target exists. If the renewal lands first, the
+collector's release fails: a renewal always writes a strictly later expiry
+(a wall-clock lease adjusted for how long the attempt has run, and never
+below the stored expiry plus one), so the record's bytes and etag no longer
+match what the collector read. A crash after renewal leaves an orphaned pin that its
+own lease ends. A crash after the head write needs no cleanup: the head's
+`fork_basis` is durable evidence that this exact record is reachable, and
+every successor head carries it forward verbatim (section 2.9).
+
+One window is not fenced. An attempt that stalls longer than a full fresh
+lease between its renewal and its head write can still install a target
+after a collector released the record. The rule
+that a live target exactly referencing a record retains it (section 6,
+rule 10) is the backstop: the record survives as an anomaly rather than
+being reaped under a live target.
 
 `FORK_CHECKPOINT_LEASE_MS` is derived, not tuned: two GC grace floors
 (section 6, rule 1), one for the create and one for everything after it, each
 being one publication plus provider bounds plus clock skew.
-`FORK_GUARD_MARGIN_MS` is one provider operation's total wall time — the
-staleness bound on the guard's own read.
 
 The fork does not copy content blobs or source metadata segments, and it does not write a target manifest, root, or floor. The target starts its own WAL one sequence above `fork_basis.manifest.manifest_head_seq`. New WAL segments, checkpoints, and metadata segments are stored under the target namespace. Until the first target flush creates a root, readers resolve the basis from the head (section 2.9.1).
 
@@ -2410,8 +2416,8 @@ publishing CAS) — under these rules:
    decisions, so no deletion consults an arbitrarily stale root set.
 4. Roots: `metadata/root.json`; the reference manifest R (rule 1); active
    checkpoint records whose owner still
-   stands — a user pin until its expiry passes, a fork pin until its target
-   is provably gone (rule 10), whatever its lease says; and the visible chain from
+   stands — a user pin until its expiry passes, a fork pin until nothing can
+   read through it any more (rule 10); and the visible chain from
    `wal/head.json.visible_wal_tip` down to the floor. A namespace with no
    root of its own has no manifest or segment to protect under its own prefix;
    its basis, if it has a foreign one, is protected on the source side by
@@ -2445,15 +2451,32 @@ publishing CAS) — under these rules:
    a later pass. Content objects are never enumerated by listing the content
    store, which is shared by every namespace whose head names it; they are
    reached only through the upload session that owns them (rule 11).
-10. **Abandoned forks.** A fork that crashes after writing its leased source
-   checkpoint record but before installing its target head leaves that
-   record with no target at all. Such a record is released once its lease
-   has passed and the target head is still absent: the lease covers a whole
-   fork attempt with margin to spare (section 3.9.2), so only an attempt
-   that is really gone can have let it pass. This is the only debris an
-   interrupted install can leave, and it lives on the source, never under
-   the target's prefix — the target either has a complete head or has
-   nothing.
+10. **Fork pins are held by exact reference.** A fork-owned record is a root
+   only while its target head is active and that head's `fork_basis` names
+   this record's checkpoint id and its manifest reference. The head is the
+   only object a fork installation writes and no successor head may rewrite
+   its `fork_basis` (section 2.9), so it is permanent evidence either way.
+   A target that is absent, terminally deleted, carries no fork basis, or
+   reads through some other checkpoint releases the record. Two of those
+   arms need care:
+
+   *Absent target.* Releasing waits for the record's own lease. The forker
+   renews that lease by compare-and-swap on the record immediately before
+   installing (section 3.9.2), so a collector that observes an expired lease
+   has already won against every attempt that could still install. This is
+   the only debris an interrupted install can leave, and it lives on the
+   source, never under the target's prefix — the target either has a
+   complete head or has nothing.
+
+   *Target that reads through another checkpoint.* A second fork attempt
+   against a name that is already taken pins a basis no target will ever
+   read. Its record is reclaimable at once; the lease has nothing to say
+   about a target that already exists.
+
+   A target head the store will not hand over is not evidence of anything,
+   and retains the record until a later pass can read it. A head that names
+   this record's checkpoint id with a different manifest reference is
+   namespace corruption and fails the pass.
 11. **Uploads and content, split at `completed`.** One sweep of `uploads/`
    owns both halves, because a session record is the only handle on the
    content object it created.
@@ -2593,10 +2616,12 @@ orphaned data for the next pass rather than a record whose data vanished.
 To keep that true, every readable checkpoint record roots its basis for the
 duration of a pass, whatever its lifecycle, expiry, or owner — no exceptions.
 State, expiry, and owner fate gate only whether the record itself is a
-candidate. A fork-owned record whose target namespace is verifiably
-terminally deleted (target head `state = deleted`, re-checked at delete time)
-or provably abandoned (rule 10) is released by compare-and-swap on the
-record's freshly observed etag — never deleted while active. A released
+candidate. A fork-owned record no target reads through any more (rule 10) is
+released by compare-and-swap on the record's freshly observed etag,
+re-classified immediately before that swap — never deleted while active. A
+released fork record whose target still names it exactly is retained instead:
+that pairing is an anomaly the fork handoff makes rare, and collection must
+not turn a damaged state into data loss. A released
 record is deleted outright once its `released_at_ms` is a grace window old;
 because release is terminal, no second state is needed between deciding to
 delete and deleting, and a crash between the release CAS and the delete

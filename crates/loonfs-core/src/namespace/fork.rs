@@ -1,19 +1,25 @@
 //! Namespace forking: installs a target namespace whose head points at a
 //! fork-owned source checkpoint, sharing content bytes and reading the
 //! source's metadata until the target flushes its own.
+//!
+//! One window is not fenced: an attempt that stalls longer than a full
+//! fresh lease between its renewal and its head write can still install a
+//! target after a collector released the record. Garbage collection's
+//! backstop is that a live target naming a record exactly retains it
+//! whatever the record's status says.
 
+use crate::checkpoint::record::renew_fork_checkpoint_for_install;
 use crate::checkpoint::{
     create_checkpoint, load_checkpoint_record, load_namespace_manifest_envelope,
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::{FORK_CHECKPOINT_LEASE_MS, FORK_GUARD_MARGIN_MS};
+use crate::limits::FORK_CHECKPOINT_LEASE_MS;
 use crate::namespace::bootstrap::{install_namespace_head, NamespaceHeadInstall};
-use crate::options::DeleteNamespaceOptions;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointStatus, ForkBasis, HeadState, NamespaceStatus, WriterBlock,
+    CheckpointOwner, ForkBasis, HeadState, NamespaceStatus, WriterBlock,
 };
 use loonfs_api::{Namespace, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
@@ -24,8 +30,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<Namespace> {
-    // The guard at the end needs to know how long this attempt has been
-    // running, so it starts here, before the first write.
+    // The renewal stamps how long this attempt has already run, so the
+    // timer starts before the first write.
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
     // Fork routes through a fork-owned source checkpoint: the record is the
@@ -93,6 +99,18 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         recent_segments: Vec::new(),
         status: NamespaceStatus::Active {},
     };
+    // The handoff: the target head is written only after a compare-and-swap
+    // proved this attempt still owns an active pin.
+    renew_fork_checkpoint_for_install(
+        store,
+        source_namespace_id,
+        &source_record.checkpoint_id,
+        new_namespace_id,
+        context
+            .now_ms
+            .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
+    )
+    .await?;
     match install_namespace_head(store, new_namespace_id, &head).await? {
         NamespaceHeadInstall::Landed => {}
         NamespaceHeadInstall::Exists => {
@@ -107,90 +125,5 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         }
     }
 
-    // A forker that stalled between creating the record and publishing the
-    // target could have slept past its own lease, and a garbage-collection
-    // pass could have released the pin, leaving a target whose basis nothing
-    // protects. The guard closes that window: an inactive record, or one too
-    // close to its lease to trust, means this target must not exist, so it
-    // is deleted through the ordinary delete path and the checkpoint failure
-    // is what the caller sees.
-    if let Err(error) = ensure_fork_checkpoint_lease_holds(
-        store,
-        source_namespace_id,
-        &source_record.checkpoint_id,
-        new_namespace_id,
-        context
-            .now_ms
-            .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
-    )
-    .await
-    {
-        if let Err(delete_error) = crate::commit_engine::delete_namespace(
-            store,
-            new_namespace_id,
-            DeleteNamespaceOptions::default(),
-            context,
-        )
-        .await
-        {
-            // Both halves failed. The caller hears why the fork failed,
-            // which is the actionable half; the target that could not be
-            // deleted is left for an operator, named here.
-            tracing::error!(
-                namespace_id = %new_namespace_id,
-                source_namespace_id = %source_namespace_id,
-                %delete_error,
-                "fork could not delete the target it published after losing its source checkpoint",
-            );
-        }
-        return Err(error);
-    }
-
     crate::namespace::status::load_namespace(store, new_namespace_id).await
-}
-
-/// Proves, after the target head is durable, that the source record still
-/// pins the basis and will keep pinning it long enough for the new target to
-/// take over that job.
-///
-/// The record must be active, and its lease must outlast this read by
-/// [`FORK_GUARD_MARGIN_MS`]. The margin is what makes the check sound where a
-/// bare re-read raced: garbage collection releases a fork record only once
-/// its lease has passed, so a lease with more than one provider operation
-/// left cannot legally be released between the read and the caller acting on
-/// it. After that point the target head itself is the protection — a fork
-/// record whose target namespace exists and is not deleted is retained by
-/// every pass, lease or no lease.
-async fn ensure_fork_checkpoint_lease_holds<S: ObjectStore + ?Sized>(
-    store: &S,
-    source_namespace_id: &NamespaceId,
-    checkpoint_id: &loonfs_api::CheckpointId,
-    new_namespace_id: &NamespaceId,
-    now_ms: u64,
-) -> Result<()> {
-    let lost = |reason: String| {
-        Err(CoreError::CheckpointUnavailable(format!(
-            "fork of `{source_namespace_id}` into `{new_namespace_id}` lost its source \
-             checkpoint `{checkpoint_id}`: {reason}"
-        )))
-    };
-    let Some(record) = load_checkpoint_record(store, source_namespace_id, checkpoint_id)
-        .await?
-        .map(|loaded| loaded.state)
-    else {
-        return lost("the record is gone".to_owned());
-    };
-    if record.status != (CheckpointStatus::Active {}) {
-        return lost(format!("the record is `{}`", record.status));
-    }
-    let CheckpointOwner::Fork { expires_at_ms, .. } = record.owner else {
-        return lost("the record is not fork-owned".to_owned());
-    };
-    if expires_at_ms <= now_ms.saturating_add(FORK_GUARD_MARGIN_MS) {
-        return lost(format!(
-            "its lease expires at {expires_at_ms} ms, inside the \
-             {FORK_GUARD_MARGIN_MS}ms guard margin at {now_ms}"
-        ));
-    }
-    Ok(())
 }
