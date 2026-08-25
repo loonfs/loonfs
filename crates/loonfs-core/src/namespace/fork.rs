@@ -93,6 +93,20 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         recent_segments: Vec::new(),
         status: NamespaceStatus::Active {},
     };
+    // The same check runs on both sides of the install. Before: a forker
+    // that stalled since creating the record must not install a target whose
+    // pin garbage collection may already have reaped. The margin covers the
+    // one provider operation the install is.
+    ensure_fork_checkpoint_lease_holds(
+        store,
+        source_namespace_id,
+        &source_record.checkpoint_id,
+        new_namespace_id,
+        context
+            .now_ms
+            .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
+    )
+    .await?;
     match install_namespace_head(store, new_namespace_id, &head).await? {
         NamespaceHeadInstall::Landed => {}
         NamespaceHeadInstall::Exists => {
@@ -149,9 +163,9 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     crate::namespace::status::load_namespace(store, new_namespace_id).await
 }
 
-/// Proves, after the target head is durable, that the source record still
-/// pins the basis and will keep pinning it long enough for the new target to
-/// take over that job.
+/// Proves, immediately before and again after the target head install, that
+/// the source record still pins the basis and will keep pinning it long
+/// enough for the new target to take over that job.
 ///
 /// The record must be active, and its lease must outlast this read by
 /// [`FORK_GUARD_MARGIN_MS`]. The margin is what makes the check sound where a
