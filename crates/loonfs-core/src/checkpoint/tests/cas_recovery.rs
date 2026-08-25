@@ -544,7 +544,7 @@ async fn create_checkpoint_fails_when_its_manifest_key_holds_a_different_payload
 }
 
 #[tokio::test]
-async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser_is_superseded() {
+async fn same_root_publications_keep_the_first_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -607,7 +607,7 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
     .await
     .expect("first publication succeeds");
     match first_outcome {
-        ManifestPublicationOutcome::Installed(root) => {
+        ManifestPublicationOutcome::Published(root) => {
             assert_eq!(
                 root.manifest.manifest_object_id,
                 first_manifest.payload.manifest_object_id
@@ -813,7 +813,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
 }
 
 #[tokio::test]
-async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
+async fn root_cas_conflict_reports_a_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
@@ -858,7 +858,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         .expect("write manifest");
 
     store.fail_all();
-    let error = publish_metadata_root(
+    let outcome = publish_metadata_root(
         &store,
         &namespace_id,
         &manifest,
@@ -866,12 +866,9 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         context.now_ms,
     )
     .await
-    .expect_err("root publication should exhaust its contention retries");
+    .expect("root publication should report CAS contention");
 
-    assert!(matches!(
-        error,
-        CoreError::HeadPublish(crate::commit::CommitHeadPublishError::StaleHead)
-    ));
+    assert_eq!(outcome, ManifestPublicationOutcome::RootCasRaceLost);
 }
 
 #[tokio::test]
@@ -929,7 +926,7 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
     .expect("root publication should recover after ambiguous CAS");
 
     match outcome {
-        ManifestPublicationOutcome::AlreadyCurrent(root) => {
+        ManifestPublicationOutcome::Published(root) => {
             assert_eq!(root.manifest.manifest_no, manifest.payload.manifest_no);
             assert_eq!(
                 root.manifest.manifest_object_id,
@@ -1133,7 +1130,7 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
     .await
     .expect("same-seq replacement publishes");
     match outcome {
-        ManifestPublicationOutcome::Installed(root) => {
+        ManifestPublicationOutcome::Published(root) => {
             assert_eq!(root.manifest.manifest_no, compacted.payload.manifest_no);
             assert_eq!(
                 root.manifest.manifest_head_seq,
@@ -1263,10 +1260,8 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
 
 #[tokio::test]
 async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
-    // The review's flush race: a publisher builds from root A while a
-    // sibling publishes B from the same basis, then tries to win on a
-    // higher head. Its carried-forward state predates B, so head ordering
-    // must not decide the winner — the predecessor gate must.
+    // Build two candidates from the same root. The candidate with the newer
+    // WAL head must not overwrite a sibling whose state it does not include.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1281,7 +1276,7 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         .await
         .expect("sibling basis");
 
-    // The stale publisher observes a newer head against the same root.
+    // The second candidate observes a newer head against the same root.
     write_file_bytes(&store, &namespace_id, "/two.txt", b"two\n", &context, None)
         .await
         .expect("write two");
@@ -1327,7 +1322,7 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
     .expect("sibling publication");
     assert!(matches!(
         sibling_outcome,
-        ManifestPublicationOutcome::Installed(_)
+        ManifestPublicationOutcome::Published(_)
     ));
 
     let stale_outcome = publish_metadata_root(

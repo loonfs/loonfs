@@ -183,8 +183,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     )
     .await?
     {
-        ManifestPublicationOutcome::Installed(_)
-        | ManifestPublicationOutcome::AlreadyCurrent(_) => (
+        ManifestPublicationOutcome::Published(_) => (
             FlushWalOutcome::Published,
             manifest.payload.manifest_no,
             manifest.payload.head_seq,
@@ -202,6 +201,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         ManifestPublicationOutcome::PredecessorChanged(_) => {
             return Ok(TryFlushWal::RaceLost);
         }
+        ManifestPublicationOutcome::RootCasRaceLost => return Ok(TryFlushWal::RaceLost),
     };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
         manifest: manifest_ref_for(namespace_id, &manifest),

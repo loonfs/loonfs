@@ -3319,48 +3319,13 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
     );
 }
 
-/// Loses every root compare-and-swap to a competing publisher, and cancels
-/// the job the first time it tries one. Every other compare-and-swap — the
-/// job's own lease heartbeat — goes through, because losing that one would
-/// fence the job instead.
-///
-/// That is the shape a shutdown takes during finalization: attempts are still
-/// available, the races are still there to take, and the job must stop taking
-/// them.
+/// Cancels the job when its first root compare-and-swap fails. Lease updates
+/// still succeed so cancellation, rather than fencing, stops the job.
 #[derive(Debug)]
 struct CancelAtTheFirstPublicationStore {
     inner: LocalFsStore,
-    namespace_id: NamespaceId,
     cancellation: MetadataCompactionCancellation,
     manifests: AtomicUsize,
-}
-
-impl CancelAtTheFirstPublicationStore {
-    /// Republishes the current root one manifest number ahead, which is what
-    /// the swap under it then loses to. The root keeps naming the same
-    /// manifest object, so nothing this job wrote becomes reachable.
-    async fn supersede_the_root(&self) {
-        let loaded = load_metadata_root_object(&self.inner, &self.namespace_id)
-            .await
-            .expect("read the root to supersede");
-        let mut root = loaded.state;
-        root.manifest.manifest_no = ManifestNo(root.manifest.manifest_no.0 + 1);
-        let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
-            loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-            root,
-        )
-        .expect("root envelope");
-        let bytes =
-            loonfs_api::wire::control::encode_control_object(&envelope).expect("root bytes");
-        self.inner
-            .put(
-                &loonfs_objectstore::keys::metadata_root(&self.namespace_id),
-                Bytes::from(bytes),
-                PutMode::Overwrite,
-            )
-            .await
-            .expect("supersede the root");
-    }
 }
 
 #[async_trait]
@@ -3391,8 +3356,10 @@ impl ObjectStore for CancelAtTheFirstPublicationStore {
             self.manifests.fetch_add(1, Ordering::SeqCst);
         }
         if key.ends_with("/metadata/root.json") && matches!(mode, PutMode::CompareAndSwap { .. }) {
-            self.supersede_the_root().await;
             self.cancellation.cancel();
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            });
         }
         self.inner.put(key, bytes, mode).await
     }
@@ -3435,7 +3402,6 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
 
     let cancelling_store = CancelAtTheFirstPublicationStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-        namespace_id: namespace_id.clone(),
         cancellation: cancellation.clone(),
         manifests: AtomicUsize::new(0),
     };

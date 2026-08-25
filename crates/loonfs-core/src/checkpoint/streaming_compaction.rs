@@ -669,12 +669,12 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         .await?;
         drop(segments);
         let lost_to = match published {
-            ManifestPublicationOutcome::Installed(_)
-            | ManifestPublicationOutcome::AlreadyCurrent(_) => {
+            ManifestPublicationOutcome::Published(_) => {
                 return Ok(Finalization::Published(manifest.payload.manifest_no))
             }
             ManifestPublicationOutcome::CoveredByCurrent(_) => "covered_by_current",
             ManifestPublicationOutcome::PredecessorChanged(_) => "predecessor_changed",
+            ManifestPublicationOutcome::RootCasRaceLost => "root_cas_race",
         };
         tracing::debug!(
             namespace_id = namespace_id.as_str(),
