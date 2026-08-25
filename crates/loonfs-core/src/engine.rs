@@ -764,13 +764,18 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let (object_key, pump, body) =
             open_content_import_reader(&self.store, catalog.content_store_id(), content_ref)
                 .await?;
-        let ((), staged) = futures::future::join(
+        let (source_checksum, staged) = futures::future::join(
             pump,
             crate::protocol::stage_owned_stream(&self.store, catalog, body, &context),
         )
         .await;
         let prepared = staged?;
-        ensure_imported_ref_matches(object_key, content_ref, prepared.content_ref())?;
+        ensure_imported_ref_matches(
+            object_key,
+            content_ref,
+            prepared.content_ref(),
+            &source_checksum,
+        )?;
         Ok(prepared)
     }
 

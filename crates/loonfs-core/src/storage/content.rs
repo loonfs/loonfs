@@ -112,7 +112,7 @@ pub(crate) async fn open_content_import_reader<'a, S: ObjectStore + ?Sized>(
 ) -> Result<
     (
         String,
-        impl std::future::Future<Output = ()> + 'a,
+        impl std::future::Future<Output = Checksum> + 'a,
         ByteStream,
     ),
     DurableContentValidationError,
@@ -120,9 +120,11 @@ pub(crate) async fn open_content_import_reader<'a, S: ObjectStore + ?Sized>(
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
     validate_content_size(store, &object_key, content_ref).await?;
     let size_bytes = content_ref.size_bytes;
+    let checksum_algorithm = content_ref.checksum.algorithm;
     let (mut sender, receiver) = futures::channel::mpsc::channel(1);
     let pump_key = object_key.clone();
     let pump = async move {
+        let mut checksum = StreamingChecksum::for_algorithm(checksum_algorithm);
         let mut offset = 0u64;
         while offset < size_bytes {
             let end = offset
@@ -141,11 +143,15 @@ pub(crate) async fn open_content_import_reader<'a, S: ObjectStore + ?Sized>(
                 Err(error) => Err(error),
             };
             let failed = chunk.is_err();
+            if let Ok(bytes) = &chunk {
+                checksum.update(bytes);
+            }
             if sender.send(chunk).await.is_err() || failed {
-                return;
+                return checksum.finish();
             }
             offset = end;
         }
+        checksum.finish()
     };
     Ok((object_key, pump, receiver.boxed()))
 }
@@ -155,6 +161,7 @@ pub(crate) fn ensure_imported_ref_matches(
     object_key: String,
     expected: &ContentRef,
     staged: &ContentRef,
+    source_checksum: &Checksum,
 ) -> Result<(), DurableContentValidationError> {
     if staged.size_bytes != expected.size_bytes {
         return Err(DurableContentValidationError::ContentLengthMismatch {
@@ -163,11 +170,11 @@ pub(crate) fn ensure_imported_ref_matches(
             actual: staged.size_bytes,
         });
     }
-    if staged.checksum != expected.checksum {
+    if source_checksum != &expected.checksum {
         return Err(DurableContentValidationError::ContentChecksumMismatch {
             object_key,
             expected: describe_checksum(&expected.checksum),
-            actual: describe_checksum(&staged.checksum),
+            actual: describe_checksum(source_checksum),
         });
     }
     Ok(())
