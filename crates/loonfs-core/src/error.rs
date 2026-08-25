@@ -688,7 +688,8 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
 pub(crate) fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCode {
     match error {
         ControlObjectLoadError::MissingObject { .. } => ErrorCode::NamespaceNotFound,
-        ControlObjectLoadError::RootAheadOfHead { .. } => ErrorCode::StaleHead,
+        ControlObjectLoadError::RootAheadOfHead { .. }
+        | ControlObjectLoadError::FloorAheadOfHead { .. } => ErrorCode::StaleHead,
         ControlObjectLoadError::NamespaceMismatch { .. }
         | ControlObjectLoadError::IdentityMismatch { .. }
         | ControlObjectLoadError::ForkBasisOwnerIsSelf { .. }

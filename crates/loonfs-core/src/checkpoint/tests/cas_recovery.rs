@@ -1104,6 +1104,68 @@ async fn read_anchor_reloads_the_head_when_the_root_is_ahead() {
 }
 
 #[tokio::test]
+async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
+    // Retention publishes the floor independently of the head. A reader that
+    // straddles those writes must not report a floor newer than its head.
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&inner, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let stale_head = inner
+        .get_with_metadata(&wal_head(&namespace_id))
+        .await
+        .expect("read bootstrap head")
+        .expect("bootstrap head exists");
+
+    write_file_bytes(
+        &inner,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&inner, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    advance_retention_floor(&inner, &namespace_id, &context)
+        .await
+        .expect("advance retention");
+
+    let status_store = StaleHeadOnceStore {
+        inner: LocalFsStore::new(temp_dir.path()).expect("status store"),
+        head_key: wal_head(&namespace_id),
+        stale_head: std::sync::Mutex::new(Some(stale_head.clone())),
+    };
+    let namespace = load_namespace(&status_store, &namespace_id)
+        .await
+        .expect("status reloads the stale head");
+    assert_eq!(namespace.head_seq, ChangeSeq(1));
+    assert_eq!(namespace.retention_floor_seq, ChangeSeq(1));
+
+    let feed_store = StaleHeadOnceStore {
+        inner: LocalFsStore::new(temp_dir.path()).expect("change-feed store"),
+        head_key: wal_head(&namespace_id),
+        stale_head: std::sync::Mutex::new(Some(stale_head)),
+    };
+    let changes = list_changes_after(
+        &feed_store,
+        &namespace_id,
+        ChangeSeq(1),
+        EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
+    )
+    .await
+    .expect("change feed reloads the stale head");
+    assert_eq!(changes.through_seq, ChangeSeq(1));
+    assert!(changes.changes.is_empty());
+}
+
+#[tokio::test]
 async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
     // The review's flush race: a publisher builds from root A while a
     // sibling publishes B from the same basis, then tries to win on a

@@ -2,8 +2,7 @@
 //! commit's durable WAL deltas mapped to semantic filesystem events.
 
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::basis::resolve_retention_floor_seq;
-use crate::namespace::control::load_namespace_head_control;
+use crate::namespace::basis::load_head_and_retention_floor;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use loonfs_api::v0::{CommittedChange, FilesystemChange, ListChangesResponse};
 use loonfs_api::wire::control::NamespaceStatus;
@@ -18,19 +17,16 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     limit: EffectiveLimit,
 ) -> Result<ListChangesResponse> {
-    let head = load_namespace_head_control(store, namespace_id)
+    let (head, retention_floor_seq) = load_head_and_retention_floor(store, namespace_id)
         .await
-        .map_err(CoreError::ControlObjectLoad)?
-        .state;
+        .map_err(CoreError::ControlObjectLoad)?;
+    let head = head.state;
     if head.status == (NamespaceStatus::Deleted {}) {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: namespace_id.clone(),
         });
     }
 
-    let retention_floor_seq = resolve_retention_floor_seq(store, &head)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
     if after_seq < retention_floor_seq {
         return Err(CoreError::RebootstrapRequired {
             after_seq,
