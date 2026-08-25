@@ -766,6 +766,20 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     expected_inode_id: None,
                 },
             )),
+            prepared_candidate(
+                &store,
+                &namespace_id,
+                commit_request(
+                    "accept-a",
+                    FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        content_ref: content.content_ref().clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
+            )
+            .await,
         ]
     };
 
@@ -786,6 +800,10 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     );
     let alias = failed[3].as_ref().expect_err("alias mirrors its primary");
     assert_eq!(alias.code(), ErrorCode::PathNotFound);
+    let accepted_alias = failed[4]
+        .as_ref()
+        .expect_err("alias of an accepted candidate fails with it");
+    assert!(matches!(accepted_alias, CoreError::WalWrite { .. }));
 
     let head = load_namespace_head_control(&store, &namespace_id)
         .await
@@ -810,6 +828,10 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     assert_eq!(
         retried[3].as_ref().expect_err("still missing").code(),
         ErrorCode::PathNotFound
+    );
+    assert_eq!(
+        retried[4].as_ref().expect("alias lands with its primary"),
+        committed
     );
 }
 

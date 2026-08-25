@@ -2,6 +2,7 @@
 //! preparation, commit-id validation, and duplicate resolution against
 //! durable receipts and same-batch primaries.
 
+use super::batch::BatchOutcomeSlot;
 use super::publish_view::PublishMetadataView;
 use crate::commit::{CandidateAllocation, CommitFingerprint, ValidatedCommitPlan};
 use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
@@ -23,29 +24,13 @@ pub(super) struct PreparedCandidateCommit {
 pub(super) enum CandidateAdmission {
     /// A new request ready for content validation and materialization.
     Prepared(PreparedCandidateCommit),
-    /// A duplicate that receives the earlier request's outcome.
-    AliasOf(usize),
-    /// An outcome decided during admission. Independent outcomes do not rely
-    /// on tentative changes from earlier requests in the batch.
-    Settled {
-        outcome: Result<ApiCommitResponse>,
-        independent: bool,
-    },
+    /// A result decided during admission.
+    Settled(BatchOutcomeSlot),
 }
 
 impl CandidateAdmission {
     fn independent(outcome: Result<ApiCommitResponse>) -> Self {
-        Self::Settled {
-            outcome,
-            independent: true,
-        }
-    }
-
-    pub(super) fn contingent(outcome: Result<ApiCommitResponse>) -> Self {
-        Self::Settled {
-            outcome,
-            independent: false,
-        }
+        Self::Settled(BatchOutcomeSlot::SettledIndependent(outcome))
     }
 }
 
@@ -55,11 +40,10 @@ struct InBatchRequest {
     semantic_identity: CommitFingerprint,
 }
 
-/// Tracks the first request for each commit ID and any aliases.
+/// Tracks the first request for each commit ID in the batch.
 #[derive(Default)]
 pub(super) struct BatchDedup {
     in_batch_requests: HashMap<CommitId, InBatchRequest>,
-    aliases: Vec<(usize, usize)>,
 }
 
 impl BatchDedup {
@@ -90,36 +74,9 @@ impl BatchDedup {
                 },
             )));
         }
-        Some(CandidateAdmission::AliasOf(existing.primary_index))
-    }
-
-    pub(super) fn record_alias(&mut self, alias_index: usize, primary_index: usize) {
-        self.aliases.push((alias_index, primary_index));
-    }
-
-    /// Resolves alias slots to their primary's outcome and unwraps the rest.
-    pub(super) fn finish(
-        &self,
-        mut outcomes: Vec<Option<Result<ApiCommitResponse>>>,
-    ) -> Vec<Result<ApiCommitResponse>> {
-        for (alias_index, primary_index) in &self.aliases {
-            let primary_outcome = outcomes
-                .get(*primary_index)
-                .and_then(Clone::clone)
-                .unwrap_or_else(|| {
-                    Err(CoreError::Internal(
-                        "missing primary batch outcome".to_owned(),
-                    ))
-                });
-            outcomes[*alias_index] = Some(primary_outcome);
-        }
-        outcomes
-            .into_iter()
-            .map(|outcome| {
-                outcome
-                    .unwrap_or_else(|| Err(CoreError::Internal("missing batch outcome".to_owned())))
-            })
-            .collect()
+        Some(CandidateAdmission::Settled(BatchOutcomeSlot::AliasOf(
+            existing.primary_index,
+        )))
     }
 }
 
@@ -172,7 +129,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         }),
         Err(error) => {
             session.discard_candidate(allocation);
-            CandidateAdmission::contingent(Err(error))
+            CandidateAdmission::Settled(BatchOutcomeSlot::SettledContingent(Err(error)))
         }
     }
 }

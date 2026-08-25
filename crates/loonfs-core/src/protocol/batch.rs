@@ -66,6 +66,25 @@ impl PublishBatchAgainstViewResult {
     }
 }
 
+/// Tracks one candidate's result and whether publication can change it.
+#[derive(Debug, Clone)]
+pub(super) enum BatchOutcomeSlot {
+    Pending,
+    Accepted,
+    SettledIndependent(Result<ApiCommitResponse>),
+    SettledContingent(Result<ApiCommitResponse>),
+    AliasOf(usize),
+}
+
+impl BatchOutcomeSlot {
+    fn settled(&self) -> Option<&Result<ApiCommitResponse>> {
+        match self {
+            Self::SettledIndependent(outcome) | Self::SettledContingent(outcome) => Some(outcome),
+            Self::Pending | Self::Accepted | Self::AliasOf(_) => None,
+        }
+    }
+}
+
 pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
@@ -88,10 +107,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             candidates.len()
         ]);
     }
-    let mut outcomes: Vec<Option<Result<ApiCommitResponse>>> = vec![None; candidates.len()];
-    let mut independent_outcomes = vec![false; candidates.len()];
+    let mut slots = vec![BatchOutcomeSlot::Pending; candidates.len()];
     let mut session = PublishPlanningSession::new(&view.head);
-    let mut accepted_indexes = Vec::new();
     let mut accepted_commits = Vec::new();
     let mut dedup = BatchDedup::default();
 
@@ -119,16 +136,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             .await;
             let candidate_request = match admission {
                 CandidateAdmission::Prepared(candidate_request) => candidate_request,
-                CandidateAdmission::AliasOf(primary_index) => {
-                    dedup.record_alias(index, primary_index);
-                    continue;
-                }
-                CandidateAdmission::Settled {
-                    outcome,
-                    independent,
-                } => {
-                    independent_outcomes[index] = independent;
-                    outcomes[index] = Some(outcome);
+                CandidateAdmission::Settled(slot) => {
+                    slots[index] = settle_admission(slot, !accepted_commits.is_empty());
                     continue;
                 }
             };
@@ -140,14 +149,16 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 validate_commit_content_references(candidate, view.content_store_id())
             {
                 session.discard_candidate(allocation);
-                independent_outcomes[index] = true;
-                outcomes[index] = Some(Err(error));
+                slots[index] = BatchOutcomeSlot::SettledIndependent(Err(error));
                 continue;
             }
             let resulting_next_inode_id = match session.commit_candidate(allocation) {
                 Ok(resulting_next_inode_id) => resulting_next_inode_id,
                 Err(error) => {
-                    outcomes[index] = Some(Err(error));
+                    slots[index] = settle_admission(
+                        BatchOutcomeSlot::SettledContingent(Err(error)),
+                        !accepted_commits.is_empty(),
+                    );
                     continue;
                 }
             };
@@ -172,7 +183,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                         .entered();
                 session.apply_accepted_commit(&preview, &materialized.commit);
             }
-            accepted_indexes.push(index);
+            slots[index] = BatchOutcomeSlot::Accepted;
             accepted_commits.push(materialized);
         }
     }
@@ -185,7 +196,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     drop(prepare_span);
 
     if accepted_commits.is_empty() {
-        return PublishBatchAgainstViewResult::unchanged(dedup.finish(outcomes));
+        return PublishBatchAgainstViewResult::unchanged(finish_batch_outcomes(&slots));
     }
     let accepted_count = u64::try_from(accepted_commits.len()).unwrap_or(u64::MAX);
     let put_started_ms = timer.monotonic_now_ms();
@@ -200,15 +211,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     .await
     {
         Ok(wal) => wal,
-        Err(error) => {
-            return abort_batch(
-                outcomes,
-                &independent_outcomes,
-                &dedup,
-                &accepted_indexes,
-                &error,
-            )
-        }
+        Err(error) => return abort_batch(slots, &error),
     };
 
     let last_plan = &accepted_commits
@@ -219,13 +222,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         Ok(value) => value,
         Err(error) => {
             let error = CoreError::Internal(format!("head publish preparation failed: {error}"));
-            return abort_batch(
-                outcomes,
-                &independent_outcomes,
-                &dedup,
-                &accepted_indexes,
-                &error,
-            );
+            return abort_batch(slots, &error);
         }
     };
     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(put_started_ms);
@@ -234,13 +231,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             elapsed_ms,
             budget_ms: WAL_PUBLISH_BUDGET_MS,
         });
-        return abort_batch(
-            outcomes,
-            &independent_outcomes,
-            &dedup,
-            &accepted_indexes,
-            &error,
-        );
+        return abort_batch(slots, &error);
     }
     let head_etag = match cas_batch_head(
         store,
@@ -252,26 +243,21 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     .await
     {
         Ok(metadata) => metadata.etag,
-        Err(error) => {
-            return abort_batch(
-                outcomes,
-                &independent_outcomes,
-                &dedup,
-                &accepted_indexes,
-                &error,
-            )
-        }
+        Err(error) => return abort_batch(slots, &error),
     };
 
     let wal_records = wal.envelope.payload.records.clone();
-    for (outcome_index, record) in accepted_indexes.into_iter().zip(&wal_records) {
-        outcomes[outcome_index] =
-            Some(committed_change_from_wal_record(record).map(|change| {
-                ApiCommitResponse::from_committed_change(namespace_id.clone(), change)
-            }));
+    let accepted_slots = slots
+        .iter_mut()
+        .filter(|slot| matches!(slot, BatchOutcomeSlot::Accepted));
+    for (slot, record) in accepted_slots.zip(&wal_records) {
+        *slot =
+            BatchOutcomeSlot::SettledIndependent(committed_change_from_wal_record(record).map(
+                |change| ApiCommitResponse::from_committed_change(namespace_id.clone(), change),
+            ));
     }
     PublishBatchAgainstViewResult {
-        results: dedup.finish(outcomes),
+        results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Advanced {
             records: wal_records,
             head: head_publish.resulting_head,
@@ -282,20 +268,12 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
 
 /// Applies the publication error and invalidates the loaded projection.
 fn abort_batch(
-    mut outcomes: Vec<Option<Result<ApiCommitResponse>>>,
-    independent_outcomes: &[bool],
-    dedup: &BatchDedup,
-    accepted_indexes: &[usize],
+    mut slots: Vec<BatchOutcomeSlot>,
     error: &CoreError,
 ) -> PublishBatchAgainstViewResult {
-    fail_outcomes_contingent_on_unpublished_batch(
-        &mut outcomes,
-        independent_outcomes,
-        accepted_indexes,
-        error,
-    );
+    fail_unpublished_slots(&mut slots, error);
     PublishBatchAgainstViewResult {
-        results: dedup.finish(outcomes),
+        results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Invalidated,
     }
 }
@@ -388,29 +366,43 @@ async fn cas_batch_head<S: ObjectStore + ?Sized>(
     result.map_err(CoreError::from)
 }
 
-/// Replaces outcomes that depended on tentative batch state with the
-/// publication error. Independent outcomes remain unchanged.
-fn fail_outcomes_contingent_on_unpublished_batch(
-    outcomes: &mut [Option<Result<ApiCommitResponse>>],
-    independent_outcomes: &[bool],
-    accepted_indexes: &[usize],
-    error: &CoreError,
-) {
-    let Some(first_accepted_index) = accepted_indexes.first().copied() else {
-        return;
-    };
-    for &index in accepted_indexes {
-        outcomes[index] = Some(Err(error.clone()));
+/// Before the first accepted commit, admission uses durable state only.
+fn settle_admission(slot: BatchOutcomeSlot, has_accepted_commits: bool) -> BatchOutcomeSlot {
+    match slot {
+        BatchOutcomeSlot::SettledContingent(outcome) if !has_accepted_commits => {
+            BatchOutcomeSlot::SettledIndependent(outcome)
+        }
+        slot => slot,
     }
-    for (index, outcome) in outcomes
-        .iter_mut()
-        .enumerate()
-        .skip(first_accepted_index + 1)
-    {
-        if !independent_outcomes[index] && matches!(outcome, Some(Err(_))) {
-            *outcome = Some(Err(error.clone()));
+}
+
+/// Replaces results that depend on unpublished changes with the publication error.
+fn fail_unpublished_slots(slots: &mut [BatchOutcomeSlot], error: &CoreError) {
+    for slot in slots {
+        if matches!(
+            slot,
+            BatchOutcomeSlot::Accepted | BatchOutcomeSlot::SettledContingent(_)
+        ) {
+            *slot = BatchOutcomeSlot::SettledIndependent(Err(error.clone()));
         }
     }
+}
+
+/// Resolves aliases and rejects any slot that did not settle.
+fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<ApiCommitResponse>> {
+    slots
+        .iter()
+        .map(|slot| {
+            match slot {
+                BatchOutcomeSlot::AliasOf(primary_index) => slots
+                    .get(*primary_index)
+                    .and_then(BatchOutcomeSlot::settled),
+                slot => slot.settled(),
+            }
+            .cloned()
+            .unwrap_or_else(|| Err(CoreError::Internal("unsettled batch outcome".to_owned())))
+        })
+        .collect()
 }
 
 #[cfg(test)]
