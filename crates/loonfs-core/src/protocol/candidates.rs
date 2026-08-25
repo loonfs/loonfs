@@ -210,6 +210,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
 }
 
 struct CommitContentAdmissions<'a> {
+    namespace_id: &'a NamespaceId,
     content_store_id: &'a ContentStoreId,
     admissions: &'a [ContentAdmission],
     now_ms: u64,
@@ -217,19 +218,26 @@ struct CommitContentAdmissions<'a> {
 
 impl CommitContentAdmissions<'_> {
     fn admits(&self, content_ref: &ContentRef) -> bool {
-        self.admissions
-            .iter()
-            .any(|admission| admission.admits(self.content_store_id, content_ref, self.now_ms))
+        self.admissions.iter().any(|admission| {
+            admission.admits(
+                self.namespace_id,
+                self.content_store_id,
+                content_ref,
+                self.now_ms,
+            )
+        })
     }
 }
 
 /// Checks that each put has a matching content preparation proof.
 pub(super) fn validate_commit_content_references(
     candidate: &CommitCandidate,
+    namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     now_ms: u64,
 ) -> Result<()> {
     let admissions = CommitContentAdmissions {
+        namespace_id,
         content_store_id,
         now_ms,
         admissions: match candidate.content_preparation() {

@@ -1,9 +1,10 @@
 //! Content preparation proofs and short-lived tokens used by producers.
 //!
 //! A token can be created only from a durable, completed upload session. It
-//! proves that the named content was verified before publication. Token
-//! expiry is preserved when converting it to [`PreparedContent`] and checked
-//! again when a publish batch admits the proof.
+//! proves that the named content was verified before publication. Namespace
+//! and store binding plus token expiry are preserved when converting it to
+//! [`PreparedContent`] and checked again when a publish batch admits the
+//! proof.
 
 use crate::limits::CONTENT_RECEIPT_TTL_MS;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -48,6 +49,7 @@ impl CompletedUploadReceipt {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContentAdmission {
+    namespace_id: NamespaceId,
     content_store_id: ContentStoreId,
     content_ref: ContentRef,
     expires_at_ms: u64,
@@ -56,11 +58,14 @@ pub(crate) struct ContentAdmission {
 impl ContentAdmission {
     /// Unbounded admission for a ref the caller keeps externally rooted;
     /// no deadline is derivable from the reference alone.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_durable_content_write(
+        namespace_id: NamespaceId,
         content_store_id: ContentStoreId,
         content_ref: ContentRef,
     ) -> Self {
         Self {
+            namespace_id,
             content_store_id,
             content_ref,
             expires_at_ms: u64::MAX,
@@ -68,11 +73,13 @@ impl ContentAdmission {
     }
 
     pub(crate) fn for_completed_upload(
+        namespace_id: NamespaceId,
         content_store_id: ContentStoreId,
         content_ref: ContentRef,
         expires_at_ms: u64,
     ) -> Self {
         Self {
+            namespace_id,
             content_store_id,
             content_ref,
             expires_at_ms,
@@ -81,11 +88,13 @@ impl ContentAdmission {
 
     pub(crate) fn admits(
         &self,
+        namespace_id: &NamespaceId,
         content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
         now_ms: u64,
     ) -> bool {
-        self.content_store_id == *content_store_id
+        self.namespace_id == *namespace_id
+            && self.content_store_id == *content_store_id
             && self.content_ref == *content_ref
             && now_ms <= self.expires_at_ms
     }
@@ -218,6 +227,7 @@ pub fn verify_content_token(
     }
 
     let admission = ContentAdmission::for_completed_upload(
+        payload.namespace_id,
         payload.content_store_id,
         payload.content_ref,
         payload.expires_at_ms,
@@ -291,9 +301,36 @@ mod tests {
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
 
         assert_eq!(prepared.content_ref(), &content);
-        assert!(prepared
-            .into_admission()
-            .admits(catalog.content_store_id(), &content, 1_000));
+        assert!(prepared.into_admission().admits(
+            catalog.namespace_id(),
+            catalog.content_store_id(),
+            &content,
+            1_000,
+        ));
+    }
+
+    #[test]
+    fn prepared_admission_remains_bound_to_its_namespace() {
+        let namespace = NamespaceId::parse("source").expect("namespace");
+        let other_namespace = NamespaceId::parse("target").expect("namespace");
+        let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
+        let token = mint_content_token(
+            "secret",
+            &receipt(&namespace, CONTENT_STORE, &content),
+            1_000,
+        )
+        .expect("mint");
+        let catalog = catalog_entry(namespace, CONTENT_STORE);
+        let admission = verify_content_token("secret", &catalog, &token, 1_000)
+            .expect("verify token")
+            .into_admission();
+
+        assert!(!admission.admits(
+            &other_namespace,
+            catalog.content_store_id(),
+            &content,
+            1_000,
+        ));
     }
 
     #[test]
@@ -342,11 +379,13 @@ mod tests {
 
         let admission = prepared.into_admission();
         assert!(admission.admits(
+            catalog.namespace_id(),
             catalog.content_store_id(),
             &content,
             issued_at_ms + CONTENT_RECEIPT_TTL_MS,
         ));
         assert!(!admission.admits(
+            catalog.namespace_id(),
             catalog.content_store_id(),
             &content,
             issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1,

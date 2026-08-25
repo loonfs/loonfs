@@ -397,12 +397,13 @@ accepted into a WAL batch, without yet being a committed or successful change.
 
 The embedded `loonfs::FsWriter` makes the first two stages independently
 drivable. `prepare_file_bytes` stages bytes, while `prepare_content_ref`
-fully validates an existing reference; both return opaque prepared content.
-`put_file_prepared` consumes that evidence without content-store I/O during
-publication. `complete_upload_prepared` returns the ordinary completion
-response together with the same evidence. These are embedded conveniences,
-not HTTP operations; hosted clients continue to carry validated content
-tokens on the existing wire requests.
+fully validates an existing reference and re-homes its bytes under a fresh
+content identity owned by the target namespace; both return opaque prepared
+content. `put_file_prepared` consumes that evidence without content-store I/O
+during publication. `complete_upload_prepared` returns the ordinary
+completion response together with the same evidence. These are embedded
+conveniences, not HTTP operations; hosted clients continue to carry validated
+content tokens on the existing wire requests.
 
 Staging is staging wherever it happens, so `prepare_file_bytes` opens an
 upload session for the object it writes, exactly as a remote upload does: the
@@ -412,6 +413,13 @@ last token the completed session could issue, and publication checks it when the
 batch is admitted. This is the same horizon that bounds remote upload tokens
 (section 6.3; format spec, "Garbage collection", rule 11), so content cannot
 be reclaimed and then admitted through an older in-process proof.
+
+Prepared evidence is bound to both the namespace and its content store. Two
+namespaces sharing a content store therefore cannot exchange prepared values:
+their collectors have different metadata roots and upload-session records.
+The explicit `prepare_content_ref` import is the safe handoff when only a ref
+is available; the returned prepared value names the fresh target-owned ref,
+not the input ref.
 
 ### 5.1 Commit identity and race guards
 
