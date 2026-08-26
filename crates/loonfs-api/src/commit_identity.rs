@@ -92,6 +92,32 @@ enum OperationFingerprintInput<'a> {
         content_ref: ContentRefFingerprintInput<'a>,
         expected_revision_no: Option<RevisionNo>,
     },
+    CreateDirByInode {
+        parent_inode_id: InodeId,
+        display_name: &'a str,
+    },
+    PutFileByInode {
+        parent_inode_id: InodeId,
+        display_name: &'a str,
+        content_ref: ContentRefFingerprintInput<'a>,
+    },
+    PutFileRevisionByInode {
+        inode_id: InodeId,
+        content_ref: ContentRefFingerprintInput<'a>,
+        expected_revision_no: RevisionNo,
+    },
+    MoveByInode {
+        inode_id: InodeId,
+        expected_binding_generation: &'a str,
+        to_parent_inode_id: InodeId,
+        to_display_name: &'a str,
+        behavior: DestinationBehavior,
+    },
+    DeleteByInode {
+        inode_id: InodeId,
+        expected_binding_generation: &'a str,
+        behavior: DeleteDirectoryBehavior,
+    },
     // Identity covers the complete caller-visible logical request. A changed
     // delete guard must conflict instead of replaying the old receipt
     // without checking the new guard.
@@ -188,6 +214,53 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             behavior: *behavior,
             content_ref: content_ref_fingerprint_input(content_ref),
             expected_revision_no: *expected_revision_no,
+        },
+        FilesystemOperation::CreateDirectoryByInode {
+            parent_inode_id,
+            display_name,
+        } => OperationFingerprintInput::CreateDirByInode {
+            parent_inode_id: *parent_inode_id,
+            display_name: display_name.as_str(),
+        },
+        FilesystemOperation::PutFileByInode {
+            parent_inode_id,
+            display_name,
+            content_ref,
+        } => OperationFingerprintInput::PutFileByInode {
+            parent_inode_id: *parent_inode_id,
+            display_name: display_name.as_str(),
+            content_ref: content_ref_fingerprint_input(content_ref),
+        },
+        FilesystemOperation::PutFileRevisionByInode {
+            inode_id,
+            content_ref,
+            expected_revision_no,
+        } => OperationFingerprintInput::PutFileRevisionByInode {
+            inode_id: *inode_id,
+            content_ref: content_ref_fingerprint_input(content_ref),
+            expected_revision_no: *expected_revision_no,
+        },
+        FilesystemOperation::MoveByInode {
+            inode_id,
+            expected_binding_generation,
+            to_parent_inode_id,
+            to_display_name,
+            behavior,
+        } => OperationFingerprintInput::MoveByInode {
+            inode_id: *inode_id,
+            expected_binding_generation,
+            to_parent_inode_id: *to_parent_inode_id,
+            to_display_name: to_display_name.as_str(),
+            behavior: *behavior,
+        },
+        FilesystemOperation::DeleteByInode {
+            inode_id,
+            expected_binding_generation,
+            behavior,
+        } => OperationFingerprintInput::DeleteByInode {
+            inode_id: *inode_id,
+            expected_binding_generation,
+            behavior: *behavior,
         },
         FilesystemOperation::DeletePath {
             path,
@@ -592,6 +665,30 @@ mod tests {
                 "a changed {label} must change the fingerprint"
             );
         }
+    }
+
+    #[test]
+    fn binding_generation_changes_inode_mutation_identity() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let operation = |expected_binding_generation: &str| FilesystemOperation::MoveByInode {
+            inode_id: InodeId(42),
+            expected_binding_generation: expected_binding_generation.to_owned(),
+            to_parent_inode_id: InodeId(7),
+            to_display_name: DisplayName::parse("report.txt").expect("display name"),
+            behavior: DestinationBehavior::NoReplace,
+        };
+
+        let fingerprint = |generation| {
+            semantic_commit_fingerprint(
+                &namespace_id,
+                &test_actor(),
+                None,
+                &[operation(generation)],
+            )
+            .expect("fingerprint")
+        };
+
+        assert_ne!(fingerprint("generation-a"), fingerprint("generation-b"));
     }
 
     #[test]

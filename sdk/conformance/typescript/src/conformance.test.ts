@@ -33,6 +33,7 @@ const EXPECTED_CASES = [
     "download",
     "end_to_end",
     "error_contract",
+    "inode_mutations",
     "pagination",
     "proxy",
     "upload_abort",
@@ -111,6 +112,30 @@ interface ChildrenByInodeExpected {
     minimum_page_count: number;
     initial_head_seq: number;
     renamed_head_seq: number;
+}
+
+interface InodeMutationsRequest {
+    namespace_id: string;
+    directory: string;
+    actor: ActorValue;
+    path_directory_name: string;
+    path_file_name: string;
+    inode_directory_name: string;
+    inode_file_name: string;
+    renamed_file_name: string;
+    moved_file_name: string;
+    content_utf8: string;
+    revised_content_utf8: string;
+    malformed_binding_generation: string;
+}
+
+interface InodeMutationsExpected {
+    entry_names: string[];
+    revised_revision_no: number;
+    moved_committed_seq: number;
+    deleted_committed_seq: number;
+    stale_binding_generation: ErrorStatusExpected;
+    malformed_binding_generation: ErrorStatusExpected;
 }
 
 interface ChangesRequest {
@@ -319,6 +344,28 @@ const CHILDREN_BY_INODE_EXPECTED_FIELDS = [
     "initial_head_seq",
     "renamed_head_seq",
 ] as const;
+const INODE_MUTATIONS_REQUEST_FIELDS = [
+    "namespace_id",
+    "directory",
+    "actor",
+    "path_directory_name",
+    "path_file_name",
+    "inode_directory_name",
+    "inode_file_name",
+    "renamed_file_name",
+    "moved_file_name",
+    "content_utf8",
+    "revised_content_utf8",
+    "malformed_binding_generation",
+] as const;
+const INODE_MUTATIONS_EXPECTED_FIELDS = [
+    "entry_names",
+    "revised_revision_no",
+    "moved_committed_seq",
+    "deleted_committed_seq",
+    "stale_binding_generation",
+    "malformed_binding_generation",
+] as const;
 const CHANGES_REQUEST_FIELDS = [
     "namespace_id",
     "path",
@@ -453,6 +500,17 @@ function decodeChildrenByInode(
     return [
         testCase.request as unknown as ChildrenByInodeRequest,
         testCase.expected as unknown as ChildrenByInodeExpected,
+    ];
+}
+
+function decodeInodeMutations(
+    testCase: ConformanceCase,
+): [InodeMutationsRequest, InodeMutationsExpected] {
+    strictObject(testCase.request, INODE_MUTATIONS_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, INODE_MUTATIONS_EXPECTED_FIELDS, `${testCase.name} expected`);
+    return [
+        testCase.request as unknown as InodeMutationsRequest,
+        testCase.expected as unknown as InodeMutationsExpected,
     ];
 }
 
@@ -759,6 +817,44 @@ async function assertBrowserTransfer(
     if (contentChecksum !== undefined) {
         assert.deepEqual(checksum(contentChecksum.algorithm, bytes), contentChecksum);
     }
+}
+
+async function stageContent(
+    client: LoonFSClient,
+    namespaceId: string,
+    bytes: Uint8Array,
+): Promise<CompletedUpload> {
+    const begin = await client.uploads.createUpload({
+        namespace_id: namespaceId,
+        body: { mode: "service_proxied" },
+    });
+    await client.uploads.putUploadContent(arrayBuffer(bytes), namespaceId, begin.upload_id);
+    return completedUpload(
+        await client.uploads.completeUpload({
+            namespace_id: namespaceId,
+            upload_id: begin.upload_id,
+            body: { mode: "service_proxied" },
+        }),
+    );
+}
+
+function stagedCommit(
+    namespaceId: string,
+    commitId: string,
+    actor: ActorValue,
+    operation: LoonFS.FilesystemOperation,
+    staged: CompletedUpload,
+): LoonFS.CommitRequest {
+    const request: LoonFS.CommitRequest = {
+        namespace_id: namespaceId,
+        actor,
+        commit_id: commitId,
+        operations: [operation],
+    };
+    if (staged.content_token !== undefined) {
+        request.content_tokens = [staged.content_token];
+    }
+    return request;
 }
 
 function completedUpload(response: LoonFS.UploadSession): CompletedUpload {
@@ -1211,6 +1307,226 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
     assert.deepEqual(observed, request.entry_names);
     assert.ok(resumeOffset <= request.entry_names.length);
     assert.deepEqual(resumed, request.entry_names.slice(resumeOffset));
+});
+
+conformanceTest("inode_mutations", async (activeHarness, testCase) => {
+    const [request, expected] = decodeInodeMutations(testCase);
+    const client = activeHarness.client;
+    const namespaceId = request.namespace_id;
+    const childPath = (name: string): string => `${request.directory}/${name}`;
+    await client.namespaces.createNamespace({ namespace_id: namespaceId });
+    await client.filesystem.createCommit(
+        directoryCommit(
+            namespaceId,
+            "conf-inode-mutations-directory",
+            request.actor,
+            request.directory,
+        ),
+    );
+    await client.filesystem.createCommit(
+        directoryCommit(
+            namespaceId,
+            "conf-inode-mutations-path-directory",
+            request.actor,
+            childPath(request.path_directory_name),
+        ),
+    );
+    await putFile(client, {
+        namespace_id: namespaceId,
+        path: childPath(request.path_file_name),
+        bytes: new TextEncoder().encode(request.content_utf8),
+        actor: request.actor,
+        commit_id: "conf-inode-mutations-path-file",
+    });
+
+    const parent = await client.filesystem.getPathEntry({
+        namespace_id: namespaceId,
+        path: request.directory,
+    });
+    await client.filesystem.createCommit({
+        namespace_id: namespaceId,
+        actor: request.actor,
+        commit_id: "conf-inode-mutations-inode-directory",
+        operations: [
+            {
+                kind: "create_directory_by_inode",
+                parent_inode_id: parent.inode_id,
+                display_name: request.inode_directory_name,
+            },
+        ],
+    });
+    let staged = await stageContent(
+        client,
+        namespaceId,
+        new TextEncoder().encode(request.content_utf8),
+    );
+    await client.filesystem.createCommit(
+        stagedCommit(
+            namespaceId,
+            "conf-inode-mutations-inode-file",
+            request.actor,
+            {
+                kind: "put_file_by_inode",
+                parent_inode_id: parent.inode_id,
+                display_name: request.inode_file_name,
+                content_ref: staged.content_ref,
+            },
+            staged,
+        ),
+    );
+
+    const listing = await client.filesystem.listPathEntries({
+        namespace_id: namespaceId,
+        path: request.directory,
+    });
+    const entries = listing.data;
+    assert.deepEqual(listedNames(entries), expected.entry_names);
+    const generations = new Set(
+        entries.map((entry) => {
+            assert.ok(entry.binding_generation != null, "listed entry has no binding_generation");
+            return entry.binding_generation;
+        }),
+    );
+    assert.equal(generations.size, entries.length);
+    const entryNamed = (name: string): LoonFS.PathEntry => {
+        const entry = entries.find((candidate) => candidate.display_name === name);
+        assert.ok(entry != null, `listed entry ${name} is missing`);
+        return entry;
+    };
+    assert.equal(
+        entryNamed(request.inode_directory_name).inode_kind,
+        entryNamed(request.path_directory_name).inode_kind,
+    );
+    const inodeFile = fileEntry(entryNamed(request.inode_file_name));
+    assert.equal(inodeFile.size_bytes, fileEntry(entryNamed(request.path_file_name)).size_bytes);
+    assert.equal(inodeFile.parent_inode_id, parent.inode_id);
+
+    staged = await stageContent(
+        client,
+        namespaceId,
+        new TextEncoder().encode(request.revised_content_utf8),
+    );
+    await client.filesystem.createCommit(
+        stagedCommit(
+            namespaceId,
+            "conf-inode-mutations-revision",
+            request.actor,
+            {
+                kind: "put_file_revision_by_inode",
+                inode_id: inodeFile.inode_id,
+                content_ref: staged.content_ref,
+                expected_revision_no: inodeFile.revision_no,
+            },
+            staged,
+        ),
+    );
+    const revised = fileEntry(
+        await client.filesystem.getPathEntry({
+            namespace_id: namespaceId,
+            path: childPath(request.inode_file_name),
+        }),
+    );
+    assert.equal(revised.revision_no, expected.revised_revision_no);
+    assert.deepEqual(
+        await readProxied(client, namespaceId, childPath(request.inode_file_name)),
+        new TextEncoder().encode(request.revised_content_utf8),
+    );
+
+    await client.filesystem.createCommit(
+        moveCommit(
+            namespaceId,
+            "conf-inode-mutations-rename",
+            request.actor,
+            childPath(request.inode_file_name),
+            childPath(request.renamed_file_name),
+        ),
+    );
+    const moveByInode = (commitId: string, generation: string): LoonFS.CommitRequest => ({
+        namespace_id: namespaceId,
+        actor: request.actor,
+        commit_id: commitId,
+        operations: [
+            {
+                kind: "move_by_inode",
+                inode_id: inodeFile.inode_id,
+                expected_binding_generation: generation,
+                to_parent_inode_id: entryNamed(request.inode_directory_name).inode_id,
+                to_display_name: request.moved_file_name,
+                behavior: "no_replace",
+            },
+        ],
+    });
+
+    assert.ok(revised.binding_generation != null, "revised entry has no binding_generation");
+    await assert.rejects(
+        client.filesystem.createCommit(
+            moveByInode("conf-inode-mutations-stale-move", revised.binding_generation),
+        ),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.ConflictError);
+            assert.equal(error.statusCode, expected.stale_binding_generation.status);
+            assert.equal(error.body.code, expected.stale_binding_generation.code);
+            return true;
+        },
+    );
+    await assert.rejects(
+        client.filesystem.createCommit(
+            moveByInode(
+                "conf-inode-mutations-malformed-move",
+                request.malformed_binding_generation,
+            ),
+        ),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.BadRequestError);
+            assert.equal(error.statusCode, expected.malformed_binding_generation.status);
+            assert.equal(error.body.code, expected.malformed_binding_generation.code);
+            return true;
+        },
+    );
+
+    const renamed = await client.filesystem.getPathEntry({
+        namespace_id: namespaceId,
+        path: childPath(request.renamed_file_name),
+    });
+    assert.ok(renamed.binding_generation != null, "renamed entry has no binding_generation");
+    const moved = await client.filesystem.createCommit(
+        moveByInode("conf-inode-mutations-move", renamed.binding_generation),
+    );
+    assert.equal(moved.committed_seq, expected.moved_committed_seq);
+    const movedEntry = await client.filesystem.getPathEntry({
+        namespace_id: namespaceId,
+        path: `${childPath(request.inode_directory_name)}/${request.moved_file_name}`,
+    });
+    assert.equal(movedEntry.inode_id, inodeFile.inode_id);
+    assert.ok(movedEntry.binding_generation != null, "moved entry has no binding_generation");
+    assert.notEqual(movedEntry.binding_generation, renamed.binding_generation);
+
+    const feed = await client.filesystem.listChanges({
+        namespace_id: namespaceId,
+        after_seq: expected.moved_committed_seq - 1,
+        limit: 1,
+    });
+    assert.equal(feed.changes.length, 1);
+    const events = feed.changes[0]?.events ?? [];
+    assert.equal(events.length, 1);
+    const movedEvent = events[0];
+    assert.ok(movedEvent?.kind === "moved");
+    assert.equal(movedEvent.binding_generation, movedEntry.binding_generation);
+
+    const deleted = await client.filesystem.createCommit({
+        namespace_id: namespaceId,
+        actor: request.actor,
+        commit_id: "conf-inode-mutations-delete",
+        operations: [
+            {
+                kind: "delete_by_inode",
+                inode_id: inodeFile.inode_id,
+                expected_binding_generation: movedEntry.binding_generation,
+                behavior: "non_recursive",
+            },
+        ],
+    });
+    assert.equal(deleted.committed_seq, expected.deleted_committed_seq);
 });
 
 test("proxy", { skip: environmentSkip }, async (context) => {

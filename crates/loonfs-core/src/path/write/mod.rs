@@ -4,6 +4,7 @@
 
 mod intent;
 mod plan_attributes;
+mod plan_by_inode;
 mod plan_create;
 mod plan_delete;
 mod plan_restore;

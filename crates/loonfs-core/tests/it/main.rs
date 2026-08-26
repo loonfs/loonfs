@@ -9,6 +9,7 @@ mod commit_validation;
 mod common;
 mod differential;
 mod fork_lifecycle;
+mod inode_mutations;
 mod layout_acceptance;
 mod path_intents;
 mod upload_sessions;

@@ -124,6 +124,9 @@ pub enum CoreError {
         /// supplied by the caller.
         existing_display_name: Option<String>,
     },
+    /// The requested binding generation is no longer current.
+    #[error("inode `{inode_id}` is no longer bound at the generation the request named")]
+    BindingGenerationMismatch { inode_id: InodeId },
     #[error("commit id conflict for `{commit_id}`")]
     CommitIdReuseConflict {
         commit_id: String,
@@ -390,6 +393,7 @@ impl CoreError {
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
+            CoreError::BindingGenerationMismatch { .. } => ErrorCode::BindingGenerationMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,

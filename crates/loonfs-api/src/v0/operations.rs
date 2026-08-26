@@ -7,7 +7,7 @@
 use super::ContentToken;
 use crate::{
     AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CheckpointId,
-    CommitId, ContentRef, InodeId, ManifestNo, NamespaceId, RevisionNo, WriterEpoch,
+    CommitId, ContentRef, DisplayName, InodeId, ManifestNo, NamespaceId, RevisionNo, WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -234,12 +234,10 @@ pub enum DeleteDirectoryBehavior {
     Recursive,
 }
 
-/// One path-oriented filesystem operation.
+/// One filesystem operation.
 ///
-/// Unknown fields are rejected because concurrency guards are optional. A
-/// misspelled guard must fail decoding instead of silently becoming `None`
-/// and allowing an unguarded write. Any future fieldless variant must use
-/// empty braces so serde also rejects unexpected fields for that variant.
+/// Unknown fields are rejected so a misspelled concurrency guard cannot be ignored.
+/// Fieldless variants must use empty braces so serde rejects unexpected fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -256,6 +254,22 @@ pub enum FilesystemOperation {
         /// `put_file` performs). The final component must still be new.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         parents: bool,
+    },
+    /// Create a directory under an existing parent inode.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationCreateDirectoryByInode")
+    )]
+    CreateDirectoryByInode {
+        /// Parent directory.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        parent_inode_id: InodeId,
+        /// New directory name.
+        display_name: DisplayName,
     },
     /// Create or replace one file with an already-durable content ref.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationPutFile"))]
@@ -274,6 +288,42 @@ pub enum FilesystemOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_revision_no: Option<RevisionNo>,
+    },
+    /// Create a file under an existing parent inode. The name must be unused.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationPutFileByInode")
+    )]
+    PutFileByInode {
+        /// Parent directory.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        parent_inode_id: InodeId,
+        /// New file name.
+        display_name: DisplayName,
+        /// Immutable bytes that must be covered by a valid preparation proof.
+        content_ref: ContentRef,
+    },
+    /// Append a revision to a file inode if its current revision matches.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationPutFileRevisionByInode")
+    )]
+    PutFileRevisionByInode {
+        /// File to update.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        inode_id: InodeId,
+        /// Immutable bytes that must be covered by a valid preparation proof.
+        content_ref: ContentRef,
+        /// Current revision required for the write.
+        expected_revision_no: RevisionNo,
     },
     /// Delete one path.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationDeletePath"))]
@@ -297,6 +347,25 @@ pub enum FilesystemOperation {
         )]
         expected_inode_id: Option<InodeId>,
     },
+    /// Delete an inode if its current binding matches.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationDeleteByInode")
+    )]
+    DeleteByInode {
+        /// Inode to delete.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        inode_id: InodeId,
+        /// Binding generation required for the delete.
+        expected_binding_generation: String,
+        /// Whether a non-empty directory may be tombstoned recursively.
+        #[serde(default)]
+        behavior: DeleteDirectoryBehavior,
+    },
     /// Move one path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMovePath"))]
     MovePath {
@@ -304,6 +373,31 @@ pub enum FilesystemOperation {
         from_path: AbsolutePath,
         /// Absolute destination whose parent must be visible and writable.
         to_path: AbsolutePath,
+        /// Whether an existing destination file may be replaced.
+        #[serde(default)]
+        behavior: DestinationBehavior,
+    },
+    /// Move an inode if its current binding matches.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMoveByInode"))]
+    MoveByInode {
+        /// Inode to move.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        inode_id: InodeId,
+        /// Binding generation required for the move.
+        expected_binding_generation: String,
+        /// Destination directory.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        to_parent_inode_id: InodeId,
+        /// New name.
+        to_display_name: DisplayName,
         /// Whether an existing destination file may be replaced.
         #[serde(default)]
         behavior: DestinationBehavior,
@@ -396,6 +490,27 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_attributes_revision_no: Option<AttributeRevisionNo>,
     },
+}
+
+impl FilesystemOperation {
+    /// Returns the content written by this operation, if any.
+    pub const fn content_ref(&self) -> Option<&ContentRef> {
+        match self {
+            Self::PutFile { content_ref, .. }
+            | Self::PutFileByInode { content_ref, .. }
+            | Self::PutFileRevisionByInode { content_ref, .. } => Some(content_ref),
+            Self::CreateDirectory { .. }
+            | Self::CreateDirectoryByInode { .. }
+            | Self::DeletePath { .. }
+            | Self::DeleteByInode { .. }
+            | Self::MovePath { .. }
+            | Self::MoveByInode { .. }
+            | Self::CopyPath { .. }
+            | Self::Undelete { .. }
+            | Self::RestoreRevision { .. }
+            | Self::UpdateAttributes { .. } => None,
+        }
+    }
 }
 
 /// A request to commit one or more filesystem operations.

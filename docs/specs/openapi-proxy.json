@@ -2469,13 +2469,28 @@
             "$ref": "#/components/schemas/FilesystemOperationCreateDirectory"
           },
           {
+            "$ref": "#/components/schemas/FilesystemOperationCreateDirectoryByInode"
+          },
+          {
             "$ref": "#/components/schemas/FilesystemOperationPutFile"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemOperationPutFileByInode"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemOperationPutFileRevisionByInode"
           },
           {
             "$ref": "#/components/schemas/FilesystemOperationDeletePath"
           },
           {
+            "$ref": "#/components/schemas/FilesystemOperationDeleteByInode"
+          },
+          {
             "$ref": "#/components/schemas/FilesystemOperationMovePath"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemOperationMoveByInode"
           },
           {
             "$ref": "#/components/schemas/FilesystemOperationCopyPath"
@@ -2490,14 +2505,19 @@
             "$ref": "#/components/schemas/FilesystemOperationUpdateAttributes"
           }
         ],
-        "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because concurrency guards are optional. A\nmisspelled guard must fail decoding instead of silently becoming `None`\nand allowing an unguarded write. Any future fieldless variant must use\nempty braces so serde also rejects unexpected fields for that variant.",
+        "description": "One filesystem operation.\n\nUnknown fields are rejected so a misspelled concurrency guard cannot be ignored.\nFieldless variants must use empty braces so serde rejects unexpected fields.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
             "create_directory": "#/components/schemas/FilesystemOperationCreateDirectory",
+            "create_directory_by_inode": "#/components/schemas/FilesystemOperationCreateDirectoryByInode",
             "put_file": "#/components/schemas/FilesystemOperationPutFile",
+            "put_file_by_inode": "#/components/schemas/FilesystemOperationPutFileByInode",
+            "put_file_revision_by_inode": "#/components/schemas/FilesystemOperationPutFileRevisionByInode",
             "delete_path": "#/components/schemas/FilesystemOperationDeletePath",
+            "delete_by_inode": "#/components/schemas/FilesystemOperationDeleteByInode",
             "move_path": "#/components/schemas/FilesystemOperationMovePath",
+            "move_by_inode": "#/components/schemas/FilesystemOperationMoveByInode",
             "copy_path": "#/components/schemas/FilesystemOperationCopyPath",
             "undelete": "#/components/schemas/FilesystemOperationUndelete",
             "restore_revision": "#/components/schemas/FilesystemOperationRestoreRevision",
@@ -3498,6 +3518,33 @@
           }
         }
       },
+      "FilesystemOperationCreateDirectoryByInode": {
+        "type": "object",
+        "description": "Create a directory under an existing parent inode.",
+        "required": [
+          "parent_inode_id",
+          "display_name",
+          "kind"
+        ],
+        "properties": {
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "New directory name."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "create_directory_by_inode"
+            ]
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
       "FilesystemOperationPutFile": {
         "type": "object",
         "description": "Create or replace one file with an already-durable content ref.",
@@ -3531,6 +3578,70 @@
           }
         }
       },
+      "FilesystemOperationPutFileByInode": {
+        "type": "object",
+        "description": "Create a file under an existing parent inode. The name must be unused.",
+        "required": [
+          "parent_inode_id",
+          "display_name",
+          "content_ref",
+          "kind"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Immutable bytes that must be covered by a valid preparation proof."
+          },
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "New file name."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "put_file_by_inode"
+            ]
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "FilesystemOperationPutFileRevisionByInode": {
+        "type": "object",
+        "description": "Append a revision to a file inode if its current revision matches.",
+        "required": [
+          "inode_id",
+          "content_ref",
+          "expected_revision_no",
+          "kind"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Immutable bytes that must be covered by a valid preparation proof."
+          },
+          "expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Current revision required for the write."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "put_file_revision_by_inode"
+            ]
+          }
+        }
+      },
       "FilesystemOperationDeletePath": {
         "type": "object",
         "description": "Delete one path.",
@@ -3561,6 +3672,37 @@
           }
         }
       },
+      "FilesystemOperationDeleteByInode": {
+        "type": "object",
+        "description": "Delete an inode if its current binding matches.",
+        "required": [
+          "inode_id",
+          "expected_binding_generation",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DeleteDirectoryBehavior",
+            "description": "Whether a non-empty directory may be tombstoned recursively."
+          },
+          "expected_binding_generation": {
+            "type": "string",
+            "description": "Binding generation required for the delete."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "delete_by_inode"
+            ]
+          }
+        }
+      },
       "FilesystemOperationMovePath": {
         "type": "object",
         "description": "Move one path to another path.",
@@ -3587,6 +3729,49 @@
           "to_path": {
             "$ref": "#/components/schemas/AbsolutePath",
             "description": "Absolute destination whose parent must be visible and writable."
+          }
+        }
+      },
+      "FilesystemOperationMoveByInode": {
+        "type": "object",
+        "description": "Move an inode if its current binding matches.",
+        "required": [
+          "inode_id",
+          "expected_binding_generation",
+          "to_parent_inode_id",
+          "to_display_name",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DestinationBehavior",
+            "description": "Whether an existing destination file may be replaced."
+          },
+          "expected_binding_generation": {
+            "type": "string",
+            "description": "Binding generation required for the move."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "move_by_inode"
+            ]
+          },
+          "to_display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "New name."
+          },
+          "to_parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           }
         }
       },

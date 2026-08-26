@@ -1,0 +1,40 @@
+{
+  "name": "inode_mutations",
+  "intent": "Checks inode-addressed creates and revisions, and the binding generation guarding an inode-addressed move and delete.",
+  "request": {
+    "namespace_id": "conf-inode-mutations",
+    "directory": "/tree",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-inode-mutations"
+    },
+    "path_directory_name": "by-path-dir",
+    "path_file_name": "by-path-file",
+    "inode_directory_name": "by-inode-dir",
+    "inode_file_name": "by-inode-file",
+    "renamed_file_name": "renamed-file",
+    "moved_file_name": "moved-file",
+    "content_utf8": "inode mutations",
+    "revised_content_utf8": "inode mutations, revised",
+    "malformed_binding_generation": "not-a-binding-generation"
+  },
+  "expected": {
+    "entry_names": [
+      "by-inode-dir",
+      "by-inode-file",
+      "by-path-dir",
+      "by-path-file"
+    ],
+    "revised_revision_no": 2,
+    "moved_committed_seq": 8,
+    "deleted_committed_seq": 9,
+    "stale_binding_generation": {
+      "status": 409,
+      "code": "binding_generation_mismatch"
+    },
+    "malformed_binding_generation": {
+      "status": 400,
+      "code": "invalid_request"
+    }
+  }
+}

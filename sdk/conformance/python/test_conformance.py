@@ -21,6 +21,7 @@ import pytest
 import uvicorn
 from loonfs_sdk import (
     ActorRef,
+    BadRequestError,
     BeginUploadRequest_DirectMultipart,
     BeginUploadRequest_DirectPut,
     BeginUploadRequest_ServiceProxied,
@@ -30,11 +31,18 @@ from loonfs_sdk import (
     CommitResponse,
     CompleteUploadRequest_DirectMultipart,
     CompleteUploadRequest_DirectPut,
+    CompleteUploadRequest_ServiceProxied,
     CompletedUploadPart,
+    ConflictError,
     FilesystemOperation_CreateDirectory,
+    FilesystemOperation_CreateDirectoryByInode,
+    FilesystemOperation_DeleteByInode,
     FilesystemOperation_DeletePath,
+    FilesystemOperation_MoveByInode,
     FilesystemOperation_MovePath,
     FilesystemOperation_PutFile,
+    FilesystemOperation_PutFileByInode,
+    FilesystemOperation_PutFileRevisionByInode,
     ListPathEntriesResponse,
     LoonFS,
     PathEntry,
@@ -59,6 +67,7 @@ EXPECTED_CASES = [
     "download",
     "end_to_end",
     "error_contract",
+    "inode_mutations",
     "pagination",
     "proxy",
     "upload_abort",
@@ -247,6 +256,32 @@ class ChildrenByInodeExpected:
     minimum_page_count: int
     initial_head_seq: int
     renamed_head_seq: int
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class InodeMutationsRequest:
+    namespace_id: str
+    directory: str
+    actor: ActorRef
+    path_directory_name: str
+    path_file_name: str
+    inode_directory_name: str
+    inode_file_name: str
+    renamed_file_name: str
+    moved_file_name: str
+    content_utf8: str
+    revised_content_utf8: str
+    malformed_binding_generation: str
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class InodeMutationsExpected:
+    entry_names: list[str]
+    revised_revision_no: int
+    moved_committed_seq: int
+    deleted_committed_seq: int
+    stale_binding_generation: ErrorStatusExpected
+    malformed_binding_generation: ErrorStatusExpected
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -497,6 +532,23 @@ def _completed_upload(response: UploadSession) -> UploadSession_Completed:
         response, UploadSession_Completed
     ), f"upload {response.upload_id} is {response.status}, not completed"
     return response
+
+
+def _stage_content(
+    client: LoonFS, namespace_id: str, payload: bytes
+) -> UploadSession_Completed:
+    begin = client.uploads.create_upload(
+        namespace_id, request=BeginUploadRequest_ServiceProxied()
+    )
+    assert isinstance(begin, BeginUploadResponse_ServiceProxied)
+    client.uploads.put_upload_content(namespace_id, begin.upload_id, request=payload)
+    return _completed_upload(
+        client.uploads.complete_upload(
+            namespace_id,
+            begin.upload_id,
+            request=CompleteUploadRequest_ServiceProxied(),
+        )
+    )
 
 
 def _aborted_upload(response: UploadSession) -> UploadSession_Aborted:
@@ -800,6 +852,186 @@ def test_children_by_inode(
     assert observed == request.entry_names
     assert resume_offset <= len(request.entry_names)
     assert resumed == request.entry_names[resume_offset:]
+
+
+def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode(
+        cases["inode_mutations"], InodeMutationsRequest, InodeMutationsExpected
+    )
+    client = harness.client
+    namespace_id = request.namespace_id
+
+    def child_path(name: str) -> str:
+        return f"{request.directory}/{name}"
+
+    client.namespaces.create_namespace(namespace_id=namespace_id)
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-mutations-directory",
+        request.actor,
+        FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
+    )
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-mutations-path-directory",
+        request.actor,
+        FilesystemOperation_CreateDirectory(
+            path=child_path(request.path_directory_name), parents=False
+        ),
+    )
+    put_file(
+        client,
+        namespace_id=namespace_id,
+        path=child_path(request.path_file_name),
+        content=request.content_utf8.encode(),
+        actor=request.actor,
+        commit_id="conf-inode-mutations-path-file",
+    )
+
+    parent_inode_id = client.filesystem.get_path_entry(
+        namespace_id, path=request.directory
+    ).inode_id
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-mutations-inode-directory",
+        request.actor,
+        FilesystemOperation_CreateDirectoryByInode(
+            parent_inode_id=parent_inode_id,
+            display_name=request.inode_directory_name,
+        ),
+    )
+    staged = _stage_content(client, namespace_id, request.content_utf8.encode())
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-mutations-inode-file",
+        request.actor,
+        FilesystemOperation_PutFileByInode(
+            parent_inode_id=parent_inode_id,
+            display_name=request.inode_file_name,
+            content_ref=staged.content_ref,
+        ),
+        content_tokens=[staged.content_token] if staged.content_token else None,
+    )
+
+    entries = client.filesystem.list_path_entries(
+        namespace_id, path=request.directory
+    ).entries
+    assert _listed_names(entries) == expected.entry_names
+    generations = {entry.binding_generation for entry in entries}
+    assert None not in generations, "listed entry has no binding_generation"
+    assert len(generations) == len(entries)
+
+    def entry_named(name: str) -> PathEntry:
+        return next(entry for entry in entries if entry.display_name == name)
+
+    assert (
+        entry_named(request.inode_directory_name).inode_kind
+        == entry_named(request.path_directory_name).inode_kind
+    )
+    inode_file = _file_entry(entry_named(request.inode_file_name))
+    assert inode_file.size_bytes == _file_entry(
+        entry_named(request.path_file_name)
+    ).size_bytes
+    assert inode_file.parent_inode_id == parent_inode_id
+
+    staged = _stage_content(client, namespace_id, request.revised_content_utf8.encode())
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-mutations-revision",
+        request.actor,
+        FilesystemOperation_PutFileRevisionByInode(
+            inode_id=inode_file.inode_id,
+            content_ref=staged.content_ref,
+            expected_revision_no=inode_file.revision_no,
+        ),
+        content_tokens=[staged.content_token] if staged.content_token else None,
+    )
+    revised = _file_entry(
+        client.filesystem.get_path_entry(
+            namespace_id, path=child_path(request.inode_file_name)
+        )
+    )
+    assert revised.revision_no == expected.revised_revision_no
+    assert (
+        _read_proxied(client, namespace_id, child_path(request.inode_file_name))
+        == request.revised_content_utf8.encode()
+    )
+
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-mutations-rename",
+        request.actor,
+        FilesystemOperation_MovePath(
+            from_path=child_path(request.inode_file_name),
+            to_path=child_path(request.renamed_file_name),
+        ),
+    )
+
+    def move_by_inode(commit_id: str, generation: str) -> Any:
+        return _apply(
+            client,
+            namespace_id,
+            commit_id,
+            request.actor,
+            FilesystemOperation_MoveByInode(
+                inode_id=inode_file.inode_id,
+                expected_binding_generation=generation,
+                to_parent_inode_id=entry_named(request.inode_directory_name).inode_id,
+                to_display_name=request.moved_file_name,
+            ),
+        )
+
+    with pytest.raises(ConflictError) as stale:
+        move_by_inode("conf-inode-mutations-stale-move", revised.binding_generation)
+    assert stale.value.status_code == expected.stale_binding_generation.status
+    assert stale.value.body.code == expected.stale_binding_generation.code
+
+    with pytest.raises(BadRequestError) as malformed:
+        move_by_inode(
+            "conf-inode-mutations-malformed-move",
+            request.malformed_binding_generation,
+        )
+    assert malformed.value.status_code == expected.malformed_binding_generation.status
+    assert malformed.value.body.code == expected.malformed_binding_generation.code
+
+    fresh_generation = client.filesystem.get_path_entry(
+        namespace_id, path=child_path(request.renamed_file_name)
+    ).binding_generation
+    moved = move_by_inode("conf-inode-mutations-move", fresh_generation)
+    assert moved.committed_seq == expected.moved_committed_seq
+    moved_entry = client.filesystem.get_path_entry(
+        namespace_id,
+        path=f"{child_path(request.inode_directory_name)}/{request.moved_file_name}",
+    )
+    assert moved_entry.inode_id == inode_file.inode_id
+    assert moved_entry.binding_generation != fresh_generation
+
+    feed = client.filesystem.list_changes(
+        namespace_id, after_seq=expected.moved_committed_seq - 1, limit=1
+    )
+    assert len(feed.changes) == 1
+    events = feed.changes[0].events
+    assert len(events) == 1
+    assert events[0].kind == "moved"
+    assert events[0].binding_generation == moved_entry.binding_generation
+
+    deleted = _apply(
+        client,
+        namespace_id,
+        "conf-inode-mutations-delete",
+        request.actor,
+        FilesystemOperation_DeleteByInode(
+            inode_id=inode_file.inode_id,
+            expected_binding_generation=moved_entry.binding_generation,
+        ),
+    )
+    assert deleted.committed_seq == expected.deleted_committed_seq
 
 
 def test_proxy(

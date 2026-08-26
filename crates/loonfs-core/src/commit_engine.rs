@@ -145,10 +145,7 @@ impl CommitCandidate {
             .request
             .operations
             .iter()
-            .filter_map(|operation| match operation {
-                FilesystemOperation::PutFile { content_ref, .. } => Some(content_ref),
-                _ => None,
-            })
+            .filter_map(FilesystemOperation::content_ref)
             .collect::<HashSet<_>>()
             .len();
         if distinct_content_refs > crate::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS {
