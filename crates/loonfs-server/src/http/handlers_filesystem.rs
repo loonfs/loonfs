@@ -485,10 +485,7 @@ pub(super) async fn create_commit(
     // to the content, not to the operation that names it.
     let put_content_refs = operations
         .iter()
-        .filter_map(|operation| match operation {
-            FilesystemOperation::PutFile { content_ref, .. } => Some(content_ref),
-            _ => None,
-        })
+        .filter_map(FilesystemOperation::content_ref)
         .collect::<Vec<_>>();
     // A request that puts nothing skips both the preparation pass and the
     // put span; one that puts is classified by the bytes it publishes.

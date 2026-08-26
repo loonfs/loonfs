@@ -459,7 +459,7 @@ inode-addressed move or delete, and `expected_head_seq` on a namespace
 delete. A guard is evaluated against the state its own operation sees, which
 includes what earlier operations in the same request did.
 
-Commit bodies reject unknown fields so a misspelled guard cannot be ignored. For example, `expected_revsion_no` returns `invalid_request` instead of applying an unguarded write.
+Commit bodies reject unknown fields so a misspelled guard cannot be ignored. For example, dropping a letter from `expected_revision_no` returns `invalid_request` instead of applying an unguarded write.
 
 Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens.
 
