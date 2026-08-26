@@ -249,10 +249,13 @@ pub(super) fn validate_commit_content_references(
             }
         },
     };
-    for operation in &candidate.request().operations {
-        if let FilesystemOperation::PutFile { content_ref, .. } = operation {
-            require_content_admission(&admissions, content_ref)?;
-        }
+    for content_ref in candidate
+        .request()
+        .operations
+        .iter()
+        .filter_map(FilesystemOperation::content_ref)
+    {
+        require_content_admission(&admissions, content_ref)?;
     }
 
     Ok(())

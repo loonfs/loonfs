@@ -1469,8 +1469,8 @@ writers.
 
 ### 3.5 Standard mutation operations
 
-A commit request contains an ordered list of path operations. These are the
-eight supported operations:
+A commit request contains an ordered list of operations. Eight of them address
+their targets by path:
 
 - `create_directory(path, parents)`
 - `put_file(path, content_ref, behavior, expected_revision_no?)`
@@ -1481,18 +1481,37 @@ eight supported operations:
 - `restore_revision(path, source_revision_no)`
 - `update_attributes(path, set, remove, expected_inode_id?, expected_attributes_revision_no?)`
 
-Every `path`, `from_path`, and `to_path` is a canonical absolute path
-(section 2.3).
+Five address them by inode:
 
-Parameters marked `?` are optional and have no default. The three `expected_*`
-parameters prevent races; omitting one disables that check. `undelete.path`
-overrides the original parent and name, and is required if the deletion did
-not record a binding.
+- `create_directory_by_inode(parent_inode_id, display_name)`
+- `put_file_by_inode(parent_inode_id, display_name, content_ref)`
+- `put_file_revision_by_inode(inode_id, content_ref, expected_revision_no)`
+- `move_by_inode(inode_id, expected_binding_generation, to_parent_inode_id, to_display_name, behavior)`
+- `delete_by_inode(inode_id, expected_binding_generation, behavior)`
+
+Every `path`, `from_path`, and `to_path` is a canonical absolute path
+(section 2.3). Every `display_name` and `to_display_name` is one path
+component under the same grammar.
+
+Parameters marked `?` are optional and have no default. The three optional
+`expected_*` parameters prevent races; omitting one disables that check. The
+inode-addressed operations take their guards as required parameters instead:
+`put_file_revision_by_inode` always names the revision it writes over, and
+`move_by_inode` and `delete_by_inode` always name the binding generation their
+target must still be bound at: the `bind_seq` and `bind_delta_index` of that
+target's current binding, which the API spec, section 5.1, carries as one
+opaque token. `undelete.path` overrides the original parent and name, and is
+required if the deletion did not record a binding.
 
 `parents`, `behavior`, `set`, and `remove` are also optional, but they have
 defaults. `parents` defaults to false. `behavior` defaults to `no_replace` for
-`put_file`, `move_path`, and `copy_path`, and to `non_recursive` for
-`delete_path`. `set` and `remove` default to empty collections.
+`put_file`, `move_path`, `copy_path`, and `move_by_inode`, and to
+`non_recursive` for `delete_path` and `delete_by_inode`. `set` and `remove`
+default to empty collections.
+
+An inode-addressed operation produces the same internal inode changes, and so
+the same WAL deltas, as the path-addressed operation that reaches the same
+target. Only the addressing differs.
 
 The operation kind and parameters are part of the durable commit fingerprint
 (section 3.3.1), so this list is part of the format. The server converts each

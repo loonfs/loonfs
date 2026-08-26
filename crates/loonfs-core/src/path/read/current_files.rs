@@ -87,7 +87,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
 }
 
 /// Resolves a visible inode and its current path through parent bindings.
-pub(super) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
+pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
     ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
     inode_id: InodeId,

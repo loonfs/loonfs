@@ -3,6 +3,10 @@
 
 use super::intent::{CommitRequest, FilesystemOperation};
 use super::plan_attributes::plan_publish_update_attributes;
+use super::plan_by_inode::{
+    plan_publish_create_by_inode, plan_publish_delete_by_inode, plan_publish_move_by_inode,
+    plan_publish_put_file_revision_by_inode, NewChild,
+};
 use super::plan_create::{
     plan_publish_create_directory, plan_publish_put_file_content_ref, plan_publish_undelete,
 };
@@ -82,6 +86,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         let unit = {
             let resolution_view = resolved.view();
             let view = PublishPathPlanningView {
+                namespace_id: &head.namespace_id,
                 metadata_state: &resolution_view,
             };
             plan_operation(operation, &view, allocation)
@@ -141,11 +146,76 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             )
             .await
         }
+        FilesystemOperation::CreateDirectoryByInode {
+            parent_inode_id,
+            display_name,
+        } => {
+            plan_publish_create_by_inode(
+                *parent_inode_id,
+                display_name,
+                NewChild::Directory,
+                view,
+                allocation,
+            )
+            .await
+        }
+        FilesystemOperation::PutFileByInode {
+            parent_inode_id,
+            display_name,
+            content_ref,
+        } => {
+            plan_publish_create_by_inode(
+                *parent_inode_id,
+                display_name,
+                NewChild::File(content_ref.clone()),
+                view,
+                allocation,
+            )
+            .await
+        }
+        FilesystemOperation::PutFileRevisionByInode {
+            inode_id,
+            content_ref,
+            expected_revision_no,
+        } => {
+            plan_publish_put_file_revision_by_inode(
+                *inode_id,
+                content_ref.clone(),
+                *expected_revision_no,
+                view,
+            )
+            .await
+        }
         FilesystemOperation::DeletePath {
             path,
             behavior,
             expected_inode_id,
         } => plan_publish_delete_path(path, *behavior, *expected_inode_id, view).await,
+        FilesystemOperation::DeleteByInode {
+            inode_id,
+            expected_binding_generation,
+            behavior,
+        } => {
+            plan_publish_delete_by_inode(*inode_id, expected_binding_generation, *behavior, view)
+                .await
+        }
+        FilesystemOperation::MoveByInode {
+            inode_id,
+            expected_binding_generation,
+            to_parent_inode_id,
+            to_display_name,
+            behavior,
+        } => {
+            plan_publish_move_by_inode(
+                *inode_id,
+                expected_binding_generation,
+                *to_parent_inode_id,
+                to_display_name,
+                *behavior,
+                view,
+            )
+            .await
+        }
         FilesystemOperation::MovePath {
             from_path,
             to_path,

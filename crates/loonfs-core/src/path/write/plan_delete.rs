@@ -5,6 +5,7 @@ use super::publish_path_planning::{
 };
 use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
+use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::ensure_mutation_path;
 use loonfs_api::{
     AbsolutePath, DeleteDirectoryBehavior, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
@@ -45,6 +46,17 @@ pub(super) async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
             );
         }
     }
+    publish_plan_delete(view, &resolved, behavior, absolute_path.as_str()).await
+}
+
+/// Compiles a resolved delete into its tombstone, whichever way the caller
+/// addressed the target. `target_path` is the spelling its errors name.
+pub(super) async fn publish_plan_delete<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    resolved: &ResolvedVisiblePath,
+    behavior: DeleteDirectoryBehavior,
+    target_path: &str,
+) -> Result<CompiledFilesystemOperation> {
     let recursive = behavior == DeleteDirectoryBehavior::Recursive;
     let op = match resolved.inode_kind {
         InodeKind::File => ApiCommitOp::DeleteFile {
@@ -59,16 +71,14 @@ pub(super) async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
                 .has_visible_children(resolved.inode_id)
                 .await?
             {
-                return Err(CoreError::DirectoryNotEmpty(
-                    absolute_path.as_str().to_owned(),
-                ));
+                return Err(CoreError::DirectoryNotEmpty(target_path.to_owned()));
             }
             ApiCommitOp::DeleteSubtree {
                 root_inode_id: resolved.inode_id,
             }
         }
     };
-    let mut preconditions = vec![publish_binding_is_precondition(view, &resolved).await?];
+    let mut preconditions = vec![publish_binding_is_precondition(view, resolved).await?];
     if !recursive && resolved.inode_kind == InodeKind::Directory {
         preconditions.push(ApiCommitPrecondition::DirectoryEmpty {
             inode_id: resolved.inode_id,

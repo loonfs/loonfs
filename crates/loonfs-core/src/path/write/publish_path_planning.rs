@@ -4,10 +4,13 @@ use crate::commit::{CandidateAllocation, PlannedOp};
 use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
+use crate::path::read::resolve_visible_inode;
 use loonfs_api::{
-    AbsolutePath, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
+    AbsolutePath, BindingGeneration, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey,
+    NamespaceId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
+use std::collections::HashMap;
 
 pub(super) fn is_missing_visible_path(error: &CoreError) -> bool {
     matches!(
@@ -44,7 +47,97 @@ impl CompiledFilesystemOperation {
 }
 
 pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?Sized> {
+    /// Namespace the commit belongs to, which is what binds a caller's
+    /// opaque binding-generation token to this namespace.
+    pub(super) namespace_id: &'a NamespaceId,
     pub(super) metadata_state: &'a MetadataView<'view, 'store, S>,
+}
+
+/// Resolves one visible inode and where it currently sits, through the same
+/// by-inode walk the read path answers `GET /inodes/{inode_id}` with.
+///
+/// An inode that does not exist, or that no longer has a visible path from
+/// the root, is `inode_not_found`: an inode-addressed request names the
+/// resource itself, so its absence reads as the resource being gone.
+pub(super) async fn publish_resolve_visible_inode<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    inode_id: InodeId,
+) -> Result<ResolvedVisiblePath> {
+    let mut session = view.metadata_state.session();
+    let mut ancestor_paths = HashMap::new();
+    resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
+        .await?
+        .ok_or(CoreError::InodeNotFound(inode_id))
+}
+
+/// Resolves one visible inode that must be a directory, which is what an
+/// inode-addressed create or move destination names.
+pub(super) async fn publish_resolve_visible_directory<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    inode_id: InodeId,
+) -> Result<ResolvedVisiblePath> {
+    let resolved = publish_resolve_visible_inode(view, inode_id).await?;
+    if resolved.inode_kind != InodeKind::Directory {
+        return Err(CoreError::ExpectedDirectory {
+            path: resolved.absolute_path,
+            kind: resolved.inode_kind,
+        });
+    }
+    Ok(resolved)
+}
+
+/// The visible entry a name currently binds under a resolved parent, if any.
+pub(super) async fn publish_resolve_visible_child<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    parent_inode_id: InodeId,
+    display_name: &DisplayName,
+) -> Result<Option<ResolvedVisiblePath>> {
+    let name_key = NameKey::for_display_name(display_name);
+    let Some(binding) = view
+        .metadata_state
+        .visible_child(parent_inode_id, &name_key)
+        .await?
+    else {
+        return Ok(None);
+    };
+    publish_resolve_visible_inode(view, binding.child_inode_id)
+        .await
+        .map(Some)
+}
+
+/// The path an inode-addressed operation names, spelled the way an error
+/// message about a path would spell it.
+pub(super) fn publish_child_display_path(parent_path: &str, display_name: &DisplayName) -> String {
+    let separator = if parent_path.ends_with('/') { "" } else { "/" };
+    format!("{parent_path}{separator}{display_name}")
+}
+
+/// Rejects a move or delete whose target is no longer bound at the
+/// generation the caller read.
+///
+/// Planning runs under the publish lock, so the comparison is race-free: a
+/// caller that read the entry earlier either mutates that exact binding or
+/// fails, never a binding some other writer put in its place.
+pub(super) fn publish_check_binding_generation<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    resolved: &ResolvedVisiblePath,
+    expected_binding_generation: &str,
+) -> Result<()> {
+    let expected = BindingGeneration::decode(expected_binding_generation, view.namespace_id)
+        .map_err(|error| {
+            CoreError::InvalidCommitRequest(format!("invalid expected binding generation: {error}"))
+        })?;
+    // The namespace root is nameless, so it carries no generation and is
+    // never a mutation target.
+    let Some(current) = resolved.binding_generation else {
+        return Err(CoreError::RootMutationForbidden);
+    };
+    if current != expected {
+        return Err(CoreError::BindingGenerationMismatch {
+            inode_id: resolved.inode_id,
+        });
+    }
+    Ok(())
 }
 
 pub(super) async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
@@ -152,28 +245,41 @@ pub(super) async fn publish_resolve_replace_destination<S: ObjectStore + ?Sized>
     behavior: DestinationBehavior,
     source_inode_id: InodeId,
 ) -> Result<ReplaceDestination> {
-    Ok(
-        match view.metadata_state.resolve_visible_path(to_path).await {
-            Ok(existing) if existing.inode_id == source_inode_id => ReplaceDestination::SameInode,
-            Ok(existing) if behavior == DestinationBehavior::Replace => {
-                if existing.inode_kind != InodeKind::File {
-                    return Err(CoreError::ExpectedFile {
-                        path: to_path.as_str().to_owned(),
-                        kind: existing.inode_kind,
-                    });
-                }
-                ReplaceDestination::Replaced(existing)
+    let occupant = match view.metadata_state.resolve_visible_path(to_path).await {
+        Ok(existing) => Some(existing),
+        Err(error) if is_missing_visible_path(&error) => None,
+        Err(error) => return Err(error),
+    };
+    publish_classify_replace_destination(occupant, behavior, source_inode_id, to_path.as_str())
+}
+
+/// Applies the destination rule to whatever a destination lookup found, so
+/// path-addressed and inode-addressed destinations decide alike.
+pub(super) fn publish_classify_replace_destination(
+    occupant: Option<ResolvedVisiblePath>,
+    behavior: DestinationBehavior,
+    source_inode_id: InodeId,
+    destination_path: &str,
+) -> Result<ReplaceDestination> {
+    Ok(match occupant {
+        Some(existing) if existing.inode_id == source_inode_id => ReplaceDestination::SameInode,
+        Some(existing) if behavior == DestinationBehavior::Replace => {
+            if existing.inode_kind != InodeKind::File {
+                return Err(CoreError::ExpectedFile {
+                    path: destination_path.to_owned(),
+                    kind: existing.inode_kind,
+                });
             }
-            Ok(existing) => {
-                return Err(CoreError::DestinationExists {
-                    path: to_path.as_str().to_owned(),
-                    existing_display_name: Some(existing.display_name),
-                })
-            }
-            Err(error) if is_missing_visible_path(&error) => ReplaceDestination::Vacant,
-            Err(error) => return Err(error),
-        },
-    )
+            ReplaceDestination::Replaced(existing)
+        }
+        Some(existing) => {
+            return Err(CoreError::DestinationExists {
+                path: destination_path.to_owned(),
+                existing_display_name: Some(existing.display_name),
+            })
+        }
+        None => ReplaceDestination::Vacant,
+    })
 }
 
 pub(super) async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(

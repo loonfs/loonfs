@@ -140,10 +140,7 @@ pub(crate) mod commit_split_support {
         for content_ref in request
             .operations
             .iter()
-            .filter_map(|operation| match operation {
-                FilesystemOperation::PutFile { content_ref, .. } => Some(content_ref),
-                _ => None,
-            })
+            .filter_map(FilesystemOperation::content_ref)
         {
             if seen.insert(content_ref.clone()) {
                 if catalog.is_none() {

@@ -10,8 +10,11 @@ use crate::commit::{
     CandidateAllocation, CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
 };
 use crate::error::{CoreError, Result};
+use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
-use loonfs_api::{AbsolutePath, AttributeRevisionNo, DestinationBehavior, InodeKind};
+use loonfs_api::{
+    AbsolutePath, AttributeRevisionNo, DestinationBehavior, DisplayName, InodeId, InodeKind,
+};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
@@ -34,8 +37,29 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     // replaces itself.
     let replaced =
         publish_resolve_replace_destination(view, to_path, behavior, source.inode_id).await?;
+    publish_plan_move(
+        view,
+        &source,
+        target_parent,
+        &target_name,
+        replaced,
+        to_path.as_str(),
+    )
+    .await
+}
+
+/// Compiles a resolved move into its rebinding, whichever way the caller
+/// addressed the source and the destination.
+pub(super) async fn publish_plan_move<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    source: &ResolvedVisiblePath,
+    target_parent: InodeId,
+    target_name: &DisplayName,
+    replaced: ReplaceDestination,
+    destination_path: &str,
+) -> Result<CompiledFilesystemOperation> {
     let mut ops = Vec::new();
-    let mut preconditions = vec![publish_binding_is_precondition(view, &source).await?];
+    let mut preconditions = vec![publish_binding_is_precondition(view, source).await?];
     match &replaced {
         ReplaceDestination::Replaced(existing) => {
             ops.push(ApiCommitOp::DeleteFile {
@@ -49,7 +73,7 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
         ReplaceDestination::Vacant => {
             preconditions.push(publish_child_name_absent_precondition(
                 target_parent,
-                &target_name,
+                target_name,
             ));
         }
         // The destination is the source's own binding: a same-slot
@@ -61,7 +85,7 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
         ReplaceDestination::SameInode => {
             if target_name.as_str() == source.display_name {
                 return Err(CoreError::DestinationExists {
-                    path: to_path.as_str().to_owned(),
+                    path: destination_path.to_owned(),
                     existing_display_name: Some(source.display_name.clone()),
                 });
             }

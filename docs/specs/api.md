@@ -271,6 +271,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` no longer matches the head; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision guard every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
+| `binding_generation_mismatch` | 409 | An inode-addressed move or delete named a binding generation that is no longer the inode's current one: the name it meant to act on is bound differently now. Re-read the entry and decide again. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
@@ -453,15 +454,16 @@ silently merge. Those checks are evaluated where their operation runs, which
 is what lets a later operation depend on an earlier one. Callers add their
 own cross-request guards on the operation itself where staleness matters:
 `expected_revision_no` on a replacing put, `expected_inode_id` on a delete,
-`deletion_seq` on an undelete, and `expected_head_seq` on a namespace
+`deletion_seq` on an undelete, `expected_binding_generation` on an
+inode-addressed move or delete, and `expected_head_seq` on a namespace
 delete. A guard is evaluated against the state its own operation sees, which
 includes what earlier operations in the same request did.
 
-Every guard is an optional field, which is why a commit body rejects unknown
-fields (section 6). A misspelled `expected_revision_no` is `invalid_request`
-rather than a write that applies unguarded and answers 200.
+Commit bodies reject unknown fields so a misspelled guard cannot be ignored. For example, `expected_revsion_no` returns `invalid_request` instead of applying an unguarded write.
 
-Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients may compare tokens for equality but must not parse or order them. Binding generations are read-only in v0.
+Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens.
+
+Inode-addressed moves and deletes require the token as `expected_binding_generation`. A valid token that no longer matches returns `binding_generation_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The guard is part of the commit's identity and is evaluated after any earlier operations in the same request.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -1763,6 +1765,60 @@ silently stacking a revision on state the caller never saw. The guard
 asserts an existing file — an absent path answers `path_not_found`, and
 combining it with `no_replace` is `invalid_request`. Like the delete guard,
 it is part of the commit's semantic identity for commit-id reuse.
+
+Five operations address inodes instead of paths. They are for a client that
+already holds inode identity, such as a sync client that read entries and kept
+their ids. That client does not have to re-derive a path another writer may
+have changed since. Each operation commits exactly what its path twin commits:
+the same bindings, the same revisions, the same tombstones, and the same
+change-feed events. They are gated by the `core.inodes.mutations` feature.
+Wherever one of them names an inode that does not exist, or one that is no
+longer visible, the answer is `inode_not_found`.
+
+`create_directory_by_inode` creates one directory under a parent named by
+inode. It has no `parents` flag, because a parent named by inode already
+exists. The parent must be a visible directory. A name that is already bound
+answers `path_conflict`.
+
+`put_file_by_inode` creates one file the same way, and it is create-only: a
+bound name answers `path_conflict`. It has no `behavior` field and no
+replacing spelling. A client holding inode identity replaces a file by naming
+the file, which is the next operation.
+
+`put_file_revision_by_inode` writes a new revision on the file itself, wherever
+that file is currently bound. `expected_revision_no` is required; there is
+deliberately no unguarded spelling. A raced write answers `stale_revision` with
+the same expected and actual details a guarded path put answers. The target
+must be a file, so naming a directory answers `path_conflict`.
+
+`move_by_inode` and `delete_by_inode` take the entry's
+`expected_binding_generation` (section 5.1), which is required. Everything else
+matches `move_path` and `delete_path`: the same destination `behavior`,
+including `replace`, and the same recursive choice for a directory delete. The
+root is not a target for either one. It is nameless, so it carries no binding
+generation, and naming it answers `invalid_request`.
+
+```json
+{
+  "commit_id": "c_1b2c3d4e5f60718293a4b5c6d7e8f901",
+  "actor": { "kind": "user", "id": "usr_8f3c" },
+  "operations": [
+    {
+      "kind": "create_directory_by_inode",
+      "parent_inode_id": "ino_1",
+      "display_name": "reports"
+    },
+    {
+      "kind": "move_by_inode",
+      "inode_id": "ino_42",
+      "expected_binding_generation": "7b2e2e2e7d",
+      "to_parent_inode_id": "ino_12",
+      "to_display_name": "january.pdf",
+      "behavior": "replace"
+    }
+  ]
+}
+```
 
 A successful response is returned only after the underlying change is actually
 committed: the WAL segment is durable and the head has advanced. Every

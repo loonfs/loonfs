@@ -147,6 +147,7 @@ error_codes! {
     StaleHead => "stale_head",
     StaleRevision => "stale_revision",
     StaleAttributes => "stale_attributes",
+    BindingGenerationMismatch => "binding_generation_mismatch",
     NotDeleted => "not_deleted",
     WriterFenced => "writer_fenced",
     WouldCycle => "would_cycle",
@@ -218,6 +219,10 @@ impl ErrorCode {
             // revision than the one it wrote from, whether the caller stated
             // that revision or the update's own guard observed it.
             | ErrorCode::StaleAttributes
+            // An inode-addressed move or delete named a binding generation
+            // that is no longer the inode's current one, so the name it
+            // meant to act on is bound differently now.
+            | ErrorCode::BindingGenerationMismatch
             // Undelete's target is not the root of a live deletion: a
             // state conflict, resolved by re-reading namespace state.
             | ErrorCode::NotDeleted
@@ -259,6 +264,7 @@ impl ErrorCode {
             | ErrorCode::StaleHead
             | ErrorCode::StaleRevision
             | ErrorCode::StaleAttributes
+            | ErrorCode::BindingGenerationMismatch
             | ErrorCode::NotDeleted
             | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
