@@ -3219,7 +3219,7 @@
         "properties": {
           "binding_generation": {
             "type": "string",
-            "description": "Opaque generation of the binding this event created: the same\ntoken a read of that entry reports."
+            "description": "Opaque identifier for the binding created by this event."
           },
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
@@ -3260,7 +3260,7 @@
         "properties": {
           "binding_generation": {
             "type": "string",
-            "description": "Opaque generation of the binding this event created: the same\ntoken a read of that entry reports."
+            "description": "Opaque identifier for the binding created by this event."
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
@@ -3341,7 +3341,7 @@
         "properties": {
           "binding_generation": {
             "type": "string",
-            "description": "Opaque generation of the binding this event created: the same\ntoken a read of that entry reports."
+            "description": "Opaque identifier for the binding created by this event."
           },
           "from_display_name": {
             "$ref": "#/components/schemas/DisplayName",
@@ -3416,7 +3416,7 @@
         "properties": {
           "binding_generation": {
             "type": "string",
-            "description": "Opaque generation of the binding this event created: the same\ntoken a read of that entry reports."
+            "description": "Opaque identifier for the binding created by this event."
           },
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
@@ -3805,7 +3805,7 @@
           },
           "binding_generation": {
             "type": "string",
-            "description": "Opaque generation of this entry's parent/name binding, present for\nevery entry except the nameless root. Creating, moving, and\nundeleting an entry mint a new generation; content and attribute\nwrites never do. Compare a held token with a later read's token to\nlearn that the name was rebound; never parse or order one."
+            "description": "Opaque identifier for this entry's current parent/name binding. Absent for the namespace root."
           },
           "created_at_ms": {
             "type": "integer",
@@ -3915,7 +3915,7 @@
           },
           "binding_generation": {
             "type": "string",
-            "description": "Opaque generation of this entry's parent/name binding, present for\nevery entry except the nameless root. Creating, moving, and\nundeleting an entry mint a new generation; content and attribute\nwrites never do. Compare a held token with a later read's token to\nlearn that the name was rebound; never parse or order one."
+            "description": "Opaque identifier for this entry's current parent/name binding. Absent for the namespace root."
           },
           "created_at_ms": {
             "type": "integer",

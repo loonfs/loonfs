@@ -113,8 +113,7 @@ pub enum FilesystemChange {
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
-        /// Opaque generation of the binding this event created: the same
-        /// token a read of that entry reports.
+        /// Opaque identifier for the binding created by this event.
         binding_generation: String,
     },
     /// A file and its first revision were created.
@@ -136,8 +135,7 @@ pub enum FilesystemChange {
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
-        /// Opaque generation of the binding this event created: the same
-        /// token a read of that entry reports.
+        /// Opaque identifier for the binding created by this event.
         binding_generation: String,
         /// First revision number.
         revision_no: RevisionNo,
@@ -188,8 +186,7 @@ pub enum FilesystemChange {
         to_parent_inode_id: InodeId,
         /// Spelling of the new binding.
         to_display_name: DisplayName,
-        /// Opaque generation of the binding this event created: the same
-        /// token a read of that entry reports.
+        /// Opaque identifier for the binding created by this event.
         binding_generation: String,
     },
     /// A file or directory subtree was deleted. Use the enclosing change's
@@ -228,8 +225,7 @@ pub enum FilesystemChange {
         parent_inode_id: InodeId,
         /// Spelling of the recovered binding.
         display_name: DisplayName,
-        /// Opaque generation of the binding this event created: the same
-        /// token a read of that entry reports.
+        /// Opaque identifier for the binding created by this event.
         binding_generation: String,
     },
     /// An inode's attributes changed.
@@ -300,12 +296,7 @@ mod tests {
     use crate::InodeId;
 
     fn binding_generation() -> String {
-        crate::BindingGeneration {
-            bind_seq: crate::ChangeSeq(419),
-            bind_delta_index: 1,
-        }
-        .encode(&crate::NamespaceId::parse("demo").expect("valid namespace id"))
-        .expect("encode binding generation")
+        "generation".to_owned()
     }
 
     #[test]

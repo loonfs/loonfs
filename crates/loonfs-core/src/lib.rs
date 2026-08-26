@@ -52,6 +52,7 @@
 //! );
 //! ```
 
+mod binding_generation;
 mod block_cache;
 mod checkpoint;
 mod commit_engine;

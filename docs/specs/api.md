@@ -83,7 +83,6 @@ either way.
     "core.namespaces.delete": true,
     "core.attributes": true,
     "core.inodes.list_children": true,
-    "core.inodes.binding_generation": true,
     "query.grep": true
   },
   "limits": {
@@ -157,7 +156,6 @@ hoc.
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
 | `core.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
-| `core.inodes.binding_generation` | The `binding_generation` an entry carries on every read, and the same token on the change-feed events that create a binding (`directory_created`, `file_created`, `moved`, `undeleted`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the field existed. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
@@ -463,16 +461,7 @@ Every guard is an optional field, which is why a commit body rejects unknown
 fields (section 6). A misspelled `expected_revision_no` is `invalid_request`
 rather than a write that applies unguarded and answers 200.
 
-Reads report one more staleness input, which no v0 request accepts yet. Every
-entry except the nameless root carries a `binding_generation`: an opaque token
-naming the exact generation of that entry's parent and name binding. Creating
-an entry mints a new generation, moving one mints a new generation, and
-undeleting one mints a new generation. Writing content or attributes never
-does. A client keeps the token it read and compares it with the token a later
-read reports. An unequal token means the name is bound differently now. A move
-does that, and so does a delete followed by a recreate. The token is opaque:
-clients must not parse it, order two of them, or do arithmetic on one, and a
-token minted in one namespace is not valid in another.
+Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients may compare tokens for equality but must not parse or order them. Binding generations are read-only in v0.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -1467,7 +1456,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
   "head_seq": 418,
   "parent_inode_id": "ino_7",
   "display_name": "report.txt",
-  "binding_generation": "7b2e2e2e7d",
+  "binding_generation": "opaque-token",
   "revision_no": 7,
   "revision_committed_by": { "kind": "service", "id": "render-worker" },
   "size_bytes": 19482,
@@ -1505,15 +1494,7 @@ attributes written reads as `{}` at revision 0 with no updater or update time.
 A read that did not include attributes omits all four siblings, so an absent
 projection never means "no attributes".
 
-The namespace root is nameless: its entry omits `parent_inode_id`,
-`display_name`, and `binding_generation`. Every non-root entry carries a
-validated `display_name`; the empty string is not a spelling for the root or
-for any named path component.
-
-`binding_generation` is the opaque token for the generation of the entry's
-parent and name binding (section 5.1). A move or an undelete rebinds the name
-and mints a new token; a content or attribute write leaves the token alone.
-The field is gated by the `core.inodes.binding_generation` feature.
+The namespace root is nameless, so its entry omits `parent_inode_id`, `display_name`, and `binding_generation`. Every other entry includes a validated `display_name` and a `binding_generation` for its current parent/name binding (section 5.1). The empty string is not a valid name for the root or any named path component.
 
 The inode route returns the same entry shape, including the current `path`.
 Renaming an entry changes its path and name but not its inode id or metadata.
@@ -2314,7 +2295,7 @@ includes its first revision and content reference:
   "inode_id": "ino_42",
   "parent_inode_id": "ino_1",
   "display_name": "docs",
-  "binding_generation": "7b2e2e2e7d"
+  "binding_generation": "opaque-token"
 }
 
 {
@@ -2322,7 +2303,7 @@ includes its first revision and content reference:
   "inode_id": "ino_43",
   "parent_inode_id": "ino_1",
   "display_name": "report.txt",
-  "binding_generation": "7b2e2e2e7d",
+  "binding_generation": "opaque-token",
   "revision_no": 1,
   "content_ref": {
     "kind": "blob_v1",
@@ -2338,11 +2319,7 @@ paths; a consumer that needs paths can stat the inode or maintain its own
 binding projection from this feed. Clients must ignore unknown event kinds
 and unknown fields.
 
-The four events that create a binding — `directory_created`, `file_created`,
-`moved`, and `undeleted` — carry the `binding_generation` of the binding they
-created (section 5.1). It is the same token a read of that entry reports, so a
-consumer projecting this feed and a consumer reading entries hold the same
-value. The other event kinds create no binding and carry no token.
+`directory_created`, `file_created`, `moved`, and `undeleted` include the `binding_generation` they created. It matches later reads of the same binding. Other events do not create bindings and omit the field.
 
 If `limit` truncates the page before the namespace head, the response includes
 `next_after_seq` set to the last returned change's `committed_seq`. The client

@@ -34,16 +34,8 @@ fn commit_id(value: &str) -> CommitId {
     CommitId::parse(value).expect("valid commit id")
 }
 
-/// The comparable content of one committed change: everything the feed
-/// promises except the wall-clock stamp, which is observational.
-/// The parts of a change two transports must agree on.
-///
-/// Content identity is left out on purpose: each transport staged its own
-/// content objects, so their ids differ by construction. The rest of the
-/// reference — size and checksums — stays in, so identical bytes still have
-/// to produce identical evidence. The binding generation is left out for the
-/// same reason: it is minted for the namespace it names, and the two
-/// transports commit into namespaces of their own.
+/// Returns the fields that must match across transports. It omits timestamps
+/// and normalizes namespace-specific identifiers while preserving content checksums and sizes.
 fn change_identity(change: &CommittedChange) -> (ChangeSeq, String, Option<String>, String) {
     let mut events = serde_json::to_value(&change.events).expect("serialize events");
     for event in events.as_array_mut().expect("events array") {

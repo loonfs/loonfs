@@ -3,10 +3,11 @@
 //! its append-only rows.
 
 use super::indexes::MetadataIndexes;
+use crate::binding_generation::BindingGeneration;
 use loonfs_api::wire::manifest::{lookup_keys, DeletedDirentry, TombstoneGeneration};
 use loonfs_api::{
-    ActorRef, AttributeRevisionNo, Attributes, BindingGeneration, ChangeSeq, CommitId, ContentRef,
-    DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName,
+    InodeId, InodeKind, NameKey, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use std::mem::size_of;

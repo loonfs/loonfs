@@ -9,9 +9,8 @@
 
 use super::visibility::{self, resolve_in_memory_read, unbind_matches_binding};
 use super::{DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord};
-use loonfs_api::{
-    AbsolutePath, ActorRef, BindingGeneration, ChangeSeq, InodeId, InodeKind, NameKey,
-};
+use crate::binding_generation::BindingGeneration;
+use loonfs_api::{AbsolutePath, ActorRef, ChangeSeq, InodeId, InodeKind, NameKey};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;

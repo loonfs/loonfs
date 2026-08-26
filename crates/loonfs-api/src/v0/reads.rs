@@ -55,11 +55,7 @@ pub struct PathEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub display_name: Option<DisplayName>,
-    /// Opaque generation of this entry's parent/name binding, present for
-    /// every entry except the nameless root. Creating, moving, and
-    /// undeleting an entry mint a new generation; content and attribute
-    /// writes never do. Compare a held token with a later read's token to
-    /// learn that the name was rebound; never parse or order one.
+    /// Opaque identifier for this entry's current parent/name binding. Absent for the namespace root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub binding_generation: Option<String>,
@@ -303,12 +299,7 @@ mod tests {
     use crate::NameKey;
 
     fn binding_generation() -> String {
-        crate::BindingGeneration {
-            bind_seq: ChangeSeq(2),
-            bind_delta_index: 1,
-        }
-        .encode(&NamespaceId::parse("demo").expect("namespace id"))
-        .expect("encode binding generation")
+        "generation".to_owned()
     }
 
     fn entry(

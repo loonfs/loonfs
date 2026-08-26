@@ -1,5 +1,3 @@
-//! What mints a binding generation, and what leaves it alone.
-
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
@@ -10,7 +8,7 @@ use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
 #[test]
-fn a_move_mints_a_generation_a_content_put_does_not_and_the_root_has_none() {
+fn binding_generation_changes_on_move_but_not_content_update() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "binding-generation-test");
     let namespace_id = namespace_id("demo");
@@ -69,7 +67,7 @@ fn a_move_mints_a_generation_a_content_put_does_not_and_the_root_has_none() {
         .expect("stat the moved file")
         .binding_generation
         .expect("a named entry carries its binding generation");
-    assert_ne!(renamed, created, "a move mints a new binding generation");
+    assert_ne!(renamed, created, "a move creates a new binding generation");
     assert_eq!(
         fs.list_path_blocking(&namespace_id, "/docs")
             .expect("list the parent directory")

@@ -1,13 +1,14 @@
 //! The change feed: committed changes after a sequence number, with each
 //! commit's durable WAL deltas mapped to semantic filesystem events.
 
+use crate::binding_generation::BindingGeneration;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::load_head_and_retention_floor;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use loonfs_api::v0::{CommittedChange, FilesystemChange, ListChangesResponse};
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
-use loonfs_api::{BindingGeneration, ChangeSeq, EffectiveLimit, NamespaceId};
+use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroU32;
 
@@ -137,9 +138,8 @@ pub(super) fn committed_change_from_wal_record(
 /// reducer have drifted and is reported as a server error rather than
 /// guessed at.
 ///
-/// `committed_seq` is the commit's own sequence, which is the `bind_seq`
-/// every binding this commit creates carries, so an event reports the same
-/// generation a later read of that binding does.
+/// `committed_seq` is also the bind sequence for bindings created by this
+/// commit.
 pub(crate) fn events_from_wal_deltas(
     namespace_id: &NamespaceId,
     committed_seq: ChangeSeq,
@@ -296,8 +296,6 @@ fn event_from_op_deltas(
     })
 }
 
-/// The token for a binding this commit created, minted exactly as a read of
-/// that binding mints it.
 fn binding_generation(
     namespace_id: &NamespaceId,
     bind_seq: ChangeSeq,
