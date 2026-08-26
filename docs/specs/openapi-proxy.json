@@ -138,6 +138,16 @@
               }
             }
           },
+          "409": {
+            "description": "The cursor is older than the retained change history and requires a fresh snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {
