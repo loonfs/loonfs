@@ -113,6 +113,9 @@ pub enum FilesystemChange {
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
+        /// Opaque generation of the binding this event created: the same
+        /// token a read of that entry reports.
+        binding_generation: String,
     },
     /// A file and its first revision were created.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeFileCreated"))]
@@ -133,6 +136,9 @@ pub enum FilesystemChange {
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
+        /// Opaque generation of the binding this event created: the same
+        /// token a read of that entry reports.
+        binding_generation: String,
         /// First revision number.
         revision_no: RevisionNo,
         /// Content of the first revision.
@@ -182,6 +188,9 @@ pub enum FilesystemChange {
         to_parent_inode_id: InodeId,
         /// Spelling of the new binding.
         to_display_name: DisplayName,
+        /// Opaque generation of the binding this event created: the same
+        /// token a read of that entry reports.
+        binding_generation: String,
     },
     /// A file or directory subtree was deleted. Use the enclosing change's
     /// `committed_seq` as `deletion_seq` when restoring it.
@@ -219,6 +228,9 @@ pub enum FilesystemChange {
         parent_inode_id: InodeId,
         /// Spelling of the recovered binding.
         display_name: DisplayName,
+        /// Opaque generation of the binding this event created: the same
+        /// token a read of that entry reports.
+        binding_generation: String,
     },
     /// An inode's attributes changed.
     #[cfg_attr(
@@ -287,6 +299,15 @@ mod tests {
     use super::{CommitResponse, CommittedChange, FilesystemChange};
     use crate::InodeId;
 
+    fn binding_generation() -> String {
+        crate::BindingGeneration {
+            bind_seq: crate::ChangeSeq(419),
+            bind_delta_index: 1,
+        }
+        .encode(&crate::NamespaceId::parse("demo").expect("valid namespace id"))
+        .expect("encode binding generation")
+    }
+
     #[test]
     fn committed_change_uses_committed_by_on_the_wire() {
         let change = CommittedChange {
@@ -324,6 +345,7 @@ mod tests {
                     inode_id: InodeId(43),
                     parent_inode_id: InodeId(1),
                     display_name: crate::DisplayName::parse("docs").expect("valid display name"),
+                    binding_generation: binding_generation(),
                 }],
             },
         );
@@ -342,6 +364,7 @@ mod tests {
                     "inode_id": "ino_43",
                     "parent_inode_id": "ino_1",
                     "display_name": "docs",
+                    "binding_generation": binding_generation(),
                 }],
             })
         );
@@ -380,27 +403,32 @@ mod tests {
         );
         let sample_content_ref_json = r#"{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#;
 
+        let generation = binding_generation();
         let directory_created = FilesystemChange::DirectoryCreated {
             inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
             display_name: crate::DisplayName::parse("Docs").expect("valid display name"),
+            binding_generation: generation.clone(),
         };
         assert_eq!(
             serde_json::to_string(&directory_created).expect("serialize directory-created event"),
-            r#"{"kind":"directory_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"Docs"}"#
+            format!(
+                r#"{{"kind":"directory_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"Docs","binding_generation":"{generation}"}}"#
+            )
         );
 
         let file_created = FilesystemChange::FileCreated {
             inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
             display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+            binding_generation: generation.clone(),
             revision_no: crate::RevisionNo(1),
             content_ref: sample_content_ref.clone(),
         };
         assert_eq!(
             serde_json::to_string(&file_created).expect("serialize file-created event"),
             format!(
-                r#"{{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
+                r#"{{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","binding_generation":"{generation}","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
             )
         );
 
@@ -435,10 +463,13 @@ mod tests {
             from_display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
             to_parent_inode_id: InodeId(3),
             to_display_name: crate::DisplayName::parse("b.txt").expect("valid display name"),
+            binding_generation: generation.clone(),
         };
         assert_eq!(
             serde_json::to_string(&moved).expect("serialize moved event"),
-            r#"{"kind":"moved","inode_id":"ino_2","from_parent_inode_id":"ino_1","from_display_name":"a.txt","to_parent_inode_id":"ino_3","to_display_name":"b.txt"}"#
+            format!(
+                r#"{{"kind":"moved","inode_id":"ino_2","from_parent_inode_id":"ino_1","from_display_name":"a.txt","to_parent_inode_id":"ino_3","to_display_name":"b.txt","binding_generation":"{generation}"}}"#
+            )
         );
 
         let deleted = FilesystemChange::Deleted {
@@ -458,10 +489,13 @@ mod tests {
             inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
             display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+            binding_generation: generation.clone(),
         };
         assert_eq!(
             serde_json::to_string(&undeleted).expect("serialize undeleted event"),
-            r#"{"kind":"undeleted","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt"}"#
+            format!(
+                r#"{{"kind":"undeleted","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","binding_generation":"{generation}"}}"#
+            )
         );
 
         let attributes_changed = FilesystemChange::AttributesChanged {

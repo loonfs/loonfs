@@ -11,6 +11,7 @@
 | **Inode** | The durable identity of a filesystem item within one namespace. An inode stays the same when its path changes. |
 | **Direntry** | A directory binding that places one inode under one parent directory and one name. |
 | **Path** | A human-friendly name built by walking visible directory bindings. Paths can change; inode identity does not. |
+| **Binding generation** | Which generation of a direntry a read observed. Creating, moving, and undeleting an entry each mint a new generation; content and attribute writes do not. Reads report it as one opaque token that clients compare but never parse. |
 | **Revision** | One immutable committed version of a file's content. Revisions are ordered by `revision_no` within an inode. |
 | **Namespace manifest** | The immutable object that describes one durable namespace file set: metadata segments, manifest number, head summary, fork references, and checkpoint records. |
 | **Checkpoint** | A durable pinned reference to one manifest version and namespace sequence. It lets readers and retention logic rely on that manifest without replaying the entire WAL history. |

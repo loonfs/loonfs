@@ -7,6 +7,7 @@
 
 mod attributes;
 mod attribution_rows;
+mod binding_generation;
 mod bulk_file_reads;
 mod cache_seeding;
 mod capability_conformance;

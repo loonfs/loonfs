@@ -31,6 +31,12 @@ pub const FEATURE_ATTRIBUTES: &str = "core.attributes";
 /// the key exists so inode-driven sync clients can gate on deployments built
 /// before the route.
 pub const FEATURE_INODES_LIST_CHILDREN: &str = "core.inodes.list_children";
+/// Gates the binding generation carried by every read entry and by the
+/// change-feed events that create a binding. Part of the core plane and
+/// implemented by the runtime, so current deployments advertise it; the key
+/// exists so inode-driven sync clients can gate on deployments built before
+/// the field.
+pub const FEATURE_INODES_BINDING_GENERATION: &str = "core.inodes.binding_generation";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 /// Starting presigned `direct_multipart` upload sessions. Independent of

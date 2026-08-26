@@ -41,12 +41,17 @@ fn commit_id(value: &str) -> CommitId {
 /// Content identity is left out on purpose: each transport staged its own
 /// content objects, so their ids differ by construction. The rest of the
 /// reference — size and checksums — stays in, so identical bytes still have
-/// to produce identical evidence.
+/// to produce identical evidence. The binding generation is left out for the
+/// same reason: it is minted for the namespace it names, and the two
+/// transports commit into namespaces of their own.
 fn change_identity(change: &CommittedChange) -> (ChangeSeq, String, Option<String>, String) {
     let mut events = serde_json::to_value(&change.events).expect("serialize events");
     for event in events.as_array_mut().expect("events array") {
         if let Some(content_ref) = event.get_mut("content_ref") {
             content_ref["content_id"] = serde_json::Value::from("<normalized>");
+        }
+        if let Some(binding_generation) = event.get_mut("binding_generation") {
+            *binding_generation = serde_json::Value::from("<normalized>");
         }
     }
     (
@@ -260,6 +265,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
             display_name,
             revision_no,
             content_ref,
+            ..
         }] => {
             assert_eq!(*parent_inode_id, ROOT_INODE_ID);
             assert_eq!(display_name.as_str(), "january.txt");

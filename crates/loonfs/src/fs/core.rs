@@ -12,8 +12,9 @@ use crate::{
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page, PageCursor,
-    PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_INODES_BINDING_GENERATION,
+    FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
     PROTOCOL_VERSION,
@@ -207,6 +208,7 @@ impl ReadCore {
                 // answer does not depend on what a serving host composes.
                 (FEATURE_ATTRIBUTES.to_owned(), true),
                 (FEATURE_INODES_LIST_CHILDREN.to_owned(), true),
+                (FEATURE_INODES_BINDING_GENERATION.to_owned(), true),
             ]),
             limits: {
                 let mut limits = PaginationPolicy::default().capability_limits();

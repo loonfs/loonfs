@@ -254,10 +254,11 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         .iter_mut()
         .filter(|slot| matches!(slot, BatchOutcomeSlot::Accepted));
     for (slot, record) in accepted_slots.zip(&wal_records) {
-        *slot =
-            BatchOutcomeSlot::SettledIndependent(committed_change_from_wal_record(record).map(
-                |change| ApiCommitResponse::from_committed_change(namespace_id.clone(), change),
-            ));
+        *slot = BatchOutcomeSlot::SettledIndependent(
+            committed_change_from_wal_record(namespace_id, record).map(|change| {
+                ApiCommitResponse::from_committed_change(namespace_id.clone(), change)
+            }),
+        );
     }
     PublishBatchAgainstViewResult {
         results: finish_batch_outcomes(&slots),

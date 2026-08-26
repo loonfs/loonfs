@@ -53,6 +53,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "attributes_updated_at_ms",
     "attributes_updated_by",
     "bearer_auth",
+    "binding_generation",
     "budget_exhausted",
     "built_through_seq",
     "checkpoint_id",

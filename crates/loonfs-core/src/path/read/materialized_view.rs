@@ -851,6 +851,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 })
             })
             .transpose()?;
+        let binding_generation = resolved
+            .binding_generation
+            .map(|generation| generation.encode(&self.namespace_id))
+            .transpose()
+            .map_err(|error| {
+                CoreError::Internal(format!(
+                    "failed to encode the binding generation of inode `{}`: {error}",
+                    resolved.inode_id
+                ))
+            })?;
         Ok(PathEntry {
             namespace_id: self.namespace_id.clone(),
             path: absolute_path,
@@ -861,6 +871,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             head_seq: self.head.seq,
             parent_inode_id: resolved.parent_inode_id,
             display_name,
+            binding_generation,
             attributes,
         })
     }
@@ -885,6 +896,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 created_at_ms: child.inode.created_at_ms,
                 parent_inode_id: Some(child.binding.parent_inode_id),
                 display_name: child.binding.display_name.to_string(),
+                binding_generation: Some(child.binding.generation()),
             },
             attributes,
         )
