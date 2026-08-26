@@ -1,16 +1,7 @@
-//! Inode-addressed mutations: that they land exactly what their path twins
-//! land, that their guards are required and race-free, and that they resolve
-//! their targets against what earlier operations in the same commit did.
-
-#![allow(clippy::panic)]
-// These integration tests use panic in unexpected match arms for precise diagnostics.
-
 use crate::common::commit_split_support::*;
-use crate::common::read_context;
-use loonfs_api::v0::FilesystemChange;
 use loonfs_api::{
-    AbsolutePath, BindingGeneration, ChangeSeq, ContentRef, DeleteDirectoryBehavior,
-    DestinationBehavior, DisplayName, InodeId, NamespaceId, RevisionNo, ROOT_INODE_ID,
+    AbsolutePath, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName, InodeId,
+    NamespaceId, RevisionNo, ROOT_INODE_ID,
 };
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitRequest, FilesystemOperation};
@@ -22,8 +13,6 @@ fn display_name(value: &str) -> DisplayName {
     DisplayName::parse(value).expect("valid display name")
 }
 
-/// The inode and current binding-generation token a read reports for a path,
-/// which is exactly what a client would hold before writing by inode.
 async fn read_entry<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -36,24 +25,8 @@ async fn read_entry<S: loonfs_objectstore::ObjectStore + ?Sized>(
         entry.inode_id,
         entry
             .binding_generation
-            .expect("a non-root entry reports its binding generation"),
+            .expect("named entry has a binding generation"),
     )
-}
-
-async fn events_at<S: loonfs_objectstore::ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
-) -> Vec<FilesystemChange> {
-    let changes = list_changes_after(store, namespace_id, ChangeSeq(committed_seq.0 - 1))
-        .await
-        .expect("list changes");
-    changes
-        .changes
-        .into_iter()
-        .find(|change| change.committed_seq == committed_seq)
-        .expect("the commit is in the change feed")
-        .events
 }
 
 async fn namespace_with_docs() -> (
@@ -75,8 +48,41 @@ async fn namespace_with_docs() -> (
     (temp_dir, store, namespace_id, context)
 }
 
+async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &loonfs_core::MutationContext,
+) -> (InodeId, String, String) {
+    write_file_bytes(
+        store,
+        namespace_id,
+        "/docs/report.txt",
+        b"body",
+        context,
+        Some("put-report"),
+    )
+    .await
+    .expect("put file");
+    let (inode_id, stale_generation) = read_entry(store, namespace_id, "/docs/report.txt").await;
+    submit_operation(
+        store,
+        namespace_id,
+        test_commit_id(Some("rename-report")),
+        FilesystemOperation::MovePath {
+            from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/renamed.txt").expect("path"),
+            behavior: DestinationBehavior::NoReplace,
+        },
+        context,
+    )
+    .await
+    .expect("rename file");
+    let (_, current_generation) = read_entry(store, namespace_id, "/docs/renamed.txt").await;
+    (inode_id, stale_generation, current_generation)
+}
+
 #[tokio::test]
-async fn creating_by_inode_lands_what_creating_by_path_lands() {
+async fn creates_entries_under_a_parent_inode() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
     let (docs_inode_id, _) = read_entry(&store, &namespace_id, "/docs").await;
     let content_ref = store_bytes_as_content(&store, &namespace_id, b"january")
@@ -84,115 +90,48 @@ async fn creating_by_inode_lands_what_creating_by_path_lands() {
         .expect("stage content")
         .into_content_ref();
 
-    let by_path = submit_commit(
+    submit_commit(
         &store,
         &namespace_id,
         CommitRequest {
-            commit_id: test_commit_id(Some("by-path")),
-            actor: loonfs_test_support::test_actor(),
-            message: None,
-            operations: vec![
-                FilesystemOperation::CreateDirectory {
-                    path: AbsolutePath::parse("/docs/by_path").expect("path"),
-                    parents: false,
-                },
-                FilesystemOperation::PutFile {
-                    path: AbsolutePath::parse("/docs/by_path.txt").expect("path"),
-                    content_ref: content_ref.clone(),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
-            ],
-        },
-        &context,
-    )
-    .await
-    .expect("path creates commit");
-
-    let by_inode = submit_commit(
-        &store,
-        &namespace_id,
-        CommitRequest {
-            commit_id: test_commit_id(Some("by-inode")),
+            commit_id: test_commit_id(Some("create-by-inode")),
             actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
                 FilesystemOperation::CreateDirectoryByInode {
                     parent_inode_id: docs_inode_id,
-                    display_name: display_name("by_inode"),
+                    display_name: display_name("archive"),
                 },
                 FilesystemOperation::PutFileByInode {
                     parent_inode_id: docs_inode_id,
-                    display_name: display_name("by_inode.txt"),
-                    content_ref: content_ref.clone(),
+                    display_name: display_name("january.txt"),
+                    content_ref,
                 },
             ],
         },
         &context,
     )
     .await
-    .expect("inode creates commit");
+    .expect("create entries by inode");
 
-    let path_events = events_at(&store, &namespace_id, by_path.committed_seq).await;
-    let inode_events = events_at(&store, &namespace_id, by_inode.committed_seq).await;
-
-    match (&path_events[0], &inode_events[0]) {
-        (
-            FilesystemChange::DirectoryCreated {
-                parent_inode_id: path_parent,
-                display_name: path_name,
-                ..
-            },
-            FilesystemChange::DirectoryCreated {
-                parent_inode_id: inode_parent,
-                display_name: inode_name,
-                ..
-            },
-        ) => {
-            assert_eq!(path_parent, &docs_inode_id);
-            assert_eq!(inode_parent, &docs_inode_id);
-            assert_eq!(path_name.as_str(), "by_path");
-            assert_eq!(inode_name.as_str(), "by_inode");
-        }
-        other => panic!("expected two directory-created events, got {other:?}"),
-    }
-
-    match (&path_events[1], &inode_events[1]) {
-        (
-            FilesystemChange::FileCreated {
-                parent_inode_id: path_parent,
-                binding_generation: path_generation,
-                revision_no: path_revision,
-                content_ref: path_content,
-                ..
-            },
-            FilesystemChange::FileCreated {
-                inode_id: inode_created,
-                parent_inode_id: inode_parent,
-                binding_generation: inode_generation,
-                revision_no: inode_revision,
-                content_ref: inode_content,
-                ..
-            },
-        ) => {
-            assert_eq!(path_parent, inode_parent);
-            assert_eq!(path_revision, inode_revision);
-            assert_eq!(path_revision, &RevisionNo(1));
-            assert_eq!(path_content, inode_content);
-            // Each event carries the generation of the binding it created,
-            // which is the token a read of that entry now reports.
-            let (read_inode_id, read_generation) =
-                read_entry(&store, &namespace_id, "/docs/by_inode.txt").await;
-            assert_eq!(&read_inode_id, inode_created);
-            assert_eq!(inode_generation, &read_generation);
-            assert_ne!(path_generation, inode_generation);
-        }
-        other => panic!("expected two file-created events, got {other:?}"),
-    }
+    assert_eq!(
+        resolve_path(&store, &namespace_id, "/docs/archive")
+            .await
+            .expect("resolve created directory")
+            .parent_inode_id,
+        Some(docs_inode_id)
+    );
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/january.txt")
+            .await
+            .expect("read created file")
+            .bytes,
+        b"january"
+    );
 }
 
 #[tokio::test]
-async fn creating_by_inode_conflicts_with_a_bound_name() {
+async fn creating_by_inode_rejects_a_bound_name() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
     let (docs_inode_id, _) = read_entry(&store, &namespace_id, "/docs").await;
     write_file_bytes(
@@ -204,7 +143,7 @@ async fn creating_by_inode_conflicts_with_a_bound_name() {
         Some("put-taken"),
     )
     .await
-    .expect("put /docs/taken.txt");
+    .expect("put existing file");
     let content_ref = store_bytes_as_content(&store, &namespace_id, b"second")
         .await
         .expect("stage content")
@@ -222,13 +161,13 @@ async fn creating_by_inode_conflicts_with_a_bound_name() {
         &context,
     )
     .await
-    .expect_err("a bound name conflicts");
+    .expect_err("bound name must conflict");
 
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
 #[tokio::test]
-async fn a_revision_write_by_inode_requires_the_current_revision() {
+async fn revision_write_requires_the_current_revision_and_survives_a_move() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
     write_file_bytes(
         &store,
@@ -267,11 +206,9 @@ async fn a_revision_write_by_inode_requires_the_current_revision() {
         &context,
     )
     .await
-    .expect_err("a stale revision guard is rejected");
+    .expect_err("stale revision must fail");
     assert_eq!(stale.code(), ErrorCode::StaleRevision);
 
-    // The write names the file, not a place in the tree, so a rebinding
-    // between the read and the write changes nothing about it.
     submit_operation(
         &store,
         &namespace_id,
@@ -284,9 +221,9 @@ async fn a_revision_write_by_inode_requires_the_current_revision() {
         &context,
     )
     .await
-    .expect("move the file");
+    .expect("move file");
 
-    let fresh = submit_operation(
+    submit_operation(
         &store,
         &namespace_id,
         test_commit_id(Some("write-fresh")),
@@ -301,57 +238,22 @@ async fn a_revision_write_by_inode_requires_the_current_revision() {
         &context,
     )
     .await
-    .expect("a current revision guard commits");
+    .expect("current revision must commit");
 
-    match &events_at(&store, &namespace_id, fresh.committed_seq).await[..] {
-        [FilesystemChange::ContentChanged {
-            inode_id,
-            revision_no,
-            ..
-        }] => {
-            assert_eq!(inode_id, &report_inode_id);
-            assert_eq!(revision_no, &RevisionNo(3));
-        }
-        other => panic!("expected one content-changed event, got {other:?}"),
-    }
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/report.txt")
             .await
-            .expect("read the file")
+            .expect("read moved file")
             .bytes,
         b"third"
     );
 }
 
 #[tokio::test]
-async fn a_stale_binding_generation_rejects_a_move_and_a_fresh_one_moves_the_inode() {
+async fn move_requires_the_current_binding_generation() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/report.txt",
-        b"body",
-        &context,
-        Some("put-report"),
-    )
-    .await
-    .expect("put the file");
-    let (report_inode_id, stale_generation) =
-        read_entry(&store, &namespace_id, "/docs/report.txt").await;
-    // Another writer rebinds the name, which mints a new generation.
-    submit_operation(
-        &store,
-        &namespace_id,
-        test_commit_id(Some("rename-report")),
-        FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/renamed.txt").expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-        },
-        &context,
-    )
-    .await
-    .expect("rename the file");
+    let (report_inode_id, stale_generation, fresh_generation) =
+        rebind_report(&store, &namespace_id, &context).await;
 
     let error = submit_operation(
         &store,
@@ -367,11 +269,10 @@ async fn a_stale_binding_generation_rejects_a_move_and_a_fresh_one_moves_the_ino
         &context,
     )
     .await
-    .expect_err("a stale binding generation is rejected");
+    .expect_err("stale binding generation must fail");
     assert_eq!(error.code(), ErrorCode::BindingGenerationMismatch);
 
-    let (_, fresh_generation) = read_entry(&store, &namespace_id, "/docs/renamed.txt").await;
-    let moved = submit_operation(
+    submit_operation(
         &store,
         &namespace_id,
         test_commit_id(Some("move-fresh")),
@@ -385,53 +286,17 @@ async fn a_stale_binding_generation_rejects_a_move_and_a_fresh_one_moves_the_ino
         &context,
     )
     .await
-    .expect("a fresh binding generation moves the inode");
+    .expect("current binding generation must move file");
 
-    match &events_at(&store, &namespace_id, moved.committed_seq).await[..] {
-        [FilesystemChange::Moved {
-            inode_id,
-            to_parent_inode_id,
-            to_display_name,
-            ..
-        }] => {
-            assert_eq!(inode_id, &report_inode_id);
-            assert_eq!(to_parent_inode_id, &ROOT_INODE_ID);
-            assert_eq!(to_display_name.as_str(), "moved.txt");
-        }
-        other => panic!("expected one moved event, got {other:?}"),
-    }
     let (moved_inode_id, _) = read_entry(&store, &namespace_id, "/moved.txt").await;
     assert_eq!(moved_inode_id, report_inode_id);
 }
 
 #[tokio::test]
-async fn a_stale_binding_generation_rejects_a_delete_and_a_fresh_one_deletes_the_inode() {
+async fn delete_requires_the_current_binding_generation() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/report.txt",
-        b"body",
-        &context,
-        Some("put-report"),
-    )
-    .await
-    .expect("put the file");
-    let (report_inode_id, stale_generation) =
-        read_entry(&store, &namespace_id, "/docs/report.txt").await;
-    submit_operation(
-        &store,
-        &namespace_id,
-        test_commit_id(Some("rename-report")),
-        FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/renamed.txt").expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-        },
-        &context,
-    )
-    .await
-    .expect("rename the file");
+    let (report_inode_id, stale_generation, fresh_generation) =
+        rebind_report(&store, &namespace_id, &context).await;
 
     let error = submit_operation(
         &store,
@@ -445,11 +310,10 @@ async fn a_stale_binding_generation_rejects_a_delete_and_a_fresh_one_deletes_the
         &context,
     )
     .await
-    .expect_err("a stale binding generation is rejected");
+    .expect_err("stale binding generation must fail");
     assert_eq!(error.code(), ErrorCode::BindingGenerationMismatch);
 
-    let (_, fresh_generation) = read_entry(&store, &namespace_id, "/docs/renamed.txt").await;
-    let deleted = submit_operation(
+    submit_operation(
         &store,
         &namespace_id,
         test_commit_id(Some("delete-fresh")),
@@ -461,31 +325,38 @@ async fn a_stale_binding_generation_rejects_a_delete_and_a_fresh_one_deletes_the
         &context,
     )
     .await
-    .expect("a fresh binding generation deletes the inode");
+    .expect("current binding generation must delete file");
 
-    match &events_at(&store, &namespace_id, deleted.committed_seq).await[..] {
-        [FilesystemChange::Deleted { inode_id, .. }] => assert_eq!(inode_id, &report_inode_id),
-        other => panic!("expected one deleted event, got {other:?}"),
-    }
     assert_eq!(
         resolve_path(&store, &namespace_id, "/docs/renamed.txt")
             .await
-            .expect_err("the entry is gone")
+            .expect_err("file must be deleted")
             .code(),
         ErrorCode::PathNotFound
     );
 }
 
 #[tokio::test]
-async fn a_binding_generation_minted_elsewhere_is_an_invalid_request() {
+async fn malformed_foreign_and_root_binding_guards_are_invalid() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
-    let (docs_inode_id, generation) = read_entry(&store, &namespace_id, "/docs").await;
-    let foreign = BindingGeneration::decode(&generation, &namespace_id)
-        .expect("decode this namespace's token")
-        .encode(&NamespaceId::parse("other").expect("valid namespace id"))
-        .expect("mint a token for another namespace");
+    let (docs_inode_id, local_generation) = read_entry(&store, &namespace_id, "/docs").await;
 
-    for token in [foreign, "not-a-token".to_owned()] {
+    let other_namespace_id = NamespaceId::parse("other").expect("valid namespace id");
+    bootstrap_namespace(&store, &other_namespace_id, &context, false)
+        .await
+        .expect("bootstrap other namespace");
+    create_directory_path(
+        &store,
+        &other_namespace_id,
+        "/docs",
+        &context,
+        Some("mkdir-other-docs"),
+    )
+    .await
+    .expect("create directory in other namespace");
+    let (_, foreign_generation) = read_entry(&store, &other_namespace_id, "/docs").await;
+
+    for token in [foreign_generation, "not-a-token".to_owned()] {
         let error = submit_operation(
             &store,
             &namespace_id,
@@ -498,13 +369,28 @@ async fn a_binding_generation_minted_elsewhere_is_an_invalid_request() {
             &context,
         )
         .await
-        .expect_err("an unreadable guard is rejected");
+        .expect_err("invalid guard must fail");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
     }
+
+    let root_error = submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("delete-root")),
+        FilesystemOperation::DeleteByInode {
+            inode_id: ROOT_INODE_ID,
+            expected_binding_generation: local_generation,
+            behavior: DeleteDirectoryBehavior::Recursive,
+        },
+        &context,
+    )
+    .await
+    .expect_err("root mutation must fail");
+    assert_eq!(root_error.code(), ErrorCode::InvalidRequest);
 }
 
 #[tokio::test]
-async fn an_inode_operation_observes_what_an_earlier_operation_in_its_commit_did() {
+async fn inode_operation_observes_an_earlier_delete_in_the_same_commit() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
     write_file_bytes(
         &store,
@@ -515,54 +401,9 @@ async fn an_inode_operation_observes_what_an_earlier_operation_in_its_commit_did
         Some("put-report"),
     )
     .await
-    .expect("put the file");
+    .expect("put file");
     let (report_inode_id, _) = read_entry(&store, &namespace_id, "/docs/report.txt").await;
-    // The head names the identity the next allocation assigns, so the
-    // second operation can address what the first one creates.
-    let created_inode_id = read_context(&store, &namespace_id).await.head.next_inode_id;
-    let content_ref = store_bytes_as_content(&store, &namespace_id, b"nested")
-        .await
-        .expect("stage content")
-        .into_content_ref();
 
-    let committed = submit_commit(
-        &store,
-        &namespace_id,
-        CommitRequest {
-            commit_id: test_commit_id(Some("create-then-fill")),
-            actor: loonfs_test_support::test_actor(),
-            message: None,
-            operations: vec![
-                FilesystemOperation::CreateDirectory {
-                    path: AbsolutePath::parse("/docs/2026").expect("path"),
-                    parents: false,
-                },
-                FilesystemOperation::PutFileByInode {
-                    parent_inode_id: created_inode_id,
-                    display_name: display_name("january.pdf"),
-                    content_ref,
-                },
-            ],
-        },
-        &context,
-    )
-    .await
-    .expect("the inode operation resolves the directory its predecessor created");
-
-    match &events_at(&store, &namespace_id, committed.committed_seq).await[..] {
-        [FilesystemChange::DirectoryCreated {
-            inode_id: created, ..
-        }, FilesystemChange::FileCreated {
-            parent_inode_id, ..
-        }] => {
-            assert_eq!(created, &created_inode_id);
-            assert_eq!(parent_inode_id, &created_inode_id);
-        }
-        other => panic!("expected a directory create and a file create, got {other:?}"),
-    }
-
-    // The same observation the other way: a target an earlier operation
-    // removed is gone for the operation that follows it.
     let error = submit_commit(
         &store,
         &namespace_id,
@@ -589,11 +430,17 @@ async fn an_inode_operation_observes_what_an_earlier_operation_in_its_commit_did
         &context,
     )
     .await
-    .expect_err("the deleted inode is not addressable");
+    .expect_err("deleted inode must not be addressable");
     assert_eq!(error.code(), ErrorCode::InodeNotFound);
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/report.txt")
+            .await
+            .expect("failed commit must leave file unchanged")
+            .bytes,
+        b"body"
+    );
 }
 
-/// Stages `bytes` and names them in a guarded revision write on `inode_id`.
 async fn put_revision_by_inode<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

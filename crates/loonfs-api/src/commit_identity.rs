@@ -106,9 +106,6 @@ enum OperationFingerprintInput<'a> {
         content_ref: ContentRefFingerprintInput<'a>,
         expected_revision_no: RevisionNo,
     },
-    // The binding generation joins the preimage for the same reason every
-    // other guard does: a token naming a different generation is a different
-    // logical request, and replaying a receipt would skip the new guard.
     MoveByInode {
         inode_id: InodeId,
         expected_binding_generation: &'a str,
@@ -668,6 +665,30 @@ mod tests {
                 "a changed {label} must change the fingerprint"
             );
         }
+    }
+
+    #[test]
+    fn binding_generation_changes_inode_mutation_identity() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let operation = |expected_binding_generation: &str| FilesystemOperation::MoveByInode {
+            inode_id: InodeId(42),
+            expected_binding_generation: expected_binding_generation.to_owned(),
+            to_parent_inode_id: InodeId(7),
+            to_display_name: DisplayName::parse("report.txt").expect("display name"),
+            behavior: DestinationBehavior::NoReplace,
+        };
+
+        let fingerprint = |generation| {
+            semantic_commit_fingerprint(
+                &namespace_id,
+                &test_actor(),
+                None,
+                &[operation(generation)],
+            )
+            .expect("fingerprint")
+        };
+
+        assert_ne!(fingerprint("generation-a"), fingerprint("generation-b"));
     }
 
     #[test]

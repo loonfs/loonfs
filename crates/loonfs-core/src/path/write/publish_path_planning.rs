@@ -1,13 +1,14 @@
 //! Shared publish-planning preconditions and visible-ancestor walks.
 
+use crate::binding_generation::BindingGeneration;
 use crate::commit::{CandidateAllocation, PlannedOp};
 use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::read::resolve_visible_inode;
 use loonfs_api::{
-    AbsolutePath, BindingGeneration, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey,
-    NamespaceId, ROOT_INODE_ID,
+    AbsolutePath, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
+    ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -47,18 +48,10 @@ impl CompiledFilesystemOperation {
 }
 
 pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?Sized> {
-    /// Namespace the commit belongs to, which is what binds a caller's
-    /// opaque binding-generation token to this namespace.
     pub(super) namespace_id: &'a NamespaceId,
     pub(super) metadata_state: &'a MetadataView<'view, 'store, S>,
 }
 
-/// Resolves one visible inode and where it currently sits, through the same
-/// by-inode walk the read path answers `GET /inodes/{inode_id}` with.
-///
-/// An inode that does not exist, or that no longer has a visible path from
-/// the root, is `inode_not_found`: an inode-addressed request names the
-/// resource itself, so its absence reads as the resource being gone.
 pub(super) async fn publish_resolve_visible_inode<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     inode_id: InodeId,
@@ -70,8 +63,6 @@ pub(super) async fn publish_resolve_visible_inode<S: ObjectStore + ?Sized>(
         .ok_or(CoreError::InodeNotFound(inode_id))
 }
 
-/// Resolves one visible inode that must be a directory, which is what an
-/// inode-addressed create or move destination names.
 pub(super) async fn publish_resolve_visible_directory<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     inode_id: InodeId,
@@ -86,7 +77,6 @@ pub(super) async fn publish_resolve_visible_directory<S: ObjectStore + ?Sized>(
     Ok(resolved)
 }
 
-/// The visible entry a name currently binds under a resolved parent, if any.
 pub(super) async fn publish_resolve_visible_child<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     parent_inode_id: InodeId,
@@ -105,19 +95,12 @@ pub(super) async fn publish_resolve_visible_child<S: ObjectStore + ?Sized>(
         .map(Some)
 }
 
-/// The path an inode-addressed operation names, spelled the way an error
-/// message about a path would spell it.
 pub(super) fn publish_child_display_path(parent_path: &str, display_name: &DisplayName) -> String {
     let separator = if parent_path.ends_with('/') { "" } else { "/" };
     format!("{parent_path}{separator}{display_name}")
 }
 
-/// Rejects a move or delete whose target is no longer bound at the
-/// generation the caller read.
-///
-/// Planning runs under the publish lock, so the comparison is race-free: a
-/// caller that read the entry earlier either mutates that exact binding or
-/// fails, never a binding some other writer put in its place.
+/// Requires the binding generation supplied by the caller to still be current.
 pub(super) fn publish_check_binding_generation<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
@@ -127,8 +110,6 @@ pub(super) fn publish_check_binding_generation<S: ObjectStore + ?Sized>(
         .map_err(|error| {
             CoreError::InvalidCommitRequest(format!("invalid expected binding generation: {error}"))
         })?;
-    // The namespace root is nameless, so it carries no generation and is
-    // never a mutation target.
     let Some(current) = resolved.binding_generation else {
         return Err(CoreError::RootMutationForbidden);
     };
@@ -253,8 +234,6 @@ pub(super) async fn publish_resolve_replace_destination<S: ObjectStore + ?Sized>
     publish_classify_replace_destination(occupant, behavior, source_inode_id, to_path.as_str())
 }
 
-/// Applies the destination rule to whatever a destination lookup found, so
-/// path-addressed and inode-addressed destinations decide alike.
 pub(super) fn publish_classify_replace_destination(
     occupant: Option<ResolvedVisiblePath>,
     behavior: DestinationBehavior,

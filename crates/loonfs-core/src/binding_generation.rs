@@ -2,6 +2,7 @@
 
 use loonfs_api::{ChangeSeq, NamespaceId};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 const FORMAT_VERSION: u8 = 1;
 const KIND: &str = "binding_generation";
@@ -22,6 +23,23 @@ impl BindingGeneration {
         })?;
         Ok(loonfs_api::wire::hex::hex_encode_bytes(&bytes))
     }
+
+    pub(crate) fn decode(
+        value: &str,
+        expected_namespace_id: &NamespaceId,
+    ) -> Result<Self, InvalidBindingGeneration> {
+        let bytes =
+            loonfs_api::wire::hex::hex_decode_bytes(value).map_err(|_| InvalidBindingGeneration)?;
+        let envelope: DecodedBindingGenerationEnvelope =
+            serde_json::from_slice(&bytes).map_err(|_| InvalidBindingGeneration)?;
+        if envelope.format_version != FORMAT_VERSION
+            || envelope.kind != KIND
+            || envelope.namespace_id != *expected_namespace_id
+        {
+            return Err(InvalidBindingGeneration);
+        }
+        Ok(envelope.generation)
+    }
 }
 
 #[derive(Serialize)]
@@ -32,3 +50,16 @@ struct BindingGenerationEnvelope<'a> {
     #[serde(flatten)]
     generation: BindingGeneration,
 }
+
+#[derive(Deserialize)]
+struct DecodedBindingGenerationEnvelope {
+    format_version: u8,
+    kind: String,
+    namespace_id: NamespaceId,
+    #[serde(flatten)]
+    generation: BindingGeneration,
+}
+
+#[derive(Debug, Error)]
+#[error("binding generation is malformed or belongs to another namespace")]
+pub(crate) struct InvalidBindingGeneration;

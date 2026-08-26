@@ -48,8 +48,6 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Compiles a resolved move into its rebinding, whichever way the caller
-/// addressed the source and the destination.
 pub(super) async fn publish_plan_move<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     source: &ResolvedVisiblePath,

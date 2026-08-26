@@ -49,8 +49,6 @@ pub(super) async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
     publish_plan_delete(view, &resolved, behavior, absolute_path.as_str()).await
 }
 
-/// Compiles a resolved delete into its tombstone, whichever way the caller
-/// addressed the target. `target_path` is the spelling its errors name.
 pub(super) async fn publish_plan_delete<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,

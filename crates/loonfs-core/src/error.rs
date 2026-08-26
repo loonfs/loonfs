@@ -124,9 +124,7 @@ pub enum CoreError {
         /// supplied by the caller.
         existing_display_name: Option<String>,
     },
-    /// An inode-addressed move or delete named a binding generation that is
-    /// not the inode's current one, so the name it meant to act on is bound
-    /// differently now.
+    /// The requested binding generation is no longer current.
     #[error("inode `{inode_id}` is no longer bound at the generation the request named")]
     BindingGenerationMismatch { inode_id: InodeId },
     #[error("commit id conflict for `{commit_id}`")]

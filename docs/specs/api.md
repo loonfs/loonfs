@@ -271,7 +271,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` no longer matches the head; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision guard every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
-| `binding_generation_mismatch` | 409 | An inode-addressed move or delete named a binding generation that is no longer the inode's current one: the name it meant to act on is bound differently now. Re-read the entry and decide again. |
+| `binding_generation_mismatch` | 409 | The binding generation supplied for an inode move or delete is no longer current. Re-read the entry before retrying. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
@@ -1766,37 +1766,13 @@ asserts an existing file — an absent path answers `path_not_found`, and
 combining it with `no_replace` is `invalid_request`. Like the delete guard,
 it is part of the commit's semantic identity for commit-id reuse.
 
-Five operations address inodes instead of paths. They are for a client that
-already holds inode identity, such as a sync client that read entries and kept
-their ids. That client does not have to re-derive a path another writer may
-have changed since. Each operation commits exactly what its path twin commits:
-the same bindings, the same revisions, the same tombstones, and the same
-change-feed events. They are gated by the `core.inodes.mutations` feature.
-Wherever one of them names an inode that does not exist, or one that is no
-longer visible, the answer is `inode_not_found`.
+Five operations use inode IDs instead of paths. They let clients act on an entry they previously read even if its path has changed. An unknown or hidden inode returns `inode_not_found`.
 
-`create_directory_by_inode` creates one directory under a parent named by
-inode. It has no `parents` flag, because a parent named by inode already
-exists. The parent must be a visible directory. A name that is already bound
-answers `path_conflict`.
+`create_directory_by_inode` and `put_file_by_inode` create an entry under an existing parent directory. Both are create-only and return `path_conflict` when the name is already in use.
 
-`put_file_by_inode` creates one file the same way, and it is create-only: a
-bound name answers `path_conflict`. It has no `behavior` field and no
-replacing spelling. A client holding inode identity replaces a file by naming
-the file, which is the next operation.
+`put_file_revision_by_inode` appends a revision to a file wherever it is currently located. It requires `expected_revision_no` and returns `stale_revision` when the file has changed.
 
-`put_file_revision_by_inode` writes a new revision on the file itself, wherever
-that file is currently bound. `expected_revision_no` is required; there is
-deliberately no unguarded spelling. A raced write answers `stale_revision` with
-the same expected and actual details a guarded path put answers. The target
-must be a file, so naming a directory answers `path_conflict`.
-
-`move_by_inode` and `delete_by_inode` take the entry's
-`expected_binding_generation` (section 5.1), which is required. Everything else
-matches `move_path` and `delete_path`: the same destination `behavior`,
-including `replace`, and the same recursive choice for a directory delete. The
-root is not a target for either one. It is nameless, so it carries no binding
-generation, and naming it answers `invalid_request`.
+`move_by_inode` and `delete_by_inode` require `expected_binding_generation` (section 5.1). Their destination, replacement, and recursive-delete behavior matches `move_path` and `delete_path`. The namespace root cannot be moved or deleted.
 
 ```json
 {
@@ -1811,7 +1787,7 @@ generation, and naming it answers `invalid_request`.
     {
       "kind": "move_by_inode",
       "inode_id": "ino_42",
-      "expected_binding_generation": "7b2e2e2e7d",
+      "expected_binding_generation": "opaque-token",
       "to_parent_inode_id": "ino_12",
       "to_display_name": "january.pdf",
       "behavior": "replace"

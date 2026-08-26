@@ -4618,7 +4618,7 @@
             "$ref": "#/components/schemas/FilesystemOperationUpdateAttributes"
           }
         ],
-        "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because concurrency guards are optional. A\nmisspelled guard must fail decoding instead of silently becoming `None`\nand allowing an unguarded write. Any future fieldless variant must use\nempty braces so serde also rejects unexpected fields for that variant.",
+        "description": "One filesystem operation.\n\nUnknown fields are rejected so a misspelled concurrency guard cannot be ignored.\nFieldless variants must use empty braces so serde rejects unexpected fields.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
@@ -6342,7 +6342,7 @@
       },
       "FilesystemOperationCreateDirectoryByInode": {
         "type": "object",
-        "description": "Create one directory under a parent addressed by inode.\n\nThe parent exists by definition, so there is no `parents` flag.",
+        "description": "Create a directory under an existing parent inode.",
         "required": [
           "parent_inode_id",
           "display_name",
@@ -6351,7 +6351,7 @@
         "properties": {
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
-            "description": "Requested child spelling, rejected when the name is already bound."
+            "description": "New directory name."
           },
           "kind": {
             "type": "string",
@@ -6402,7 +6402,7 @@
       },
       "FilesystemOperationPutFileByInode": {
         "type": "object",
-        "description": "Create one file under a parent addressed by inode.\n\nCreate-only: a bound name conflicts. A new revision on a file that\nalready exists is [`Self::PutFileRevisionByInode`], which names the\nfile rather than a place in a directory.",
+        "description": "Create a file under an existing parent inode. The name must be unused.",
         "required": [
           "parent_inode_id",
           "display_name",
@@ -6416,7 +6416,7 @@
           },
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
-            "description": "Requested child spelling, rejected when the name is already bound."
+            "description": "New file name."
           },
           "kind": {
             "type": "string",
@@ -6434,7 +6434,7 @@
       },
       "FilesystemOperationPutFileRevisionByInode": {
         "type": "object",
-        "description": "Append a new revision to a file addressed by inode, wherever it is\ncurrently bound.\n\nThe revision guard is required: an inode-addressed write is for a\nclient holding state it read, and there is deliberately no unguarded\nspelling of it.",
+        "description": "Append a revision to a file inode if its current revision matches.",
         "required": [
           "inode_id",
           "content_ref",
@@ -6448,7 +6448,7 @@
           },
           "expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "The revision the write applies over; a raced write fails with\n`stale_revision` instead of stacking on state the caller never\nsaw."
+            "description": "Current revision required for the write."
           },
           "inode_id": {
             "type": "string",
@@ -6496,7 +6496,7 @@
       },
       "FilesystemOperationDeleteByInode": {
         "type": "object",
-        "description": "Delete the inode a client holds, guarded by the binding generation it\nread.",
+        "description": "Delete an inode if its current binding matches.",
         "required": [
           "inode_id",
           "expected_binding_generation",
@@ -6509,7 +6509,7 @@
           },
           "expected_binding_generation": {
             "type": "string",
-            "description": "Binding generation the client read for this inode. The delete\napplies only while that generation is still current; anything\nelse answers `binding_generation_mismatch`."
+            "description": "Binding generation required for the delete."
           },
           "inode_id": {
             "type": "string",
@@ -6556,7 +6556,7 @@
       },
       "FilesystemOperationMoveByInode": {
         "type": "object",
-        "description": "Move the inode a client holds under a new parent and name, guarded by\nthe binding generation it read.",
+        "description": "Move an inode if its current binding matches.",
         "required": [
           "inode_id",
           "expected_binding_generation",
@@ -6571,7 +6571,7 @@
           },
           "expected_binding_generation": {
             "type": "string",
-            "description": "Binding generation the client read for this inode. The move\napplies only while that generation is still current; anything\nelse answers `binding_generation_mismatch`."
+            "description": "Binding generation required for the move."
           },
           "inode_id": {
             "type": "string",
@@ -6587,7 +6587,7 @@
           },
           "to_display_name": {
             "$ref": "#/components/schemas/DisplayName",
-            "description": "Destination spelling."
+            "description": "New name."
           },
           "to_parent_inode_id": {
             "type": "string",

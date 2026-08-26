@@ -1,9 +1,4 @@
-//! Publish plans for inode-addressed mutations: the operations a client
-//! writes when it holds inode identity rather than a path.
-//!
-//! Each plan resolves its targets by inode and then compiles the same
-//! commit operations its path twin compiles, so the durable deltas and the
-//! change feed cannot tell the two spellings apart.
+//! Plans inode-addressed mutations.
 
 use super::plan_delete::publish_plan_delete;
 use super::plan_transfer::publish_plan_move;
@@ -23,16 +18,11 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 
-/// What an inode-addressed create binds under its parent.
 pub(super) enum NewChild {
     Directory,
     File(ContentRef),
 }
 
-/// Creates one entry under a parent addressed by inode.
-///
-/// Create-only for both kinds: an already bound name is a conflict, never a
-/// replacement.
 pub(super) async fn plan_publish_create_by_inode<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
     display_name: &DisplayName,
@@ -74,10 +64,6 @@ pub(super) async fn plan_publish_create_by_inode<S: ObjectStore + ?Sized>(
     ))
 }
 
-/// Appends a revision to a file addressed by inode.
-///
-/// The plan carries no binding precondition: the operation names the file
-/// itself, so where the file is bound is not part of what it asserts.
 pub(super) async fn plan_publish_put_file_revision_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     content_ref: ContentRef,
@@ -91,9 +77,6 @@ pub(super) async fn plan_publish_put_file_revision_by_inode<S: ObjectStore + ?Si
             kind: target.inode_kind,
         });
     }
-    // The caller's revision is the base the write applies over, so a raced
-    // write reaches the same base-revision mismatch a guarded path put
-    // reaches, with the same expected and actual details.
     Ok(CompiledFilesystemOperation::new(
         vec![ApiCommitOp::ReplaceFile {
             inode_id,
@@ -110,7 +93,6 @@ pub(super) async fn plan_publish_put_file_revision_by_inode<S: ObjectStore + ?Si
     ))
 }
 
-/// Moves the inode a client holds under a new parent and name.
 pub(super) async fn plan_publish_move_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     expected_binding_generation: &str,
@@ -138,7 +120,6 @@ pub(super) async fn plan_publish_move_by_inode<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Deletes the inode a client holds.
 pub(super) async fn plan_publish_delete_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     expected_binding_generation: &str,

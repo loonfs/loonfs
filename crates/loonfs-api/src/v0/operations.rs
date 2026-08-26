@@ -234,12 +234,10 @@ pub enum DeleteDirectoryBehavior {
     Recursive,
 }
 
-/// One path-oriented filesystem operation.
+/// One filesystem operation.
 ///
-/// Unknown fields are rejected because concurrency guards are optional. A
-/// misspelled guard must fail decoding instead of silently becoming `None`
-/// and allowing an unguarded write. Any future fieldless variant must use
-/// empty braces so serde also rejects unexpected fields for that variant.
+/// Unknown fields are rejected so a misspelled concurrency guard cannot be ignored.
+/// Fieldless variants must use empty braces so serde rejects unexpected fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -257,22 +255,20 @@ pub enum FilesystemOperation {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         parents: bool,
     },
-    /// Create one directory under a parent addressed by inode.
-    ///
-    /// The parent exists by definition, so there is no `parents` flag.
+    /// Create a directory under an existing parent inode.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationCreateDirectoryByInode")
     )]
     CreateDirectoryByInode {
-        /// Visible directory that will own the new binding.
+        /// Parent directory.
         #[serde(with = "crate::public_inode_id")]
         #[cfg_attr(
             feature = "openapi",
             schema(schema_with = crate::public_inode_id::schema)
         )]
         parent_inode_id: InodeId,
-        /// Requested child spelling, rejected when the name is already bound.
+        /// New directory name.
         display_name: DisplayName,
     },
     /// Create or replace one file with an already-durable content ref.
@@ -293,40 +289,31 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_revision_no: Option<RevisionNo>,
     },
-    /// Create one file under a parent addressed by inode.
-    ///
-    /// Create-only: a bound name conflicts. A new revision on a file that
-    /// already exists is [`Self::PutFileRevisionByInode`], which names the
-    /// file rather than a place in a directory.
+    /// Create a file under an existing parent inode. The name must be unused.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationPutFileByInode")
     )]
     PutFileByInode {
-        /// Visible directory that will own the new binding.
+        /// Parent directory.
         #[serde(with = "crate::public_inode_id")]
         #[cfg_attr(
             feature = "openapi",
             schema(schema_with = crate::public_inode_id::schema)
         )]
         parent_inode_id: InodeId,
-        /// Requested child spelling, rejected when the name is already bound.
+        /// New file name.
         display_name: DisplayName,
         /// Immutable bytes that must be covered by a valid preparation proof.
         content_ref: ContentRef,
     },
-    /// Append a new revision to a file addressed by inode, wherever it is
-    /// currently bound.
-    ///
-    /// The revision guard is required: an inode-addressed write is for a
-    /// client holding state it read, and there is deliberately no unguarded
-    /// spelling of it.
+    /// Append a revision to a file inode if its current revision matches.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationPutFileRevisionByInode")
     )]
     PutFileRevisionByInode {
-        /// Visible file inode receiving the new revision.
+        /// File to update.
         #[serde(with = "crate::public_inode_id")]
         #[cfg_attr(
             feature = "openapi",
@@ -335,9 +322,7 @@ pub enum FilesystemOperation {
         inode_id: InodeId,
         /// Immutable bytes that must be covered by a valid preparation proof.
         content_ref: ContentRef,
-        /// The revision the write applies over; a raced write fails with
-        /// `stale_revision` instead of stacking on state the caller never
-        /// saw.
+        /// Current revision required for the write.
         expected_revision_no: RevisionNo,
     },
     /// Delete one path.
@@ -362,23 +347,20 @@ pub enum FilesystemOperation {
         )]
         expected_inode_id: Option<InodeId>,
     },
-    /// Delete the inode a client holds, guarded by the binding generation it
-    /// read.
+    /// Delete an inode if its current binding matches.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationDeleteByInode")
     )]
     DeleteByInode {
-        /// Visible inode to delete.
+        /// Inode to delete.
         #[serde(with = "crate::public_inode_id")]
         #[cfg_attr(
             feature = "openapi",
             schema(schema_with = crate::public_inode_id::schema)
         )]
         inode_id: InodeId,
-        /// Binding generation the client read for this inode. The delete
-        /// applies only while that generation is still current; anything
-        /// else answers `binding_generation_mismatch`.
+        /// Binding generation required for the delete.
         expected_binding_generation: String,
         /// Whether a non-empty directory may be tombstoned recursively.
         #[serde(default)]
@@ -395,29 +377,26 @@ pub enum FilesystemOperation {
         #[serde(default)]
         behavior: DestinationBehavior,
     },
-    /// Move the inode a client holds under a new parent and name, guarded by
-    /// the binding generation it read.
+    /// Move an inode if its current binding matches.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMoveByInode"))]
     MoveByInode {
-        /// Visible inode to rebind.
+        /// Inode to move.
         #[serde(with = "crate::public_inode_id")]
         #[cfg_attr(
             feature = "openapi",
             schema(schema_with = crate::public_inode_id::schema)
         )]
         inode_id: InodeId,
-        /// Binding generation the client read for this inode. The move
-        /// applies only while that generation is still current; anything
-        /// else answers `binding_generation_mismatch`.
+        /// Binding generation required for the move.
         expected_binding_generation: String,
-        /// Visible destination directory, which may be the current parent.
+        /// Destination directory.
         #[serde(with = "crate::public_inode_id")]
         #[cfg_attr(
             feature = "openapi",
             schema(schema_with = crate::public_inode_id::schema)
         )]
         to_parent_inode_id: InodeId,
-        /// Destination spelling.
+        /// New name.
         to_display_name: DisplayName,
         /// Whether an existing destination file may be replaced.
         #[serde(default)]
@@ -514,13 +493,7 @@ pub enum FilesystemOperation {
 }
 
 impl FilesystemOperation {
-    /// Returns the external content this operation writes, which is the
-    /// content a `content_tokens` proof must cover.
-    ///
-    /// One accessor so every surface that collects an operation's content —
-    /// request limits, admission coverage, test preparation — asks the same
-    /// question and a new content-carrying variant cannot be missed by one
-    /// of them.
+    /// Returns the content written by this operation, if any.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match self {
             Self::PutFile { content_ref, .. }
