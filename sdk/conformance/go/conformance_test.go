@@ -41,6 +41,7 @@ var expectedCases = []string{
 	"download",
 	"end_to_end",
 	"error_contract",
+	"inode_mutations",
 	"pagination",
 	"proxy",
 	"upload_abort",
@@ -88,6 +89,8 @@ func TestSDKConformance(t *testing.T) {
 			switch testCase.Name {
 			case "children_by_inode":
 				runChildrenByInode(t, h, testCase)
+			case "inode_mutations":
+				runInodeMutations(t, h, testCase)
 			case "error_contract":
 				runErrorContract(t, h, testCase)
 			case "commit_replay":
@@ -1029,6 +1032,336 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 }
 
+type inodeMutationsRequest struct {
+	NamespaceID                string          `json:"namespace_id"`
+	Directory                  string          `json:"directory"`
+	Actor                      loonfs.ActorRef `json:"actor"`
+	PathDirectoryName          string          `json:"path_directory_name"`
+	PathFileName               string          `json:"path_file_name"`
+	InodeDirectoryName         string          `json:"inode_directory_name"`
+	InodeFileName              string          `json:"inode_file_name"`
+	RenamedFileName            string          `json:"renamed_file_name"`
+	MovedFileName              string          `json:"moved_file_name"`
+	ContentUTF8                string          `json:"content_utf8"`
+	RevisedContentUTF8         string          `json:"revised_content_utf8"`
+	MalformedBindingGeneration string          `json:"malformed_binding_generation"`
+}
+
+type inodeMutationsExpected struct {
+	EntryNames                 []string            `json:"entry_names"`
+	RevisedRevisionNo          int64               `json:"revised_revision_no"`
+	MovedCommittedSeq          int64               `json:"moved_committed_seq"`
+	DeletedCommittedSeq        int64               `json:"deleted_committed_seq"`
+	StaleBindingGeneration     errorStatusExpected `json:"stale_binding_generation"`
+	MalformedBindingGeneration errorStatusExpected `json:"malformed_binding_generation"`
+}
+
+func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[inodeMutationsRequest, inodeMutationsExpected](t, testCase)
+	childPath := func(name string) string { return request.Directory + "/" + name }
+	createNamespace(t, h.client, request.NamespaceID)
+	applyCreateDirectory(
+		t,
+		h.client,
+		request.NamespaceID,
+		"conf-inode-mutations-directory",
+		&request.Actor,
+		request.Directory,
+	)
+	applyCreateDirectory(
+		t,
+		h.client,
+		request.NamespaceID,
+		"conf-inode-mutations-path-directory",
+		&request.Actor,
+		childPath(request.PathDirectoryName),
+	)
+	if _, err := transfers.PutFile(context.Background(), h.client, transfers.PutFileInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(childPath(request.PathFileName)),
+		Bytes:       []byte(request.ContentUTF8),
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID("conf-inode-mutations-path-file"),
+	}); err != nil {
+		t.Fatalf("put path-addressed file: %v", err)
+	}
+
+	parentInodeID := identityOf(statPath(t, h.client, request.NamespaceID, request.Directory)).inodeID
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID("conf-inode-mutations-inode-directory"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				CreateDirectoryByInode: &loonfs.FilesystemOperationCreateDirectoryByInode{
+					ParentInodeID: parentInodeID,
+					DisplayName:   request.InodeDirectoryName,
+				},
+			},
+		},
+	})
+	contentRef, contentToken := stageContent(t, h.client, request.NamespaceID, []byte(request.ContentUTF8))
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID:   request.NamespaceID,
+		Actor:         &request.Actor,
+		CommitID:      loonfs.CommitID("conf-inode-mutations-inode-file"),
+		ContentTokens: contentTokens(contentToken),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				PutFileByInode: &loonfs.FilesystemOperationPutFileByInode{
+					ParentInodeID: parentInodeID,
+					DisplayName:   request.InodeFileName,
+					ContentRef:    contentRef,
+				},
+			},
+		},
+	})
+
+	listing := listPathEntries(t, h.client, request.NamespaceID, request.Directory)
+	names := make([]string, 0, len(listing))
+	generations := make(map[string]struct{}, len(listing))
+	for _, entry := range listing {
+		identity := identityOf(entry)
+		names = append(names, identity.displayName)
+		if identity.bindingGeneration == "" {
+			t.Fatalf("listed entry %q has no binding_generation", identity.displayName)
+		}
+		generations[identity.bindingGeneration] = struct{}{}
+	}
+	if !equalStrings(names, expected.EntryNames) {
+		t.Fatalf("listed names = %v, want %v", names, expected.EntryNames)
+	}
+	if len(generations) != len(listing) {
+		t.Errorf("listing reported %d distinct binding generations, want %d", len(generations), len(listing))
+	}
+	entryNamed := func(name string) *loonfs.PathEntry {
+		for _, entry := range listing {
+			if identityOf(entry).displayName == name {
+				return entry
+			}
+		}
+		t.Fatalf("listed entry %q is missing", name)
+		return nil
+	}
+	inodeDirectory := entryNamed(request.InodeDirectoryName)
+	if inodeDirectory.InodeKind != entryNamed(request.PathDirectoryName).InodeKind {
+		t.Errorf("inode-created directory inode_kind = %q, want the path-created kind", inodeDirectory.InodeKind)
+	}
+	inodeFile := requireFileProjection(t, entryNamed(request.InodeFileName))
+	pathFile := requireFileProjection(t, entryNamed(request.PathFileName))
+	if inodeFile.SizeBytes != pathFile.SizeBytes {
+		t.Errorf("inode-created file size_bytes = %d, want %d", inodeFile.SizeBytes, pathFile.SizeBytes)
+	}
+	if optionalString(inodeFile.ParentInodeID) != parentInodeID {
+		t.Errorf("inode-created file parent_inode_id = %q, want %q", optionalString(inodeFile.ParentInodeID), parentInodeID)
+	}
+
+	contentRef, contentToken = stageContent(t, h.client, request.NamespaceID, []byte(request.RevisedContentUTF8))
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID:   request.NamespaceID,
+		Actor:         &request.Actor,
+		CommitID:      loonfs.CommitID("conf-inode-mutations-revision"),
+		ContentTokens: contentTokens(contentToken),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				PutFileRevisionByInode: &loonfs.FilesystemOperationPutFileRevisionByInode{
+					InodeID:            inodeFile.InodeID,
+					ContentRef:         contentRef,
+					ExpectedRevisionNo: inodeFile.RevisionNo,
+				},
+			},
+		},
+	})
+	revised := requireFileProjection(
+		t,
+		statPath(t, h.client, request.NamespaceID, childPath(request.InodeFileName)),
+	)
+	if revised.RevisionNo != expected.RevisedRevisionNo {
+		t.Errorf("revised revision_no = %d, want %d", revised.RevisionNo, expected.RevisedRevisionNo)
+	}
+	readback := getFile(t, h.client, request.NamespaceID, childPath(request.InodeFileName))
+	if !bytes.Equal(readback.Bytes, []byte(request.RevisedContentUTF8)) {
+		t.Error("inode-addressed revision readback did not match the revised payload")
+	}
+	staleGeneration := optionalString(revised.BindingGeneration)
+
+	noReplace := loonfs.DestinationBehaviorNoReplace
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID("conf-inode-mutations-rename"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				MovePath: &loonfs.FilesystemOperationMovePath{
+					Behavior: &noReplace,
+					FromPath: loonfs.AbsolutePath(childPath(request.InodeFileName)),
+					ToPath:   loonfs.AbsolutePath(childPath(request.RenamedFileName)),
+				},
+			},
+		},
+	})
+	moveByInode := func(commitID string, generation string) *loonfs.CommitRequest {
+		return &loonfs.CommitRequest{
+			NamespaceID: request.NamespaceID,
+			Actor:       &request.Actor,
+			CommitID:    loonfs.CommitID(commitID),
+			Operations: []*loonfs.FilesystemOperation{
+				{
+					MoveByInode: &loonfs.FilesystemOperationMoveByInode{
+						Behavior:                  &noReplace,
+						InodeID:                   inodeFile.InodeID,
+						ExpectedBindingGeneration: generation,
+						ToParentInodeID:           identityOf(inodeDirectory).inodeID,
+						ToDisplayName:             request.MovedFileName,
+					},
+				},
+			},
+		}
+	}
+
+	_, err := h.client.Filesystem.CreateCommit(
+		context.Background(),
+		moveByInode("conf-inode-mutations-stale-move", staleGeneration),
+	)
+	var conflict *loonfs.ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected ConflictError, found %T: %v", err, err)
+	}
+	if conflict.StatusCode != expected.StaleBindingGeneration.Status {
+		t.Errorf("stale move status = %d, want %d", conflict.StatusCode, expected.StaleBindingGeneration.Status)
+	}
+	if conflict.Body == nil || conflict.Body.Code != expected.StaleBindingGeneration.Code {
+		t.Errorf("stale move body = %#v, want code %q", conflict.Body, expected.StaleBindingGeneration.Code)
+	}
+	_, err = h.client.Filesystem.CreateCommit(
+		context.Background(),
+		moveByInode("conf-inode-mutations-malformed-move", request.MalformedBindingGeneration),
+	)
+	var badRequest *loonfs.BadRequestError
+	if !errors.As(err, &badRequest) {
+		t.Fatalf("expected BadRequestError, found %T: %v", err, err)
+	}
+	if badRequest.StatusCode != expected.MalformedBindingGeneration.Status {
+		t.Errorf("malformed move status = %d, want %d", badRequest.StatusCode, expected.MalformedBindingGeneration.Status)
+	}
+	if badRequest.Body == nil || badRequest.Body.Code != expected.MalformedBindingGeneration.Code {
+		t.Errorf("malformed move body = %#v, want code %q", badRequest.Body, expected.MalformedBindingGeneration.Code)
+	}
+
+	freshGeneration := identityOf(statPath(
+		t,
+		h.client,
+		request.NamespaceID,
+		childPath(request.RenamedFileName),
+	)).bindingGeneration
+	moved := applyCommit(t, h.client, moveByInode("conf-inode-mutations-move", freshGeneration))
+	if int64(moved.CommittedSeq) != expected.MovedCommittedSeq {
+		t.Errorf("move committed_seq = %d, want %d", moved.CommittedSeq, expected.MovedCommittedSeq)
+	}
+	movedEntry := identityOf(statPath(
+		t,
+		h.client,
+		request.NamespaceID,
+		childPath(request.InodeDirectoryName)+"/"+request.MovedFileName,
+	))
+	if movedEntry.inodeID != inodeFile.InodeID {
+		t.Errorf("moved inode_id = %q, want %q", movedEntry.inodeID, inodeFile.InodeID)
+	}
+	if movedEntry.bindingGeneration == freshGeneration {
+		t.Error("move did not mint a new binding generation")
+	}
+
+	limit := 1
+	feed, err := h.client.Filesystem.ListChanges(context.Background(), &loonfs.ListChangesRequest{
+		NamespaceID: request.NamespaceID,
+		AfterSeq:    loonfs.ChangeSeq(expected.MovedCommittedSeq - 1),
+		Limit:       &limit,
+	})
+	if err != nil {
+		t.Fatalf("list inode-mutations changes: %v", err)
+	}
+	if len(feed.Changes) != 1 || len(feed.Changes[0].Events) != 1 || feed.Changes[0].Events[0].Moved == nil {
+		t.Fatalf("expected one moved event, found %#v", feed.Changes)
+	}
+	movedEvent := feed.Changes[0].Events[0].Moved
+	if movedEvent.BindingGeneration != movedEntry.bindingGeneration {
+		t.Errorf(
+			"moved event binding_generation = %q, want %q",
+			movedEvent.BindingGeneration,
+			movedEntry.bindingGeneration,
+		)
+	}
+
+	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
+	deleted := applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID("conf-inode-mutations-delete"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				DeleteByInode: &loonfs.FilesystemOperationDeleteByInode{
+					Behavior:                  &nonRecursive,
+					InodeID:                   inodeFile.InodeID,
+					ExpectedBindingGeneration: movedEntry.bindingGeneration,
+				},
+			},
+		},
+	})
+	if int64(deleted.CommittedSeq) != expected.DeletedCommittedSeq {
+		t.Errorf("delete committed_seq = %d, want %d", deleted.CommittedSeq, expected.DeletedCommittedSeq)
+	}
+}
+
+func stageContent(
+	t *testing.T,
+	sdk *client.Client,
+	namespaceID string,
+	payload []byte,
+) (*loonfs.ContentRef, *loonfs.ContentToken) {
+	t.Helper()
+	begin, err := sdk.Uploads.CreateUpload(context.Background(), &loonfs.CreateUploadRequest{
+		NamespaceID: namespaceID,
+		Body: &loonfs.BeginUploadRequest{
+			ServiceProxied: &loonfs.BeginUploadServiceProxied{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("begin service-proxied upload: %v", err)
+	}
+	if begin.ServiceProxied == nil {
+		t.Fatalf("begin upload mode = %q, want service_proxied", begin.Mode)
+	}
+	uploadID := string(begin.ServiceProxied.UploadID)
+	if _, err := sdk.Uploads.PutUploadContent(
+		context.Background(),
+		namespaceID,
+		uploadID,
+		bytes.NewReader(payload),
+	); err != nil {
+		t.Fatalf("stage upload content: %v", err)
+	}
+	completed, err := sdk.Uploads.CompleteUpload(context.Background(), &loonfs.CompleteUploadBody{
+		NamespaceID: namespaceID,
+		UploadID:    uploadID,
+		Body: &loonfs.CompleteUploadRequest{
+			ServiceProxied: &loonfs.CompleteUploadServiceProxied{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("complete service-proxied upload: %v", err)
+	}
+	status := requireCompletedStatus(t, completed)
+	return status.ContentRef, status.ContentToken
+}
+
+func contentTokens(token *loonfs.ContentToken) []*loonfs.ContentToken {
+	if token == nil {
+		return nil
+	}
+	return []*loonfs.ContentToken{token}
+}
+
 func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[paginationRequest, paginationExpected](t, testCase)
@@ -1817,9 +2150,10 @@ func requireFileProjection(t *testing.T, entry *loonfs.PathEntry) *loonfs.PathEn
 
 // pathEntryIdentity is the common subset of the generated path-entry variants.
 type pathEntryIdentity struct {
-	path        string
-	inodeID     string
-	displayName string
+	path              string
+	inodeID           string
+	displayName       string
+	bindingGeneration string
 }
 
 func identityOf(entry *loonfs.PathEntry) pathEntryIdentity {
@@ -1828,27 +2162,30 @@ func identityOf(entry *loonfs.PathEntry) pathEntryIdentity {
 	}
 	if entry.Dir != nil {
 		return pathEntryIdentity{
-			path:        string(entry.Dir.Path),
-			inodeID:     string(entry.Dir.InodeID),
-			displayName: displayNameOf(entry.Dir.DisplayName),
+			path:              string(entry.Dir.Path),
+			inodeID:           string(entry.Dir.InodeID),
+			displayName:       optionalString(entry.Dir.DisplayName),
+			bindingGeneration: optionalString(entry.Dir.BindingGeneration),
 		}
 	}
 	if entry.File != nil {
 		return pathEntryIdentity{
-			path:        string(entry.File.Path),
-			inodeID:     string(entry.File.InodeID),
-			displayName: displayNameOf(entry.File.DisplayName),
+			path:              string(entry.File.Path),
+			inodeID:           string(entry.File.InodeID),
+			displayName:       optionalString(entry.File.DisplayName),
+			bindingGeneration: optionalString(entry.File.BindingGeneration),
 		}
 	}
 	return pathEntryIdentity{}
 }
 
-// displayNameOf returns an empty string for the root entry.
-func displayNameOf(name *loonfs.DisplayName) string {
-	if name == nil {
+// optionalString returns an empty string for an absent value, which is what
+// the root entry reports for its display name and its binding generation.
+func optionalString(value *string) string {
+	if value == nil {
 		return ""
 	}
-	return string(*name)
+	return *value
 }
 
 func commitCompletedFile(
@@ -1863,15 +2200,11 @@ func commitCompletedFile(
 ) *loonfs.CommitResponse {
 	t.Helper()
 	noReplace := loonfs.DestinationBehaviorNoReplace
-	contentTokens := []*loonfs.ContentToken(nil)
-	if contentToken != nil {
-		contentTokens = []*loonfs.ContentToken{contentToken}
-	}
 	return applyCommit(t, sdk, &loonfs.CommitRequest{
 		NamespaceID:   namespaceID,
 		Actor:         actor,
 		CommitID:      loonfs.CommitID(commitID),
-		ContentTokens: contentTokens,
+		ContentTokens: contentTokens(contentToken),
 		Operations: []*loonfs.FilesystemOperation{
 			{
 				PutFile: &loonfs.FilesystemOperationPutFile{

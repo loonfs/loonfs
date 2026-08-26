@@ -6,11 +6,12 @@ use bytes::Bytes;
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompleteUploadRequest,
-    FilesystemChange, UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
+    ContentToken, FilesystemChange, UploadContentClaim, UploadMode, UploadPartChecksumClaim,
+    UploadSessionStatus,
 };
 use loonfs_api::{
-    ActorRef, ApiError, ChangeSeq, Checksum, CommitId, CommitRequest, FilesystemOperation,
-    NamespaceId,
+    ActorRef, ApiError, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation, NamespaceId,
 };
 use loonfs_client::{
     Client, ClientConfig, ClientError, CommitOptions, CreateDirectoryOptions, DeleteOptions,
@@ -21,6 +22,7 @@ use loonfs_conformance::server::{start_server, ConformanceServer, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::collections::HashSet;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rust_client_matches_the_reference_corpus() {
@@ -30,6 +32,7 @@ async fn rust_client_matches_the_reference_corpus() {
     for case in &cases {
         match case.name.as_str() {
             "children_by_inode" => run_children_by_inode(&harness, case).await,
+            "inode_mutations" => run_inode_mutations(&harness, case).await,
             "error_contract" => run_error_contract(&harness, case).await,
             "commit_replay" => run_commit_replay(&harness, case).await,
             "upload_direct_put" => run_direct_put(&harness, case).await,
@@ -106,6 +109,10 @@ fn commit_id(value: &str) -> CommitId {
     CommitId::parse(value).expect("valid fixture commit id")
 }
 
+fn display_name(value: &str) -> DisplayName {
+    DisplayName::parse(value).expect("valid fixture display name")
+}
+
 fn commit_options(actor: &ActorRef, id: &str) -> CommitOptions {
     let mut options = CommitOptions::new(actor.clone());
     options.commit_id = Some(commit_id(id));
@@ -127,12 +134,12 @@ struct ErrorRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ErrorExpected {
-    unauthenticated: UnauthorizedExpected,
+    unauthenticated: ErrorStatusExpected,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UnauthorizedExpected {
+struct ErrorStatusExpected {
     status: u16,
     code: String,
 }
@@ -839,6 +846,382 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
     }
     validate_page_walk(&request.entry_names, &observed, resume_offset, &resumed)
         .expect("children-by-inode pagination invariants");
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InodeMutationsRequest {
+    namespace_id: String,
+    directory: String,
+    actor: ActorRef,
+    path_directory_name: String,
+    path_file_name: String,
+    inode_directory_name: String,
+    inode_file_name: String,
+    renamed_file_name: String,
+    moved_file_name: String,
+    content_utf8: String,
+    revised_content_utf8: String,
+    malformed_binding_generation: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InodeMutationsExpected {
+    entry_names: Vec<String>,
+    revised_revision_no: u64,
+    moved_committed_seq: u64,
+    deleted_committed_seq: u64,
+    stale_binding_generation: ErrorStatusExpected,
+    malformed_binding_generation: ErrorStatusExpected,
+}
+
+async fn run_inode_mutations(harness: &Harness, case: &Case) {
+    let (request, expected) = parse_values::<InodeMutationsRequest, InodeMutationsExpected>(case);
+    let namespace = namespace_id(&request.namespace_id);
+    let child_path = |name: &str| {
+        namespace_path(
+            &request.namespace_id,
+            &format!("{}/{name}", request.directory),
+        )
+    };
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create inode-mutations namespace");
+    let directory = namespace_path(&request.namespace_id, &request.directory);
+    harness
+        .client
+        .create_directory(
+            &directory,
+            &CreateDirectoryOptions::new(request.actor.clone()),
+        )
+        .await
+        .expect("create inode-mutations directory");
+    harness
+        .client
+        .create_directory(
+            &child_path(&request.path_directory_name),
+            &CreateDirectoryOptions::new(request.actor.clone()),
+        )
+        .await
+        .expect("create path-addressed directory");
+    harness
+        .client
+        .put_file_bytes(
+            &child_path(&request.path_file_name),
+            request.content_utf8.as_bytes(),
+            &put_options(&request.actor, "conf-inode-mutations-path-file"),
+        )
+        .await
+        .expect("put path-addressed file");
+
+    let parent_inode_id = harness
+        .client
+        .get_path_entry(&directory, &StatPathOptions::default())
+        .await
+        .expect("stat inode-mutations directory")
+        .inode_id;
+    harness
+        .client
+        .create_commit(
+            &namespace,
+            &CommitRequest::single(
+                commit_id("conf-inode-mutations-inode-directory"),
+                request.actor.clone(),
+                None,
+                FilesystemOperation::CreateDirectoryByInode {
+                    parent_inode_id,
+                    display_name: display_name(&request.inode_directory_name),
+                },
+            ),
+        )
+        .await
+        .expect("create directory by inode");
+    let (content_ref, content_tokens) =
+        stage_content(harness, &namespace, request.content_utf8.as_bytes()).await;
+    harness
+        .client
+        .create_commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id("conf-inode-mutations-inode-file"),
+                actor: request.actor.clone(),
+                message: None,
+                content_tokens,
+                operations: vec![FilesystemOperation::PutFileByInode {
+                    parent_inode_id,
+                    display_name: display_name(&request.inode_file_name),
+                    content_ref,
+                }],
+            },
+        )
+        .await
+        .expect("put file by inode");
+
+    let listing = harness
+        .client
+        .list_path_entries_page(&directory, None, None, &ListPathEntriesOptions::default())
+        .await
+        .expect("list inode-mutations directory");
+    let names: Vec<String> = listing
+        .entries
+        .iter()
+        .map(|entry| {
+            entry
+                .display_name
+                .as_ref()
+                .expect("listed name")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(names, expected.entry_names);
+    let generations: HashSet<&str> = listing
+        .entries
+        .iter()
+        .map(|entry| {
+            entry
+                .binding_generation
+                .as_deref()
+                .expect("listed binding generation")
+        })
+        .collect();
+    assert_eq!(generations.len(), listing.entries.len());
+    let entry_named = |name: &str| {
+        listing
+            .entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .display_name
+                    .as_ref()
+                    .is_some_and(|display_name| display_name.as_str() == name)
+            })
+            .unwrap_or_else(|| panic!("listed entry `{name}` is missing"))
+    };
+    let inode_file = entry_named(&request.inode_file_name);
+    let path_file = entry_named(&request.path_file_name);
+    assert_eq!(
+        entry_named(&request.inode_directory_name).inode_kind(),
+        entry_named(&request.path_directory_name).inode_kind()
+    );
+    assert_eq!(inode_file.inode_kind(), path_file.inode_kind());
+    assert_eq!(inode_file.size_bytes(), path_file.size_bytes());
+    assert_eq!(inode_file.parent_inode_id, Some(parent_inode_id));
+    let inode_directory_id = entry_named(&request.inode_directory_name).inode_id;
+    let file_inode_id = inode_file.inode_id;
+    let expected_revision_no = inode_file.revision_no().expect("listed revision");
+
+    let (content_ref, content_tokens) =
+        stage_content(harness, &namespace, request.revised_content_utf8.as_bytes()).await;
+    harness
+        .client
+        .create_commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id("conf-inode-mutations-revision"),
+                actor: request.actor.clone(),
+                message: None,
+                content_tokens,
+                operations: vec![FilesystemOperation::PutFileRevisionByInode {
+                    inode_id: file_inode_id,
+                    content_ref,
+                    expected_revision_no,
+                }],
+            },
+        )
+        .await
+        .expect("put file revision by inode");
+    let file_path = child_path(&request.inode_file_name);
+    let revised = harness
+        .client
+        .get_path_entry(&file_path, &StatPathOptions::default())
+        .await
+        .expect("stat revised file");
+    assert_eq!(
+        revised.revision_no().expect("revised revision").0,
+        expected.revised_revision_no
+    );
+    assert_eq!(
+        harness
+            .client
+            .get_file_bytes(&file_path)
+            .await
+            .expect("read revised file"),
+        request.revised_content_utf8.as_bytes()
+    );
+    let stale_generation = revised
+        .binding_generation
+        .expect("revised binding generation");
+
+    let renamed_file = child_path(&request.renamed_file_name);
+    let mut rename_options = MoveOptions::new(request.actor.clone());
+    rename_options.commit = commit_options(&request.actor, "conf-inode-mutations-rename");
+    harness
+        .client
+        .move_path(&file_path, &renamed_file, &rename_options)
+        .await
+        .expect("rename file by path");
+
+    let move_by_inode = |id: &str, expected_binding_generation: String| {
+        CommitRequest::single(
+            commit_id(id),
+            request.actor.clone(),
+            None,
+            FilesystemOperation::MoveByInode {
+                inode_id: file_inode_id,
+                expected_binding_generation,
+                to_parent_inode_id: inode_directory_id,
+                to_display_name: display_name(&request.moved_file_name),
+                behavior: DestinationBehavior::NoReplace,
+            },
+        )
+    };
+    let stale = harness
+        .client
+        .create_commit(
+            &namespace,
+            &move_by_inode("conf-inode-mutations-stale-move", stale_generation),
+        )
+        .await
+        .expect_err("stale binding generation must fail");
+    assert_api_error(&stale, &expected.stale_binding_generation);
+    let malformed = harness
+        .client
+        .create_commit(
+            &namespace,
+            &move_by_inode(
+                "conf-inode-mutations-malformed-move",
+                request.malformed_binding_generation.clone(),
+            ),
+        )
+        .await
+        .expect_err("malformed binding generation must fail");
+    assert_api_error(&malformed, &expected.malformed_binding_generation);
+
+    let fresh_generation = harness
+        .client
+        .get_path_entry(&renamed_file, &StatPathOptions::default())
+        .await
+        .expect("stat renamed file")
+        .binding_generation
+        .expect("renamed binding generation");
+    let moved = harness
+        .client
+        .create_commit(
+            &namespace,
+            &move_by_inode("conf-inode-mutations-move", fresh_generation.clone()),
+        )
+        .await
+        .expect("move by inode");
+    assert_eq!(moved.committed_seq.0, expected.moved_committed_seq);
+    let moved_entry = harness
+        .client
+        .get_path_entry(
+            &namespace_path(
+                &request.namespace_id,
+                &format!(
+                    "{}/{}/{}",
+                    request.directory, request.inode_directory_name, request.moved_file_name
+                ),
+            ),
+            &StatPathOptions::default(),
+        )
+        .await
+        .expect("stat moved file");
+    assert_eq!(moved_entry.inode_id, file_inode_id);
+    let moved_generation = moved_entry
+        .binding_generation
+        .expect("moved binding generation");
+    assert_ne!(moved_generation, fresh_generation);
+
+    let feed = harness
+        .client
+        .list_changes(
+            &namespace,
+            ChangeSeq(expected.moved_committed_seq - 1),
+            Some(1),
+        )
+        .await
+        .expect("list inode-mutations changes");
+    match feed
+        .changes
+        .first()
+        .expect("moved change")
+        .events
+        .as_slice()
+    {
+        [FilesystemChange::Moved {
+            binding_generation, ..
+        }] => assert_eq!(binding_generation, &moved_generation),
+        other => panic!("expected one moved event, found {other:?}"),
+    }
+
+    let deleted = harness
+        .client
+        .create_commit(
+            &namespace,
+            &CommitRequest::single(
+                commit_id("conf-inode-mutations-delete"),
+                request.actor.clone(),
+                None,
+                FilesystemOperation::DeleteByInode {
+                    inode_id: file_inode_id,
+                    expected_binding_generation: moved_generation,
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                },
+            ),
+        )
+        .await
+        .expect("delete by inode");
+    assert_eq!(deleted.committed_seq.0, expected.deleted_committed_seq);
+}
+
+fn assert_api_error(error: &ClientError, expected: &ErrorStatusExpected) {
+    match error {
+        ClientError::Api { status, code, .. } => {
+            assert_eq!(*status, expected.status);
+            assert_eq!(code, &expected.code);
+        }
+        other => panic!("expected API error, found {other:?}"),
+    }
+}
+
+async fn stage_content(
+    harness: &Harness,
+    namespace_id: &NamespaceId,
+    bytes: &[u8],
+) -> (ContentRef, Vec<ContentToken>) {
+    let begin = harness
+        .client
+        .create_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
+        .await
+        .expect("begin service-proxied upload");
+    let BeginUploadResponse::ServiceProxied { upload_id, .. } = begin else {
+        panic!("expected service_proxied, found {begin:?}");
+    };
+    harness
+        .client
+        .put_upload_content(namespace_id, &upload_id, bytes)
+        .await
+        .expect("stage upload content");
+    let completed = harness
+        .client
+        .complete_upload(
+            namespace_id,
+            &upload_id,
+            &CompleteUploadRequest::ServiceProxied {},
+        )
+        .await
+        .expect("complete service-proxied upload");
+    (
+        completed
+            .content_ref()
+            .expect("completed content ref")
+            .clone(),
+        completed.content_token().cloned().into_iter().collect(),
+    )
 }
 
 async fn run_pagination(harness: &Harness, case: &Case) {
