@@ -1315,7 +1315,7 @@
             }
           },
           "409": {
-            "description": "The cursor is below the retention floor; rebootstrap required",
+            "description": "The cursor is older than the retained change history and requires a fresh snapshot",
             "content": {
               "application/json": {
                 "schema": {
