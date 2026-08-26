@@ -1314,6 +1314,16 @@
               }
             }
           },
+          "409": {
+            "description": "The cursor is below the retention floor; rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {

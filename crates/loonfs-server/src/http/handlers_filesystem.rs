@@ -573,6 +573,7 @@ pub(super) async fn create_commit(
             (status = 400, description = "Invalid change cursor or limit", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 409, description = "The cursor is below the retention floor; rebootstrap required", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
