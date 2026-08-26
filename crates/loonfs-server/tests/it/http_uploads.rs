@@ -371,6 +371,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
             display_name,
             revision_no: RevisionNo(1),
             content_ref: created_ref,
+            ..
         } if display_name.as_str() == "uploaded.txt" && *created_ref == content_ref
     ));
 

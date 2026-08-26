@@ -1,6 +1,7 @@
 //! The change feed: committed changes after a sequence number, with each
 //! commit's durable WAL deltas mapped to semantic filesystem events.
 
+use crate::binding_generation::BindingGeneration;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::load_head_and_retention_floor;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
@@ -65,7 +66,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         for record in segment.records() {
             if record.seq > after_seq {
                 let committed_seq = record.seq;
-                changes.push(committed_change_from_wal_record(record)?);
+                changes.push(committed_change_from_wal_record(namespace_id, record)?);
                 if changes.len() == limit.as_usize() {
                     through_seq = committed_seq;
                     if committed_seq < head.seq {
@@ -109,6 +110,7 @@ pub(super) async fn find_committed_change_at<S: ObjectStore + ?Sized>(
 
 /// Converts one WAL commit record into the shared API change shape.
 pub(super) fn committed_change_from_wal_record(
+    namespace_id: &NamespaceId,
     record: &WalCommitPayload,
 ) -> Result<CommittedChange> {
     Ok(CommittedChange {
@@ -117,7 +119,7 @@ pub(super) fn committed_change_from_wal_record(
         committed_by: record.committed_by.clone(),
         committed_at_ms: record.committed_at_ms,
         message: record.message.clone(),
-        events: events_from_wal_deltas(&record.deltas)?,
+        events: events_from_wal_deltas(namespace_id, record.seq, &record.deltas)?,
     })
 }
 
@@ -135,14 +137,21 @@ pub(super) fn committed_change_from_wal_record(
 /// well-formed commits; an unmatched pattern means the feed mapper and the
 /// reducer have drifted and is reported as a server error rather than
 /// guessed at.
-pub(crate) fn events_from_wal_deltas(deltas: &[WalCommitDelta]) -> Result<Vec<FilesystemChange>> {
+///
+/// `committed_seq` is also the bind sequence for bindings created by this
+/// commit.
+pub(crate) fn events_from_wal_deltas(
+    namespace_id: &NamespaceId,
+    committed_seq: ChangeSeq,
+    deltas: &[WalCommitDelta],
+) -> Result<Vec<FilesystemChange>> {
     let mut events = Vec::new();
     let mut group: Vec<&WalDelta> = Vec::new();
     let mut group_op_index = None;
     for delta in deltas {
         if group_op_index != Some(delta.semantic_op_index) {
             if group_op_index.is_some() {
-                events.push(event_from_op_deltas(&group)?);
+                events.push(event_from_op_deltas(namespace_id, committed_seq, &group)?);
                 group.clear();
             }
             group_op_index = Some(delta.semantic_op_index);
@@ -150,12 +159,16 @@ pub(crate) fn events_from_wal_deltas(deltas: &[WalCommitDelta]) -> Result<Vec<Fi
         group.push(&delta.delta);
     }
     if group_op_index.is_some() {
-        events.push(event_from_op_deltas(&group)?);
+        events.push(event_from_op_deltas(namespace_id, committed_seq, &group)?);
     }
     Ok(events)
 }
 
-fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
+fn event_from_op_deltas(
+    namespace_id: &NamespaceId,
+    committed_seq: ChangeSeq,
+    deltas: &[&WalDelta],
+) -> Result<FilesystemChange> {
     Ok(match deltas {
         // CreateDirectory: allocate + bind.
         [WalDelta::CreateInode {
@@ -163,6 +176,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             inode_kind: loonfs_api::InodeKind::Directory,
             ..
         }, WalDelta::BindDirentry {
+            delta_index,
             parent_inode_id,
             display_name,
             child_inode_id,
@@ -171,6 +185,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             inode_id: *inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
+            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
         },
         // CreateFile (and copy-file): allocate + bind + first revision.
         [WalDelta::CreateInode {
@@ -178,6 +193,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             inode_kind: loonfs_api::InodeKind::File,
             ..
         }, WalDelta::BindDirentry {
+            delta_index,
             parent_inode_id,
             display_name,
             child_inode_id,
@@ -192,6 +208,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
                 inode_id: *inode_id,
                 parent_inode_id: *parent_inode_id,
                 display_name: display_name.clone(),
+                binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
                 revision_no: *revision_no,
                 content_ref: content_ref.clone(),
             }
@@ -214,6 +231,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             child_inode_id,
             ..
         }, WalDelta::BindDirentry {
+            delta_index,
             parent_inode_id: to_parent_inode_id,
             display_name: to_name,
             child_inode_id: bound_inode_id,
@@ -224,6 +242,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             from_display_name: from_name.clone(),
             to_parent_inode_id: *to_parent_inode_id,
             to_display_name: to_name.clone(),
+            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
         },
         // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.
         [WalDelta::UnbindDirentry { child_inode_id, .. }, WalDelta::TombstoneSubtree {
@@ -242,6 +261,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
         },
         // Undelete: revoke the exact deletion generation, re-bind the root.
         [WalDelta::RevokeSubtreeTombstone { root_inode_id, .. }, WalDelta::BindDirentry {
+            delta_index,
             parent_inode_id,
             display_name,
             child_inode_id,
@@ -250,6 +270,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             inode_id: *root_inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
+            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
         },
         // UpdateAttributes, including the copy that carries a source's
         // attributes onto the inode it just created. The delta already holds
@@ -275,12 +296,32 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
     })
 }
 
+fn binding_generation(
+    namespace_id: &NamespaceId,
+    bind_seq: ChangeSeq,
+    bind_delta_index: u32,
+) -> Result<String> {
+    BindingGeneration {
+        bind_seq,
+        bind_delta_index,
+    }
+    .encode(namespace_id)
+    .map_err(|error| CoreError::Internal(format!("failed to encode a binding generation: {error}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::event_from_op_deltas;
     use loonfs_api::v0::FilesystemChange;
     use loonfs_api::wire::wal::WalDelta;
-    use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, InodeId};
+    use loonfs_api::{
+        AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, InodeId,
+        NamespaceId,
+    };
+
+    fn namespace_id() -> NamespaceId {
+        NamespaceId::parse("demo").expect("valid namespace id")
+    }
 
     fn attributes() -> Attributes {
         Attributes::new(std::collections::BTreeMap::from([(
@@ -304,7 +345,8 @@ mod tests {
         let delta = append_attributes(0);
 
         assert_eq!(
-            event_from_op_deltas(&[&delta]).expect("map the operation"),
+            event_from_op_deltas(&namespace_id(), ChangeSeq(7), &[&delta])
+                .expect("map the operation"),
             FilesystemChange::AttributesChanged {
                 inode_id: InodeId(7),
                 attributes_revision_no: AttributeRevisionNo(3),
@@ -318,7 +360,7 @@ mod tests {
         let first = append_attributes(0);
         let second = append_attributes(1);
 
-        let error = event_from_op_deltas(&[&first, &second])
+        let error = event_from_op_deltas(&namespace_id(), ChangeSeq(7), &[&first, &second])
             .expect_err("two attribute deltas are not one operation");
         assert!(error.to_string().contains("drifted"), "{error}");
     }

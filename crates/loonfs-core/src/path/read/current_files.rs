@@ -4,7 +4,7 @@
 
 use super::materialized_view::LoadedMetadataView;
 use crate::error::{CoreError, Result};
-use crate::metadata::{MetadataViewSession, ResolvedVisiblePath};
+use crate::metadata::{DirentryBindRecord, MetadataViewSession, ResolvedVisiblePath};
 use loonfs_api::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet};
@@ -116,8 +116,10 @@ pub(super) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
             .as_ref()
             .map(|binding| binding.parent_inode_id),
         display_name: current_binding
+            .as_ref()
             .map(|binding| binding.display_name.to_string())
             .unwrap_or_default(),
+        binding_generation: current_binding.as_ref().map(DirentryBindRecord::generation),
     }))
 }
 

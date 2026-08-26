@@ -330,6 +330,7 @@ mod tests {
             head_seq: ChangeSeq(3),
             parent_inode_id: display_name.map(|_| InodeId(1)),
             display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
+            binding_generation: None,
             attributes: None,
         }
     }

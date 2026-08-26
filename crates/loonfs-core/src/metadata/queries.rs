@@ -9,6 +9,7 @@
 
 use super::visibility::{self, resolve_in_memory_read, unbind_matches_binding};
 use super::{DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord};
+use crate::binding_generation::BindingGeneration;
 use loonfs_api::{AbsolutePath, ActorRef, ChangeSeq, InodeId, InodeKind, NameKey};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -23,6 +24,7 @@ pub struct ResolvedVisiblePath {
     pub created_at_ms: u64,
     pub parent_inode_id: Option<InodeId>,
     pub display_name: String,
+    pub binding_generation: Option<BindingGeneration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]

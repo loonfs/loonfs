@@ -461,6 +461,8 @@ Every guard is an optional field, which is why a commit body rejects unknown
 fields (section 6). A misspelled `expected_revision_no` is `invalid_request`
 rather than a write that applies unguarded and answers 200.
 
+Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients may compare tokens for equality but must not parse or order them. Binding generations are read-only in v0.
+
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
 committed logical commit only after its WAL segment is durably written and the
@@ -1454,6 +1456,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
   "head_seq": 418,
   "parent_inode_id": "ino_7",
   "display_name": "report.txt",
+  "binding_generation": "opaque-token",
   "revision_no": 7,
   "revision_committed_by": { "kind": "service", "id": "render-worker" },
   "size_bytes": 19482,
@@ -1491,9 +1494,7 @@ attributes written reads as `{}` at revision 0 with no updater or update time.
 A read that did not include attributes omits all four siblings, so an absent
 projection never means "no attributes".
 
-The namespace root is nameless: its entry omits both `parent_inode_id` and
-`display_name`. Every non-root entry carries a validated `display_name`; the
-empty string is not a spelling for the root or for any named path component.
+The namespace root is nameless, so its entry omits `parent_inode_id`, `display_name`, and `binding_generation`. Every other entry includes a validated `display_name` and a `binding_generation` for its current parent/name binding (section 5.1). The empty string is not a valid name for the root or any named path component.
 
 The inode route returns the same entry shape, including the current `path`.
 Renaming an entry changes its path and name but not its inode id or metadata.
@@ -2277,12 +2278,12 @@ Event kinds:
 
 | Kind | Meaning | Fields |
 | --- | --- | --- |
-| `directory_created` | A directory was created. | `inode_id`, `parent_inode_id`, `display_name`. |
-| `file_created` | A file was created with its first revision. | `inode_id`, `parent_inode_id`, `display_name`, `revision_no`, `content_ref`. |
+| `directory_created` | A directory was created. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`. |
+| `file_created` | A file was created with its first revision. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`, `revision_no`, `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
-| `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`. |
+| `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`, `binding_generation`. |
 | `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus optional `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
-| `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`. |
+| `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 
 Directory and file creation use separate event shapes. A file creation always
@@ -2293,7 +2294,8 @@ includes its first revision and content reference:
   "kind": "directory_created",
   "inode_id": "ino_42",
   "parent_inode_id": "ino_1",
-  "display_name": "docs"
+  "display_name": "docs",
+  "binding_generation": "opaque-token"
 }
 
 {
@@ -2301,6 +2303,7 @@ includes its first revision and content reference:
   "inode_id": "ino_43",
   "parent_inode_id": "ino_1",
   "display_name": "report.txt",
+  "binding_generation": "opaque-token",
   "revision_no": 1,
   "content_ref": {
     "kind": "blob_v1",
@@ -2315,6 +2318,8 @@ Events name inodes and their parent-directory bindings rather than full
 paths; a consumer that needs paths can stat the inode or maintain its own
 binding projection from this feed. Clients must ignore unknown event kinds
 and unknown fields.
+
+`directory_created`, `file_created`, `moved`, and `undeleted` include the `binding_generation` they created. It matches later reads of the same binding. Other events do not create bindings and omit the field.
 
 If `limit` truncates the page before the namespace head, the response includes
 `next_after_seq` set to the last returned change's `committed_seq`. The client

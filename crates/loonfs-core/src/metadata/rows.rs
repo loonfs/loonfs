@@ -3,6 +3,7 @@
 //! its append-only rows.
 
 use super::indexes::MetadataIndexes;
+use crate::binding_generation::BindingGeneration;
 use loonfs_api::wire::manifest::{lookup_keys, DeletedDirentry, TombstoneGeneration};
 use loonfs_api::{
     ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName,
@@ -60,6 +61,15 @@ pub struct DirentryBindRecord {
     pub child_inode_id: InodeId,
     pub bind_seq: ChangeSeq,
     pub bind_delta_index: u32,
+}
+
+impl DirentryBindRecord {
+    pub(crate) fn generation(&self) -> BindingGeneration {
+        BindingGeneration {
+            bind_seq: self.bind_seq,
+            bind_delta_index: self.bind_delta_index,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

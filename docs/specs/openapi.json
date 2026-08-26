@@ -6035,9 +6035,14 @@
           "inode_id",
           "parent_inode_id",
           "display_name",
+          "binding_generation",
           "kind"
         ],
         "properties": {
+          "binding_generation": {
+            "type": "string",
+            "description": "Opaque identifier for the binding created by this event."
+          },
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
             "description": "User-facing spelling of the new entry."
@@ -6069,11 +6074,16 @@
           "inode_id",
           "parent_inode_id",
           "display_name",
+          "binding_generation",
           "revision_no",
           "content_ref",
           "kind"
         ],
         "properties": {
+          "binding_generation": {
+            "type": "string",
+            "description": "Opaque identifier for the binding created by this event."
+          },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
             "description": "Content of the first revision."
@@ -6147,9 +6157,14 @@
           "from_display_name",
           "to_parent_inode_id",
           "to_display_name",
+          "binding_generation",
           "kind"
         ],
         "properties": {
+          "binding_generation": {
+            "type": "string",
+            "description": "Opaque identifier for the binding created by this event."
+          },
           "from_display_name": {
             "$ref": "#/components/schemas/DisplayName",
             "description": "Spelling of the old binding."
@@ -6217,9 +6232,14 @@
           "inode_id",
           "parent_inode_id",
           "display_name",
+          "binding_generation",
           "kind"
         ],
         "properties": {
+          "binding_generation": {
+            "type": "string",
+            "description": "Opaque identifier for the binding created by this event."
+          },
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
             "description": "Spelling of the recovered binding."
@@ -6722,6 +6742,10 @@
             "$ref": "#/components/schemas/ActorRef",
             "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
           },
+          "binding_generation": {
+            "type": "string",
+            "description": "Opaque identifier for this entry's current parent/name binding. Absent for the namespace root."
+          },
           "created_at_ms": {
             "type": "integer",
             "format": "int64",
@@ -6827,6 +6851,10 @@
           "attributes_updated_by": {
             "$ref": "#/components/schemas/ActorRef",
             "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
+          },
+          "binding_generation": {
+            "type": "string",
+            "description": "Opaque identifier for this entry's current parent/name binding. Absent for the namespace root."
           },
           "created_at_ms": {
             "type": "integer",

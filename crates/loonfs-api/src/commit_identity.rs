@@ -1027,6 +1027,7 @@ mod tests {
                     inode_id: InodeId(2),
                     parent_inode_id: InodeId(1),
                     display_name: DisplayName::parse("report.txt").expect("valid display name"),
+                    binding_generation: "generation".to_owned(),
                     revision_no: RevisionNo(1),
                     content_ref,
                 }],
