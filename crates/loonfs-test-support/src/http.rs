@@ -36,6 +36,38 @@ pub fn retry_on_macos_teardown_einval<T>(exchange: impl Fn() -> T) -> T {
     exchange()
 }
 
+/// Retries an HTTP exchange that returns its failures instead of panicking.
+///
+/// This gates the same macOS socket error as the helper above, on returned
+/// errors as well as panics.
+#[allow(clippy::print_stderr)]
+pub fn retry_result_on_macos_teardown_einval<T, E: std::fmt::Debug>(
+    exchange: impl Fn() -> Result<T, E>,
+) -> Result<T, E> {
+    if !cfg!(target_os = "macos") {
+        return exchange();
+    }
+    const ATTEMPTS: usize = 3;
+    for _ in 1..ATTEMPTS {
+        match catch_unwind(AssertUnwindSafe(&exchange)) {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error)) => {
+                if !message_is_teardown_einval(&format!("{error:?}")) {
+                    return Err(error);
+                }
+                eprintln!("retrying: macOS reset the connection before the client's timeout reset");
+            }
+            Err(payload) => {
+                if !panic_is_teardown_einval(payload.as_ref()) {
+                    resume_unwind(payload);
+                }
+                eprintln!("retrying: macOS reset the connection before the client's timeout reset");
+            }
+        }
+    }
+    exchange()
+}
+
 /// Returns true for the ureq panic caused by the macOS socket error.
 fn panic_is_teardown_einval(payload: &(dyn std::any::Any + Send)) -> bool {
     let message = if let Some(owned) = payload.downcast_ref::<String>() {
@@ -45,5 +77,10 @@ fn panic_is_teardown_einval(payload: &(dyn std::any::Any + Send)) -> bool {
     } else {
         return false;
     };
-    message.contains("kind: InvalidInput") && message.contains("Invalid argument")
+    message_is_teardown_einval(message)
+}
+
+fn message_is_teardown_einval(message: &str) -> bool {
+    message.contains("Invalid argument")
+        && (message.contains("kind: InvalidInput") || message.contains("os error 22"))
 }

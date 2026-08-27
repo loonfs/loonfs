@@ -12,7 +12,7 @@ use loonfs_api::{
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
-use loonfs_test_support::http::raw_agent;
+use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
@@ -112,10 +112,12 @@ fn post_retention_advance(
 }
 
 fn post_admin_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> ApiResult<T> {
-    let request = raw_agent()
-        .post(url)
-        .set("authorization", &format!("Bearer {auth_token}"));
-    decode_admin_response(request.call())
+    retry_result_on_macos_teardown_einval(|| {
+        let request = raw_agent()
+            .post(url)
+            .set("authorization", &format!("Bearer {auth_token}"));
+        decode_admin_response(request.call())
+    })
 }
 
 fn post_admin_json_body<T: serde::de::DeserializeOwned>(
@@ -123,10 +125,12 @@ fn post_admin_json_body<T: serde::de::DeserializeOwned>(
     auth_token: &str,
     body: serde_json::Value,
 ) -> ApiResult<T> {
-    let request = raw_agent()
-        .post(url)
-        .set("authorization", &format!("Bearer {auth_token}"));
-    decode_admin_response(request.send_json(body))
+    retry_result_on_macos_teardown_einval(|| {
+        let request = raw_agent()
+            .post(url)
+            .set("authorization", &format!("Bearer {auth_token}"));
+        decode_admin_response(request.send_json(body.clone()))
+    })
 }
 
 fn decode_admin_response<T: serde::de::DeserializeOwned>(

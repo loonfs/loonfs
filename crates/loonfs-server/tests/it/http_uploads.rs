@@ -14,7 +14,9 @@ use loonfs_api::{
     LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
 };
 use loonfs_client::{ClientError, NamespacePath};
-use loonfs_test_support::http::raw_agent;
+use loonfs_test_support::http::{
+    raw_agent, retry_on_macos_teardown_einval, retry_result_on_macos_teardown_einval,
+};
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
@@ -538,27 +540,31 @@ async fn complete_upload_session(
 }
 
 fn get_upload(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSession {
-    let response = raw_agent()
-        .get(&format!(
-            "{server_url}/v0/namespaces/demo/uploads/{upload_id}"
-        ))
-        .set("authorization", "Bearer test-token")
-        .call()
-        .expect("get upload status");
-    serde_json::from_reader(response.into_reader()).expect("decode upload status")
+    retry_on_macos_teardown_einval(|| {
+        let response = raw_agent()
+            .get(&format!(
+                "{server_url}/v0/namespaces/demo/uploads/{upload_id}"
+            ))
+            .set("authorization", "Bearer test-token")
+            .call()
+            .expect("get upload status");
+        serde_json::from_reader(response.into_reader()).expect("decode upload status")
+    })
 }
 
 fn abort_upload(
     server_url: &str,
     upload_id: &loonfs_api::UploadId,
 ) -> Result<UploadSession, Box<ureq::Error>> {
-    let response = raw_agent()
-        .post(&format!(
-            "{server_url}/v0/namespaces/demo/uploads/{upload_id}/abort"
-        ))
-        .set("authorization", "Bearer test-token")
-        .set("content-type", "application/json")
-        .send_string("{}")
-        .map_err(Box::new)?;
-    Ok(serde_json::from_reader(response.into_reader()).expect("decode abort response"))
+    retry_result_on_macos_teardown_einval(|| {
+        let response = raw_agent()
+            .post(&format!(
+                "{server_url}/v0/namespaces/demo/uploads/{upload_id}/abort"
+            ))
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/json")
+            .send_string("{}")
+            .map_err(Box::new)?;
+        Ok(serde_json::from_reader(response.into_reader()).expect("decode abort response"))
+    })
 }
