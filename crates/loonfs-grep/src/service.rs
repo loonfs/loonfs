@@ -18,6 +18,7 @@ use crate::root::{
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs::{CoreError, CurrentFileState, MetadataViewError};
+use loonfs_api::v0::FilesystemChange;
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, string_prefix_upper_bound, BlockHandle,
@@ -467,6 +468,9 @@ async fn tail_revisions(reads: &NamespaceReads<'_>, resume: ChangeFeedResume) ->
                 });
             }
             for event in change.events.iter().skip(start_event_index) {
+                if matches!(event, FilesystemChange::Undeleted { .. }) {
+                    return Ok(TailScan::RebuildRequired);
+                }
                 if let Some(revision) = published_revision(event) {
                     inodes.insert(revision.inode_id);
                 }
@@ -486,6 +490,10 @@ async fn tail_revisions(reads: &NamespaceReads<'_>, resume: ChangeFeedResume) ->
 enum TailScan {
     /// Every file whose content changed after the index watermark.
     Within(BTreeSet<InodeId>),
+    /// An undelete may expose files absent from the checkpoint index. The
+    /// event names only the restored root, so an exact query must wait for
+    /// the worker to rebuild the projection from the now-visible tree.
+    RebuildRequired,
     /// More files changed after the watermark than the tail budget allows;
     /// enumeration stopped there, so no set is carried.
     OverBudget,
@@ -740,7 +748,7 @@ impl GrepService {
         if let Some(tail_resume) = tail_resume {
             match tail_revisions(reads, tail_resume).await? {
                 TailScan::Within(inodes) => candidates.unfiltered.extend(inodes),
-                TailScan::OverBudget if request.allow_stale => {
+                TailScan::OverBudget | TailScan::RebuildRequired if request.allow_stale => {
                     // Serve the index's cut and nothing newer. A candidate
                     // whose current revision is past the watermark carries no
                     // posting for that revision, so `admits` already refuses
@@ -748,7 +756,7 @@ impl GrepService {
                     // at an unindexed revision.
                     tail_scanned = false;
                 }
-                TailScan::OverBudget => {
+                TailScan::OverBudget | TailScan::RebuildRequired => {
                     return Err(CoreError::IndexLagging {
                         behind_commits: head_seq.0.saturating_sub(snapshot.built_through_seq.0),
                     }

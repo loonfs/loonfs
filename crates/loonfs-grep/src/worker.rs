@@ -27,7 +27,7 @@ use loonfs::{
     FsReader, PassBudget, RuntimeError, StoreFailureClass, DEFAULT_GC_MAX_OBJECTS,
     GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
 };
-use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
+use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
@@ -405,6 +405,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             } => {
                 collect_backfill_unit(&reads, checkpoint_id, *target_seq, *cursor_inode_id, policy)
                     .await
+                    .map(CollectedIndexWork::Unit)
             }
             GrepIndexStatus::Active {
                 built_through_seq,
@@ -419,10 +420,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
 
         let unit = match collected {
-            Ok(Some(unit)) => unit,
-            // `None` is valid only during active indexing. A backfill must
-            // always return its next page.
-            Ok(None) => {
+            Ok(CollectedIndexWork::Unit(unit)) => unit,
+            Ok(CollectedIndexWork::UpToDate) => {
                 let built_through_seq = current
                     .manifest_state()
                     .status()
@@ -436,6 +435,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     namespace_id,
                     GrepBuildOutcome::UpToDate { built_through_seq },
                 ));
+            }
+            // An undelete may expose a whole subtree that was hidden from
+            // the checkpoint backfill. The event names only its root and
+            // carries no descendant revisions, so no incremental unit can
+            // prove the projection complete. Rebuild from a checkpoint that
+            // sees the restored tree before advancing the watermark.
+            Ok(CollectedIndexWork::Restart) => {
+                return self.restart_backfill(namespace_id, &current).await;
             }
             // The projection's basis is gone. Either the change feed no
             // longer retains history back to the watermark, or the pinned
@@ -747,6 +754,12 @@ struct CollectedIndexUnit {
     progress: CollectedProgress,
 }
 
+enum CollectedIndexWork {
+    Unit(CollectedIndexUnit),
+    UpToDate,
+    Restart,
+}
+
 #[derive(Default)]
 struct IndexingStats {
     indexed_revisions: u64,
@@ -793,7 +806,7 @@ async fn collect_backfill_unit(
     target_seq: ChangeSeq,
     cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,
-) -> Result<Option<CollectedIndexUnit>> {
+) -> Result<CollectedIndexUnit> {
     let mut postings = BTreeMap::new();
     let mut stats = IndexingStats::default();
     let mut next_cursor = cursor;
@@ -850,7 +863,7 @@ async fn collect_backfill_unit(
         }
     }
     load_and_fold_revision_contents(reads, &pending, &mut postings, &mut stats).await?;
-    Ok(Some(CollectedIndexUnit {
+    Ok(CollectedIndexUnit {
         postings,
         stats,
         progress: CollectedProgress::Backfill {
@@ -858,7 +871,7 @@ async fn collect_backfill_unit(
             target_seq,
             next_cursor,
         },
-    }))
+    })
 }
 
 /// Collects one incremental step from the semantic change feed.
@@ -869,13 +882,13 @@ async fn collect_incremental_unit(
     built_through_seq: ChangeSeq,
     next_event_index: u32,
     policy: GramIndexBuildPolicy,
-) -> Result<Option<CollectedIndexUnit>> {
+) -> Result<CollectedIndexWork> {
     let resume = ChangeFeedResume::new(built_through_seq, next_event_index);
     let feed = reads
         .list_changes_after(resume.after_seq(), policy.max_files_per_step.get())
         .await?;
     if feed.changes.is_empty() {
-        return Ok(None);
+        return Ok(CollectedIndexWork::UpToDate);
     }
     let mut postings = BTreeMap::new();
     let mut stats = IndexingStats::default();
@@ -902,6 +915,9 @@ async fn collect_incremental_unit(
             });
         }
         for (event_index, event) in change.events.iter().enumerate().skip(start_event_index) {
+            if matches!(event, FilesystemChange::Undeleted { .. }) {
+                return Ok(CollectedIndexWork::Restart);
+            }
             let Some(revision) = published_revision(event) else {
                 continue;
             };
@@ -953,10 +969,10 @@ async fn collect_incremental_unit(
     }
     if collected_through_seq == built_through_seq && collected_next_event_index == next_event_index
     {
-        return Ok(None);
+        return Ok(CollectedIndexWork::UpToDate);
     }
     load_and_fold_revision_contents(reads, &pending, &mut postings, &mut stats).await?;
-    Ok(Some(CollectedIndexUnit {
+    Ok(CollectedIndexWork::Unit(CollectedIndexUnit {
         postings,
         stats,
         progress: CollectedProgress::Incremental {
