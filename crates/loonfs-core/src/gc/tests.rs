@@ -762,6 +762,50 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
 }
 
 #[tokio::test]
+async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::content_blob(),
+        OperationClass::Delete,
+        InjectedError::Transport("content delete timed out".to_owned()),
+    );
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let (upload_id, _, _) = stage_upload(&store, &namespace_id, &setup).await;
+
+    let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    gc_namespace(&store, &namespace_id, &config(), &expired)
+        .await
+        .expect("abort expired upload");
+
+    store.fail_next(1);
+    let reaped = context(expired.now_ms + GRACE_MS + 1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
+        .await
+        .expect("retain after failed cleanup");
+    assert_eq!(report.deleted.upload_sessions, 0);
+    assert!(matches!(
+        read_upload_session(&store, &namespace_id, &upload_id)
+            .await
+            .expect("aborted session retained")
+            .status,
+        UploadSessionRecordStatus::Aborted { .. }
+    ));
+
+    let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
+        .await
+        .expect("retry cleanup");
+    assert_eq!(report.deleted.upload_sessions, 1);
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_none());
+}
+
+#[tokio::test]
 async fn a_pass_reports_the_soonest_deadline_it_retained() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1113,6 +1157,56 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
         store.head(&content_key).await.expect("head").is_none(),
         "completed content nothing published is reclaimable"
     );
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn completed_content_delete_failure_keeps_the_session_for_retry() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::content_blob(),
+        OperationClass::Delete,
+        InjectedError::Transport("content delete timed out".to_owned()),
+    );
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let (upload_id, content_ref, content_store_id, _prepared) =
+        complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
+    let content_key =
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+
+    store.fail_next(1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+        .await
+        .expect("retain after failed content delete");
+    assert_eq!(report.deleted.upload_sessions, 0);
+    assert_eq!(report.deleted.content_objects, 0);
+    assert!(store
+        .head(&content_key)
+        .await
+        .expect("head content")
+        .is_some());
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_some());
+
+    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+        .await
+        .expect("retry content delete");
+    assert_eq!(report.deleted.upload_sessions, 1);
+    assert_eq!(report.deleted.content_objects, 1);
+    assert!(store
+        .head(&content_key)
+        .await
+        .expect("head content")
+        .is_none());
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .is_none());

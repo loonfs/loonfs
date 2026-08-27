@@ -198,7 +198,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     let upload_id = match create_upload_session(store, namespace_id, session, context).await {
         Ok(upload_id) => upload_id,
         Err(error) => {
-            abort_unpublished_multipart_upload(
+            let _ = abort_unpublished_multipart_upload(
                 store,
                 &content_store_id,
                 &content_id,
@@ -1101,7 +1101,7 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
         })
         .await?;
 
-    abandoned.release(store, content_store_id).await;
+    let _ = abandoned.release(store, content_store_id).await;
     Ok(response)
 }
 
@@ -1131,21 +1131,29 @@ impl AbandonedUpload {
 
     /// Releases everything the session left behind, provider upload first so
     /// the object it might still assemble cannot outlive the deletion.
+    ///
+    /// `true` confirms both cleanup steps. A failed provider abort stops
+    /// before object deletion so an in-flight assembly cannot resurrect the
+    /// object after it was deleted.
+    #[must_use]
     pub(crate) async fn release<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
         content_store_id: &ContentStoreId,
-    ) {
+    ) -> bool {
         if let Some(provider_upload_id) = &self.provider_multipart_upload_id {
-            abort_unpublished_multipart_upload(
+            if !abort_unpublished_multipart_upload(
                 store,
                 content_store_id,
                 &self.content_id,
                 provider_upload_id,
             )
-            .await;
+            .await
+            {
+                return false;
+            }
         }
-        delete_unpublished_content_object(store, content_store_id, &self.content_id).await;
+        delete_unpublished_content_object(store, content_store_id, &self.content_id).await
     }
 }
 
@@ -1753,6 +1761,46 @@ mod tests {
         .await
         .expect("replay direct-put completion");
         assert_eq!(replay, first);
+    }
+
+    #[tokio::test]
+    async fn provider_abort_failure_stops_before_object_delete() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        bootstrap_namespace(&store, &namespace_id, &context(1_000), false)
+            .await
+            .expect("bootstrap");
+        let content_store_id = load_namespace_content_store_id(&store, &namespace_id)
+            .await
+            .expect("content store id");
+        let content_id = ContentId::generate();
+        let content_key = content_blob(&content_store_id, &content_id);
+        store
+            .put(
+                &content_key,
+                Bytes::from_static(BYTES),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("write unpublished content");
+        let abandoned = AbandonedUpload {
+            content_id,
+            provider_multipart_upload_id: Some("unsupported-provider-upload".to_owned()),
+        };
+
+        assert!(
+            !abandoned.release(&store, &content_store_id).await,
+            "an unsupported provider abort is incomplete cleanup"
+        );
+        assert!(
+            store
+                .head(&content_key)
+                .await
+                .expect("head content")
+                .is_some(),
+            "object deletion waits until provider abort succeeds"
+        );
     }
 
     #[tokio::test]

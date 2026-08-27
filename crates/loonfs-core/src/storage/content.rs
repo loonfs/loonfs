@@ -272,21 +272,26 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
 /// object and no metadata can reference it. Deleting is therefore safe and
 /// keeping it would leak bytes nobody can name again. This runs strictly
 /// after the durable transition that made the session terminal, and it is
-/// idempotent, so a cleanup lost to a crash is simply repeated by the next
-/// garbage-collection pass — which is why a failure here is logged rather
-/// than propagated.
+/// idempotent, so a cleanup lost to a crash is repeated by the next
+/// garbage-collection pass. The returned flag tells that pass whether it may
+/// remove the durable session record that makes the retry possible.
+#[must_use]
 pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_id: &ContentId,
-) {
+) -> bool {
     let object_key = content_blob(content_store_id, content_id);
-    if let Err(error) = store.delete(&object_key).await {
-        tracing::warn!(
-            content_id = %content_id,
-            error_class = ?error.class(),
-            "failed to remove the content object of a terminated upload session"
-        );
+    match store.delete(&object_key).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                content_id = %content_id,
+                error_class = ?error.class(),
+                "failed to remove the content object of a terminated upload session"
+            );
+            false
+        }
     }
 }
 
@@ -295,25 +300,30 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
 /// Aborting is safe whatever the upload's real state: an upload that already
 /// assembled its object survives the abort untouched, and one the provider
 /// has never heard of succeeds anyway. So this runs strictly after the
-/// durable transition without first proving what it is cleaning up, and a
-/// failure is logged rather than propagated — the next garbage-collection
-/// pass repeats it from the terminal record.
+/// durable transition without first proving what it is cleaning up. The
+/// returned flag tells garbage collection whether the provider is quiescent
+/// enough to proceed to object deletion and eventual session-record removal.
+#[must_use]
 pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_id: &ContentId,
     provider_upload_id: &str,
-) {
+) -> bool {
     let object_key = content_blob(content_store_id, content_id);
-    if let Err(error) = store
+    match store
         .abort_multipart_upload(&object_key, provider_upload_id)
         .await
     {
-        tracing::warn!(
-            content_id = %content_id,
-            error_class = ?error.class(),
-            "failed to abandon the multipart upload of a terminated upload session"
-        );
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                content_id = %content_id,
+                error_class = ?error.class(),
+                "failed to abandon the multipart upload of a terminated upload session"
+            );
+            false
+        }
     }
 }
 
