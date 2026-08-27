@@ -24,9 +24,10 @@ pub struct GrepRequest {
     /// bound to that page's request; each page is evaluated against the
     /// namespace head at page time.
     pub cursor: Option<String>,
-    /// When the unindexed tail exceeds the scan budget, return
-    /// indexed-only results (reported via `tail_scanned: false`) instead
-    /// of failing with `index_lagging`.
+    /// When the unindexed tail exceeds the scan budget or crosses an
+    /// undelete that requires an index rebuild, return indexed-only results
+    /// (reported via `tail_scanned: false`) instead of failing with
+    /// `index_lagging`.
     pub allow_stale: bool,
     /// Permit a capped exhaustive scan when the pattern yields no required
     /// grams. Refused beyond the server's scan budget.

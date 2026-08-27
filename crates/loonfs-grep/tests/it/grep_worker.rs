@@ -1121,7 +1121,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
 }
 
 #[tokio::test]
-async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
+async fn a_recursive_delete_hides_matches_and_an_undelete_rebuild_restores_them() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -1203,6 +1203,14 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
         )
         .await
         .expect("undelete the subtree");
+    let restart = worker
+        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .await
+        .expect("restart after undelete");
+    assert!(matches!(
+        restart.outcome,
+        GrepBuildOutcome::BackfillRestarted { .. }
+    ));
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let restored = new_query(&store, &namespace_id, &request("subtree needle"))
@@ -1211,13 +1219,110 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     assert_eq!(
         matched_paths(&restored),
         vec!["/docs/a.txt", "/docs/b.txt"],
-        "an undelete makes the same postings eligible again"
+        "the fresh checkpoint must index the restored subtree"
     );
-    assert_eq!(
+    assert_ne!(
         grep_segment_ids(&store, &namespace_id).await,
         segments_before,
-        "an undelete must write no new postings"
+        "an undelete must replace the old projection"
     );
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn undeleting_a_subtree_hidden_from_backfill_restarts_the_projection() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("undelete-after-backfill").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("undelete-backfill-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let reader = writer.reader();
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    for name in ["a", "b"] {
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/docs/{name}.txt"),
+                format!("restored needle {name}\n").as_bytes(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("write file before delete");
+    }
+    let docs_inode_id = reader
+        .get_path_entry(&namespace_id, "/docs", Default::default())
+        .await
+        .expect("stat docs before delete")
+        .inode_id;
+    let deleted = writer
+        .delete_path(
+            &namespace_id,
+            "/docs",
+            loonfs::DeleteOptions {
+                behavior: loonfs::DeleteDirectoryBehavior::Recursive,
+                ..loonfs::DeleteOptions::new(loonfs_test_support::test_actor())
+            },
+        )
+        .await
+        .expect("delete subtree before backfill");
+
+    let worker = worker(&store).await;
+    worker.enable(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    assert!(
+        new_query(&store, &namespace_id, &request("restored needle"))
+            .await
+            .expect("query hidden tree")
+            .matches
+            .is_empty()
+    );
+
+    writer
+        .undelete(
+            &namespace_id,
+            docs_inode_id,
+            deleted.committed_seq,
+            Some("/docs"),
+            loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("undelete subtree after backfill");
+
+    let exact_error = new_query(&store, &namespace_id, &request("restored needle"))
+        .await
+        .expect_err("an exact query cannot project an unseen restored subtree");
+    assert_eq!(exact_error.code(), ErrorCode::IndexLagging);
+
+    let mut stale_request = request("restored needle");
+    stale_request.allow_stale = true;
+    let stale = new_query(&store, &namespace_id, &stale_request)
+        .await
+        .expect("indexed-only query across undelete");
+    assert!(!stale.tail_scanned);
+    assert!(stale.matches.is_empty());
+
+    let restart = worker
+        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .await
+        .expect("restart after undelete");
+    assert!(matches!(
+        restart.outcome,
+        GrepBuildOutcome::BackfillRestarted { .. }
+    ));
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+
+    let restored = new_query(&store, &namespace_id, &request("restored needle"))
+        .await
+        .expect("query rebuilt restored tree");
+    assert_eq!(matched_paths(&restored), vec!["/docs/a.txt", "/docs/b.txt"]);
     writer.shutdown().await.expect("shutdown");
 }
 

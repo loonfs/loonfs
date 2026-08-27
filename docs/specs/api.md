@@ -2461,10 +2461,20 @@ opts into a capped exhaustive scan. A tail past the scan budget is
 rejected with `index_lagging` unless `allow_stale` accepts indexed-only
 results (reported via `tail_scanned: false`); stale results are a
 consistent cut at the index watermark — files whose newest revision
-postdates it are omitted entirely rather than mixed in. The `path_prefix`
-value is a complete absolute path, not a partial textual segment prefix. The
-server resolves it using the name-key folding rule (format spec, section
-2.3.1), then limits results to descendants of that inode. It must therefore
+postdates it are omitted entirely rather than mixed in.
+
+An undelete after the index watermark also returns `index_lagging` for an
+exact query: the restored entry may be a directory whose descendants were
+hidden from the checkpoint backfill, and the change event names only that
+root. With `allow_stale`, the query serves indexed-only results and reports
+`tail_scanned: false`. The worker starts a fresh checkpoint backfill
+before advancing its watermark past the undelete, so a later exact query
+includes the restored subtree.
+
+The `path_prefix` value is a complete absolute path, not a partial textual
+segment prefix. The server resolves it using the name-key folding rule
+(format spec, section 2.3.1), then limits results to descendants of that
+inode. It must therefore
 use the same canonical spelling as any other path. A scope that does not exist
 answers `path_not_found`; an
 empty existing scope answers successfully with no matches. A missing data half answers `not_supported` with the
