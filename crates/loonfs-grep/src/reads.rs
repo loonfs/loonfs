@@ -5,8 +5,8 @@
 
 use crate::{GrepError, Result};
 use loonfs::{
-    CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState, FsReader,
-    ListChangesOptions, StatPathOptions, MAX_RESOLVE_CURRENT_FILES,
+    CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState, FsReadSnapshot,
+    FsReader, ListChangesOptions, StatPathOptions, MAX_RESOLVE_CURRENT_FILES,
 };
 use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
@@ -18,8 +18,8 @@ use loonfs_api::{
 /// Filesystem reads for one namespace.
 ///
 /// Each call uses an internally consistent snapshot, but consecutive calls
-/// may observe different heads. Query candidates are reverified against
-/// current state, so a snapshot does not need to span calls.
+/// may observe different heads. Query execution pins one view so every
+/// metadata phase in one response uses the same head.
 pub struct NamespaceReads<'a> {
     reader: &'a FsReader,
     namespace_id: &'a NamespaceId,
@@ -37,6 +37,14 @@ impl<'a> NamespaceReads<'a> {
     /// Returns the namespace used by this reader.
     pub fn namespace_id(&self) -> &NamespaceId {
         self.namespace_id
+    }
+
+    /// Pins one metadata view for a query.
+    pub(crate) async fn pin(&self) -> Result<PinnedNamespaceReads<'a>> {
+        Ok(PinnedNamespaceReads {
+            reader: self.reader,
+            snapshot: self.reader.pin_namespace(self.namespace_id).await?,
+        })
     }
 
     /// Returns the namespace's current head sequence.
@@ -169,6 +177,137 @@ impl<'a> NamespaceReads<'a> {
         Ok(self
             .reader
             .read_content_ref(self.namespace_id, content_ref, max_bytes)
+            .await?)
+    }
+}
+
+/// Filesystem reads held to one namespace head for a single grep query.
+pub(crate) struct PinnedNamespaceReads<'a> {
+    reader: &'a FsReader,
+    snapshot: FsReadSnapshot,
+}
+
+impl PinnedNamespaceReads<'_> {
+    /// Returns the namespace used by this reader.
+    pub(crate) fn namespace_id(&self) -> &NamespaceId {
+        self.snapshot.namespace_id()
+    }
+
+    /// Returns the head sequence shared by every metadata read.
+    pub(crate) fn head_seq(&self) -> ChangeSeq {
+        self.snapshot.head_seq()
+    }
+
+    /// Reads committed changes after `after_seq`, capped at the pinned head.
+    ///
+    /// The feed itself may observe a later durable head. Its immutable commit
+    /// prefix is truncated here so later commits cannot affect this query.
+    pub(crate) async fn list_changes_after(
+        &self,
+        after_seq: ChangeSeq,
+        limit: usize,
+    ) -> Result<ListChangesResponse> {
+        let head_seq = self.head_seq();
+        if after_seq > head_seq {
+            return Err(CoreError::InvalidCursor(format!(
+                "change feed sequence `{after_seq}` is ahead of pinned head `{head_seq}`"
+            ))
+            .into());
+        }
+        if after_seq == head_seq {
+            return Ok(ListChangesResponse {
+                namespace_id: self.namespace_id().clone(),
+                after_seq,
+                through_seq: head_seq,
+                next_after_seq: None,
+                changes: Vec::new(),
+            });
+        }
+        let mut page = self
+            .reader
+            .list_changes(
+                self.namespace_id(),
+                after_seq,
+                ListChangesOptions {
+                    limit: Some(page_limit(limit).map_err(invalid_page_limit)?),
+                },
+            )
+            .await?;
+        page.changes
+            .retain(|change| change.committed_seq <= head_seq);
+        page.through_seq = head_seq;
+        page.next_after_seq = page
+            .changes
+            .last()
+            .map(|change| change.committed_seq)
+            .filter(|last_seq| *last_seq < head_seq);
+        Ok(page)
+    }
+
+    /// Resolves visibility, revision, and path in input order.
+    pub(crate) async fn resolve_current_files(
+        &self,
+        inode_ids: &[InodeId],
+    ) -> Result<Vec<CurrentFileState>> {
+        Ok(self.snapshot.resolve_current_files(inode_ids).await?)
+    }
+
+    /// Resolves one path against the pinned metadata view.
+    pub(crate) async fn resolve_path(&self, absolute_path: &AbsolutePath) -> Result<PathEntry> {
+        Ok(self
+            .snapshot
+            .get_path_entry(
+                absolute_path.as_str(),
+                StatPathOptions {
+                    include_attributes: false,
+                },
+            )
+            .await?)
+    }
+
+    /// Lists one directory page against the pinned metadata view.
+    pub(crate) async fn list_path_page(
+        &self,
+        absolute_path: &AbsolutePath,
+        cursor: Option<DirectoryPageCursor>,
+        limit: usize,
+    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
+        let page = self
+            .snapshot
+            .list_path_entries_page(
+                absolute_path.as_str(),
+                PageRequest {
+                    limit: page_limit(limit).map_err(invalid_page_limit)?,
+                    cursor,
+                },
+                loonfs::ListPathEntriesOptions::default(),
+            )
+            .await?;
+        let next_cursor = page
+            .next_cursor
+            .as_deref()
+            .map(decode_cursor)
+            .transpose()
+            .map_err(|error| {
+                GrepError::from(CoreError::InvalidCursor(format!(
+                    "the directory listing cursor did not decode: {error}"
+                )))
+            })?;
+        Ok(Page {
+            items: page.entries,
+            next_cursor,
+        })
+    }
+
+    /// Reads one immutable content object selected from the pinned view.
+    pub(crate) async fn read_content_ref(
+        &self,
+        content_ref: &ContentRef,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        Ok(self
+            .snapshot
+            .read_content_ref(content_ref, max_bytes)
             .await?)
     }
 }

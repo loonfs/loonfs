@@ -9,7 +9,8 @@ mod writes;
 
 pub use maintenance::{CheckpointsPager, MetadataCompactionOutcome};
 pub use reads::{
-    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, TrashPager,
+    ChangesPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager, PathEntriesPager,
+    TrashPager,
 };
 
 pub(crate) use core::{should_invalidate_after_result, ReadCore, WriterBits, WriterIdentity};

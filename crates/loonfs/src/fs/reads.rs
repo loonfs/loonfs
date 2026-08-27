@@ -16,6 +16,87 @@ use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageCursor, PageRequest,
     PaginationPolicy, TrashPageCursor,
 };
+use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
+
+/// A namespace metadata view pinned to one head sequence.
+///
+/// Create one with [`FsReader::pin_namespace`] when several related reads
+/// must describe the same filesystem state. Immutable content selected by
+/// this view remains safe to read through [`Self::read_content_ref`].
+#[must_use]
+pub struct FsReadSnapshot {
+    engine: NamespaceReaderEngine<SharedObjectStore>,
+    context: RuntimeReadContext,
+}
+
+impl FsReadSnapshot {
+    /// Returns the namespace this snapshot reads.
+    pub fn namespace_id(&self) -> &NamespaceId {
+        self.engine.namespace_id()
+    }
+
+    /// Returns the head sequence this snapshot is pinned to.
+    pub fn head_seq(&self) -> ChangeSeq {
+        self.context.head.seq
+    }
+
+    /// Resolves an absolute path against this snapshot.
+    pub async fn get_path_entry(
+        &self,
+        absolute_path: &str,
+        options: StatPathOptions,
+    ) -> Result<PathEntry> {
+        Ok(self
+            .engine
+            .resolve_path(absolute_path, options, &self.context)
+            .await?)
+    }
+
+    /// Lists one directory page against this snapshot.
+    pub async fn list_path_entries_page(
+        &self,
+        absolute_path: &str,
+        request: PageRequest<DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
+    ) -> Result<ListPathEntriesResponse> {
+        let listed_path = AbsolutePath::parse(absolute_path)
+            .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
+        let page = self
+            .engine
+            .list_path_page(listed_path.as_str(), request, options, &self.context)
+            .await?;
+        Ok(ListPathEntriesResponse {
+            namespace_id: self.namespace_id().clone(),
+            path: listed_path,
+            head_seq: self.head_seq(),
+            entries: page.items,
+            next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+        })
+    }
+
+    /// Resolves current visibility, revision, and path against this snapshot.
+    pub async fn resolve_current_files(
+        &self,
+        inode_ids: &[InodeId],
+    ) -> Result<Vec<CurrentFileState>> {
+        Ok(self
+            .engine
+            .resolve_current_files(inode_ids, &self.context)
+            .await?)
+    }
+
+    /// Reads and verifies immutable content selected from this snapshot.
+    pub async fn read_content_ref(
+        &self,
+        content_ref: &ContentRef,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        Ok(self
+            .engine
+            .read_content_ref(content_ref, max_bytes, &self.context)
+            .await?)
+    }
+}
 
 /// Fetches directory pages as needed.
 ///
@@ -345,6 +426,18 @@ fn advance_typed_cursor<C: PageCursor>(
 }
 
 impl FsReader {
+    /// Pins one namespace metadata view for a sequence of related reads.
+    ///
+    /// The returned snapshot keeps path lookup, directory listing, inode
+    /// resolution, and content selection on the same head even if commits
+    /// publish concurrently. It is intended to be short-lived for one
+    /// request or unit of work.
+    pub async fn pin_namespace(&self, namespace_id: &NamespaceId) -> Result<FsReadSnapshot> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        Ok(FsReadSnapshot { engine, context })
+    }
+
     /// Returns a namespace's current state.
     #[tracing::instrument(
         level = "debug",

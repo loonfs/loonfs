@@ -181,7 +181,7 @@ pub use loonfs_objectstore::{
 pub use cache::RuntimeCacheStats;
 pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
 pub use fs::{
-    ChangesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
+    ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
     MetadataCompactionOutcome, PathEntriesPager, TrashPager,
 };
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
