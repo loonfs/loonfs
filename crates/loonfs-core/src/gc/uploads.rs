@@ -102,9 +102,12 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             }
             // Repeat provider cleanup so a later pass completes work left by a crash
             // after the abort CAS.
-            AbandonedUpload::of(&state)
+            if !AbandonedUpload::of(&state)
                 .release(store, content_store_id)
-                .await;
+                .await
+            {
+                return Ok(retain_undated());
+            }
             // Do not count this as reclaimed content. Abort cleanup runs even when no
             // object was written. Only a completed session with an `Absent` reference
             // result proves that a content object was eligible for reclamation.
@@ -133,12 +136,15 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                     reclaimed_content: false,
                 }),
                 ContentReference::Absent => {
-                    delete_unpublished_content_object(
+                    if !delete_unpublished_content_object(
                         store,
                         content_store_id,
                         &content_ref.content_id,
                     )
-                    .await;
+                    .await
+                    {
+                        return Ok(retain_undated());
+                    }
                     Ok(UploadSessionSweep::Delete {
                         reclaimed_content: true,
                     })
@@ -201,7 +207,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     match aborted {
         // Keep the newly aborted record until its post-abort grace period expires.
         Ok(CasAttempt::Settled(Some(abandoned))) => {
-            abandoned.release(store, content_store_id).await;
+            let _ = abandoned.release(store, content_store_id).await;
             Ok(retain_until(context.now_ms.saturating_add(grace_window_ms)))
         }
         Ok(CasAttempt::Settled(None)) => Ok(retain_undated()),
