@@ -113,6 +113,34 @@ async fn new_query_page(
     .await
 }
 
+async fn flush_wal_and_advance_retention(admin: &FsAdmin, namespace_id: &NamespaceId) -> ChangeSeq {
+    admin
+        .run_maintenance(
+            namespace_id,
+            MaintenancePlan {
+                metadata: Some(MetadataMaintenanceOptions {
+                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                }),
+                ..MaintenancePlan::default()
+            },
+        )
+        .await
+        .expect("flush wal");
+    admin
+        .run_maintenance(
+            namespace_id,
+            MaintenancePlan {
+                advance_retention: true,
+                ..MaintenancePlan::default()
+            },
+        )
+        .await
+        .expect("advance retention")
+        .retention
+        .expect("retention selected")
+        .retention_floor_seq
+}
+
 fn normalize_namespace(mut response: GrepResponse, namespace_id: &NamespaceId) -> GrepResponse {
     response.namespace_id = namespace_id.clone();
     response
@@ -608,31 +636,8 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         )
         .await
         .expect("write after watermark");
-    admin
-        .run_maintenance(
-            &namespace_id,
-            MaintenancePlan {
-                metadata: Some(MetadataMaintenanceOptions {
-                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
-                }),
-                ..MaintenancePlan::default()
-            },
-        )
-        .await
-        .expect("flush wal");
-    let floor = admin
-        .run_maintenance(
-            &namespace_id,
-            MaintenancePlan {
-                advance_retention: true,
-                ..MaintenancePlan::default()
-            },
-        )
-        .await
-        .expect("advance retention")
-        .retention
-        .expect("retention selected");
-    assert!(floor.retention_floor_seq > ChangeSeq(0));
+    let retention_floor_seq = flush_wal_and_advance_retention(&admin, &namespace_id).await;
+    assert!(retention_floor_seq > ChangeSeq(0));
 
     // The feed can no longer reach the watermark, which the worker must
     // read as "my basis is gone" and answer with a whole new attempt.
@@ -672,6 +677,125 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("query after rebootstrap");
     assert_eq!(response.matches.len(), 1);
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("worker-handoff-gap").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("handoff-gap-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("handoff-gap-admin")
+        .build()
+        .await
+        .expect("admin");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    for index in 0..2u32 {
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/before-{index}.txt"),
+                format!("handoff needle before {index}\n").as_bytes(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("write checkpointed file");
+    }
+
+    let worker = worker(&store).await;
+    worker.enable(&namespace_id).await.expect("enable");
+    let target_seq = match worker
+        .lifecycle(&namespace_id)
+        .await
+        .expect("backfill lifecycle")
+    {
+        GrepIndexStatus::Backfilling { target_seq, .. } => target_seq,
+        status => panic!("newly enabled grep must be backfilling, got {status:?}"),
+    };
+    let policy = GramIndexBuildPolicy {
+        max_files_per_step: NonZeroUsize::MIN,
+        ..GramIndexBuildPolicy::default()
+    };
+    let first = worker
+        .build_step(&namespace_id, policy)
+        .await
+        .expect("first backfill page");
+    assert!(matches!(
+        first.outcome,
+        GrepBuildOutcome::Published {
+            indexed_revisions: 1,
+            materialized: false,
+            ..
+        }
+    ));
+
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/during.txt",
+            b"handoff needle during\n",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write during backfill");
+    let retention_floor_seq = flush_wal_and_advance_retention(&admin, &namespace_id).await;
+    assert!(retention_floor_seq > target_seq);
+
+    // Checkpoint pages remain readable after retention passes their basis,
+    // so the final page may still publish the snapshot watermark as active.
+    // The change-feed boundary is authoritative: a query at that watermark
+    // must fail explicitly instead of treating the missing tail as empty.
+    let completed = worker
+        .build_step(&namespace_id, policy)
+        .await
+        .expect("final backfill page");
+    assert!(matches!(
+        completed.outcome,
+        GrepBuildOutcome::Published {
+            built_through_seq,
+            materialized: true,
+            ..
+        } if built_through_seq == target_seq
+    ));
+    let error = new_query(&store, &namespace_id, &request("handoff needle"))
+        .await
+        .expect_err("an expired handoff cursor cannot answer a query");
+    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+
+    let restarted = worker
+        .build_step(&namespace_id, policy)
+        .await
+        .expect("restart expired handoff");
+    assert!(matches!(
+        restarted.outcome,
+        GrepBuildOutcome::BackfillRestarted { .. }
+    ));
+    drive_worker_to_current(&worker, &namespace_id, policy).await;
+
+    let response = new_query(&store, &namespace_id, &request("handoff needle"))
+        .await
+        .expect("query after fresh backfill");
+    assert_eq!(
+        matched_paths(&response)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "/before-0.txt".to_owned(),
+            "/before-1.txt".to_owned(),
+            "/during.txt".to_owned(),
+        ])
+    );
     writer.shutdown().await.expect("shutdown");
 }
 
