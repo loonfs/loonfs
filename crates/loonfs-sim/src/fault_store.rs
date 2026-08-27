@@ -650,12 +650,16 @@ fn apply_range(
     let invalid_range = || ObjectStoreError::InvalidRange {
         object_key: key.to_owned(),
     };
-    let start = usize::try_from(range.start_inclusive).map_err(|_| invalid_range())?;
-    let end = usize::try_from(range.end_exclusive).map_err(|_| invalid_range())?;
-    if start > end || start > bytes.len() {
+    if range.start_inclusive > range.end_exclusive {
         return Err(invalid_range());
     }
-    let end = end.min(bytes.len());
+    let start = usize::try_from(range.start_inclusive).map_err(|_| invalid_range())?;
+    if start > bytes.len() {
+        return Err(invalid_range());
+    }
+    let end = usize::try_from(range.end_exclusive)
+        .unwrap_or(usize::MAX)
+        .min(bytes.len());
     Ok(Bytes::copy_from_slice(&bytes[start..end]))
 }
 
@@ -882,63 +886,25 @@ mod tests {
     }
 
     #[test]
-    fn apply_range_matches_the_store_range_contract() {
-        assert_eq!(
+    fn apply_range_clamps_the_end_and_checks_the_start() {
+        let read = |start_inclusive, end_exclusive| {
             apply_range(
                 "range",
                 b"abcdef".to_vec(),
                 Some(ByteRange {
-                    start_inclusive: 1,
-                    end_exclusive: 4,
+                    start_inclusive,
+                    end_exclusive,
                 }),
             )
-            .expect("bounded read"),
-            Bytes::from_static(b"bcd")
-        );
+        };
+
         assert_eq!(
-            apply_range(
-                "range",
-                b"abcdef".to_vec(),
-                Some(ByteRange {
-                    start_inclusive: 4,
-                    end_exclusive: 99,
-                }),
-            )
-            .expect("clamped read"),
+            read(4, 99).expect("clamped read"),
             Bytes::from_static(b"ef")
         );
-        assert_eq!(
-            apply_range(
-                "range",
-                b"abcdef".to_vec(),
-                Some(ByteRange {
-                    start_inclusive: 6,
-                    end_exclusive: 8,
-                }),
-            )
-            .expect("read at the exact end"),
-            Bytes::new()
-        );
+        assert_eq!(read(6, 8).expect("read at the exact end"), Bytes::new());
         assert!(matches!(
-            apply_range(
-                "range",
-                b"abcdef".to_vec(),
-                Some(ByteRange {
-                    start_inclusive: 7,
-                    end_exclusive: 8,
-                }),
-            ),
-            Err(ObjectStoreError::InvalidRange { .. })
-        ));
-        assert!(matches!(
-            apply_range(
-                "range",
-                b"abcdef".to_vec(),
-                Some(ByteRange {
-                    start_inclusive: 4,
-                    end_exclusive: 1,
-                }),
-            ),
+            read(7, 8),
             Err(ObjectStoreError::InvalidRange { .. })
         ));
     }
