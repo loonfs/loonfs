@@ -834,7 +834,9 @@ manifests, and non-protecting checkpoint records under the usual windows,
 leaving the head as the id-retiring tombstone, together with the root and
 floor objects if the namespace ever wrote them (section 6, rule 4). Objects
 protected by fork-owned checkpoint records survive, so clones of a deleted
-source stay readable.
+source stay readable. A deleted fork target that materialized its own metadata
+root also keeps its source checkpoint: that root may be the basis of a nested
+fork whose manifest still names source-owned segments and content.
 
 ### 2.6 Forks
 
@@ -845,7 +847,10 @@ verified fork-owned source checkpoint at that head, then installs the complete
 target head with one create-if-absent. The target writes no manifest, no root, and no floor: the
 head's `fork_basis` names the source manifest the target starts from, and the
 fork-owned checkpoint record is what keeps that manifest and its segments alive
-for as long as the target may still need them.
+for as long as the target or a nested descendant may still need them. A target
+must materialize its own metadata root before it can be forked again; that
+direct-read, non-swept control object conservatively keeps the source
+checkpoint after target deletion.
 
 Fork provenance lives in the target head and stays there for the namespace's
 life. Reads and recovery use the target head, its own manifests once it has
@@ -1685,8 +1690,8 @@ context. The protocol is:
    generated id. Its owner carries the target namespace id and
    `expires_at_ms = now + FORK_CHECKPOINT_LEASE_MS`. This record is the
    reachability root that keeps the source's basis manifest and segments alive
-   for as long as the target lives; nothing under the target's prefix protects
-   them. Each attempt creates a new record.
+   for as long as the target or a nested descendant may need them. Each attempt
+   creates a new record.
 3. Read the pinned manifest to get the target's next inode id. Build the active target head with the source's `content_store_id` and a `fork_basis` containing the record's `manifest` reference and checkpoint id. The reference's `manifest_head_seq` is the target's fork sequence.
 4. Renew the source checkpoint with compare-and-swap. The record must be active, fork-owned, and assigned to this target. The new expiry must be later than the stored expiry and at least `now + FORK_CHECKPOINT_LEASE_MS`. The remaining lease must cover the target-head write. If either check fails, the fork stops before creating the target.
 5. Write the target head with create-if-absent.
@@ -2423,9 +2428,9 @@ publishing CAS) — under these rules:
    a later pass. Content objects are never enumerated by listing the content
    store, which is shared by every namespace whose head names it; they are
    reached only through the upload session that owns them (rule 11).
-10. **Fork checkpoints require an exact reference.** A fork-owned record remains a root while its active target's `fork_basis` names the record's source namespace, checkpoint id, and manifest. An absent target keeps the record until its lease expires. A deleted target, a target without a fork basis, or a target that names another source or checkpoint makes the record releasable immediately. This also allows GC to release records created by failed fork attempts against an existing target.
+10. **Fork checkpoints require an exact reference.** A fork-owned record remains a root while its active target's `fork_basis` names the record's source namespace, checkpoint id, and manifest. An absent target keeps the record until its lease expires. A deleted target with no metadata root makes the record releasable immediately. A deleted target with a metadata root retains the record conservatively, because nested checkpoint creation must publish that root before installing a descendant and the descendant's manifest may still name source-owned objects. An active target without a fork basis, or one that names another source or checkpoint, makes the record releasable immediately. This also allows GC to release records created by failed fork attempts against an existing target.
 
-    If the target head cannot be read, GC retains the record. If the source namespace and checkpoint id match but the manifest differs, the namespace is corrupt and the pass fails.
+    If the target head or metadata root cannot be read, GC retains the record or fails the pass without deletion. Checkpoint basis verification rejects a deleted source, so a checkpoint attempt that publishes a late root after the target tombstone cannot install a new descendant. If the source namespace and checkpoint id match but the manifest differs, the namespace is corrupt and the pass fails.
 11. **Uploads and content, split at `completed`.** One sweep of `uploads/`
    owns both halves, because a session record is the only handle on the
    content object it created.

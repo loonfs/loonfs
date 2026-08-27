@@ -535,6 +535,46 @@ async fn fork_clone_survives_source_delete() {
 }
 
 #[tokio::test]
+async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
+    let temp_dir = tempdir().expect("tempdir");
+    let ancestor = NamespaceId::parse("ancestor").expect("valid namespace id");
+    let parent = NamespaceId::parse("parent").expect("valid namespace id");
+    let descendant = NamespaceId::parse("descendant").expect("valid namespace id");
+    let context = mutation_context();
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    seed_source_namespace_for_fork(&store, &ancestor, &context).await;
+    fork_namespace(&store, &ancestor, &parent, &context)
+        .await
+        .expect("fork parent");
+    fork_namespace(&store, &parent, &descendant, &context)
+        .await
+        .expect("fork descendant");
+
+    namespace_engine(&store, &parent, &context)
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect("delete parent");
+    namespace_engine(&store, &ancestor, &context)
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect("delete ancestor");
+
+    let mut aged = context.clone();
+    aged.now_ms = u64::MAX / 2;
+    loonfs_core::gc_namespace(&store, &ancestor, &loonfs_core::GcConfig::default(), &aged)
+        .await
+        .expect("collect ancestor");
+
+    assert_eq!(
+        read_file_bytes(&store, &descendant, "/docs/shared.txt")
+            .await
+            .expect("descendant reads through its retained ancestry")
+            .bytes,
+        b"base"
+    );
+}
+
+#[tokio::test]
 async fn a_fork_basis_checksum_mismatch_is_corruption() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
