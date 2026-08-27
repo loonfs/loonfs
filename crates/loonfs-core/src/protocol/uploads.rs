@@ -843,6 +843,13 @@ where
 
     let verified = match completion_outcome(store, content_store_id, plan).await? {
         CompletionOutcome::Verified(content_ref) => content_ref,
+        // The provider upload was already consumed, so this request cannot
+        // establish what consumed it. Reject only this claim: a retry with
+        // the claim that describes the assembled object may still recover
+        // a completion whose response was lost.
+        CompletionOutcome::Rejected(reason) => {
+            return Err(CoreError::InvalidUploadContent(reason));
+        }
         // The bytes that landed are not the bytes that were promised, and
         // the provider upload that could have produced them is consumed.
         // Nothing can rescue this session, so it stops here rather than
@@ -1307,6 +1314,9 @@ fn already_completed_outcome(
 enum CompletionOutcome {
     /// The stored object matches the completion claim.
     Verified(ContentRef),
+    /// This claim does not match the evidence left by an upload that was
+    /// already consumed. Another claim may still recover the session.
+    Rejected(String),
     /// The upload is invalid and must be aborted.
     Unusable(String),
 }
@@ -1478,14 +1488,13 @@ async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
     let parts = multipart_parts(parts, checksum_algorithm)?;
     let object_key = content_blob(content_store_id, &expected.content_id);
 
-    match store
+    let completion = match store
         .complete_multipart_upload(&object_key, provider_upload_id, &parts, &expected.checksum)
         .await
     {
-        // Either the provider assembled the object on this call, or it had
-        // already consumed the upload. Both questions are answered by the
-        // same read of the object, so neither needs its own path.
-        Ok(MultipartCompletion::Assembled | MultipartCompletion::UnknownUpload) => {}
+        Ok(completion @ (MultipartCompletion::Assembled | MultipartCompletion::UnknownUpload)) => {
+            completion
+        }
         Err(err) => {
             // The object was not assembled on this call. The provider may
             // have refused the parts, or the call may not have completed at
@@ -1496,11 +1505,22 @@ async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
             // what a repeated completion reconciles from.
             return Err(CoreError::store(&object_key, &err));
         }
-    }
+    };
 
     match verify_durable_content_checksum(store, content_store_id, expected).await {
         Ok(()) => Ok(CompletionOutcome::Verified(expected.clone())),
-        Err(err) => Ok(CompletionOutcome::Unusable(content_failure_reason(err)?)),
+        Err(err) => {
+            let reason = content_failure_reason(err)?;
+            Ok(match completion {
+                // This call consumed the provider upload, so a confirmed
+                // mismatch makes the session unusable.
+                MultipartCompletion::Assembled => CompletionOutcome::Unusable(reason),
+                // An earlier completion or abort consumed the upload. A
+                // mismatch rejects this request but is not evidence that a
+                // different completion claim cannot describe the object.
+                MultipartCompletion::UnknownUpload => CompletionOutcome::Rejected(reason),
+            })
+        }
     }
 }
 
