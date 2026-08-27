@@ -451,8 +451,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         changes.changes[2].commit_id,
         CommitId::parse("req-restore-restore").expect("valid commit id")
     );
-    // The restore reports as a content change: one durable fact for a put
-    // over an existing file and a revision restore alike.
+    // Restoring a revision emits the same event as a regular content update.
     assert_eq!(changes.changes[2].events.len(), 1);
     assert!(matches!(
         &changes.changes[2].events[0],
@@ -573,7 +572,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         harness.client.list_file_revisions_page(&target, None, None).await,
         Err(ClientError::Api { code, .. }) if code == "path_not_found"
     ));
-    // The revision history follows the inode to its new binding.
+    // Revision history follows the inode after a move.
     let moved_revisions = harness
         .client
         .list_file_revisions_page(&moved, None, None)

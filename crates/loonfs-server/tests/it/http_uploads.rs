@@ -74,15 +74,11 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
         .expect("create namespace");
 
     for body in [
-        // A proxied begin has no geometry to ask for.
+        // Reject fields that belong to another upload mode.
         r#"{"mode":"service_proxied","part_size_bytes":8388608}"#,
-        // A direct put cannot carry multipart geometry.
         r#"{"mode":"direct_put","part_size_bytes":8388608}"#,
-        // Nor does a multipart begin take a direct put's size hint.
         r#"{"mode":"direct_multipart","size_bytes":5}"#,
-        // A multipart begin promises nothing about its payload.
         r#"{"mode":"direct_multipart","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
-        // And a request that does not say how it moves its bytes.
         "{}",
     ] {
         let result = raw_agent()
@@ -305,7 +301,6 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     let completed = stage_uploaded_content(&harness.client, &namespace, file_bytes).await;
     let content_ref = completed.content_ref.clone();
 
-    // Copy the completion token directly into the commit request.
     let put_request = CommitRequest {
         commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
         actor: loonfs_test_support::test_actor(),
@@ -362,8 +357,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     assert_eq!(change.commit_id, commit.commit_id);
     assert_eq!(change.commit_id, put_request.commit_id);
     assert_eq!(change.message.as_deref(), Some("upload over http"));
-    // One semantic event per request operation: the file creation with its
-    // binding and first revision.
+    // The commit emits one file-created event with its initial revision.
     assert_eq!(change.events.len(), 1);
     assert!(matches!(
         &change.events[0],
@@ -403,7 +397,6 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .await
         .expect("create namespace");
 
-    // An open session reports itself and mints nothing.
     let open = harness
         .client
         .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
@@ -415,7 +408,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     assert_eq!(status.mode, UploadMode::ServiceProxied);
     assert!(matches!(status.status, UploadSessionStatus::Open { .. }));
 
-    // Aborting it is terminal, repeatable, and observable.
+    // Abort is idempotent.
     let aborted = abort_upload(&harness.server_url, open.upload_id()).expect("abort");
     let repeated = abort_upload(&harness.server_url, open.upload_id()).expect("repeated abort");
     assert_eq!(repeated, aborted);
@@ -435,8 +428,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     };
     assert_eq!(aborted_at_ms, response_aborted_at_ms);
 
-    // Completing an aborted session reports the same absence its eventual
-    // deletion will.
+    // An aborted session cannot be completed.
     let completion = harness
         .client
         .complete_upload(
@@ -448,10 +440,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .expect_err("an aborted session cannot complete");
     assert_eq!(completion.code(), Some(ErrorCode::UploadNotFound));
 
-    // A completed session re-mints on every read, and refuses to be aborted.
-    // The client here is one that lost its commit response and threw the
-    // completion's receipt away: it reads the session and commits with what
-    // the read hands back, without sending a byte of content again.
+    // A client can recover a lost completion response by reading the session and using its new token.
     let (upload_id, content_ref, completed_at_ms) =
         complete_upload_session(&harness, &namespace, b"status re-mint").await;
     let status = get_upload(&harness.server_url, &upload_id);
@@ -501,8 +490,6 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     harness.server.abort();
 }
 
-/// Stages content and hands back the session id, which the shared helper
-/// does not expose.
 async fn complete_upload_session(
     harness: &crate::common::TestServer,
     namespace: &loonfs_api::NamespaceId,

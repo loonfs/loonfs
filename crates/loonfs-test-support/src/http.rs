@@ -11,35 +11,15 @@ pub fn raw_agent() -> ureq::Agent {
         .build()
 }
 
-/// Retries an HTTP exchange when ureq hits a known macOS socket error.
-///
-/// This can happen when the server rejects a request before reading its body.
-/// Only the matching EINVAL panic is retried. Other panics are rethrown, and
-/// the final attempt runs normally so a persistent failure keeps its message.
-#[allow(clippy::print_stderr)]
+/// Retries the known macOS socket panic caused by an early server disconnect.
 pub fn retry_on_macos_teardown_einval<T>(exchange: impl Fn() -> T) -> T {
-    if !cfg!(target_os = "macos") {
-        return exchange();
+    match retry_result_on_macos_teardown_einval(|| Ok::<T, std::convert::Infallible>(exchange())) {
+        Ok(value) => value,
+        Err(never) => match never {},
     }
-    const ATTEMPTS: usize = 3;
-    for _ in 1..ATTEMPTS {
-        match catch_unwind(AssertUnwindSafe(&exchange)) {
-            Ok(value) => return value,
-            Err(payload) => {
-                if !panic_is_teardown_einval(payload.as_ref()) {
-                    resume_unwind(payload);
-                }
-                eprintln!("retrying: macOS reset the connection before the client's timeout reset");
-            }
-        }
-    }
-    exchange()
 }
 
-/// Retries an HTTP exchange that returns its failures instead of panicking.
-///
-/// This gates the same macOS socket error as the helper above, on returned
-/// errors as well as panics.
+/// Retries the same macOS socket failure when an HTTP exchange returns it.
 #[allow(clippy::print_stderr)]
 pub fn retry_result_on_macos_teardown_einval<T, E: std::fmt::Debug>(
     exchange: impl Fn() -> Result<T, E>,
@@ -55,20 +35,18 @@ pub fn retry_result_on_macos_teardown_einval<T, E: std::fmt::Debug>(
                 if !message_is_teardown_einval(&format!("{error:?}")) {
                     return Err(error);
                 }
-                eprintln!("retrying: macOS reset the connection before the client's timeout reset");
             }
             Err(payload) => {
                 if !panic_is_teardown_einval(payload.as_ref()) {
                     resume_unwind(payload);
                 }
-                eprintln!("retrying: macOS reset the connection before the client's timeout reset");
             }
         }
+        eprintln!("retrying: macOS reset the connection before the client's timeout reset");
     }
     exchange()
 }
 
-/// Returns true for the ureq panic caused by the macOS socket error.
 fn panic_is_teardown_einval(payload: &(dyn std::any::Any + Send)) -> bool {
     let message = if let Some(owned) = payload.downcast_ref::<String>() {
         owned.as_str()
