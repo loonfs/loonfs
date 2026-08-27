@@ -720,6 +720,78 @@ mod direct_multipart {
     }
 
     #[tokio::test]
+    async fn a_conflicting_retry_cannot_destroy_a_recoverable_assembly() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+        let request = complete_request(&session, upload_every_part(&store, &session));
+        let provider_parts = request
+            .parts
+            .iter()
+            .map(|part| loonfs_objectstore::MultipartPart {
+                part_number: part.part_number,
+                etag: part.etag.clone(),
+                checksum: part.checksum.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        // The provider completed the upload, but LoonFS never received the
+        // answer and therefore still has an open session.
+        store
+            .complete_multipart_upload(
+                &session.object_key,
+                &session.provider_upload_id,
+                &provider_parts,
+                &request.content.checksum,
+            )
+            .await
+            .expect("provider assembly whose response was lost");
+
+        let conflicting = CompleteMultipartUploadRequest {
+            content: UploadContentClaim {
+                size_bytes: request.content.size_bytes,
+                checksum: Checksum::crc64nvme(&vec![b'x'; session.payload.len()]),
+            },
+            parts: request.parts.clone(),
+        };
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &conflicting,
+            &context,
+        )
+        .await
+        .expect_err("a conflicting completion claim is rejected");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+        assert!(matches!(
+            session_state(&store, &session.namespace_id, &session.upload_id)
+                .await
+                .status,
+            UploadSessionRecordStatus::Open { .. }
+        ));
+        assert_eq!(
+            store
+                .get(&session.object_key, None)
+                .await
+                .expect("read recoverable object")
+                .expect("recoverable object survives"),
+            Bytes::from(session.payload.clone())
+        );
+
+        complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &request,
+            &context,
+        )
+        .await
+        .expect("the original claim recovers the lost completion");
+    }
+
+    #[tokio::test]
     async fn a_completion_that_does_not_verify_ends_the_session_and_deletes_the_object() {
         let temp_dir = tempdir().expect("tempdir");
         let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -787,7 +859,7 @@ mod direct_multipart {
     }
 
     #[tokio::test]
-    async fn a_refused_assembly_is_a_store_failure_and_the_retry_is_terminal() {
+    async fn a_refused_assembly_stays_open_without_object_evidence() {
         let temp_dir = tempdir().expect("tempdir");
         let store = MultipartStore::with_enforcement(
             LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -834,13 +906,13 @@ mod direct_multipart {
             &context,
         )
         .await
-        .expect_err("neither an upload nor an object is left to complete");
+        .expect_err("neither an upload nor matching object evidence is available");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
         assert!(matches!(
             session_state(&store, &session.namespace_id, &session.upload_id)
                 .await
                 .status,
-            UploadSessionRecordStatus::Aborted { .. }
+            UploadSessionRecordStatus::Open { .. }
         ));
         assert!(store
             .head(&session.object_key)
