@@ -7,7 +7,7 @@ use crate::checkpoint::record::{
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::control::load_head_object;
+use crate::namespace::control::{load_head_object, load_metadata_root_object_if_present};
 use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordState, CheckpointStatus, NamespaceStatus,
 };
@@ -95,6 +95,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     {
         ForkCheckpointReachability::Reclaimable => {}
         ForkCheckpointReachability::ReferencedByLiveTarget
+        | ForkCheckpointReachability::MayHaveLiveDescendant
         | ForkCheckpointReachability::InFlight
         | ForkCheckpointReachability::Ambiguous => return Ok(ForkCheckpointSweep::Retained),
     }
@@ -112,6 +113,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
 /// Whether a fork checkpoint is still needed.
 pub(super) enum ForkCheckpointReachability {
     ReferencedByLiveTarget,
+    MayHaveLiveDescendant,
     InFlight,
     Reclaimable,
     Ambiguous,
@@ -153,6 +155,19 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
         },
     };
     if head.status == (NamespaceStatus::Deleted {}) {
+        // A nested fork must materialize its immediate source's metadata root
+        // before it can publish the descendant checkpoint. That root may name
+        // metadata and content owned by earlier ancestors, and it is a direct,
+        // non-swept control object rather than listing evidence. Retain this
+        // source record conservatively whenever the deleted target ever
+        // materialized one.
+        if load_metadata_root_object_if_present(store, target_namespace_id)
+            .await
+            .map_err(CoreError::ControlObjectLoad)?
+            .is_some()
+        {
+            return Ok(ForkCheckpointReachability::MayHaveLiveDescendant);
+        }
         return Ok(ForkCheckpointReachability::Reclaimable);
     }
     let Some(basis) = head.fork_basis else {

@@ -926,6 +926,63 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
 }
 
 #[tokio::test]
+async fn checkpoint_verification_rejects_a_deleted_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("load checkpoint")
+        .expect("checkpoint exists")
+        .state;
+
+    let loaded_head = load_head_object(&store, &namespace_id)
+        .await
+        .expect("load head");
+    let mut deleted_head = loaded_head.state;
+    deleted_head.status = loonfs_api::wire::control::NamespaceStatus::Deleted {};
+    let encoded = loonfs_api::wire::control::encode_control_state(
+        loonfs_api::wire::control::ControlObjectKind::WalHead,
+        &deleted_head,
+    )
+    .expect("encode deleted head");
+    store
+        .compare_and_swap(
+            &loaded_head.object_key,
+            &loaded_head.etag,
+            Bytes::from(encoded),
+        )
+        .await
+        .expect("install deleted head");
+
+    let verified = super::record::verify_checkpoint_basis(&store, &record)
+        .await
+        .expect("verification runs");
+    assert_eq!(
+        verified,
+        super::record::CheckpointBasisVerification::Invalid,
+        "a tombstoned namespace cannot acquire a new checkpoint dependency"
+    );
+}
+
+#[tokio::test]
 async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_record() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

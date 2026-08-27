@@ -398,6 +398,10 @@ async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
             target_namespace_id,
             expires_at_ms,
         } => {
+            // Reserve the largest classification path: the target head and,
+            // for a deleted target, its metadata root. Charging both here is
+            // deliberately coarse and keeps root collection all-or-nothing.
+            charge(budget)?;
             charge(budget)?;
             Ok(matches!(
                 classify_fork_checkpoint(

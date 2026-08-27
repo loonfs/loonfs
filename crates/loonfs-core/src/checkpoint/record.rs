@@ -21,7 +21,7 @@ use crate::namespace::control_snapshot::resolve_retention_floor_seq;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
-    ControlObjectKind,
+    ControlObjectKind, NamespaceStatus,
 };
 use loonfs_api::{CheckpointId, NamespaceId};
 use loonfs_objectstore::keys::checkpoint_record;
@@ -279,6 +279,13 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .state;
+    // A checkpoint that verifies after the namespace tombstone could create
+    // a new durable dependency after an ancestor collector had already
+    // proved this namespace had none. The tombstone is terminal, so such a
+    // record cannot become a readable checkpoint and must not verify.
+    if head.status == (NamespaceStatus::Deleted {}) {
+        return Ok(CheckpointBasisVerification::Invalid);
+    }
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::ControlObjectLoad)?;

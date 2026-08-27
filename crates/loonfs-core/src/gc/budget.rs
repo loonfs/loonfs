@@ -6,8 +6,8 @@
 ///
 /// * the namespace control snapshot: head, metadata root, and retention floor
 ///   read concurrently;
-/// * one checkpoint record read while marking, plus one more for the fork
-///   target head that decides whether that record's target is gone;
+/// * one checkpoint record read while marking, plus two more for the fork
+///   target head and its possible metadata-root probe;
 /// * one manifest opened, whether to mark its segments or by the content
 ///   reference scan;
 /// * one page of revision rows read out of an opened manifest;
