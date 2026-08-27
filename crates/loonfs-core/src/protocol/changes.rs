@@ -34,7 +34,13 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
             retention_floor_seq,
         });
     }
-    if after_seq >= head.seq {
+    if after_seq > head.seq {
+        return Err(CoreError::InvalidCursor(format!(
+            "change feed sequence `{after_seq}` is ahead of namespace head `{}`",
+            head.seq
+        )));
+    }
+    if after_seq == head.seq {
         return Ok(ListChangesResponse {
             namespace_id: namespace_id.clone(),
             after_seq,
@@ -311,13 +317,19 @@ fn binding_generation(
 
 #[cfg(test)]
 mod tests {
-    use super::event_from_op_deltas;
+    use super::{event_from_op_deltas, list_changes_after};
+    use crate::context::MutationContext;
+    use crate::error::CoreError;
+    use crate::namespace::bootstrap::bootstrap_namespace;
     use loonfs_api::v0::FilesystemChange;
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::{
-        AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, InodeId,
-        NamespaceId,
+        AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, EffectiveLimit,
+        InodeId, NamespaceId,
     };
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use std::num::NonZeroU32;
+    use tempfile::tempdir;
 
     fn namespace_id() -> NamespaceId {
         NamespaceId::parse("demo").expect("valid namespace id")
@@ -338,6 +350,36 @@ mod tests {
             attributes_revision_no: AttributeRevisionNo(3),
             attributes: attributes(),
         }
+    }
+
+    #[tokio::test]
+    async fn change_feed_accepts_the_head_but_rejects_a_future_cursor() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = namespace_id();
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &MutationContext {
+                writer_id: "writer".to_owned(),
+                now_ms: 1,
+            },
+            false,
+        )
+        .await
+        .expect("bootstrap");
+        let limit = EffectiveLimit::new(NonZeroU32::MIN);
+
+        let caught_up = list_changes_after(&store, &namespace_id, ChangeSeq(0), limit)
+            .await
+            .expect("the head is a valid cursor");
+        assert!(caught_up.changes.is_empty());
+        assert_eq!(caught_up.through_seq, ChangeSeq(0));
+
+        let error = list_changes_after(&store, &namespace_id, ChangeSeq(1), limit)
+            .await
+            .expect_err("an unpublished sequence cannot be a valid cursor");
+        assert!(matches!(error, CoreError::InvalidCursor(_)), "{error}");
     }
 
     #[test]

@@ -12,7 +12,7 @@ use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
     decode_cursor, AbsolutePath, ChangeSeq, CheckpointId, ContentRef, DirectoryPageCursor,
     EffectiveLimit, InodeId, LimitError, NamespaceId, Page, PageRequest, PaginationPolicy,
-    PathEntry, RevisionNo, MAX_PUBLIC_INTEGER,
+    PathEntry, RevisionNo,
 };
 
 /// Filesystem reads for one namespace.
@@ -40,14 +40,8 @@ impl<'a> NamespaceReads<'a> {
     }
 
     /// Returns the namespace's current head sequence.
-    ///
-    /// Requesting changes after the largest valid sequence reads the current
-    /// head without returning any history.
     pub async fn head_seq(&self) -> Result<ChangeSeq> {
-        Ok(self
-            .list_changes_after(ChangeSeq(MAX_PUBLIC_INTEGER), 1)
-            .await?
-            .through_seq)
+        Ok(self.reader.get_namespace(self.namespace_id).await?.head_seq)
     }
 
     /// Reads one page of the files a checkpoint pins, in ascending inode-id

@@ -2357,6 +2357,10 @@ If `limit` truncates the page before the namespace head, the response includes
 `next_after_seq` set to the last returned change's `committed_seq`. The client
 resumes with `after_seq={next_after_seq}`.
 
+`after_seq` may equal the current namespace head, which returns an empty page.
+A value above the head is invalid: accepting an unpublished sequence would let
+a consumer silently skip commits as the namespace catches up.
+
 ### 6.12 `POST /forks`
 
 Representative request:
