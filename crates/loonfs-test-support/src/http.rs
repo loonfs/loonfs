@@ -11,32 +11,42 @@ pub fn raw_agent() -> ureq::Agent {
         .build()
 }
 
-/// Retries an HTTP exchange when ureq hits a known macOS socket error.
-///
-/// This can happen when the server rejects a request before reading its body.
-/// Only the matching EINVAL panic is retried. Other panics are rethrown, and
-/// the final attempt runs normally so a persistent failure keeps its message.
-#[allow(clippy::print_stderr)]
+/// Retries the known macOS socket panic caused by an early server disconnect.
 pub fn retry_on_macos_teardown_einval<T>(exchange: impl Fn() -> T) -> T {
+    match retry_result_on_macos_teardown_einval(|| Ok::<T, std::convert::Infallible>(exchange())) {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
+}
+
+/// Retries the same macOS socket failure when an HTTP exchange returns it.
+#[allow(clippy::print_stderr)]
+pub fn retry_result_on_macos_teardown_einval<T, E: std::fmt::Debug>(
+    exchange: impl Fn() -> Result<T, E>,
+) -> Result<T, E> {
     if !cfg!(target_os = "macos") {
         return exchange();
     }
     const ATTEMPTS: usize = 3;
     for _ in 1..ATTEMPTS {
         match catch_unwind(AssertUnwindSafe(&exchange)) {
-            Ok(value) => return value,
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error)) => {
+                if !message_is_teardown_einval(&format!("{error:?}")) {
+                    return Err(error);
+                }
+            }
             Err(payload) => {
                 if !panic_is_teardown_einval(payload.as_ref()) {
                     resume_unwind(payload);
                 }
-                eprintln!("retrying: macOS reset the connection before the client's timeout reset");
             }
         }
+        eprintln!("retrying: macOS reset the connection before the client's timeout reset");
     }
     exchange()
 }
 
-/// Returns true for the ureq panic caused by the macOS socket error.
 fn panic_is_teardown_einval(payload: &(dyn std::any::Any + Send)) -> bool {
     let message = if let Some(owned) = payload.downcast_ref::<String>() {
         owned.as_str()
@@ -45,5 +55,10 @@ fn panic_is_teardown_einval(payload: &(dyn std::any::Any + Send)) -> bool {
     } else {
         return false;
     };
-    message.contains("kind: InvalidInput") && message.contains("Invalid argument")
+    message_is_teardown_einval(message)
+}
+
+fn message_is_teardown_einval(message: &str) -> bool {
+    message.contains("Invalid argument")
+        && (message.contains("kind: InvalidInput") || message.contains("os error 22"))
 }

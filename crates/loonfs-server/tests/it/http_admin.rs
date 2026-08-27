@@ -12,7 +12,7 @@ use loonfs_api::{
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
-use loonfs_test_support::http::raw_agent;
+use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
@@ -43,22 +43,18 @@ fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_api::GcRespons
     post_gc_with(server_url, namespace, serde_json::json!({}))
 }
 
-/// The upkeep report a step that selected metadata is obliged to carry.
 fn upkeep(step: &loonfs_api::MaintenanceStepResponse) -> &loonfs_api::MetadataMaintenanceResponse {
     step.metadata_maintenance
         .as_ref()
         .expect("a step selecting metadata upkeep reports it")
 }
 
-/// The floor a step that selected the retention advance is obliged to report.
 fn retention_floor(step: loonfs_api::MaintenanceStepResponse) -> ChangeSeq {
     step.retention
         .expect("a step selecting the retention advance reports it")
         .retention_floor_seq
 }
 
-/// One garbage-collection pass, as the collapsed surface runs it: a
-/// maintenance step selecting `gc` and nothing else.
 fn post_gc_with(
     server_url: &str,
     namespace: &str,
@@ -75,7 +71,6 @@ fn post_gc_with(
     })
 }
 
-/// One metadata-upkeep step at the server's default threshold.
 fn post_maintenance_step(
     server_url: &str,
     namespace: &str,
@@ -87,7 +82,6 @@ fn post_maintenance_step(
     )
 }
 
-/// A step body that selects nothing, which the route refuses.
 fn post_empty_maintenance_step(
     server_url: &str,
     namespace: &str,
@@ -99,7 +93,6 @@ fn post_empty_maintenance_step(
     )
 }
 
-/// One retention-floor advance, as the collapsed surface runs it.
 fn post_retention_advance(
     server_url: &str,
     namespace: &str,
@@ -112,10 +105,12 @@ fn post_retention_advance(
 }
 
 fn post_admin_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> ApiResult<T> {
-    let request = raw_agent()
-        .post(url)
-        .set("authorization", &format!("Bearer {auth_token}"));
-    decode_admin_response(request.call())
+    retry_result_on_macos_teardown_einval(|| {
+        let request = raw_agent()
+            .post(url)
+            .set("authorization", &format!("Bearer {auth_token}"));
+        decode_admin_response(request.call())
+    })
 }
 
 fn post_admin_json_body<T: serde::de::DeserializeOwned>(
@@ -123,10 +118,12 @@ fn post_admin_json_body<T: serde::de::DeserializeOwned>(
     auth_token: &str,
     body: serde_json::Value,
 ) -> ApiResult<T> {
-    let request = raw_agent()
-        .post(url)
-        .set("authorization", &format!("Bearer {auth_token}"));
-    decode_admin_response(request.send_json(body))
+    retry_result_on_macos_teardown_einval(|| {
+        let request = raw_agent()
+            .post(url)
+            .set("authorization", &format!("Bearer {auth_token}"));
+        decode_admin_response(request.send_json(body.clone()))
+    })
 }
 
 fn decode_admin_response<T: serde::de::DeserializeOwned>(
@@ -204,8 +201,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         .expect("list first checkpoint");
     assert_eq!(listed.checkpoints, vec![first.clone()]);
 
-    // Creating again over the same head is a second pin, not a second name
-    // for the first: a new record under a new id, over the same basis.
+    // A second checkpoint at the same head creates a new record.
     let repeated = post_checkpoint(&server_url, namespace.as_str()).expect("repeat checkpoint");
     assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
     assert_eq!(repeated.namespace_id, first.namespace_id);
@@ -215,8 +211,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(repeated.expires_at_ms, first.expires_at_ms);
     assert!(repeated.created_at_ms >= first.created_at_ms);
 
-    // Release is idempotent: the first call flips the record one way, and
-    // the repeat observes the settled end state.
+    // Releasing a checkpoint twice returns the same result.
     let released = post_checkpoint_release(
         &server_url,
         namespace.as_str(),
@@ -242,8 +237,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
             .expect_err("malformed checkpoint id");
     assert_eq!(bogus_release.code, "invalid_request");
 
-    // The GC grace window's derived safety floor is enforced at the API:
-    // a sub-minimum override is rejected, not honored.
+    // Reject grace periods below the safety minimum.
     let unsafe_gc = post_gc_with(
         &server_url,
         namespace.as_str(),
@@ -258,8 +252,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     );
     assert_eq!(advanced, ChangeSeq(1));
 
-    // Idempotent in the floor it lands on. `status_before` legitimately
-    // differs: the first call observed the floor it then advanced past.
+    // Both calls reach the same floor, although they start from different floors.
     let repeated =
         post_retention_advance(&server_url, namespace.as_str()).expect("repeat retention");
     assert_eq!(repeated.status_before.retention_floor_seq, advanced);
@@ -306,10 +299,7 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
         .expect("write file");
     post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
-    // A bounded pass returns an opaque cursor, and the route accepts it
-    // on the next invocation without carrying any safety state. The budget
-    // covers the roots this namespace marks before it walks, so what is
-    // left over is what bounds the walk.
+    // Resume a bounded pass with its returned cursor.
     let bounded = post_gc_with(
         &server_url,
         namespace.as_str(),
@@ -325,9 +315,7 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
     .expect("resumed gc pass");
     assert!(resumed.next_cursor.is_some());
 
-    // A freshly written namespace sits entirely inside the grace
-    // window: the unbounded pass completes, deletes nothing, and reads
-    // keep working.
+    // Objects inside the grace window remain readable.
     let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
     assert_eq!(report.deleted.wal_segments, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
@@ -365,13 +353,11 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
         .await
         .expect("write file");
 
-    // A body that names no action is not a step.
     let empty = post_empty_maintenance_step(&server_url, namespace.as_str())
         .expect_err("a body selecting nothing is refused");
     assert_eq!(empty.code, "invalid_request");
     assert!(empty.message.contains("at least one action"));
 
-    // One WAL segment sits far below the default threshold.
     let idle = post_maintenance_step(&server_url, namespace.as_str()).expect("idle step");
     assert_eq!(idle.namespace_id, namespace);
     assert_eq!(idle.status_before.wal_tail_segments, 1);
@@ -379,12 +365,11 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
         upkeep(&idle).wal_flush,
         loonfs_api::WalFlushStepOutcome::NotNeeded
     );
-    // Unnamed actions report nothing at all.
+    // Only requested actions appear in the response.
     assert!(idle.gc.is_none());
     assert!(idle.retention.is_none());
 
-    // Forcing the threshold to one segment flushes the WAL tail, and the
-    // named retention and collection actions run behind it.
+    // A one-segment threshold flushes the WAL before retention and GC run.
     let forced: loonfs_api::MaintenanceStepResponse = client
         .run_maintenance(
             &namespace,
@@ -404,8 +389,7 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
             manifest_head_seq: ChangeSeq(1),
         }
     );
-    // The floor is reported because the step named the advance, and it never
-    // goes backwards.
+    // Retention advances monotonically.
     assert!(retention_floor(forced.clone()) >= forced.status_before.retention_floor_seq);
     assert_eq!(
         upkeep(&forced).reorganize,
@@ -457,10 +441,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         "http-admin-corrupt",
     ))
     .await;
-    // A second server on the same store reads cold: it must consume the
-    // manifest and notice the corruption. The first server's reads are
-    // pinned to the head-plus-manifest pair its own publish seeded, which
-    // stays valid without touching the corrupted object.
+    // A new server must read the corrupted manifest; the first server has a valid cached snapshot.
     let cold = start_server(test_config(
         store_root,
         "loonfs-server-cold-reader",
@@ -509,8 +490,6 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
         other => panic!("expected namespace_corrupt, got {other:?}"),
     }
-    // The warm server keeps serving its pinned pair; the corruption is
-    // surfaced by whoever actually consumes the manifest.
     client
         .get_path_entry(&target, &Default::default())
         .await
@@ -558,8 +537,7 @@ async fn http_admin_store_probe_reports_unique_successes_from_the_configured_sto
         assert_eq!(check.message, None);
     }
 
-    // A probe leaves the store as it found it: emptying the run's scratch
-    // prefix is its own last check, and nothing else here wrote there.
+    // The probe removes its temporary objects.
     let store = ConfiguredObjectStore::local_fs(
         harness.store_root.as_ref().expect("local-fs test store"),
         harness.store_key_prefix.as_deref(),
@@ -593,8 +571,7 @@ async fn http_admin_store_probe_requires_a_token_and_accepts_a_bodyless_request(
         "unauthorized"
     );
 
-    // Body handling matches the maintenance-step route: an absent body is
-    // the same request as `{}`.
+    // An absent body is treated as an empty object.
     let bodyless: loonfs_api::v0::StoreProbeResponse =
         post_admin_json(&url, "test-token").expect("probe with no body");
     assert!(

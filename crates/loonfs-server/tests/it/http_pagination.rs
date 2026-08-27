@@ -13,7 +13,7 @@ use loonfs_client::{
     ClientError, CreateDirectoryOptions, MoveOptions, NamespacePath, PutFileOptions,
     RestoreRevisionOptions,
 };
-use loonfs_test_support::http::raw_agent;
+use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
@@ -160,41 +160,43 @@ fn get_json<T: serde::de::DeserializeOwned>(
     url: &str,
     auth_token: &str,
 ) -> Result<T, Box<ApiError>> {
-    let request = raw_agent()
-        .get(url)
-        .set("authorization", &format!("Bearer {auth_token}"));
-    match request.call() {
-        Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| {
-            Box::new(ApiError {
-                code: "invalid_json".to_owned(),
-                feature: None,
-                message: err.to_string(),
-                param: None,
-                request_id: None,
-                details: None,
-            })
-        }),
-        Err(ureq::Error::Status(_, response)) => Err(Box::new(
-            serde_json::from_reader::<_, ApiError>(response.into_reader()).unwrap_or_else(|err| {
-                ApiError {
+    retry_result_on_macos_teardown_einval(|| {
+        let request = raw_agent()
+            .get(url)
+            .set("authorization", &format!("Bearer {auth_token}"));
+        match request.call() {
+            Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| {
+                Box::new(ApiError {
                     code: "invalid_json".to_owned(),
                     feature: None,
                     message: err.to_string(),
                     param: None,
                     request_id: None,
                     details: None,
-                }
+                })
             }),
-        )),
-        Err(ureq::Error::Transport(error)) => Err(Box::new(ApiError {
-            code: "transport".to_owned(),
-            feature: None,
-            message: error.to_string(),
-            param: None,
-            request_id: None,
-            details: None,
-        })),
-    }
+            Err(ureq::Error::Status(_, response)) => Err(Box::new(
+                serde_json::from_reader::<_, ApiError>(response.into_reader()).unwrap_or_else(
+                    |err| ApiError {
+                        code: "invalid_json".to_owned(),
+                        feature: None,
+                        message: err.to_string(),
+                        param: None,
+                        request_id: None,
+                        details: None,
+                    },
+                ),
+            )),
+            Err(ureq::Error::Transport(error)) => Err(Box::new(ApiError {
+                code: "transport".to_owned(),
+                feature: None,
+                message: error.to_string(),
+                param: None,
+                request_id: None,
+                details: None,
+            })),
+        }
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -449,8 +451,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         changes.changes[2].commit_id,
         CommitId::parse("req-restore-restore").expect("valid commit id")
     );
-    // The restore reports as a content change: one durable fact for a put
-    // over an existing file and a revision restore alike.
+    // Restoring a revision emits the same event as a regular content update.
     assert_eq!(changes.changes[2].events.len(), 1);
     assert!(matches!(
         &changes.changes[2].events[0],
@@ -571,7 +572,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         harness.client.list_file_revisions_page(&target, None, None).await,
         Err(ClientError::Api { code, .. }) if code == "path_not_found"
     ));
-    // The revision history follows the inode to its new binding.
+    // Revision history follows the inode after a move.
     let moved_revisions = harness
         .client
         .list_file_revisions_page(&moved, None, None)
