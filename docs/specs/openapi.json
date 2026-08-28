@@ -3979,7 +3979,7 @@
             "$ref": "#/components/schemas/CheckpointOwnerSnapshot"
           }
         ],
-        "description": "Who a checkpoint record answers to, as the record durably records it.\n\nThe owners have different releases, so a listing that names the owner\nalso says which records the release endpoint will act on: a user pin is\nreleased by id, a fork lease is released by deleting the target namespace\nit protects, and a snapshot is released by its own expiry.",
+        "description": "The owner of a checkpoint record.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
@@ -5998,7 +5998,7 @@
       },
       "CheckpointOwnerSnapshot": {
         "type": "object",
-        "description": "A stable read view, standing until the expiry it was created with.",
+        "description": "An application-created read view.",
         "required": [
           "name",
           "kind"
@@ -6012,7 +6012,7 @@
           },
           "name": {
             "type": "string",
-            "description": "The label the creator recorded. Not a key: several records may\ncarry one label over different bases."
+            "description": "A label that does not need to be unique."
           }
         }
       },
