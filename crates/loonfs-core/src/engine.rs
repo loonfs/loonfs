@@ -895,6 +895,26 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         )
         .await
     }
+
+    /// Creates a snapshot pin for the current namespace head.
+    ///
+    /// A snapshot is a checkpoint owned by the application that asked for it,
+    /// pinning a manifest behind a stable read view. `expires_at_ms` is
+    /// required and is when garbage collection releases the pin; nothing
+    /// else releases it.
+    pub async fn create_snapshot(&self, name: String, expires_at_ms: u64) -> Result<Checkpoint> {
+        let context = self.mutation_context()?;
+        crate::checkpoint::create_checkpoint(
+            &self.store,
+            &self.namespace_id,
+            CheckpointOwner::Snapshot {
+                name,
+                expires_at_ms,
+            },
+            &context,
+        )
+        .await
+    }
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {

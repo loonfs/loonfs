@@ -151,6 +151,10 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
             "released_missing_basis_checkpoints",
             gc.released_checkpoints.missing_basis,
         ),
+        (
+            "released_snapshot_checkpoints",
+            gc.released_checkpoints.snapshot,
+        ),
     ] {
         assert_eq!(
             counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)],),

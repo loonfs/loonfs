@@ -450,3 +450,77 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
     .expect_err("foreign cursor should fail");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }
+
+#[tokio::test]
+async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+
+    let expires_at_ms = context.now_ms + 60_000;
+    let snapshot = create::create_checkpoint(
+        &store,
+        &namespace_id,
+        CheckpointOwner::Snapshot {
+            name: "report-run".to_owned(),
+            expires_at_ms,
+        },
+        &context,
+    )
+    .await
+    .expect("create snapshot");
+
+    let listed = list_all_checkpoints(&store, &namespace_id)
+        .await
+        .expect("list checkpoints");
+    assert_eq!(listed.checkpoints.len(), 1);
+    assert_eq!(listed.checkpoints[0].checkpoint_id, snapshot.checkpoint_id);
+    assert_eq!(
+        listed.checkpoints[0].owner,
+        CheckpointOwnerSummary::Snapshot {
+            name: "report-run".to_owned()
+        }
+    );
+    assert_eq!(listed.checkpoints[0].expires_at_ms, Some(expires_at_ms));
+}
+
+#[tokio::test]
+async fn a_refused_owner_writes_no_record_to_find() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+
+    let refused = [
+        CheckpointOwner::User {
+            name: String::new(),
+            expires_at_ms: None,
+        },
+        CheckpointOwner::Snapshot {
+            name: String::new(),
+            expires_at_ms: context.now_ms + 60_000,
+        },
+        CheckpointOwner::Snapshot {
+            name: "report-run".to_owned(),
+            expires_at_ms: 0,
+        },
+    ];
+    for owner in refused {
+        let error = create::create_checkpoint(&store, &namespace_id, owner.clone(), &context)
+            .await
+            .expect_err("the owner is not creatable");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest, "owner: {owner:?}");
+    }
+
+    let listed = list_all_checkpoints(&store, &namespace_id)
+        .await
+        .expect("list checkpoints");
+    assert!(listed.checkpoints.is_empty());
+}

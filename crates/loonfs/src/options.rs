@@ -158,6 +158,19 @@ impl CreateCheckpointOptions {
     }
 }
 
+/// Options for creating a durable snapshot pin.
+///
+/// The name is a label recorded on the record, not a key. No `Default`: a
+/// snapshot always names its owner and when it stops pinning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSnapshotOptions {
+    /// Label recorded on the checkpoint record.
+    pub name: String,
+    /// When garbage collection releases the pin, in Unix milliseconds. A
+    /// snapshot has no other release.
+    pub expires_at_ms: u64,
+}
+
 /// Options for creating a namespace; feeds core's
 /// [`loonfs_core::BootstrapOptions`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

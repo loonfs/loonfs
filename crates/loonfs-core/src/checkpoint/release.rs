@@ -5,8 +5,9 @@
 //! stamping the release instant, and returns. That is terminal: the record
 //! never pins anything again, and garbage collection deletes it a grace
 //! window after that stamp (format spec, "Garbage collection"). Fork-owned
-//! records are not releasable here: their release is decided by garbage
-//! collection from the fork target's fate.
+//! and snapshot-owned records are not releasable here: a fork release is
+//! decided by garbage collection from the fork target's fate, and a snapshot
+//! releases itself at the expiry it was created with.
 
 use super::record::{load_checkpoint_record, release_checkpoint_record};
 use crate::context::MutationContext;
@@ -37,6 +38,12 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
         return Err(CoreError::InvalidCheckpointRequest(format!(
             "checkpoint `{checkpoint_id}` is owned by fork target `{target_namespace_id}`; \
              it is released by deleting that namespace, not by this operation"
+        )));
+    }
+    if matches!(loaded.state.owner, CheckpointOwner::Snapshot { .. }) {
+        return Err(CoreError::InvalidCheckpointRequest(format!(
+            "checkpoint `{checkpoint_id}` is owned by a snapshot; it is released by its own \
+             expiry, not by this operation"
         )));
     }
     release_checkpoint_record(store, namespace_id, checkpoint_id, context.now_ms).await?;

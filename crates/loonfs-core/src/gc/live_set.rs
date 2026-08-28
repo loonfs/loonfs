@@ -364,7 +364,12 @@ async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
         let candidate = checkpoint_is_candidate(store, &record, budget, context).await?;
         // A deleted namespace has no readers. Only an active fork checkpoint
         // for an existing target still protects the source basis.
-        if namespace_deleted && (candidate || matches!(record.owner, CheckpointOwner::User { .. }))
+        if namespace_deleted
+            && (candidate
+                || matches!(
+                    record.owner,
+                    CheckpointOwner::User { .. } | CheckpointOwner::Snapshot { .. }
+                ))
         {
             continue;
         }
@@ -390,10 +395,9 @@ async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
 ) -> CollectResult<bool> {
     // A fork checkpoint remains a root while its target still references it.
     match &record.owner {
-        CheckpointOwner::User { .. } => {
-            Ok(record.status != (CheckpointStatus::Active {})
-                || lease_expired(record, context.now_ms))
-        }
+        CheckpointOwner::User { .. } | CheckpointOwner::Snapshot { .. } => Ok(record.status
+            != (CheckpointStatus::Active {})
+            || lease_expired(record, context.now_ms)),
         CheckpointOwner::Fork {
             target_namespace_id,
             expires_at_ms,

@@ -10,10 +10,11 @@ use crate::trace::phase_span;
 use crate::FsAdmin;
 use crate::NamespaceDiagnostics;
 use crate::{
-    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions, ErrorCode,
-    FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenancePlan,
-    MaintenanceStepResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
+    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions,
+    CreateSnapshotOptions, ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse,
+    MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceOptions,
+    MetadataMaintenanceResponse, NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome,
+    SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
@@ -670,6 +671,40 @@ impl FsAdmin {
         let result = self
             .engine(namespace_id)
             .create_checkpoint(options.name, options.ttl_ms)
+            .await
+            .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
+    }
+
+    /// Creates a snapshot for the current namespace head.
+    ///
+    /// A snapshot is a checkpoint the application owns: it pins a manifest
+    /// version behind a stable read view, is listed by the checkpoint
+    /// listing like any other record, and holds until its required expiry
+    /// passes. Nothing else releases it. If the current head has no manifest
+    /// yet, one is published first for the current durable namespace state.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.snapshot_create",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.snapshot_create",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn create_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateSnapshotOptions,
+    ) -> Result<Checkpoint> {
+        let span = tracing::Span::current();
+        self.core.record_trace_context(&span);
+        let result = self
+            .engine(namespace_id)
+            .create_snapshot(options.name, options.expires_at_ms)
             .await
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)

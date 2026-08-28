@@ -124,21 +124,36 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
 
 fn validate_checkpoint_owner(owner: &CheckpointOwner) -> Result<()> {
     match owner {
-        CheckpointOwner::User { name, .. } => {
-            if name.is_empty() {
+        CheckpointOwner::User { name, .. } => validate_checkpoint_name(name),
+        CheckpointOwner::Snapshot {
+            name,
+            expires_at_ms,
+        } => {
+            validate_checkpoint_name(name)?;
+            // Zero is already past at every clock, so it pins nothing.
+            if *expires_at_ms == 0 {
                 return Err(CoreError::InvalidCheckpointRequest(
-                    "checkpoint name must not be empty".to_owned(),
+                    "snapshot expiry must not be zero".to_owned(),
                 ));
-            }
-            if name.chars().count() > CHECKPOINT_NAME_MAX_CHARS {
-                return Err(CoreError::InvalidCheckpointRequest(format!(
-                    "checkpoint name exceeds {CHECKPOINT_NAME_MAX_CHARS} characters"
-                )));
             }
             Ok(())
         }
         CheckpointOwner::Fork { .. } => Ok(()),
     }
+}
+
+fn validate_checkpoint_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(CoreError::InvalidCheckpointRequest(
+            "checkpoint name must not be empty".to_owned(),
+        ));
+    }
+    if name.chars().count() > CHECKPOINT_NAME_MAX_CHARS {
+        return Err(CoreError::InvalidCheckpointRequest(format!(
+            "checkpoint name exceeds {CHECKPOINT_NAME_MAX_CHARS} characters"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

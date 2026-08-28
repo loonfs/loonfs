@@ -683,6 +683,24 @@ fn control_objects_match_golden_bytes() {
             status: CheckpointStatus::Active {},
         },
     );
+    // The snapshot owner is a durable encoding of its own, and like the fork
+    // owner it always carries the expiry it is released from.
+    check_control_golden(
+        "control_checkpoint_record_snapshot.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        CheckpointRecordState {
+            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000006"),
+            namespace_id: namespace_id(),
+            manifest: sample_manifest_ref(6),
+            head_commit_id: commit_id(),
+            created_at_ms: 3_000,
+            owner: CheckpointOwner::Snapshot {
+                name: "report-run".to_owned(),
+                expires_at_ms: 9_000,
+            },
+            status: CheckpointStatus::Active {},
+        },
+    );
     // The lease is a control object of its own family, and the two things
     // that write it — the job and the collector that fences it — decide
     // ownership by compare-and-swapping this document. Its bytes are pinned
@@ -1016,22 +1034,43 @@ fn active_checkpoint_records_reject_release_stamps() {
 }
 
 #[test]
-fn fork_checkpoint_records_reject_a_missing_lease_expiry() {
-    let message = assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+fn fork_and_snapshot_checkpoint_records_reject_a_missing_expiry() {
+    for fixture in [
         "control_checkpoint_record_fork.v1.json",
+        "control_checkpoint_record_snapshot.v1.json",
+    ] {
+        let message = assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+            fixture,
+            ControlObjectKind::CheckpointRecord,
+            |payload| {
+                payload
+                    .get_mut("owner")
+                    .expect("owner")
+                    .as_object_mut()
+                    .expect("owner object")
+                    .remove("expires_at_ms");
+            },
+        );
+        assert!(
+            message.contains("missing field `expires_at_ms`"),
+            "unexpected refusal for `{fixture}`: {message}"
+        );
+    }
+}
+
+#[test]
+fn checkpoint_records_reject_an_untagged_or_unknown_owner() {
+    // A reader that does not know an owner kind cannot tell what releases
+    // the record, so it refuses the record instead of guessing.
+    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+        "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
-        |payload| {
-            payload
-                .get_mut("owner")
-                .expect("owner")
-                .as_object_mut()
-                .expect("owner object")
-                .remove("expires_at_ms");
-        },
+        |payload| payload["owner"]["kind"] = serde_json::Value::from("lease"),
     );
-    assert!(
-        message.contains("missing field `expires_at_ms`"),
-        "unexpected refusal: {message}"
+    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+        "control_checkpoint_record.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        |payload| payload["owner"] = serde_json::Value::from("snapshot"),
     );
 }
 

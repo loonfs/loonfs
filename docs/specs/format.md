@@ -91,7 +91,7 @@ The required durable object families and standard key patterns are:
 | **WAL head** | Mutable | Defines the namespace's durable identity and current state: content store, fork provenance, visible sequence, writer epoch, writer metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/wal_{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata segment references and a head summary. Segment references carry their own owner, so a fork target's manifest names source-owned segments without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
-| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
+| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user, fork target, or snapshot). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/segments/{segment_id}.sst.zst` |
 | **Compaction staging** | Immutable | Holds segments written by a streaming compaction before publication. The descriptor stores the job id used to derive this key. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` |
 | **Compaction leases** | Mutable lifecycle | Record ownership of a compaction output prefix. A job creates and refreshes an `active` lease. Garbage collection may change an expired lease to terminal `reaping` before reclaiming the output. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/lease.json` |
@@ -999,7 +999,15 @@ a materialized file set worth pointing at. Until then the head resolves the
 basis on its own. Once the root exists it is the basis, and `fork_basis`
 becomes provenance only.
 
-A checkpoint pins one namespace manifest version in a record under `checkpoints/`. It does not affect current visibility. The record stores a `manifest` reference (section 1.7), the `head_commit_id` at that manifest, and tagged `owner` and `status` fields. A `user` owner has a name and optional `expires_at_ms`. A `fork` owner has the target namespace and a required `expires_at_ms`. The record has no top-level expiry field.
+A checkpoint pins one namespace manifest version in a record under `checkpoints/`. It does not affect current visibility. The record stores a `manifest` reference (section 1.7), the `head_commit_id` at that manifest, and tagged `owner` and `status` fields. A `user` owner has a name and optional `expires_at_ms`. A `fork` owner has the target namespace and a required `expires_at_ms`. A `snapshot` owner has a name and a required `expires_at_ms`. The record has no top-level expiry field.
+
+A `snapshot` owner is a stable read view held by the application that asked
+for it. Its expiry is required, so a snapshot always says when it stops
+pinning. Release works the way it works for any expired record. The first
+collection pass to run after that instant flips the record to `released` with
+the same one-way compare-and-swap, and the record is deleted a grace window
+later. Nothing else releases a snapshot. A snapshot name is a label rather
+than a key, on the same terms as a user pin's name.
 
 Creation is write-then-verify: write the record active, then verify — under
 the self-enforced verify budget — that the floor has not passed the basis and
@@ -1039,10 +1047,10 @@ A user pin carries the caller's `ttl_ms`, or nothing at all, in which case it
 is held until released. A fork owner structurally requires one: it is the
 lease for a single fork attempt (section 3.9.2), and letting it pass is how an
 abandoned attempt becomes collectable; a fork owner without one fails ordinary
-strict deserialization as a missing field. An active record whose expiry has
-passed still pins and still serves — until the pass that releases it, it is a
-root, and answering from it is answering from state that is provably still
-there.
+strict deserialization as a missing field. A snapshot owner requires one on
+the same terms. An active record whose expiry has passed still pins and still
+serves — until the pass that releases it, it is a root, and answering from it
+is answering from state that is provably still there.
 
 Explicit release is user-owned only, and it is idempotent: releasing an
 already-released or already-deleted record leaves the same end state. Owner
@@ -2393,16 +2401,16 @@ publishing CAS) — under these rules:
    decisions, so no deletion consults an arbitrarily stale root set.
 4. Roots: `metadata/root.json`; the reference manifest R (rule 1); active
    checkpoint records whose owner still
-   stands — a user pin until its expiry passes, a fork pin until nothing can
-   read through it any more (rule 10); and the visible chain from
+   stands — a user or snapshot pin until its expiry passes, a fork pin until
+   nothing can read through it any more (rule 10); and the visible chain from
    `wal/head.json.visible_wal_tip` down to the floor. A namespace with no
    root of its own has no manifest or segment to protect under its own prefix;
    its basis, if it has a foreign one, is protected on the source side by
    the fork-owned checkpoint record. On a terminally
    deleted namespace the root set shrinks to fork-owned records protecting
    a live target (and their bases): reads are impossible and the tombstone
-   is immutable, so user pins, the final replay chain, and the last
-   manifest protect nothing and age out. The head survives as the
+   is immutable, so user and snapshot pins, the final replay chain, and the
+   last manifest protect nothing and age out. The head survives as the
    id-retiring tombstone, together with the root and floor objects if the
    namespace ever wrote them.
 5. A root the pass cannot resolve causes retention, not deletion: a root
