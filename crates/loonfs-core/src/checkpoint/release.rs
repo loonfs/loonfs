@@ -1,13 +1,7 @@
-//! Explicit checkpoint release: the owner-driven end of a user pin's
-//! lifecycle.
+//! Releases user-owned checkpoints.
 //!
-//! Release flips the record `active` -> `released` by compare-and-swap,
-//! stamping the release instant, and returns. That is terminal: the record
-//! never pins anything again, and garbage collection deletes it a grace
-//! window after that stamp (format spec, "Garbage collection"). Fork-owned
-//! and snapshot-owned records are not releasable here: a fork release is
-//! decided by garbage collection from the fork target's fate, and a snapshot
-//! releases itself at the expiry it was created with.
+//! Forks and snapshots have separate lifecycle rules and cannot be released
+//! through this operation.
 
 use super::record::{load_checkpoint_record, release_checkpoint_record};
 use crate::context::MutationContext;

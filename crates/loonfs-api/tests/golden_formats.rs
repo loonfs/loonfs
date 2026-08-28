@@ -683,8 +683,6 @@ fn control_objects_match_golden_bytes() {
             status: CheckpointStatus::Active {},
         },
     );
-    // The snapshot owner is a durable encoding of its own, and like the fork
-    // owner it always carries the expiry it is released from.
     check_control_golden(
         "control_checkpoint_record_snapshot.v1.json",
         ControlObjectKind::CheckpointRecord,
@@ -1060,8 +1058,6 @@ fn fork_and_snapshot_checkpoint_records_reject_a_missing_expiry() {
 
 #[test]
 fn checkpoint_records_reject_an_untagged_or_unknown_owner() {
-    // A reader that does not know an owner kind cannot tell what releases
-    // the record, so it refuses the record instead of guessing.
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
         "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,

@@ -676,13 +676,7 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Creates a snapshot for the current namespace head.
-    ///
-    /// A snapshot is a checkpoint the application owns: it pins a manifest
-    /// version behind a stable read view, is listed by the checkpoint
-    /// listing like any other record, and holds until its required expiry
-    /// passes. Nothing else releases it. If the current head has no manifest
-    /// yet, one is published first for the current durable namespace state.
+    /// Creates a snapshot of the current namespace state.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.snapshot_create",

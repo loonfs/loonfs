@@ -1001,13 +1001,9 @@ becomes provenance only.
 
 A checkpoint pins one namespace manifest version in a record under `checkpoints/`. It does not affect current visibility. The record stores a `manifest` reference (section 1.7), the `head_commit_id` at that manifest, and tagged `owner` and `status` fields. A `user` owner has a name and optional `expires_at_ms`. A `fork` owner has the target namespace and a required `expires_at_ms`. A `snapshot` owner has a name and a required `expires_at_ms`. The record has no top-level expiry field.
 
-A `snapshot` owner is a stable read view held by the application that asked
-for it. Its expiry is required, so a snapshot always says when it stops
-pinning. Release works the way it works for any expired record. The first
-collection pass to run after that instant flips the record to `released` with
-the same one-way compare-and-swap, and the record is deleted a grace window
-later. Nothing else releases a snapshot. A snapshot name is a label rather
-than a key, on the same terms as a user pin's name.
+A `snapshot` owner represents an application-created read view. Its name is a
+label, not a key, and its expiry is required. Garbage collection releases an
+expired snapshot and deletes its record after the grace window.
 
 Creation is write-then-verify: write the record active, then verify — under
 the self-enforced verify budget — that the floor has not passed the basis and
@@ -1047,10 +1043,8 @@ A user pin carries the caller's `ttl_ms`, or nothing at all, in which case it
 is held until released. A fork owner structurally requires one: it is the
 lease for a single fork attempt (section 3.9.2), and letting it pass is how an
 abandoned attempt becomes collectable; a fork owner without one fails ordinary
-strict deserialization as a missing field. A snapshot owner requires one on
-the same terms. An active record whose expiry has passed still pins and still
-serves — until the pass that releases it, it is a root, and answering from it
-is answering from state that is provably still there.
+strict deserialization as a missing field. A snapshot owner also requires an
+expiry. An expired record remains a root until garbage collection releases it.
 
 Explicit release is user-owned only, and it is idempotent: releasing an
 already-released or already-deleted record leaves the same end state. Owner

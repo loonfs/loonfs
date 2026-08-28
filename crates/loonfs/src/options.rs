@@ -158,16 +158,12 @@ impl CreateCheckpointOptions {
     }
 }
 
-/// Options for creating a durable snapshot pin.
-///
-/// The name is a label recorded on the record, not a key. No `Default`: a
-/// snapshot always names its owner and when it stops pinning.
+/// Options for creating a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSnapshotOptions {
-    /// Label recorded on the checkpoint record.
+    /// A label that does not need to be unique.
     pub name: String,
-    /// When garbage collection releases the pin, in Unix milliseconds. A
-    /// snapshot has no other release.
+    /// Expiry time in Unix milliseconds.
     pub expires_at_ms: u64,
 }
 

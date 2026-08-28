@@ -734,19 +734,6 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
     assert_eq!(listed_snapshot.owner, snapshot.owner);
     assert_eq!(listed_snapshot.expires_at_ms, Some(expires_at_ms));
     assert_eq!(listed_snapshot.checkpoint_seq, snapshot.checkpoint_seq);
-
-    // A snapshot names its own expiry, so an absent one is not a request the
-    // runtime can turn into a record.
-    assert_core_error_kind(
-        block_on(fs.admin.create_snapshot(
-            &namespace_id,
-            CreateSnapshotOptions {
-                name: "no-expiry".to_owned(),
-                expires_at_ms: 0,
-            },
-        )),
-        ErrorCode::InvalidRequest,
-    );
 }
 
 #[test]

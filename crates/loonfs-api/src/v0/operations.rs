@@ -634,12 +634,7 @@ pub struct ReleaseCheckpointResponse {
     pub checkpoint_id: CheckpointId,
 }
 
-/// Who a checkpoint record answers to, as the record durably records it.
-///
-/// The owners have different releases, so a listing that names the owner
-/// also says which records the release endpoint will act on: a user pin is
-/// released by id, a fork lease is released by deleting the target namespace
-/// it protects, and a snapshot is released by its own expiry.
+/// The owner of a checkpoint record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -658,11 +653,10 @@ pub enum CheckpointOwnerSummary {
         /// Namespace whose continued existence keeps this pin standing.
         target_namespace_id: NamespaceId,
     },
-    /// A stable read view, standing until the expiry it was created with.
+    /// An application-created read view.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerSnapshot"))]
     Snapshot {
-        /// The label the creator recorded. Not a key: several records may
-        /// carry one label over different bases.
+        /// A label that does not need to be unique.
         name: String,
     },
 }

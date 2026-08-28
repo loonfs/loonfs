@@ -130,7 +130,6 @@ fn validate_checkpoint_owner(owner: &CheckpointOwner) -> Result<()> {
             expires_at_ms,
         } => {
             validate_checkpoint_name(name)?;
-            // Zero is already past at every clock, so it pins nothing.
             if *expires_at_ms == 0 {
                 return Err(CoreError::InvalidCheckpointRequest(
                     "snapshot expiry must not be zero".to_owned(),
