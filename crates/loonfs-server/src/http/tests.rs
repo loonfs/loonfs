@@ -167,6 +167,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "checksum_algorithm",
     "target_namespace_id",
     "target_seq",
+    "through_seq",
     "to_display_name",
     "to_parent_inode_id",
     "ttl_ms",

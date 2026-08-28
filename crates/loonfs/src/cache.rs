@@ -12,8 +12,9 @@ use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::{
-    load_checkpoint_read_basis, load_namespace_read_anchor, ControlObjectIdentity,
-    ControlObjectLoadError, LoadedHeadControl, MetadataBasis, VerifiedNamespaceCatalogEntry,
+    load_checkpoint_read_basis, load_namespace_read_anchor, load_snapshot_read_basis,
+    ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MetadataBasis,
+    VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
 use loonfs_objectstore::keys::wal_head;
@@ -379,6 +380,37 @@ impl ReadCore {
             Some(self.inner.metadata_segment_cache.as_ref()),
             &live.head.state,
             checkpoint_id,
+        )
+        .await?;
+        let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
+            head: CachedControl {
+                identity: ControlObjectIdentity {
+                    etag: pinned.head_etag,
+                },
+                state: pinned.head,
+            },
+            basis: pinned.basis,
+        });
+        Ok((self.reader_engine(namespace_id), read_context))
+    }
+
+    /// Pins a snapshot-owned checkpoint while enforcing its live lease.
+    pub(crate) async fn pinned_read_at_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+        now_ms: u64,
+    ) -> Result<(
+        loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
+        RuntimeReadContext,
+    )> {
+        let live = self.head_for_metadata_read(namespace_id).await?;
+        let pinned = load_snapshot_read_basis(
+            self.store(),
+            Some(self.inner.metadata_segment_cache.as_ref()),
+            &live.head.state,
+            snapshot_id,
+            now_ms,
         )
         .await?;
         let read_context = self.runtime_read_context(&CachedNamespaceAnchor {

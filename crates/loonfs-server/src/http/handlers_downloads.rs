@@ -7,7 +7,10 @@
 //! advertised together.
 
 use super::error::ApiResponseError;
-use super::handlers_filesystem::parse_revision_no;
+use super::handlers_filesystem::{
+    parse_optional_snapshot_id, parse_revision_no, pin_requested_snapshot,
+    reject_snapshot_with_revision, SnapshotQuery,
+};
 use super::handlers_inodes::{parse_inode_id, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
@@ -42,14 +45,17 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
         tag = "filesystem",
         summary = "Begin download",
         description = "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.max_content_bytes`.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Authorize the file revision this live snapshot selected")
+        ),
         request_body = BeginDownloadRequest,
         responses(
             (status = 200, description = "Download authorized", body = BeginDownloadResponse),
-            (status = 400, description = "Invalid path or revision", body = ApiError),
+            (status = 400, description = "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, path, or revision not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot released or expired", body = ApiError),
             (status = 501, description = "Direct download is unsupported", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
@@ -72,21 +78,29 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
 pub(super) async fn create_download(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
-    query: AppQuery<NoQuery>,
+    query: AppQuery<SnapshotQuery>,
     AppJson(request): AppJson<BeginDownloadRequest>,
 ) -> Result<Json<BeginDownloadResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
+    let query = query.into_params()?;
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    reject_snapshot_with_revision(snapshot_id.as_ref(), request.revision_no)?;
+    let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
     // A store either authorizes direct transfers or it does not, and one
     // that does can always sign a read — so this asks for the bundle, not
     // for a direction within it.
     let issuer = direct_get_issuer(&state)?;
 
-    let target = state
-        .reader
-        .create_download(&namespace_id, request.path.as_str(), request.revision_no)
-        .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    let target = match snapshot {
+        Some(snapshot) => snapshot.create_download(request.path.as_str()).await,
+        None => {
+            state
+                .reader
+                .create_download(&namespace_id, request.path.as_str(), request.revision_no)
+                .await
+        }
+    }
+    .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let access = presigned_access(issuer, &target.object_key).await?;
 
     Ok(Json(BeginDownloadResponse {

@@ -2,8 +2,8 @@
 
 use crate::common::{assert_core_error_kind, open_runtime_async, store};
 use loonfs::{
-    CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId, PageRequest,
-    PaginationPolicy, PutFileOptions,
+    CreateNamespaceOptions, CreateSnapshotOptions, DestinationBehavior, ErrorCode, NamespaceId,
+    PageRequest, PaginationPolicy, PutFileOptions,
 };
 use tempfile::tempdir;
 
@@ -234,5 +234,77 @@ async fn a_released_checkpoint_refuses_a_pin_instead_of_reading_current_state() 
             .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
             .await,
         ErrorCode::CheckpointUnavailable,
+    );
+}
+
+#[tokio::test]
+async fn snapshot_pins_serve_captured_state_and_enforce_release() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-lease-read-test").await;
+    let namespace_id = NamespaceId::parse("snapshot-lease-reads").expect("namespace id");
+    runtime
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/pinned.txt",
+            b"captured",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create captured file");
+    let now_ms = loonfs::current_time_ms().expect("current time");
+    let snapshot = runtime
+        .admin
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "reader".to_owned(),
+                expires_at_ms: now_ms + 60_000,
+            },
+        )
+        .await
+        .expect("create snapshot");
+
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/pinned.txt",
+            b"current",
+            PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
+            },
+        )
+        .await
+        .expect("replace captured file");
+    let pinned = runtime
+        .reader
+        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id, now_ms)
+        .await
+        .expect("pin live snapshot");
+    assert_eq!(pinned.head_seq(), snapshot.checkpoint_seq);
+    assert_eq!(
+        pinned
+            .get_file_bytes("/pinned.txt")
+            .await
+            .expect("read captured bytes")
+            .bytes,
+        b"captured"
+    );
+
+    runtime
+        .admin
+        .release_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .await
+        .expect("release snapshot");
+    assert_core_error_kind(
+        runtime
+            .reader
+            .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id, now_ms)
+            .await,
+        ErrorCode::SnapshotGone,
     );
 }

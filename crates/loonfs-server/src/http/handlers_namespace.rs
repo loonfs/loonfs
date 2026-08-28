@@ -2,7 +2,9 @@
 //! handlers.
 
 use super::error::ApiResponseError;
-use super::handlers_filesystem::{invalid_path_id_error, parse_public_ordinal, resolve_page_limit};
+use super::handlers_filesystem::{
+    invalid_path_id_error, parse_public_ordinal, parse_snapshot_id, resolve_page_limit,
+};
 use super::{
     authorize, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson,
 };
@@ -584,11 +586,6 @@ pub(super) async fn release_snapshot(
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct SnapshotPathParams {
     snapshot_id: String,
-}
-
-fn parse_snapshot_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
-    CheckpointId::parse(value)
-        .map_err(|error| invalid_path_id_error("snapshot_id", value, error.reason()))
 }
 
 fn snapshot_expiry_from_ttl(

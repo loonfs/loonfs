@@ -23,12 +23,14 @@ use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 /// Create one with [`FsReader::pin_namespace`] when several related reads
 /// must describe the same filesystem state, or with
 /// [`FsReader::pin_namespace_at_checkpoint`] to describe the state one
-/// checkpoint captured. Immutable content selected by this view remains
+/// checkpoint captured. [`FsReader::pin_namespace_at_snapshot`] adds the
+/// snapshot lease policy. Immutable content selected by this view remains
 /// safe to read through [`Self::read_content_ref`].
 #[must_use]
 pub struct FsReadSnapshot {
     engine: NamespaceReaderEngine<SharedObjectStore>,
     context: RuntimeReadContext,
+    max_read_content_bytes: Option<u64>,
 }
 
 impl FsReadSnapshot {
@@ -96,6 +98,22 @@ impl FsReadSnapshot {
         Ok(self
             .engine
             .read_content_ref(content_ref, max_bytes, &self.context)
+            .await?)
+    }
+
+    /// Reads the file selected by this snapshot.
+    pub async fn get_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
+        Ok(self
+            .engine
+            .get_file(absolute_path, &self.context, self.max_read_content_bytes)
+            .await?)
+    }
+
+    /// Resolves the file selected by this snapshot for a direct download.
+    pub async fn create_download(&self, absolute_path: &str) -> Result<DirectDownloadTarget> {
+        Ok(self
+            .engine
+            .direct_download_target(absolute_path, None, &self.context)
             .await?)
     }
 }
@@ -437,7 +455,11 @@ impl FsReader {
     pub async fn pin_namespace(&self, namespace_id: &NamespaceId) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-        Ok(FsReadSnapshot { engine, context })
+        Ok(FsReadSnapshot {
+            engine,
+            context,
+            max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
+        })
     }
 
     /// Pins the namespace state captured by a checkpoint.
@@ -453,7 +475,34 @@ impl FsReader {
             .core
             .pinned_read_at_checkpoint(namespace_id, checkpoint_id)
             .await?;
-        Ok(FsReadSnapshot { engine, context })
+        Ok(FsReadSnapshot {
+            engine,
+            context,
+            max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
+        })
+    }
+
+    /// Pins one namespace at a live snapshot lease.
+    ///
+    /// Checkpoint pins are policy-free. Snapshot pins enforce snapshot
+    /// ownership and refuse expired or released leases against the supplied
+    /// `now_ms`, so a wire layer owns its clock.
+    pub async fn pin_namespace_at_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+        now_ms: u64,
+    ) -> Result<FsReadSnapshot> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let (engine, context) = self
+            .core
+            .pinned_read_at_snapshot(namespace_id, snapshot_id, now_ms)
+            .await?;
+        Ok(FsReadSnapshot {
+            engine,
+            context,
+            max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
+        })
     }
 
     /// Returns a namespace's current state.

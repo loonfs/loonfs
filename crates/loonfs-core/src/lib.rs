@@ -119,7 +119,9 @@ pub mod cache {
 /// Typed loaders for namespace control objects and verified catalog state.
 /// Used by `loonfs` read and write paths and by layout tests.
 pub mod control {
-    pub use crate::checkpoint::{load_checkpoint_read_basis, CheckpointReadBasis};
+    pub use crate::checkpoint::{
+        load_checkpoint_read_basis, load_snapshot_read_basis, CheckpointReadBasis,
+    };
     pub use crate::control_object::ControlObjectLoadError;
     pub use crate::namespace::catalog::{
         load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,

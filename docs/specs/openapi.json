@@ -1238,7 +1238,7 @@
           "filesystem"
         ],
         "summary": "List changes after a sequence",
-        "description": "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
+        "description": "Returns committed changes from the write-ahead log. When `snapshot_id` is provided, the feed ends at the sequence that snapshot captured.",
         "operationId": "list_changes",
         "parameters": [
           {
@@ -1271,6 +1271,15 @@
               "maximum": 1000,
               "minimum": 1
             }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "query",
+            "description": "End the feed at the sequence this live snapshot captured",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CheckpointId"
+            }
           }
         ],
         "responses": {
@@ -1285,7 +1294,7 @@
             }
           },
           "400": {
-            "description": "Invalid change cursor or limit",
+            "description": "Invalid change cursor, limit, snapshot id, non-snapshot checkpoint, or after_seq above the snapshot sequence",
             "content": {
               "application/json": {
                 "schema": {
@@ -1305,7 +1314,7 @@
             }
           },
           "404": {
-            "description": "Namespace not found",
+            "description": "Namespace or snapshot not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1325,7 +1334,7 @@
             }
           },
           "410": {
-            "description": "Namespace deleted",
+            "description": "Namespace deleted or snapshot released or expired",
             "content": {
               "application/json": {
                 "schema": {
@@ -1444,7 +1453,7 @@
           "filesystem"
         ],
         "summary": "Read file",
-        "description": "Returns file bytes for the current revision at a path, or for a specific retained revision when `revision_no` is provided.",
+        "description": "Returns file bytes for the current revision at a path, for a specific retained revision when `revision_no` is provided, or for the revision selected by a live snapshot when `snapshot_id` is provided.",
         "operationId": "get_file_bytes",
         "parameters": [
           {
@@ -1468,10 +1477,19 @@
           {
             "name": "revision_no",
             "in": "query",
-            "description": "Optional prior revision number",
+            "description": "Optional prior revision number; cannot be combined with snapshot_id",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/RevisionNo"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "query",
+            "description": "Read the file revision this live snapshot selected",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CheckpointId"
             }
           }
         ],
@@ -1492,7 +1510,7 @@
             }
           },
           "400": {
-            "description": "Invalid path or revision",
+            "description": "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id",
             "content": {
               "application/json": {
                 "schema": {
@@ -1512,7 +1530,7 @@
             }
           },
           "404": {
-            "description": "Namespace, path, or revision not found",
+            "description": "Namespace, path, revision, or snapshot not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1522,7 +1540,7 @@
             }
           },
           "410": {
-            "description": "Namespace deleted",
+            "description": "Namespace deleted or snapshot released or expired",
             "content": {
               "application/json": {
                 "schema": {
@@ -1565,6 +1583,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "query",
+            "description": "Authorize the file revision this live snapshot selected",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CheckpointId"
+            }
           }
         ],
         "requestBody": {
@@ -1589,7 +1616,7 @@
             }
           },
           "400": {
-            "description": "Invalid path or revision",
+            "description": "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id",
             "content": {
               "application/json": {
                 "schema": {
@@ -1609,7 +1636,7 @@
             }
           },
           "404": {
-            "description": "Namespace, path, or revision not found",
+            "description": "Namespace, path, revision, or snapshot not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1619,7 +1646,7 @@
             }
           },
           "410": {
-            "description": "Namespace deleted",
+            "description": "Namespace deleted or snapshot released or expired",
             "content": {
               "application/json": {
                 "schema": {
@@ -1651,7 +1678,7 @@
           "filesystem"
         ],
         "summary": "List directory",
-        "description": "Lists a directory at the current namespace head.",
+        "description": "Lists a directory at the current namespace head or at a live snapshot when `snapshot_id` is provided.",
         "operationId": "list_path_entries",
         "parameters": [
           {
@@ -1703,6 +1730,15 @@
               "type": "boolean",
               "default": false
             }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "query",
+            "description": "Read the directory as this live snapshot captured it",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CheckpointId"
+            }
           }
         ],
         "responses": {
@@ -1717,7 +1753,7 @@
             }
           },
           "400": {
-            "description": "Invalid path, limit, cursor, or include_attributes",
+            "description": "Invalid path, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint",
             "content": {
               "application/json": {
                 "schema": {
@@ -1737,7 +1773,7 @@
             }
           },
           "404": {
-            "description": "Namespace or path not found",
+            "description": "Namespace, path, or snapshot not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1747,7 +1783,7 @@
             }
           },
           "410": {
-            "description": "Namespace deleted",
+            "description": "Namespace deleted or snapshot released or expired",
             "content": {
               "application/json": {
                 "schema": {
@@ -1774,7 +1810,7 @@
           "filesystem"
         ],
         "summary": "Stat path",
-        "description": "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
+        "description": "Returns metadata for a path at the current namespace head or at a live snapshot when `snapshot_id` is provided.",
         "operationId": "get_path_entry",
         "parameters": [
           {
@@ -1804,6 +1840,15 @@
               "type": "boolean",
               "default": true
             }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "query",
+            "description": "Read the path as this live snapshot captured it",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CheckpointId"
+            }
           }
         ],
         "responses": {
@@ -1818,7 +1863,7 @@
             }
           },
           "400": {
-            "description": "Invalid path or include_attributes",
+            "description": "Invalid path, include_attributes, snapshot id, or non-snapshot checkpoint",
             "content": {
               "application/json": {
                 "schema": {
@@ -1838,7 +1883,7 @@
             }
           },
           "404": {
-            "description": "Namespace or path not found",
+            "description": "Namespace, path, or snapshot not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1848,7 +1893,7 @@
             }
           },
           "410": {
-            "description": "Namespace deleted",
+            "description": "Namespace deleted or snapshot released or expired",
             "content": {
               "application/json": {
                 "schema": {

@@ -51,6 +51,7 @@ pub use self::reorganize::{
 };
 pub use self::runs::MetadataFamilyGroup;
 pub(crate) use self::runs::MetadataLsmPolicy;
+pub use self::snapshot::load_snapshot_read_basis;
 pub use self::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
     StoredMetadataBlockKind,

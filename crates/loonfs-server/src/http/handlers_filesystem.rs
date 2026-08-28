@@ -17,8 +17,8 @@ use axum::Json;
 use futures::Stream;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
-    payload_class, ErrorCode, ListChangesOptions, ListPathEntriesOptions, StatPathOptions,
-    TraceMode, TraceStoreKind,
+    payload_class, CheckpointId, ErrorCode, FsReadSnapshot, ListChangesOptions,
+    ListPathEntriesOptions, StatPathOptions, TraceMode, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -43,6 +43,7 @@ use tracing::Instrument;
 pub(super) struct PathQuery {
     path: Option<String>,
     include_attributes: Option<String>,
+    snapshot_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -63,6 +64,7 @@ pub(super) struct ListPathPageQuery {
     limit: Option<String>,
     cursor: Option<String>,
     include_attributes: Option<String>,
+    snapshot_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -77,6 +79,7 @@ pub(super) struct PageQuery {
 pub(super) struct ContentQuery {
     path: Option<String>,
     revision_no: Option<String>,
+    snapshot_id: Option<String>,
 }
 
 /// One materialized download plus the permit accounting for its memory.
@@ -115,6 +118,13 @@ impl Stream for DownloadBodyStream {
 pub(super) struct ChangesQuery {
     after_seq: Option<String>,
     limit: Option<String>,
+    snapshot_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SnapshotQuery {
+    pub(super) snapshot_id: Option<String>,
 }
 
 /// Schema-only override for the shared page-limit query contract.
@@ -181,20 +191,21 @@ impl utoipa::ToSchema for OpenApiDefaultFalseBoolean {}
         path = "/v0/namespaces/{namespace_id}/filesystem/entries",
         tag = "filesystem",
         summary = "List directory",
-        description = "Lists a directory at the current namespace head.",
+        description = "Lists a directory at the current namespace head or at a live snapshot when `snapshot_id` is provided.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor"),
-            ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.")
+            ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Read the directory as this live snapshot captured it")
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_api::ListPathEntriesResponse),
-            (status = 400, description = "Invalid path, limit, cursor, or include_attributes", body = ApiError),
+            (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or path not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 404, description = "Namespace, path, or snapshot not found", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot released or expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -215,22 +226,29 @@ pub(super) async fn list_path_entries(
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
-    let listing = state
-        .reader
-        .list_path_entries_page(
-            &namespace_id,
-            &path,
-            PageRequest {
-                limit: resolve_page_limit(query.limit)?,
-                cursor: decode_optional_cursor(query.cursor)?,
-            },
-            options,
-        )
-        .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_invalid_request_param("path")
-        })?;
+    let request = PageRequest {
+        limit: resolve_page_limit(query.limit)?,
+        cursor: decode_optional_cursor(query.cursor)?,
+    };
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let listing = match snapshot {
+        Some(snapshot) => {
+            snapshot
+                .list_path_entries_page(&path, request, options)
+                .await
+        }
+        None => {
+            state
+                .reader
+                .list_path_entries_page(&namespace_id, &path, request, options)
+                .await
+        }
+    }
+    .map_err(|error| {
+        ApiResponseError::runtime_for_namespace(&namespace_id, error)
+            .with_invalid_request_param("path")
+    })?;
     Ok(Json(listing))
 }
 
@@ -242,18 +260,19 @@ pub(super) async fn list_path_entries(
         path = "/v0/namespaces/{namespace_id}/filesystem/entry",
         tag = "filesystem",
         summary = "Stat path",
-        description = "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
+        description = "Returns metadata for a path at the current namespace head or at a live snapshot when `snapshot_id` is provided.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
-            ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.")
+            ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Read the path as this live snapshot captured it")
         ),
         responses(
             (status = 200, description = "Authoritative path entry", body = loonfs_api::PathEntry),
-            (status = 400, description = "Invalid path or include_attributes", body = ApiError),
+            (status = 400, description = "Invalid path, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or path not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 404, description = "Namespace, path, or snapshot not found", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot released or expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -272,14 +291,21 @@ pub(super) async fn get_path_entry(
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
-    let entry = state
-        .reader
-        .get_path_entry(&namespace_id, &path, options)
-        .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_invalid_request_param("path")
-        })?;
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let entry = match snapshot {
+        Some(snapshot) => snapshot.get_path_entry(&path, options).await,
+        None => {
+            state
+                .reader
+                .get_path_entry(&namespace_id, &path, options)
+                .await
+        }
+    }
+    .map_err(|error| {
+        ApiResponseError::runtime_for_namespace(&namespace_id, error)
+            .with_invalid_request_param("path")
+    })?;
     Ok(Json(entry))
 }
 
@@ -291,18 +317,19 @@ pub(super) async fn get_path_entry(
         path = "/v0/namespaces/{namespace_id}/filesystem/content",
         tag = "filesystem",
         summary = "Read file",
-        description = "Returns file bytes for the current revision at a path, or for a specific retained revision when `revision_no` is provided.",
+        description = "Returns file bytes for the current revision at a path, for a specific retained revision when `revision_no` is provided, or for the revision selected by a live snapshot when `snapshot_id` is provided.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
-            ("revision_no" = Option<RevisionNo>, Query, description = "Optional prior revision number")
+            ("revision_no" = Option<RevisionNo>, Query, description = "Optional prior revision number; cannot be combined with snapshot_id"),
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Read the file revision this live snapshot selected")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid path or revision", body = ApiError),
+            (status = 400, description = "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, path, or revision not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot released or expired", body = ApiError),
             (status = 413, description = "Content exceeds the advertised `download.max_content_bytes` limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
@@ -323,15 +350,21 @@ pub(super) async fn get_file_bytes(
         .as_deref()
         .map(parse_revision_no)
         .transpose()?;
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no)?;
+    let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
     let permit = acquire_download_permit(&state)?;
-    let file = match revision_no {
-        Some(revision_no) => {
-            state
-                .reader
-                .get_file_revision_bytes(&namespace_id, &path, revision_no)
-                .await
-        }
-        None => state.reader.get_file_bytes(&namespace_id, &path).await,
+    let file = match snapshot {
+        Some(snapshot) => snapshot.get_file_bytes(&path).await,
+        None => match revision_no {
+            Some(revision_no) => {
+                state
+                    .reader
+                    .get_file_revision_bytes(&namespace_id, &path, revision_no)
+                    .await
+            }
+            None => state.reader.get_file_bytes(&namespace_id, &path).await,
+        },
     }
     .map_err(|error| {
         ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -559,19 +592,20 @@ pub(super) async fn create_commit(
         path = "/v0/namespaces/{namespace_id}/changes",
         tag = "filesystem",
         summary = "List changes after a sequence",
-        description = "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
+        description = "Returns committed changes from the write-ahead log. When `snapshot_id` is provided, the feed ends at the sequence that snapshot captured.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("after_seq" = loonfs_api::ChangeSeq, Query, description = "Return committed changes after this sequence"),
-            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size")
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "End the feed at the sequence this live snapshot captured")
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
-            (status = 400, description = "Invalid change cursor or limit", body = ApiError),
+            (status = 400, description = "Invalid change cursor, limit, snapshot id, non-snapshot checkpoint, or after_seq above the snapshot sequence", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 404, description = "Namespace or snapshot not found", body = ApiError),
             (status = 409, description = "The cursor is older than the retained change history and requires a fresh snapshot", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot released or expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -587,16 +621,106 @@ pub(super) async fn list_changes(
     let query = query.into_params()?;
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = resolve_page_limit(query.limit)?;
-    let response = state
-        .reader
-        .list_changes(
-            &namespace_id,
-            after_seq,
-            ListChangesOptions { limit: Some(limit) },
-        )
-        .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let response = match snapshot {
+        Some(snapshot) => {
+            let captured_seq = snapshot.head_seq();
+            if after_seq > captured_seq {
+                return Err(ApiResponseError::new(
+                    ErrorCode::InvalidRequest,
+                    &format!("after_seq `{after_seq}` is above snapshot sequence `{captured_seq}`"),
+                )
+                .with_param("after_seq"));
+            }
+            if after_seq == captured_seq {
+                ListChangesResponse {
+                    namespace_id: namespace_id.clone(),
+                    after_seq,
+                    through_seq: captured_seq,
+                    next_after_seq: None,
+                    changes: Vec::new(),
+                }
+            } else {
+                let mut page = state
+                    .reader
+                    .list_changes(
+                        &namespace_id,
+                        after_seq,
+                        ListChangesOptions { limit: Some(limit) },
+                    )
+                    .await
+                    .map_err(|error| {
+                        ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                    })?;
+                page.changes
+                    .retain(|change| change.committed_seq <= captured_seq);
+                page.through_seq = captured_seq;
+                page.next_after_seq = page
+                    .changes
+                    .last()
+                    .map(|change| change.committed_seq)
+                    .filter(|last_seq| *last_seq < captured_seq);
+                page
+            }
+        }
+        None => state
+            .reader
+            .list_changes(
+                &namespace_id,
+                after_seq,
+                ListChangesOptions { limit: Some(limit) },
+            )
+            .await
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?,
+    };
     Ok(Json(response))
+}
+
+pub(super) async fn pin_requested_snapshot(
+    state: &AppState,
+    namespace_id: &loonfs_api::NamespaceId,
+    snapshot_id: Option<CheckpointId>,
+) -> Result<Option<FsReadSnapshot>, ApiResponseError> {
+    let Some(snapshot_id) = snapshot_id else {
+        return Ok(None);
+    };
+    let now_ms = current_unix_ms()?;
+    state
+        .reader
+        .pin_namespace_at_snapshot(namespace_id, &snapshot_id, now_ms)
+        .await
+        .map(Some)
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(namespace_id, error)
+                .with_invalid_request_param("snapshot_id")
+        })
+}
+
+pub(super) fn reject_snapshot_with_revision(
+    snapshot_id: Option<&CheckpointId>,
+    revision_no: Option<RevisionNo>,
+) -> Result<(), ApiResponseError> {
+    if snapshot_id.is_some() && revision_no.is_some() {
+        return Err(ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            "revision_no cannot be combined with snapshot_id; a snapshot read serves the revision \
+             selected by the snapshot",
+        )
+        .with_param("revision_no"));
+    }
+    Ok(())
+}
+
+pub(super) fn parse_optional_snapshot_id(
+    snapshot_id: Option<String>,
+) -> Result<Option<CheckpointId>, ApiResponseError> {
+    snapshot_id.as_deref().map(parse_snapshot_id).transpose()
+}
+
+pub(super) fn parse_snapshot_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
+    CheckpointId::parse(value)
+        .map_err(|error| invalid_path_id_error("snapshot_id", value, error.reason()))
 }
 
 fn parse_after_seq(value: &str) -> Result<loonfs_api::ChangeSeq, ApiResponseError> {

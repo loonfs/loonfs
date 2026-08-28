@@ -252,7 +252,6 @@ pub async fn app_with_store(
 }
 
 /// Builds the server router with custom direct-transfer providers for tests.
-#[cfg(feature = "test-support")]
 pub async fn app_with_test_transfers(
     config: ServerConfig,
     store: SharedObjectStore,
