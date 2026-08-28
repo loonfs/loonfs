@@ -21,8 +21,10 @@ use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 /// A namespace metadata view pinned to one head sequence.
 ///
 /// Create one with [`FsReader::pin_namespace`] when several related reads
-/// must describe the same filesystem state. Immutable content selected by
-/// this view remains safe to read through [`Self::read_content_ref`].
+/// must describe the same filesystem state, or with
+/// [`FsReader::pin_namespace_at_checkpoint`] to describe the state one
+/// checkpoint captured. Immutable content selected by this view remains
+/// safe to read through [`Self::read_content_ref`].
 #[must_use]
 pub struct FsReadSnapshot {
     engine: NamespaceReaderEngine<SharedObjectStore>,
@@ -435,6 +437,22 @@ impl FsReader {
     pub async fn pin_namespace(&self, namespace_id: &NamespaceId) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        Ok(FsReadSnapshot { engine, context })
+    }
+
+    /// Pins the namespace state captured by a checkpoint.
+    ///
+    /// Missing or released checkpoints return `checkpoint_unavailable`.
+    pub async fn pin_namespace_at_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+        checkpoint_id: &CheckpointId,
+    ) -> Result<FsReadSnapshot> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let (engine, context) = self
+            .core
+            .pinned_read_at_checkpoint(namespace_id, checkpoint_id)
+            .await?;
         Ok(FsReadSnapshot { engine, context })
     }
 

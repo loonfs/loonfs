@@ -7,13 +7,13 @@
 use crate::fs::{should_invalidate_after_result, ReadCore};
 use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
-use crate::{CommitResponse, CoreError, NamespaceId, Recency, RuntimeCacheConfig};
+use crate::{CheckpointId, CommitResponse, CoreError, NamespaceId, Recency, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::{
-    load_namespace_read_anchor, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
-    MetadataBasis, VerifiedNamespaceCatalogEntry,
+    load_checkpoint_read_basis, load_namespace_read_anchor, ControlObjectIdentity,
+    ControlObjectLoadError, LoadedHeadControl, MetadataBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
 use loonfs_objectstore::keys::wal_head;
@@ -361,6 +361,35 @@ impl ReadCore {
     )> {
         let anchor = self.head_for_metadata_read(namespace_id).await?;
         let read_context = self.runtime_read_context(&anchor);
+        Ok((self.reader_engine(namespace_id), read_context))
+    }
+
+    /// Pins the metadata view captured by a checkpoint.
+    pub(crate) async fn pinned_read_at_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+        checkpoint_id: &CheckpointId,
+    ) -> Result<(
+        loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
+        RuntimeReadContext,
+    )> {
+        let live = self.head_for_metadata_read(namespace_id).await?;
+        let pinned = load_checkpoint_read_basis(
+            self.store(),
+            Some(self.inner.metadata_segment_cache.as_ref()),
+            &live.head.state,
+            checkpoint_id,
+        )
+        .await?;
+        let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
+            head: CachedControl {
+                identity: ControlObjectIdentity {
+                    etag: pinned.head_etag,
+                },
+                state: pinned.head,
+            },
+            basis: pinned.basis,
+        });
         Ok((self.reader_engine(namespace_id), read_context))
     }
 

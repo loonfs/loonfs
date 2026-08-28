@@ -21,6 +21,7 @@ mod frozen_floor;
 mod list;
 mod load;
 mod publish;
+mod read_basis;
 pub(crate) mod record;
 mod release;
 mod reorganize;
@@ -43,6 +44,7 @@ pub use self::cache::{
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
 pub use self::list::CheckpointPageCursor;
+pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
 pub use self::reorganize::{
     FrozenBasePolicy, MetadataCompactionView, MetadataReorganizeOutcome, MetadataReorganizeReport,
 };
