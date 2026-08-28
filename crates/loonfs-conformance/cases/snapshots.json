@@ -1,0 +1,57 @@
+{
+  "name": "snapshots",
+  "intent": "Checks snapshot lifecycle operations, captured reads, bounded change feeds, and snapshot error contracts.",
+  "request": {
+    "namespace_id": "conf-snapshots",
+    "directory": "/tree",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-snapshots"
+    },
+    "snapshot_name": "captured-tree",
+    "replaced_file_name": "kept.txt",
+    "deleted_file_name": "removed.txt",
+    "added_file_name": "added.txt",
+    "captured_content_utf8": "captured snapshot content",
+    "current_content_utf8": "current snapshot content",
+    "deleted_content_utf8": "removed after snapshot",
+    "added_content_utf8": "added after snapshot",
+    "create_ttl_ms": 3600000,
+    "extend_ttl_ms": 7200000,
+    "unknown_snapshot_id": "chk_ffffffffffffffffffffffffffffffff"
+  },
+  "expected": {
+    "snapshot_head_seq": 3,
+    "captured_revision_no": 1,
+    "captured_entry_names": [
+      "kept.txt",
+      "removed.txt"
+    ],
+    "current_revision_no": 2,
+    "current_entry_names": [
+      "added.txt",
+      "kept.txt"
+    ],
+    "snapshot_change_seqs": [
+      1,
+      2,
+      3
+    ],
+    "snapshot_gone": {
+      "status": 410,
+      "code": "snapshot_gone"
+    },
+    "snapshot_not_found": {
+      "status": 404,
+      "code": "snapshot_not_found"
+    },
+    "revision_with_snapshot": {
+      "status": 400,
+      "code": "invalid_request"
+    },
+    "zero_ttl": {
+      "status": 400,
+      "code": "invalid_request"
+    }
+  }
+}

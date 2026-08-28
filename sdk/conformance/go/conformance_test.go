@@ -44,6 +44,7 @@ var expectedCases = []string{
 	"inode_mutations",
 	"pagination",
 	"proxy",
+	"snapshots",
 	"upload_abort",
 	"upload_direct_put",
 	"upload_multipart",
@@ -91,6 +92,8 @@ func TestSDKConformance(t *testing.T) {
 				runChildrenByInode(t, h, testCase)
 			case "inode_mutations":
 				runInodeMutations(t, h, testCase)
+			case "snapshots":
+				runSnapshots(t, h, testCase)
 			case "error_contract":
 				runErrorContract(t, h, testCase)
 			case "commit_replay":
@@ -1360,6 +1363,352 @@ func contentTokens(token *loonfs.ContentToken) []*loonfs.ContentToken {
 		return nil
 	}
 	return []*loonfs.ContentToken{token}
+}
+
+type snapshotsRequest struct {
+	NamespaceID         string          `json:"namespace_id"`
+	Directory           string          `json:"directory"`
+	Actor               loonfs.ActorRef `json:"actor"`
+	SnapshotName        string          `json:"snapshot_name"`
+	ReplacedFileName    string          `json:"replaced_file_name"`
+	DeletedFileName     string          `json:"deleted_file_name"`
+	AddedFileName       string          `json:"added_file_name"`
+	CapturedContentUTF8 string          `json:"captured_content_utf8"`
+	CurrentContentUTF8  string          `json:"current_content_utf8"`
+	DeletedContentUTF8  string          `json:"deleted_content_utf8"`
+	AddedContentUTF8    string          `json:"added_content_utf8"`
+	CreateTTLMs         int64           `json:"create_ttl_ms"`
+	ExtendTTLMs         int64           `json:"extend_ttl_ms"`
+	UnknownSnapshotID   string          `json:"unknown_snapshot_id"`
+}
+
+type snapshotsExpected struct {
+	SnapshotHeadSeq      int64               `json:"snapshot_head_seq"`
+	CapturedRevisionNo   int64               `json:"captured_revision_no"`
+	CapturedEntryNames   []string            `json:"captured_entry_names"`
+	CurrentRevisionNo    int64               `json:"current_revision_no"`
+	CurrentEntryNames    []string            `json:"current_entry_names"`
+	SnapshotChangeSeqs   []int64             `json:"snapshot_change_seqs"`
+	SnapshotGone         errorStatusExpected `json:"snapshot_gone"`
+	SnapshotNotFound     errorStatusExpected `json:"snapshot_not_found"`
+	RevisionWithSnapshot errorStatusExpected `json:"revision_with_snapshot"`
+	ZeroTtl              errorStatusExpected `json:"zero_ttl"`
+}
+
+func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[snapshotsRequest, snapshotsExpected](t, testCase)
+	ctx := context.Background()
+	childPath := func(name string) string { return request.Directory + "/" + name }
+	createNamespace(t, h.client, request.NamespaceID)
+
+	applyCommit(
+		t,
+		h.client,
+		createDirectoryCommit(
+			request.NamespaceID,
+			"conf-snapshots-create-directory",
+			&request.Actor,
+			request.Directory,
+			nil,
+		),
+	)
+	_, err := transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
+		Bytes:       []byte(request.CapturedContentUTF8),
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID("conf-snapshots-create-replaced"),
+	})
+	if err != nil {
+		t.Fatalf("create replaced snapshot file: %v", err)
+	}
+	_, err = transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(childPath(request.DeletedFileName)),
+		Bytes:       []byte(request.DeletedContentUTF8),
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID("conf-snapshots-create-deleted"),
+	})
+	if err != nil {
+		t.Fatalf("create deleted snapshot file: %v", err)
+	}
+
+	snapshot, err := h.client.Namespaces.CreateSnapshot(ctx, &loonfs.CreateSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		Name:        request.SnapshotName,
+		TTLMs:       request.CreateTTLMs,
+	})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if string(snapshot.NamespaceID) != request.NamespaceID {
+		t.Errorf("snapshot namespace_id = %q, want %q", snapshot.NamespaceID, request.NamespaceID)
+	}
+	if snapshot.Name != request.SnapshotName {
+		t.Errorf("snapshot name = %q, want %q", snapshot.Name, request.SnapshotName)
+	}
+	if int64(snapshot.HeadSeq) != expected.SnapshotHeadSeq {
+		t.Errorf("snapshot head_seq = %d, want %d", snapshot.HeadSeq, expected.SnapshotHeadSeq)
+	}
+	if snapshot.ExpiresAtMs <= snapshot.CreatedAtMs {
+		t.Errorf("snapshot expires_at_ms = %d, want greater than created_at_ms %d", snapshot.ExpiresAtMs, snapshot.CreatedAtMs)
+	}
+
+	replace := loonfs.DestinationBehaviorReplace
+	_, err = transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
+		Bytes:       []byte(request.CurrentContentUTF8),
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID("conf-snapshots-replace-file"),
+		Behavior:    replace,
+	})
+	if err != nil {
+		t.Fatalf("replace snapshot file: %v", err)
+	}
+	_, err = transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(childPath(request.AddedFileName)),
+		Bytes:       []byte(request.AddedContentUTF8),
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID("conf-snapshots-add-file"),
+	})
+	if err != nil {
+		t.Fatalf("add file after snapshot: %v", err)
+	}
+	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		Actor:       &request.Actor,
+		CommitID:    loonfs.CommitID("conf-snapshots-delete-file"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				DeletePath: &loonfs.FilesystemOperationDeletePath{
+					Behavior: &nonRecursive,
+					Path:     loonfs.AbsolutePath(childPath(request.DeletedFileName)),
+				},
+			},
+		},
+	})
+
+	snapshotID := snapshot.SnapshotID
+	capturedEntry, err := h.client.Filesystem.GetPathEntry(ctx, &loonfs.GetPathEntryRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        childPath(request.ReplacedFileName),
+		SnapshotID:  &snapshotID,
+	})
+	if err != nil {
+		t.Fatalf("stat snapshot file: %v", err)
+	}
+	if revision := requireFileProjection(t, capturedEntry).RevisionNo; int64(revision) != expected.CapturedRevisionNo {
+		t.Errorf("captured revision_no = %d, want %d", revision, expected.CapturedRevisionNo)
+	}
+	currentEntry := statPath(t, h.client, request.NamespaceID, childPath(request.ReplacedFileName))
+	if revision := requireFileProjection(t, currentEntry).RevisionNo; int64(revision) != expected.CurrentRevisionNo {
+		t.Errorf("current revision_no = %d, want %d", revision, expected.CurrentRevisionNo)
+	}
+
+	capturedListing, err := h.client.Filesystem.ListPathEntries(ctx, &loonfs.ListPathEntriesRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        request.Directory,
+		SnapshotID:  &snapshotID,
+	})
+	if err != nil {
+		t.Fatalf("list snapshot directory: %v", err)
+	}
+	if capturedListing.Response == nil {
+		t.Fatal("snapshot directory page has no response")
+	}
+	if int64(capturedListing.Response.HeadSeq) != expected.SnapshotHeadSeq {
+		t.Errorf("snapshot listing head_seq = %d, want %d", capturedListing.Response.HeadSeq, expected.SnapshotHeadSeq)
+	}
+	if names := listedNames(t, capturedListing.Results); !equalStrings(names, expected.CapturedEntryNames) {
+		t.Errorf("snapshot listing names = %v, want %v", names, expected.CapturedEntryNames)
+	}
+	currentListing := listPathEntries(t, h.client, request.NamespaceID, request.Directory)
+	if names := listedNames(t, currentListing); !equalStrings(names, expected.CurrentEntryNames) {
+		t.Errorf("current listing names = %v, want %v", names, expected.CurrentEntryNames)
+	}
+
+	capturedBytes := readSDKFileBytes(t, h.client, &loonfs.GetFileBytesRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        childPath(request.ReplacedFileName),
+		SnapshotID:  &snapshotID,
+	}, "read snapshot content")
+	if !bytes.Equal(capturedBytes, []byte(request.CapturedContentUTF8)) {
+		t.Error("snapshot content did not match the captured payload")
+	}
+	currentBytes := readSDKFileBytes(t, h.client, &loonfs.GetFileBytesRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        childPath(request.ReplacedFileName),
+	}, "read current content")
+	if !bytes.Equal(currentBytes, []byte(request.CurrentContentUTF8)) {
+		t.Error("current content did not match the replacement payload")
+	}
+
+	limit := 100
+	feed, err := h.client.Filesystem.ListChanges(ctx, &loonfs.ListChangesRequest{
+		NamespaceID: request.NamespaceID,
+		AfterSeq:    loonfs.ChangeSeq(0),
+		Limit:       &limit,
+		SnapshotID:  &snapshotID,
+	})
+	if err != nil {
+		t.Fatalf("list snapshot changes: %v", err)
+	}
+	if int64(feed.ThroughSeq) != expected.SnapshotHeadSeq {
+		t.Errorf("snapshot changes through_seq = %d, want %d", feed.ThroughSeq, expected.SnapshotHeadSeq)
+	}
+	if feed.NextAfterSeq != nil {
+		t.Errorf("snapshot changes next_after_seq = %d, want nil", *feed.NextAfterSeq)
+	}
+	changeSeqs := make([]int64, 0, len(feed.Changes))
+	for _, change := range feed.Changes {
+		changeSeqs = append(changeSeqs, int64(change.CommittedSeq))
+	}
+	if !equalInt64s(changeSeqs, expected.SnapshotChangeSeqs) {
+		t.Errorf("snapshot change seqs = %v, want %v", changeSeqs, expected.SnapshotChangeSeqs)
+	}
+
+	extended, err := h.client.Namespaces.ExtendSnapshot(ctx, &loonfs.ExtendSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		SnapshotID:  snapshotID,
+		TTLMs:       request.ExtendTTLMs,
+	})
+	if err != nil {
+		t.Fatalf("extend snapshot: %v", err)
+	}
+	if extended.SnapshotID != snapshotID || int64(extended.HeadSeq) != expected.SnapshotHeadSeq || extended.Name != request.SnapshotName {
+		t.Errorf("extended snapshot = %#v, want the created snapshot", extended)
+	}
+	if extended.ExpiresAtMs <= snapshot.ExpiresAtMs {
+		t.Errorf("extended expires_at_ms = %d, want greater than %d", extended.ExpiresAtMs, snapshot.ExpiresAtMs)
+	}
+
+	listed, err := h.client.Namespaces.ListSnapshots(ctx, &loonfs.ListSnapshotsRequest{
+		NamespaceID: request.NamespaceID,
+	})
+	if err != nil {
+		t.Fatalf("list snapshots: %v", err)
+	}
+	if listed.Response == nil {
+		t.Fatal("snapshot page has no response")
+	}
+	if string(listed.Response.NamespaceID) != request.NamespaceID || listed.Response.NextCursor != nil {
+		t.Errorf("snapshot page response = %#v", listed.Response)
+	}
+	if len(listed.Results) != 1 || listed.Results[0].SnapshotID != snapshotID {
+		t.Errorf("listed snapshots = %#v, want only %q", listed.Results, snapshotID)
+	}
+
+	releaseRequest := &loonfs.ReleaseSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		SnapshotID:  snapshotID,
+	}
+	for _, label := range []string{"release snapshot", "release snapshot again"} {
+		released, releaseErr := h.client.Namespaces.ReleaseSnapshot(ctx, releaseRequest)
+		if releaseErr != nil {
+			t.Fatalf("%s: %v", label, releaseErr)
+		}
+		if string(released.NamespaceID) != request.NamespaceID || released.SnapshotID != snapshotID {
+			t.Errorf("%s response = %#v", label, released)
+		}
+	}
+
+	_, err = h.client.Filesystem.GetPathEntry(ctx, &loonfs.GetPathEntryRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        childPath(request.ReplacedFileName),
+		SnapshotID:  &snapshotID,
+	})
+	assertGoneError(t, err, expected.SnapshotGone)
+	_, err = h.client.Namespaces.ExtendSnapshot(ctx, &loonfs.ExtendSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		SnapshotID:  snapshotID,
+		TTLMs:       request.ExtendTTLMs,
+	})
+	assertGoneError(t, err, expected.SnapshotGone)
+
+	unknownSnapshotID := loonfs.CheckpointID(request.UnknownSnapshotID)
+	_, err = h.client.Filesystem.GetPathEntry(ctx, &loonfs.GetPathEntryRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        childPath(request.ReplacedFileName),
+		SnapshotID:  &unknownSnapshotID,
+	})
+	var notFound *loonfs.NotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("expected NotFoundError, found %T: %v", err, err)
+	}
+	if notFound.StatusCode != expected.SnapshotNotFound.Status || notFound.Body == nil || notFound.Body.Code != expected.SnapshotNotFound.Code {
+		t.Errorf("unknown snapshot error = %#v, want %#v", notFound, expected.SnapshotNotFound)
+	}
+
+	revision := loonfs.RevisionNo(expected.CapturedRevisionNo)
+	_, err = h.client.Filesystem.GetFileBytes(ctx, &loonfs.GetFileBytesRequest{
+		NamespaceID: request.NamespaceID,
+		Path:        childPath(request.ReplacedFileName),
+		RevisionNo:  &revision,
+		SnapshotID:  &snapshotID,
+	})
+	assertBadRequestError(t, err, expected.RevisionWithSnapshot)
+	_, err = h.client.Namespaces.CreateSnapshot(ctx, &loonfs.CreateSnapshotRequest{
+		NamespaceID: request.NamespaceID,
+		Name:        request.SnapshotName,
+		TTLMs:       0,
+	})
+	assertBadRequestError(t, err, expected.ZeroTtl)
+}
+
+func readSDKFileBytes(
+	t *testing.T,
+	sdk *client.Client,
+	request *loonfs.GetFileBytesRequest,
+	label string,
+) []byte {
+	t.Helper()
+	reader, err := sdk.Filesystem.GetFileBytes(context.Background(), request)
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	return content
+}
+
+func assertGoneError(t *testing.T, err error, expected errorStatusExpected) {
+	t.Helper()
+	var gone *loonfs.GoneError
+	if !errors.As(err, &gone) {
+		t.Fatalf("expected GoneError, found %T: %v", err, err)
+	}
+	if gone.StatusCode != expected.Status || gone.Body == nil || gone.Body.Code != expected.Code {
+		t.Errorf("gone error = %#v, want %#v", gone, expected)
+	}
+}
+
+func assertBadRequestError(t *testing.T, err error, expected errorStatusExpected) {
+	t.Helper()
+	var badRequest *loonfs.BadRequestError
+	if !errors.As(err, &badRequest) {
+		t.Fatalf("expected BadRequestError, found %T: %v", err, err)
+	}
+	if badRequest.StatusCode != expected.Status || badRequest.Body == nil || badRequest.Body.Code != expected.Code {
+		t.Errorf("bad request error = %#v, want %#v", badRequest, expected)
+	}
+}
+
+func equalInt64s(left, right []int64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func runPagination(t *testing.T, h *harness, testCase conformanceCase) {

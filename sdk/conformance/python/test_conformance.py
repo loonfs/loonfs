@@ -43,8 +43,10 @@ from loonfs_sdk import (
     FilesystemOperation_PutFile,
     FilesystemOperation_PutFileByInode,
     FilesystemOperation_PutFileRevisionByInode,
+    GoneError,
     ListPathEntriesResponse,
     LoonFS,
+    NotFoundError,
     PathEntry,
     PathEntry_File,
     UnauthorizedError,
@@ -70,6 +72,7 @@ EXPECTED_CASES = [
     "inode_mutations",
     "pagination",
     "proxy",
+    "snapshots",
     "upload_abort",
     "upload_direct_put",
     "upload_multipart",
@@ -282,6 +285,38 @@ class InodeMutationsExpected:
     deleted_committed_seq: int
     stale_binding_generation: ErrorStatusExpected
     malformed_binding_generation: ErrorStatusExpected
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class SnapshotsRequest:
+    namespace_id: str
+    directory: str
+    actor: ActorRef
+    snapshot_name: str
+    replaced_file_name: str
+    deleted_file_name: str
+    added_file_name: str
+    captured_content_utf8: str
+    current_content_utf8: str
+    deleted_content_utf8: str
+    added_content_utf8: str
+    create_ttl_ms: int
+    extend_ttl_ms: int
+    unknown_snapshot_id: str
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class SnapshotsExpected:
+    snapshot_head_seq: int
+    captured_revision_no: int
+    captured_entry_names: list[str]
+    current_revision_no: int
+    current_entry_names: list[str]
+    snapshot_change_seqs: list[int]
+    snapshot_gone: ErrorStatusExpected
+    snapshot_not_found: ErrorStatusExpected
+    revision_with_snapshot: ErrorStatusExpected
+    zero_ttl: ErrorStatusExpected
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -1032,6 +1067,211 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         ),
     )
     assert deleted.committed_seq == expected.deleted_committed_seq
+
+
+def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode(
+        cases["snapshots"], SnapshotsRequest, SnapshotsExpected
+    )
+    client = harness.client
+    namespace_id = request.namespace_id
+
+    def child_path(name: str) -> str:
+        return f"{request.directory}/{name}"
+
+    client.namespaces.create_namespace(namespace_id=namespace_id)
+    _apply(
+        client,
+        namespace_id,
+        "conf-snapshots-create-directory",
+        request.actor,
+        FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
+    )
+    put_file(
+        client,
+        namespace_id=namespace_id,
+        path=child_path(request.replaced_file_name),
+        content=request.captured_content_utf8.encode(),
+        actor=request.actor,
+        commit_id="conf-snapshots-create-replaced",
+    )
+    put_file(
+        client,
+        namespace_id=namespace_id,
+        path=child_path(request.deleted_file_name),
+        content=request.deleted_content_utf8.encode(),
+        actor=request.actor,
+        commit_id="conf-snapshots-create-deleted",
+    )
+
+    snapshot = client.namespaces.create_snapshot(
+        namespace_id,
+        name=request.snapshot_name,
+        ttl_ms=request.create_ttl_ms,
+    )
+    assert snapshot.namespace_id == namespace_id
+    assert snapshot.name == request.snapshot_name
+    assert snapshot.head_seq == expected.snapshot_head_seq
+    assert snapshot.expires_at_ms > snapshot.created_at_ms
+
+    put_file(
+        client,
+        namespace_id=namespace_id,
+        path=child_path(request.replaced_file_name),
+        content=request.current_content_utf8.encode(),
+        actor=request.actor,
+        commit_id="conf-snapshots-replace-file",
+        behavior="replace",
+    )
+    put_file(
+        client,
+        namespace_id=namespace_id,
+        path=child_path(request.added_file_name),
+        content=request.added_content_utf8.encode(),
+        actor=request.actor,
+        commit_id="conf-snapshots-add-file",
+    )
+    _apply(
+        client,
+        namespace_id,
+        "conf-snapshots-delete-file",
+        request.actor,
+        FilesystemOperation_DeletePath(path=child_path(request.deleted_file_name)),
+    )
+
+    captured_entry = _file_entry(
+        client.filesystem.get_path_entry(
+            namespace_id,
+            path=child_path(request.replaced_file_name),
+            snapshot_id=snapshot.snapshot_id,
+        )
+    )
+    assert captured_entry.revision_no == expected.captured_revision_no
+    current_entry = _file_entry(
+        client.filesystem.get_path_entry(
+            namespace_id,
+            path=child_path(request.replaced_file_name),
+        )
+    )
+    assert current_entry.revision_no == expected.current_revision_no
+
+    captured_listing = client.filesystem.list_path_entries(
+        namespace_id,
+        path=request.directory,
+        snapshot_id=snapshot.snapshot_id,
+    )
+    assert captured_listing.head_seq == expected.snapshot_head_seq
+    assert _listed_names(captured_listing.entries) == expected.captured_entry_names
+    current_listing = client.filesystem.list_path_entries(
+        namespace_id,
+        path=request.directory,
+    )
+    assert _listed_names(current_listing.entries) == expected.current_entry_names
+
+    captured_content = b"".join(
+        client.filesystem.get_file_bytes(
+            namespace_id,
+            path=child_path(request.replaced_file_name),
+            snapshot_id=snapshot.snapshot_id,
+        )
+    )
+    assert captured_content == request.captured_content_utf8.encode()
+    current_content = b"".join(
+        client.filesystem.get_file_bytes(
+            namespace_id,
+            path=child_path(request.replaced_file_name),
+        )
+    )
+    assert current_content == request.current_content_utf8.encode()
+
+    feed = client.filesystem.list_changes(
+        namespace_id,
+        after_seq=0,
+        limit=100,
+        snapshot_id=snapshot.snapshot_id,
+    )
+    assert feed.through_seq == expected.snapshot_head_seq
+    assert feed.next_after_seq is None
+    assert [change.committed_seq for change in feed.changes] == (
+        expected.snapshot_change_seqs
+    )
+
+    extended = client.namespaces.extend_snapshot(
+        namespace_id,
+        snapshot.snapshot_id,
+        ttl_ms=request.extend_ttl_ms,
+    )
+    assert extended.snapshot_id == snapshot.snapshot_id
+    assert extended.head_seq == expected.snapshot_head_seq
+    assert extended.name == request.snapshot_name
+    assert extended.expires_at_ms > snapshot.expires_at_ms
+
+    listed = client.namespaces.list_snapshots(namespace_id)
+    assert listed.namespace_id == namespace_id
+    assert listed.next_cursor is None
+    assert len(listed.snapshots) == 1
+    assert listed.snapshots[0].snapshot_id == snapshot.snapshot_id
+
+    first_release = client.namespaces.release_snapshot(
+        namespace_id, snapshot.snapshot_id
+    )
+    assert first_release.namespace_id == namespace_id
+    assert first_release.snapshot_id == snapshot.snapshot_id
+    second_release = client.namespaces.release_snapshot(
+        namespace_id, snapshot.snapshot_id
+    )
+    assert second_release.namespace_id == namespace_id
+    assert second_release.snapshot_id == snapshot.snapshot_id
+
+    with pytest.raises(GoneError) as released_read:
+        client.filesystem.get_path_entry(
+            namespace_id,
+            path=child_path(request.replaced_file_name),
+            snapshot_id=snapshot.snapshot_id,
+        )
+    assert released_read.value.status_code == expected.snapshot_gone.status
+    assert released_read.value.body.code == expected.snapshot_gone.code
+    with pytest.raises(GoneError) as released_extend:
+        client.namespaces.extend_snapshot(
+            namespace_id,
+            snapshot.snapshot_id,
+            ttl_ms=request.extend_ttl_ms,
+        )
+    assert released_extend.value.status_code == expected.snapshot_gone.status
+    assert released_extend.value.body.code == expected.snapshot_gone.code
+
+    with pytest.raises(NotFoundError) as unknown_read:
+        client.filesystem.get_path_entry(
+            namespace_id,
+            path=child_path(request.replaced_file_name),
+            snapshot_id=request.unknown_snapshot_id,
+        )
+    assert unknown_read.value.status_code == expected.snapshot_not_found.status
+    assert unknown_read.value.body.code == expected.snapshot_not_found.code
+    with pytest.raises(BadRequestError) as revision_with_snapshot:
+        b"".join(
+            client.filesystem.get_file_bytes(
+                namespace_id,
+                path=child_path(request.replaced_file_name),
+                revision_no=expected.captured_revision_no,
+                snapshot_id=snapshot.snapshot_id,
+            )
+        )
+    assert (
+        revision_with_snapshot.value.status_code
+        == expected.revision_with_snapshot.status
+    )
+    assert (
+        revision_with_snapshot.value.body.code == expected.revision_with_snapshot.code
+    )
+    with pytest.raises(BadRequestError) as zero_ttl:
+        client.namespaces.create_snapshot(
+            namespace_id,
+            name=request.snapshot_name,
+            ttl_ms=0,
+        )
+    assert zero_ttl.value.status_code == expected.zero_ttl.status
+    assert zero_ttl.value.body.code == expected.zero_ttl.code
 
 
 def test_proxy(
