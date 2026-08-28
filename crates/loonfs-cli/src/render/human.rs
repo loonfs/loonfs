@@ -64,7 +64,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             response.namespace_id, response.head_seq.0
         ),
         CommandData::SnapshotCreated(snapshot) => format!(
-            "snapshot {} created for {} @ seq {} (name {}, expires at {})",
+            "snapshot {} created for {} at sequence {} (name: {}, expires: {})",
             snapshot.snapshot_id,
             snapshot.namespace_id,
             snapshot.head_seq.0,
@@ -101,7 +101,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             format_utc_ms(snapshot.expires_at_ms)
         ),
         CommandData::SnapshotReleased(response) => format!(
-            "snapshot {} in {} released or already gone",
+            "snapshot {} in {} released",
             response.snapshot_id, response.namespace_id
         ),
         CommandData::CheckpointCreated(checkpoint) => {

@@ -1,5 +1,3 @@
-//! Point-in-time snapshot lifecycle commands.
-
 use super::context::{fail, fail_for};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::pagination::{write_jsonl_page, PagePlan};

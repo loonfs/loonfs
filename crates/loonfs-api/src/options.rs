@@ -46,10 +46,7 @@ pub struct StatPathOptions {
     /// capped at 64 KiB, so the cost of including it is bounded by the
     /// request.
     pub include_attributes: bool,
-    /// Read the path state captured by this live snapshot.
-    ///
-    /// This applies to path stat operations. Inode stat operations do not
-    /// accept snapshot selection.
+    /// Read a path from this snapshot. Inode lookups do not support snapshots.
     pub snapshot_id: Option<CheckpointId>,
 }
 
@@ -73,7 +70,7 @@ pub struct ListPathEntriesOptions {
     /// declares no byte budget anywhere. A caller that wants attributes for a
     /// whole directory asks for them, and pages accordingly.
     pub include_attributes: bool,
-    /// Read the directory state captured by this live snapshot.
+    /// Read the directory from this snapshot.
     pub snapshot_id: Option<CheckpointId>,
 }
 

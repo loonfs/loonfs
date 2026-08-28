@@ -178,7 +178,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Describes a path at the current head or one live snapshot.
+    /// Describes a path from the current state or a snapshot.
     pub(crate) async fn get_path_entry_at_snapshot(
         &self,
         spec: &NamespacePath,
@@ -249,7 +249,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Reads path-based file content using the requested revision or snapshot.
+    /// Reads file content from a revision or snapshot.
     pub(crate) async fn get_file_bytes_with_options(
         &self,
         spec: &NamespacePath,
@@ -651,9 +651,7 @@ impl ResolvedTarget {
         }
     }
 
-    // --- snapshot lifecycle (`core/v0`) ---
-
-    /// Creates a time-bounded snapshot of the namespace's current state.
+    /// Saves the namespace's current state for a limited time.
     pub(crate) async fn create_snapshot(
         &self,
         namespace_id: &NamespaceId,
@@ -674,7 +672,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Lists one page of live snapshots.
+    /// Lists one page of available snapshots.
     pub(crate) async fn list_snapshots_page(
         &self,
         namespace_id: &NamespaceId,
@@ -695,7 +693,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Extends one live snapshot lease.
+    /// Extends a snapshot's lifetime.
     pub(crate) async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,

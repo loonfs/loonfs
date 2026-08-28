@@ -168,14 +168,14 @@ Namespace management
 
 Snapshot management
   loonfs snapshot create <namespace> --name <label> --ttl-ms <ms>
-    Capture the namespace's current state for the requested lifetime
+    Save the namespace's current state for the requested time
 
   loonfs snapshot list <namespace> [--limit <n>] [--page-size <n>]
                                    [--cursor <cursor>] [--all] [--jsonl]
-    List live snapshots in ID order
+    List snapshots that are still available
 
   loonfs snapshot extend <namespace> <snapshot-id> --ttl-ms <ms>
-    Extend a live snapshot's lease from now, within its lifetime limit
+    Keep a snapshot available for longer
 
   loonfs snapshot release <namespace> <snapshot-id>
     Release a snapshot. Repeating the command succeeds.

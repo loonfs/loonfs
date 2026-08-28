@@ -18,13 +18,11 @@ use loonfs_api::{
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 
-/// The options carry `snapshot_id` for the wire and the CLI backends; the
-/// embedded readers pin explicitly instead, and refuse the option rather
-/// than silently reading a different state than the caller named.
-fn reject_snapshot_option(snapshot_id: &Option<CheckpointId>, place: &str) -> Result<()> {
+/// Runtime readers require callers to pin snapshots explicitly.
+fn reject_snapshot_option(snapshot_id: &Option<CheckpointId>, reader: &str) -> Result<()> {
     if snapshot_id.is_some() {
         return Err(loonfs_core::Error::InvalidCheckpointRequest(format!(
-            "the snapshot_id option is not accepted {place}"
+            "snapshot_id is not supported by {reader}"
         ))
         .into());
     }
@@ -59,7 +57,10 @@ impl FsReadSnapshot {
         absolute_path: &str,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
-        reject_snapshot_option(&options.snapshot_id, "here; this view is already pinned")?;
+        reject_snapshot_option(
+            &options.snapshot_id,
+            "FsReadSnapshot because it is already pinned",
+        )?;
         Ok(self
             .engine
             .resolve_path(absolute_path, options, &self.context)
@@ -553,7 +554,7 @@ impl FsReader {
     ) -> Result<PathEntry> {
         reject_snapshot_option(
             &options.snapshot_id,
-            "here; pin the view with FsReader::pin_namespace_at_snapshot",
+            "FsReader; call pin_namespace_at_snapshot first",
         )?;
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
@@ -639,7 +640,7 @@ impl FsReader {
     ) -> Result<ListPathEntriesResponse> {
         reject_snapshot_option(
             &options.snapshot_id,
-            "here; pin the view with FsReader::pin_namespace_at_snapshot",
+            "FsReader; call pin_namespace_at_snapshot first",
         )?;
         self.core.record_trace_context(&tracing::Span::current());
         let (mut response, next_cursor) = self

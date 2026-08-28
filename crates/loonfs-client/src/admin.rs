@@ -112,7 +112,7 @@ impl SnapshotsPager {
 }
 
 impl Client {
-    /// Creates a time-bounded view of the namespace's current state.
+    /// Saves the namespace's current state for a limited time.
     /// Retrying this request starts a distinct attempt.
     pub async fn create_snapshot(
         &self,
@@ -148,7 +148,7 @@ impl Client {
         }
     }
 
-    /// Lists one bounded page of live snapshots.
+    /// Lists one bounded page of available snapshots.
     pub async fn list_snapshots_page(
         &self,
         namespace_id: &NamespaceId,
@@ -162,7 +162,7 @@ impl Client {
             .await
     }
 
-    /// Extends a live snapshot's lease. Repeating the same request is safe.
+    /// Extends a snapshot's lifetime. Repeating the same request is safe.
     pub async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,

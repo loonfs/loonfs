@@ -3,14 +3,12 @@
 use super::*;
 use crate::transport::{append_optional_pagination_query, append_query_param};
 
-/// Optional selectors for a path-based file-content read.
+/// Selects a retained revision or snapshot for a file read. Set at most one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadFileOptions {
     /// Read one retained revision instead of the current file.
     pub revision_no: Option<RevisionNo>,
-    /// Read the file revision captured by this live snapshot.
-    ///
-    /// The server rejects a request that supplies both selectors.
+    /// Read the file revision captured by this snapshot.
     pub snapshot_id: Option<CheckpointId>,
 }
 
@@ -19,7 +17,7 @@ pub struct ReadFileOptions {
 pub struct ListChangesOptions {
     /// Maximum number of changes in the page.
     pub limit: Option<u32>,
-    /// End the feed at this live snapshot's captured sequence.
+    /// End the feed at this snapshot's captured sequence.
     pub snapshot_id: Option<CheckpointId>,
 }
 
@@ -585,10 +583,7 @@ impl Client {
         .await
     }
 
-    /// Reads path-based file content using the requested revision or snapshot.
-    ///
-    /// Both selectors are sent when both are present so the server remains
-    /// authoritative for their mutual-exclusion error.
+    /// Reads file content from a retained revision or snapshot.
     pub async fn get_file_bytes_with_options(
         &self,
         spec: &NamespacePath,

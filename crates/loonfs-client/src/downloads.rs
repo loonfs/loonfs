@@ -2,14 +2,12 @@
 
 use super::*;
 
-/// Optional selectors for a path-based download grant.
+/// Selects a retained revision or snapshot for a download. Set at most one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
     /// Download one retained revision instead of the current file.
     pub revision_no: Option<RevisionNo>,
-    /// Download the file revision captured by this live snapshot.
-    ///
-    /// The server rejects a request that supplies both selectors.
+    /// Download the file revision captured by this snapshot.
     pub snapshot_id: Option<CheckpointId>,
 }
 
@@ -140,10 +138,7 @@ impl Client {
         .await
     }
 
-    /// Requests short-lived direct access using the requested revision or snapshot.
-    ///
-    /// Both selectors are sent when both are present so the server remains
-    /// authoritative for their mutual-exclusion error.
+    /// Requests short-lived direct access to a revision or snapshot.
     pub async fn create_download_with_options(
         &self,
         spec: &NamespacePath,

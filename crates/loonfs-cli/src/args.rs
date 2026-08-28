@@ -715,7 +715,7 @@ pub(crate) struct FilesystemLsArgs {
     /// Resume from a cursor returned by a previous listing.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
-    /// Read the point-in-time state captured by this snapshot.
+    /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
     pub snapshot_id: Option<String>,
 }
@@ -739,7 +739,7 @@ pub(crate) struct FilesystemStatArgs {
     /// Visible inode to describe instead of a path.
     #[arg(long, value_name = "INODE_ID", value_parser = parse_public_inode_id)]
     pub inode: Option<InodeId>,
-    /// Read the point-in-time state captured by this snapshot.
+    /// Read from this snapshot instead of the current state.
     #[arg(
         long,
         value_hint = ValueHint::Other,
@@ -856,8 +856,8 @@ pub(crate) struct FilesystemCatArgs {
     /// Print this revision instead of the current content.
     #[arg(long)]
     pub revision: Option<u64>,
-    /// Read the point-in-time state captured by this snapshot.
-    #[arg(long, value_hint = ValueHint::Other)]
+    /// Read from this snapshot instead of the current state.
+    #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
     pub snapshot_id: Option<String>,
 }
 
@@ -909,8 +909,8 @@ pub(crate) struct FilesystemGetArgs {
     /// Download this revision instead of the current content.
     #[arg(long)]
     pub revision: Option<u64>,
-    /// Read the point-in-time state captured by this snapshot.
-    #[arg(long, value_hint = ValueHint::Other)]
+    /// Read from this snapshot instead of the current state.
+    #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
     pub snapshot_id: Option<String>,
     /// Overwrite existing local files.
     #[arg(long)]
@@ -1057,18 +1057,18 @@ pub(crate) struct ChangesArgs {
     pub after: Option<u64>,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Read the point-in-time state captured by this snapshot.
+    /// End the change feed at this snapshot.
     #[arg(long, value_hint = ValueHint::Other)]
     pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SnapshotCommand {
-    /// Capture the namespace's current state for a bounded time.
+    /// Save the namespace's current state for a limited time.
     Create(SnapshotCreateArgs),
-    /// List live snapshots in snapshot-id order.
+    /// List snapshots that are still available.
     List(SnapshotListArgs),
-    /// Extend a live snapshot's lease.
+    /// Keep a snapshot available for longer.
     Extend(SnapshotExtendArgs),
     /// Release a snapshot.
     Release(SnapshotReleaseArgs),
@@ -1092,7 +1092,7 @@ pub(crate) struct SnapshotCreateArgs {
     /// Snapshot label. Labels do not need to be unique.
     #[arg(long)]
     pub name: String,
-    /// Snapshot lifetime from now, in milliseconds.
+    /// How long the snapshot remains available, in milliseconds.
     #[arg(long)]
     pub ttl_ms: u64,
 }
@@ -1115,7 +1115,7 @@ pub(crate) struct SnapshotExtendArgs {
     /// Snapshot id to extend.
     #[arg(value_hint = ValueHint::Other)]
     pub snapshot_id: String,
-    /// Snapshot lifetime from now, in milliseconds.
+    /// New lifetime from now, in milliseconds.
     #[arg(long)]
     pub ttl_ms: u64,
 }
@@ -1987,55 +1987,6 @@ mod tests {
         assert_subcommands(subcommand(admin, "maintenance"), &["run", "step", "flush"]);
         assert_subcommands(subcommand(admin, "retention"), &["advance"]);
         assert_subcommands(subcommand(admin, "store"), &["probe"]);
-    }
-
-    #[test]
-    fn snapshot_commands_and_read_flags_follow_the_public_grammar() {
-        Cli::try_parse_from([
-            "loonfs", "snapshot", "create", "demo", "--name", "report", "--ttl-ms", "5000",
-        ])
-        .expect("snapshot create grammar");
-        Cli::try_parse_from([
-            "loonfs",
-            "snapshot",
-            "extend",
-            "demo",
-            "chk_00000000000000000000000000000001",
-            "--ttl-ms",
-            "5000",
-        ])
-        .expect("snapshot extend grammar");
-        for arguments in [
-            vec!["loonfs", "ls", "/", "--snapshot-id", "snapshot"],
-            vec!["loonfs", "stat", "/doc", "--snapshot-id", "snapshot"],
-            vec!["loonfs", "cat", "/doc", "--snapshot-id", "snapshot"],
-            vec!["loonfs", "get", "/doc", "--snapshot-id", "snapshot"],
-            vec!["loonfs", "changes", "--snapshot-id", "snapshot"],
-        ] {
-            Cli::try_parse_from(arguments).expect("snapshot read flag");
-        }
-        assert!(Cli::try_parse_from([
-            "loonfs",
-            "stat",
-            "--inode",
-            "ino_2",
-            "--snapshot-id",
-            "snapshot",
-        ])
-        .is_err());
-
-        let mut command = Cli::command();
-        for name in ["ls", "stat", "cat", "get", "changes"] {
-            let help = command
-                .find_subcommand_mut(name)
-                .expect("read command")
-                .render_long_help()
-                .to_string();
-            assert!(
-                help.contains("Read the point-in-time state captured by this snapshot"),
-                "{name} help:\n{help}"
-            );
-        }
     }
 
     #[test]

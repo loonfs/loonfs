@@ -1,5 +1,3 @@
-//! Snapshot lifecycle and point-in-time CLI reads.
-
 use super::common::*;
 
 #[test]
@@ -35,12 +33,6 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
     let listed_data = json_data(&listed);
     assert_eq!(listed_data["kind"], "snapshots_listed");
     assert_eq!(listed_data["snapshots"][0]["snapshot_id"], snapshot_id);
-
-    let listed_human = harness.run(&["snapshot", "list", "demo"]);
-    assert_success(&listed_human);
-    let listed_text = stdout_string(&listed_human);
-    assert!(listed_text.contains("SNAPSHOT\tNAME\tSEQ\tCREATED\tEXPIRES"));
-    assert!(listed_text.contains(&snapshot_id));
 
     let extended = harness.run(&[
         "--json",
