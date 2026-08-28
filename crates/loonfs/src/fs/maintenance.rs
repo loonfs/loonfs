@@ -705,7 +705,7 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Refuses a snapshot create that would pass the namespace's live quota.
+    /// Checks whether the namespace has room for another live snapshot.
     pub async fn ensure_snapshot_quota(
         &self,
         namespace_id: &NamespaceId,
@@ -728,7 +728,7 @@ impl FsAdmin {
                 if matches!(
                     checkpoint.owner,
                     loonfs_api::CheckpointOwnerSummary::Snapshot { expires_at_ms, .. }
-                        if expires_at_ms >= now_ms
+                        if expires_at_ms > now_ms
                 ) {
                     live_after_create = live_after_create.saturating_add(1);
                     if live_after_create > max_live {
@@ -791,7 +791,7 @@ impl FsAdmin {
         Ok(response)
     }
 
-    /// Lists one page of live snapshot-owned checkpoint records.
+    /// Lists one page of live snapshots.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.list_snapshots",
@@ -833,7 +833,7 @@ impl FsAdmin {
                 .map_err(RuntimeError::from)?;
             snapshots.extend(page.items.into_iter().filter_map(|checkpoint| {
                 SnapshotSummary::from_checkpoint(checkpoint)
-                    .filter(|snapshot| snapshot.expires_at_ms >= now_ms)
+                    .filter(|snapshot| snapshot.expires_at_ms > now_ms)
             }));
             match page.next_cursor {
                 Some(next_cursor) if snapshots.len() < requested => cursor = Some(next_cursor),
@@ -872,7 +872,7 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Releases a snapshot-owned checkpoint by id. Idempotent.
+    /// Releases a snapshot. Repeated releases succeed.
     pub async fn release_snapshot(
         &self,
         namespace_id: &NamespaceId,

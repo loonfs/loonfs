@@ -2963,7 +2963,7 @@
           "namespaces"
         ],
         "summary": "List snapshots",
-        "description": "Lists one page of live snapshots in snapshot-id order. Released and expired snapshots are omitted. The cursor resumes the checkpoint inventory and does not create a snapshot.",
+        "description": "Lists live snapshots in snapshot-id order. Released and expired snapshots are omitted.",
         "operationId": "list_snapshots",
         "parameters": [
           {
@@ -3055,7 +3055,7 @@
           "namespaces"
         ],
         "summary": "Create snapshot",
-        "description": "Creates one time-bounded read snapshot over the current namespace state. Every call creates a new snapshot, so the operation is not idempotent. It refuses an invalid name or ttl and creation past the namespace quota.",
+        "description": "Creates a snapshot of the current namespace state. Every call creates a new snapshot.",
         "operationId": "create_snapshot",
         "parameters": [
           {
@@ -3152,7 +3152,7 @@
           "namespaces"
         ],
         "summary": "Extend snapshot",
-        "description": "Extends a live snapshot without passing its lifetime ceiling. It refuses non-snapshot records and snapshots that are released or expired. Repeating the request has the same outcome.",
+        "description": "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
         "operationId": "extend_snapshot",
         "parameters": [
           {
@@ -3248,7 +3248,7 @@
           "namespaces"
         ],
         "summary": "Release snapshot",
-        "description": "Releases a snapshot by id. The transition is idempotent and one-way. It refuses checkpoint records owned by users or forks.",
+        "description": "Releases a snapshot by id. Repeated releases succeed.",
         "operationId": "release_snapshot",
         "parameters": [
           {
@@ -4646,7 +4646,7 @@
       },
       "CreateSnapshotRequest": {
         "type": "object",
-        "description": "Request to create a time-bounded read snapshot.",
+        "description": "Request to create a snapshot.",
         "required": [
           "name",
           "ttl_ms"
@@ -4654,12 +4654,12 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Label recorded on the snapshot record. A label, not a key: several\nrecords may carry the same name over different bases."
+            "description": "A label that does not need to be unique."
           },
           "ttl_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Required snapshot lifetime from the server's current time, in\nmilliseconds.",
+            "description": "Snapshot lifetime from the current server time, in milliseconds.",
             "minimum": 0
           }
         },
@@ -5772,7 +5772,7 @@
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/CheckpointId",
-            "description": "Snapshot the release targeted."
+            "description": "Released snapshot id."
           }
         }
       },
@@ -6007,7 +6007,7 @@
       },
       "SnapshotSummary": {
         "type": "object",
-        "description": "One live read snapshot.",
+        "description": "A live snapshot.",
         "required": [
           "snapshot_id",
           "namespace_id",
@@ -6035,7 +6035,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Application-facing label recorded on the snapshot."
+            "description": "Snapshot label."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -6043,7 +6043,7 @@
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/CheckpointId",
-            "description": "Durable checkpoint-record id used as the snapshot id."
+            "description": "Snapshot id."
           }
         }
       },

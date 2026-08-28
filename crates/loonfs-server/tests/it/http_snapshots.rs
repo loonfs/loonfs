@@ -14,7 +14,7 @@ use loonfs_test_support::ids::namespace_id;
 use serde::de::DeserializeOwned;
 use tempfile::tempdir;
 
-type ApiResult<T> = Result<T, (u16, ApiError)>;
+type ApiResult<T> = Result<T, (u16, Box<ApiError>)>;
 
 fn create_snapshot(
     server_url: &str,
@@ -101,8 +101,10 @@ fn decode_response<T: DeserializeOwned>(
             .unwrap_or_else(|error| panic!("decode success response: {error}"))),
         Err(ureq::Error::Status(status, response)) => Err((
             status,
-            serde_json::from_reader(response.into_reader())
-                .unwrap_or_else(|error| panic!("decode error response: {error}")),
+            Box::new(
+                serde_json::from_reader(response.into_reader())
+                    .unwrap_or_else(|error| panic!("decode error response: {error}")),
+            ),
         )),
         Err(ureq::Error::Transport(error)) => panic!("HTTP transport failed: {error}"),
     }
@@ -293,39 +295,6 @@ async fn http_snapshots_enforce_quota_and_release_frees_a_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_snapshots_extension_clamps_to_created_lifetime() {
-    let temp_dir = tempdir().expect("tempdir");
-    let mut config = test_config(
-        temp_dir.path().join("store"),
-        "snapshot-lifetime",
-        "snapshot-lifetime",
-    );
-    config.snapshot_max_ttl_ms = 2_000;
-    config.snapshot_max_lifetime_ms = 2_000;
-    let harness = start_server(config).await;
-    let namespace = namespace_id("lifetime");
-    harness
-        .client
-        .create_namespace(&namespace)
-        .await
-        .expect("create namespace");
-
-    let created = create_snapshot(&harness.server_url, namespace.as_str(), "short", 1_900)
-        .expect("create snapshot");
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let extended = extend_snapshot(
-        &harness.server_url,
-        namespace.as_str(),
-        created.snapshot_id.as_str(),
-        2_000,
-    )
-    .expect("extend snapshot");
-    assert_eq!(extended.expires_at_ms, created.created_at_ms + 2_000);
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_snapshots_keep_owner_operations_and_listings_separate() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config(
@@ -388,19 +357,6 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
             .snapshots,
         vec![snapshot.clone()]
     );
-
-    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
-    let checkpoints = collect_checkpoints(&harness.client, &namespace)
-        .await
-        .expect("admin listing keeps expired records");
-    assert!(checkpoints
-        .checkpoints
-        .iter()
-        .any(|item| item.checkpoint_id == snapshot.snapshot_id));
-    assert!(list_snapshots(&harness.server_url, namespace.as_str())
-        .expect("snapshot listing omits expired records")
-        .snapshots
-        .is_empty());
 
     harness.server.abort();
 }

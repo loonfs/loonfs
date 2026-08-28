@@ -961,9 +961,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Releases a snapshot-owned checkpoint by id.
-    ///
-    /// Idempotent: releasing an already-released or reaped snapshot succeeds.
+    /// Releases a snapshot. Repeated releases succeed.
     pub async fn release_snapshot(
         &self,
         checkpoint_id: &CheckpointId,

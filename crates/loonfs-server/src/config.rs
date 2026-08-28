@@ -95,12 +95,12 @@ pub struct ServerConfig {
     /// Advertised as the `snapshot.max_ttl_ms` capability limit.
     #[serde(default = "default_snapshot_max_ttl_ms")]
     pub snapshot_max_ttl_ms: u64,
-    /// Largest snapshot lifetime measured from its durable creation time.
-    /// Extensions clamp to this ceiling. Advertised as the
+    /// Largest snapshot lifetime measured from its creation time. Extensions
+    /// cannot pass this ceiling. Advertised as the
     /// `snapshot.max_lifetime_ms` capability limit.
     #[serde(default = "default_snapshot_max_lifetime_ms")]
     pub snapshot_max_lifetime_ms: u64,
-    /// Most live, unexpired snapshots one namespace may hold. Advertised as
+    /// Maximum live snapshots per namespace. Advertised as
     /// the `snapshot.max_live_per_namespace` capability limit.
     #[serde(default = "default_snapshot_max_live_per_namespace")]
     pub snapshot_max_live_per_namespace: usize,

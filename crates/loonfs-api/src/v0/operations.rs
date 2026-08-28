@@ -624,16 +624,14 @@ pub struct CreateCheckpointRequest {
     pub ttl_ms: Option<u64>,
 }
 
-/// Request to create a time-bounded read snapshot.
+/// Request to create a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateSnapshotRequest {
-    /// Label recorded on the snapshot record. A label, not a key: several
-    /// records may carry the same name over different bases.
+    /// A label that does not need to be unique.
     pub name: String,
-    /// Required snapshot lifetime from the server's current time, in
-    /// milliseconds.
+    /// Snapshot lifetime from the current server time, in milliseconds.
     pub ttl_ms: u64,
 }
 
@@ -710,15 +708,15 @@ pub struct Checkpoint {
     pub manifest_no: ManifestNo,
 }
 
-/// One live read snapshot.
+/// A live snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SnapshotSummary {
-    /// Durable checkpoint-record id used as the snapshot id.
+    /// Snapshot id.
     pub snapshot_id: CheckpointId,
     /// Namespace whose state the snapshot captured.
     pub namespace_id: NamespaceId,
-    /// Application-facing label recorded on the snapshot.
+    /// Snapshot label.
     pub name: String,
     /// Namespace sequence captured by the snapshot.
     pub head_seq: ChangeSeq,
@@ -729,7 +727,7 @@ pub struct SnapshotSummary {
 }
 
 impl SnapshotSummary {
-    /// Maps a snapshot-owned checkpoint record to its core-plane summary.
+    /// Converts a snapshot-owned checkpoint to a snapshot summary.
     pub fn from_checkpoint(checkpoint: Checkpoint) -> Option<Self> {
         let CheckpointOwnerSummary::Snapshot {
             name,
@@ -782,7 +780,7 @@ pub struct ListSnapshotsResponse {
 pub struct ReleaseSnapshotResponse {
     /// Namespace the snapshot belonged to.
     pub namespace_id: NamespaceId,
-    /// Snapshot the release targeted.
+    /// Released snapshot id.
     pub snapshot_id: CheckpointId,
 }
 

@@ -391,7 +391,7 @@ pub(super) async fn fork_namespace(
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "Create snapshot",
-        description = "Creates one time-bounded read snapshot over the current namespace state. Every call creates a new snapshot, so the operation is not idempotent. It refuses an invalid name or ttl and creation past the namespace quota.",
+        description = "Creates a snapshot of the current namespace state. Every call creates a new snapshot.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = CreateSnapshotRequest,
         responses(
@@ -451,7 +451,7 @@ pub(super) async fn create_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "List snapshots",
-        description = "Lists one page of live snapshots in snapshot-id order. Released and expired snapshots are omitted. The cursor resumes the checkpoint inventory and does not create a snapshot.",
+        description = "Lists live snapshots in snapshot-id order. Released and expired snapshots are omitted.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
@@ -498,7 +498,7 @@ pub(super) async fn list_snapshots(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
         tag = "namespaces",
         summary = "Extend snapshot",
-        description = "Extends a live snapshot without passing its lifetime ceiling. It refuses non-snapshot records and snapshots that are released or expired. Repeating the request has the same outcome.",
+        description = "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("snapshot_id" = String, Path, description = "Snapshot id")
@@ -548,7 +548,7 @@ pub(super) async fn extend_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
         tag = "namespaces",
         summary = "Release snapshot",
-        description = "Releases a snapshot by id. The transition is idempotent and one-way. It refuses checkpoint records owned by users or forks.",
+        description = "Releases a snapshot by id. Repeated releases succeed.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("snapshot_id" = String, Path, description = "Snapshot id")

@@ -158,7 +158,7 @@ hoc.
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
-| `core.snapshots` | Creating, listing, extending, and releasing read snapshots under `/v0/namespaces/{ns}/snapshots`. | The routes are present on every server. Clients gate on this declaration, as they do for namespace forks. |
+| `core.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
 | `core.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
@@ -925,10 +925,9 @@ the honest answer to the question the route is asked.
 
 #### Snapshots
 
-A snapshot is a time-bounded read lease over the checkpoint substrate. Its
-checkpoint record id is its `snapshot_id`. Creation requires `name` and
-`ttl_ms`. The ttl may not exceed either `snapshot.max_ttl_ms` or
-`snapshot.max_lifetime_ms`.
+A snapshot is a time-bounded view of a namespace. Its checkpoint record id is
+its `snapshot_id`. Creation requires `name` and `ttl_ms`. The ttl cannot exceed
+`snapshot.max_ttl_ms` or `snapshot.max_lifetime_ms`.
 
 An extension measures its requested ttl from the server's current time. It
 never moves the expiry past `snapshot.max_lifetime_ms` from the record's
@@ -940,7 +939,7 @@ expired. The admin checkpoint listing keeps expired records visible until
 collection releases them. Snapshot release is idempotent and one-way. A
 second release succeeds, including after the record is reaped.
 
-Snapshot reads arrive separately. These operations only manage the lease.
+These operations manage the snapshot lifetime.
 
 #### Store contract probe
 
