@@ -1793,7 +1793,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "loonfs"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-api"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ciborium",
  "crc32c",
@@ -1833,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "clap",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-client"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "axum",
  "bytes",
@@ -1884,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-conformance"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1904,7 +1904,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1925,7 +1925,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-grep"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-model"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "loonfs-api",
  "serde",
@@ -1958,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-objectstore"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -1986,7 +1986,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-server"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-sim"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "loonfs-test-support"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
