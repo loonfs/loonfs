@@ -634,12 +634,7 @@ pub struct ReleaseCheckpointResponse {
     pub checkpoint_id: CheckpointId,
 }
 
-/// Who a checkpoint record answers to, as the record durably records it.
-///
-/// The two owners have different releases, so a listing that names the
-/// owner also says which records the release endpoint will act on: a user
-/// pin is released by id, and a fork lease is released by deleting the
-/// target namespace it protects.
+/// The owner of a checkpoint record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -657,6 +652,12 @@ pub enum CheckpointOwnerSummary {
     Fork {
         /// Namespace whose continued existence keeps this pin standing.
         target_namespace_id: NamespaceId,
+    },
+    /// An application-created read view.
+    #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerSnapshot"))]
+    Snapshot {
+        /// A label that does not need to be unique.
+        name: String,
     },
 }
 
@@ -855,12 +856,15 @@ pub struct ReleasedCheckpointCounts {
     /// Fork-owned records released because their target namespace is
     /// provably gone.
     pub fork: u64,
-    /// Records released because their expiry passed, or because they sit on
-    /// a terminally deleted namespace.
+    /// User-owned records released because their expiry passed, or because
+    /// they sit on a terminally deleted namespace.
     pub expired: u64,
     /// Active records released because their basis manifest is verifiably
     /// gone.
     pub missing_basis: u64,
+    /// Snapshot-owned records released because their expiry passed, or
+    /// because they sit on a terminally deleted namespace.
+    pub snapshot: u64,
 }
 
 impl ReleasedCheckpointCounts {
@@ -870,10 +874,12 @@ impl ReleasedCheckpointCounts {
             fork,
             expired,
             missing_basis,
+            snapshot,
         } = other;
         self.fork += fork;
         self.expired += expired;
         self.missing_basis += missing_basis;
+        self.snapshot += snapshot;
     }
 }
 

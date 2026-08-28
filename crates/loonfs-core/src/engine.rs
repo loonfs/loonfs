@@ -895,6 +895,21 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         )
         .await
     }
+
+    /// Creates a snapshot of the current namespace state.
+    pub async fn create_snapshot(&self, name: String, expires_at_ms: u64) -> Result<Checkpoint> {
+        let context = self.mutation_context()?;
+        crate::checkpoint::create_checkpoint(
+            &self.store,
+            &self.namespace_id,
+            CheckpointOwner::Snapshot {
+                name,
+                expires_at_ms,
+            },
+            &context,
+        )
+        .await
+    }
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {

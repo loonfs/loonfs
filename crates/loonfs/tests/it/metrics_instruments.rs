@@ -162,7 +162,7 @@ fn a_collection_step_reports_what_the_pass_retained() {
     });
     assert_eq!(
         snapshot.by_name("loonfs.gc.reclaimed").count(),
-        9,
+        10,
         "one pass registers the whole reclaimable vocabulary"
     );
     assert_eq!(

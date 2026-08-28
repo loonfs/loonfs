@@ -62,7 +62,7 @@ type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 /// Reclaimable object families one collection pass counts.
 ///
 /// Metric labels remain unchanged even though the API fields are now grouped.
-const GC_CATEGORIES: [GcCategory; 9] = [
+const GC_CATEGORIES: [GcCategory; 10] = [
     ("deleted_wal_segments", |gc| gc.deleted.wal_segments),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
@@ -81,6 +81,9 @@ const GC_CATEGORIES: [GcCategory; 9] = [
     ("deleted_content_objects", |gc| gc.deleted.content_objects),
     ("released_missing_basis_checkpoints", |gc| {
         gc.released_checkpoints.missing_basis
+    }),
+    ("released_snapshot_checkpoints", |gc| {
+        gc.released_checkpoints.snapshot
     }),
 ];
 
@@ -1464,6 +1467,6 @@ mod tests {
         assert_eq!(counter(&snapshot, "loonfs.gc.retained", &[]), 4);
         // Every family registers at construction, so a scrape names the
         // whole reclaimable vocabulary rather than only what has happened.
-        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
+        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 10);
     }
 }

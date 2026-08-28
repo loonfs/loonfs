@@ -1042,7 +1042,11 @@ fn openapi_names_tagged_one_of_alternatives() {
         ),
         (
             "CheckpointOwnerSummary",
-            &["CheckpointOwnerUser", "CheckpointOwnerFork"][..],
+            &[
+                "CheckpointOwnerUser",
+                "CheckpointOwnerFork",
+                "CheckpointOwnerSnapshot",
+            ][..],
         ),
         (
             "CompleteUploadRequest",

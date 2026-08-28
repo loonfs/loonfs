@@ -7,9 +7,9 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CheckpointOwnerSummary, CommitId, CreateCheckpointOptions, CreateNamespaceOptions,
-    DeleteNamespaceOptions, ErrorCode, FsAdmin, FsWriter, MaintenancePlan, ManifestNo,
-    MetadataCompactionOutcome, NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeError,
-    SharedObjectStore, WalFlushStepOutcome,
+    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsWriter, MaintenancePlan,
+    ManifestNo, MetadataCompactionOutcome, NamespaceId, PutFileOptions, ReorganizeStepOutcome,
+    RuntimeError, SharedObjectStore, WalFlushStepOutcome,
 };
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectEnvelope, ControlObjectKind,
@@ -691,6 +691,49 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
         .expect("status after lost race");
     assert_eq!(status.current_manifest_no, None);
     assert_eq!(status.wal_tail_segments, 1);
+}
+
+#[test]
+fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "snapshot-create-test");
+    let namespace_id = namespace_id("demo");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("put file");
+
+    let expires_at_ms = 4_102_444_800_000;
+    let snapshot = block_on(fs.admin.create_snapshot(
+        &namespace_id,
+        CreateSnapshotOptions {
+            name: "report-run".to_owned(),
+            expires_at_ms,
+        },
+    ))
+    .expect("create snapshot");
+    assert_eq!(
+        snapshot.owner,
+        CheckpointOwnerSummary::Snapshot {
+            name: "report-run".to_owned()
+        }
+    );
+
+    let listed = block_on(collect_checkpoints(&fs.admin, &namespace_id)).expect("list checkpoints");
+    let listed_snapshot = listed
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.checkpoint_id == snapshot.checkpoint_id)
+        .expect("the snapshot is in the checkpoint listing");
+    assert_eq!(listed_snapshot.owner, snapshot.owner);
+    assert_eq!(listed_snapshot.expires_at_ms, Some(expires_at_ms));
+    assert_eq!(listed_snapshot.checkpoint_seq, snapshot.checkpoint_seq);
 }
 
 #[test]

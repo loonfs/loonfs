@@ -3746,6 +3746,111 @@ async fn fork_owned_checkpoints_reject_user_release() {
 }
 
 #[tokio::test]
+async fn snapshot_owned_checkpoints_reject_user_release() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    let snapshot = crate::checkpoint::create_checkpoint(
+        &store,
+        &namespace_id,
+        CheckpointOwner::Snapshot {
+            name: "report-run".to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        &setup,
+    )
+    .await
+    .expect("snapshot checkpoint");
+
+    let error = crate::checkpoint::release_checkpoint(
+        &store,
+        &namespace_id,
+        &snapshot.checkpoint_id,
+        &setup,
+    )
+    .await
+    .expect_err("snapshot-owned release must fail");
+    assert!(
+        matches!(
+            &error,
+            CoreError::InvalidCheckpointRequest(message)
+                if message.contains("owned by a snapshot")
+        ),
+        "expected invalid checkpoint request, got {error:?}"
+    );
+    assert_eq!(
+        checkpoint_lifecycle(&store, &namespace_id, &snapshot.checkpoint_id).await,
+        CheckpointStatus::Active {}
+    );
+}
+
+#[tokio::test]
+async fn gc_releases_an_expired_snapshot_under_its_own_count() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    let expiring = crate::checkpoint::create_checkpoint(
+        &store,
+        &namespace_id,
+        CheckpointOwner::Snapshot {
+            name: "short-lived".to_owned(),
+            expires_at_ms: setup.now_ms + GRACE_MS,
+        },
+        &setup,
+    )
+    .await
+    .expect("expiring snapshot");
+    let lasting = crate::checkpoint::create_checkpoint(
+        &store,
+        &namespace_id,
+        CheckpointOwner::Snapshot {
+            name: "long-lived".to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        &setup,
+    )
+    .await
+    .expect("lasting snapshot");
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("advance past the expiring basis");
+
+    let expired = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let pass = gc_namespace(&store, &namespace_id, &config(), &expired)
+        .await
+        .expect("post-expiry pass");
+    assert_eq!(pass.released_checkpoints.snapshot, 1);
+    assert_eq!(
+        pass.released_checkpoints.expired, 0,
+        "a snapshot release is not counted as a user pin expiring"
+    );
+    assert_eq!(pass.deleted.checkpoint_records, 0);
+    assert_eq!(
+        checkpoint_lifecycle(&store, &namespace_id, &expiring.checkpoint_id).await,
+        CheckpointStatus::Released {
+            released_at_ms: expired.now_ms
+        }
+    );
+    assert_eq!(
+        checkpoint_lifecycle(&store, &namespace_id, &lasting.checkpoint_id).await,
+        CheckpointStatus::Active {},
+        "the unexpired snapshot survives the pass"
+    );
+    stat_root(&store, &namespace_id).await;
+}
+
+#[tokio::test]
 async fn gc_retains_active_checkpoint_bases() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

@@ -21,6 +21,8 @@ pub(super) enum CheckpointSweep {
     Delete,
     /// This pass flipped the record `active -> released`.
     Released,
+    /// This pass flipped a snapshot record `active -> released`.
+    ReleasedSnapshot,
     Retain,
 }
 
@@ -84,7 +86,9 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     if !releasable {
         return Ok(CheckpointSweep::Retain);
     }
+    let snapshot = matches!(record.owner, CheckpointOwner::Snapshot { .. });
     match release_inspected_checkpoint_record(store, key, loaded, context.now_ms).await? {
+        CheckpointRelease::Released if snapshot => Ok(CheckpointSweep::ReleasedSnapshot),
         CheckpointRelease::Released => Ok(CheckpointSweep::Released),
         CheckpointRelease::LostRace => {
             tracing::debug!(

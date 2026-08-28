@@ -402,6 +402,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                 self.report.deleted.checkpoint_records += 1;
             }
             CheckpointSweep::Released => self.report.released_checkpoints.expired += 1,
+            CheckpointSweep::ReleasedSnapshot => self.report.released_checkpoints.snapshot += 1,
             CheckpointSweep::Retain => self.report.retain(RetainedReason::CheckpointNotReleasable),
         }
         Ok(())

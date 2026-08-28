@@ -191,10 +191,10 @@ pub use maintenance_runner::{
 };
 pub use options::{
     CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, DirectMultipartUploadOptions, ListChangesOptions,
-    ListInodeChildrenOptions, ListPathEntriesOptions, MaintenancePlan, MetadataMaintenanceOptions,
-    MoveOptions, PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions,
-    UndeleteOptions, UpdateAttributesOptions,
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteOptions, DirectMultipartUploadOptions,
+    ListChangesOptions, ListInodeChildrenOptions, ListPathEntriesOptions, MaintenancePlan,
+    MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
+    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

@@ -158,6 +158,15 @@ impl CreateCheckpointOptions {
     }
 }
 
+/// Options for creating a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSnapshotOptions {
+    /// A label that does not need to be unique.
+    pub name: String,
+    /// Expiry time in Unix milliseconds.
+    pub expires_at_ms: u64,
+}
+
 /// Options for creating a namespace; feeds core's
 /// [`loonfs_core::BootstrapOptions`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

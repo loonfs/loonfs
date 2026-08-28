@@ -247,6 +247,13 @@ pub enum CheckpointOwner {
         /// Lease bounding the fork attempt before its target head is installed.
         expires_at_ms: u64,
     },
+    /// An application-created read view with a required expiry.
+    Snapshot {
+        /// Application-facing label that need not be unique.
+        name: String,
+        /// When garbage collection may release the pin.
+        expires_at_ms: u64,
+    },
 }
 
 impl CheckpointOwner {
@@ -255,6 +262,7 @@ impl CheckpointOwner {
         match self {
             Self::User { expires_at_ms, .. } => *expires_at_ms,
             Self::Fork { expires_at_ms, .. } => Some(*expires_at_ms),
+            Self::Snapshot { expires_at_ms, .. } => Some(*expires_at_ms),
         }
     }
 }

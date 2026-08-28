@@ -3974,14 +3974,18 @@
           },
           {
             "$ref": "#/components/schemas/CheckpointOwnerFork"
+          },
+          {
+            "$ref": "#/components/schemas/CheckpointOwnerSnapshot"
           }
         ],
-        "description": "Who a checkpoint record answers to, as the record durably records it.\n\nThe two owners have different releases, so a listing that names the\nowner also says which records the release endpoint will act on: a user\npin is released by id, and a fork lease is released by deleting the\ntarget namespace it protects.",
+        "description": "The owner of a checkpoint record.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
             "user": "#/components/schemas/CheckpointOwnerUser",
-            "fork": "#/components/schemas/CheckpointOwnerFork"
+            "fork": "#/components/schemas/CheckpointOwnerFork",
+            "snapshot": "#/components/schemas/CheckpointOwnerSnapshot"
           }
         }
       },
@@ -5347,13 +5351,14 @@
         "required": [
           "fork",
           "expired",
-          "missing_basis"
+          "missing_basis",
+          "snapshot"
         ],
         "properties": {
           "expired": {
             "type": "integer",
             "format": "int64",
-            "description": "Records released because their expiry passed, or because they sit on\na terminally deleted namespace.",
+            "description": "User-owned records released because their expiry passed, or because\nthey sit on a terminally deleted namespace.",
             "minimum": 0
           },
           "fork": {
@@ -5366,6 +5371,12 @@
             "type": "integer",
             "format": "int64",
             "description": "Active records released because their basis manifest is verifiably\ngone.",
+            "minimum": 0
+          },
+          "snapshot": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Snapshot-owned records released because their expiry passed, or\nbecause they sit on a terminally deleted namespace.",
             "minimum": 0
           }
         }
@@ -5982,6 +5993,26 @@
           "target_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace whose continued existence keeps this pin standing."
+          }
+        }
+      },
+      "CheckpointOwnerSnapshot": {
+        "type": "object",
+        "description": "An application-created read view.",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "snapshot"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "A label that does not need to be unique."
           }
         }
       },
