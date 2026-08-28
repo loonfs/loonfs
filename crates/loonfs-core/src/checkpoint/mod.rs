@@ -29,6 +29,7 @@ mod retention;
 mod row;
 mod runs;
 mod scan;
+mod snapshot;
 mod stored_block_cache;
 mod streaming_compaction;
 #[cfg(test)]
@@ -75,6 +76,7 @@ pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
+pub(crate) use self::snapshot::{extend_snapshot_expiry, release_snapshot};
 pub(crate) use self::streaming_compaction::run_metadata_compaction_job;
 
 fn checkpoint_summary(
@@ -91,9 +93,13 @@ fn checkpoint_summary(
         } => loonfs_api::CheckpointOwnerSummary::Fork {
             target_namespace_id,
         },
-        loonfs_api::wire::control::CheckpointOwner::Snapshot { name, .. } => {
-            loonfs_api::CheckpointOwnerSummary::Snapshot { name }
-        }
+        loonfs_api::wire::control::CheckpointOwner::Snapshot {
+            name,
+            expires_at_ms,
+        } => loonfs_api::CheckpointOwnerSummary::Snapshot {
+            name,
+            expires_at_ms,
+        },
     };
     loonfs_api::Checkpoint {
         namespace_id: record.namespace_id,

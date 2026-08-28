@@ -22,6 +22,8 @@ pub const FEATURE_NAMESPACES_CREATE: &str = "core.namespaces.create";
 pub const FEATURE_NAMESPACES_FORK: &str = "core.namespaces.fork";
 /// Gates namespace deletion.
 pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
+/// Gates read-snapshot lifecycle operations.
+pub const FEATURE_SNAPSHOTS: &str = "core.snapshots";
 /// Gates inode attributes: writing them, and projecting them onto reads.
 /// Attributes are part of the core plane, not a composed extension, so a
 /// deployment that serves the core profile serves them.
@@ -82,6 +84,12 @@ pub const LIMIT_UPLOAD_MAX_CONCURRENT: &str = "upload.max_concurrent";
 /// Advisory limit: how many service-proxied content reads the deployment
 /// materializes at once; requests past the cap answer `server_busy`.
 pub const LIMIT_DOWNLOAD_MAX_CONCURRENT: &str = "download.max_concurrent";
+/// Advisory limit: the largest snapshot TTL one request may ask for.
+pub const LIMIT_SNAPSHOT_MAX_TTL_MS: &str = "snapshot.max_ttl_ms";
+/// Advisory limit: the largest snapshot expiry measured from record creation.
+pub const LIMIT_SNAPSHOT_MAX_LIFETIME_MS: &str = "snapshot.max_lifetime_ms";
+/// Advisory limit: the most live snapshots one namespace may hold.
+pub const LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE: &str = "snapshot.max_live_per_namespace";
 /// Advisory limit: the most path operations one commit may carry; a longer
 /// list answers `invalid_request` before planning.
 pub const LIMIT_COMMIT_MAX_OPERATIONS: &str = "commit.max_operations";

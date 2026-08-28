@@ -36,8 +36,8 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
     }
     if matches!(loaded.state.owner, CheckpointOwner::Snapshot { .. }) {
         return Err(CoreError::InvalidCheckpointRequest(format!(
-            "checkpoint `{checkpoint_id}` is owned by a snapshot; it is released by its own \
-             expiry, not by this operation"
+            "checkpoint `{checkpoint_id}` is owned by a snapshot; it is released through the \
+             snapshot release operation or by its expiry, not by this operation"
         )));
     }
     release_checkpoint_record(store, namespace_id, checkpoint_id, context.now_ms).await?;

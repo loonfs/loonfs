@@ -324,7 +324,7 @@
             }
           },
           "400": {
-            "description": "Invalid id, or the checkpoint is fork-owned",
+            "description": "Invalid id, or the checkpoint is owned by another operation",
             "content": {
               "application/json": {
                 "schema": {
@@ -2957,6 +2957,357 @@
         "x-loonfs-retry": "idempotent"
       }
     },
+    "/v0/namespaces/{namespace_id}/snapshots": {
+      "get": {
+        "tags": [
+          "namespaces"
+        ],
+        "summary": "List snapshots",
+        "description": "Lists live snapshots in snapshot-id order. Released and expired snapshots are omitted.",
+        "operationId": "list_snapshots",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque snapshot-list page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Live snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSnapshotsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id, limit, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "idempotent",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.snapshots"
+        }
+      },
+      "post": {
+        "tags": [
+          "namespaces"
+        ],
+        "summary": "Create snapshot",
+        "description": "Creates a snapshot of the current namespace state. Every call creates a new snapshot.",
+        "operationId": "create_snapshot",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSnapshotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Snapshot created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id, name, or ttl",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Snapshot quota exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "not_idempotent"
+      }
+    },
+    "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend": {
+      "post": {
+        "tags": [
+          "namespaces"
+        ],
+        "summary": "Extend snapshot",
+        "description": "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
+        "operationId": "extend_snapshot",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "description": "Snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtendSnapshotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Snapshot extended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or ttl",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Snapshot not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Snapshot released or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "idempotent"
+      }
+    },
+    "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release": {
+      "post": {
+        "tags": [
+          "namespaces"
+        ],
+        "summary": "Release snapshot",
+        "description": "Releases a snapshot by id. Repeated releases succeed.",
+        "operationId": "release_snapshot",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "description": "Snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot release accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseSnapshotResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or non-snapshot record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "idempotent"
+      }
+    },
     "/v0/namespaces/{namespace_id}/uploads": {
       "post": {
         "tags": [
@@ -4293,6 +4644,27 @@
         },
         "additionalProperties": false
       },
+      "CreateSnapshotRequest": {
+        "type": "object",
+        "description": "Request to create a snapshot.",
+        "required": [
+          "name",
+          "ttl_ms"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "A label that does not need to be unique."
+          },
+          "ttl_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Snapshot lifetime from the current server time, in milliseconds.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "DeleteDirectoryBehavior": {
         "type": "string",
         "description": "Directory delete behavior for path-oriented deletes.",
@@ -4494,6 +4866,22 @@
             "description": "Oldest sequence still promised for incremental replay."
           }
         }
+      },
+      "ExtendSnapshotRequest": {
+        "type": "object",
+        "description": "Request to extend a read snapshot.",
+        "required": [
+          "ttl_ms"
+        ],
+        "properties": {
+          "ttl_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requested lifetime from the server's current time, in milliseconds.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "FileRevision": {
         "type": "object",
@@ -5107,6 +5495,31 @@
           }
         }
       },
+      "ListSnapshotsResponse": {
+        "type": "object",
+        "description": "One page of live read snapshots.",
+        "required": [
+          "namespace_id",
+          "snapshots"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the snapshots belong to."
+          },
+          "next_cursor": {
+            "type": "string",
+            "description": "Opaque cursor for the next page."
+          },
+          "snapshots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotSummary"
+            },
+            "description": "Live snapshot records in ascending snapshot-id order."
+          }
+        }
+      },
       "ListTrashResponse": {
         "type": "object",
         "description": "One trash listing page: the namespace's recoverable deletions.",
@@ -5345,6 +5758,24 @@
           }
         }
       },
+      "ReleaseSnapshotResponse": {
+        "type": "object",
+        "description": "Result of releasing a read snapshot.",
+        "required": [
+          "namespace_id",
+          "snapshot_id"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the snapshot belonged to."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Released snapshot id."
+          }
+        }
+      },
       "ReleasedCheckpointCounts": {
         "type": "object",
         "description": "Checkpoint records released by one GC pass, grouped by reason.\n\nReleasing a record stops it from pinning data. A later pass may delete the\nrecord after its grace window and count that under\n[`DeletedObjectCounts::checkpoint_records`].",
@@ -5571,6 +6002,48 @@
             "format": "int32",
             "description": "Part number this capability writes.",
             "minimum": 0
+          }
+        }
+      },
+      "SnapshotSummary": {
+        "type": "object",
+        "description": "A live snapshot.",
+        "required": [
+          "snapshot_id",
+          "namespace_id",
+          "name",
+          "head_seq",
+          "created_at_ms",
+          "expires_at_ms"
+        ],
+        "properties": {
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time the snapshot record was created, in Unix milliseconds.",
+            "minimum": 0
+          },
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the snapshot lease expires, in Unix milliseconds.",
+            "minimum": 0
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence captured by the snapshot."
+          },
+          "name": {
+            "type": "string",
+            "description": "Snapshot label."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose state the snapshot captured."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Snapshot id."
           }
         }
       },
@@ -6001,9 +6474,16 @@
         "description": "An application-created read view.",
         "required": [
           "name",
+          "expires_at_ms",
           "kind"
         ],
         "properties": {
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the snapshot lease expires, in Unix milliseconds.",
+            "minimum": 0
+          },
           "kind": {
             "type": "string",
             "enum": [

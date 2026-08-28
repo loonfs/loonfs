@@ -1002,8 +1002,9 @@ becomes provenance only.
 A checkpoint pins one namespace manifest version in a record under `checkpoints/`. It does not affect current visibility. The record stores a `manifest` reference (section 1.7), the `head_commit_id` at that manifest, and tagged `owner` and `status` fields. A `user` owner has a name and optional `expires_at_ms`. A `fork` owner has the target namespace and a required `expires_at_ms`. A `snapshot` owner has a name and a required `expires_at_ms`. The record has no top-level expiry field.
 
 A `snapshot` owner represents an application-created read view. Its name is a
-label, not a key, and its expiry is required. Garbage collection releases an
-expired snapshot and deletes its record after the grace window.
+label, not a key, and its expiry is required. A snapshot can be released
+explicitly or by garbage collection after it expires. Its record is deleted
+after the grace window.
 
 Creation is write-then-verify: write the record active, then verify — under
 the self-enforced verify budget — that the floor has not passed the basis and

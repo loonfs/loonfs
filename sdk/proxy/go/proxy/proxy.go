@@ -40,6 +40,10 @@ var routes = []route{
 	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/revisions"},
 	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/filesystem/trash"},
 	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/grep"},
+	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots"},
+	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots"},
+	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend"},
+	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/release"},
 	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads"},
 	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}"},
 	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort"},
@@ -202,17 +206,16 @@ func matchPattern(pattern, path string) (string, bool) {
 	var namespaceAlias string
 	for index, patternSegment := range patternSegments {
 		pathSegment := pathSegments[index]
-		switch patternSegment {
-		case "{namespace_alias}":
+		if patternSegment == "{namespace_alias}" {
 			if pathSegment == "" {
 				return "", false
 			}
 			namespaceAlias = pathSegment
-		case "{upload_id}":
+		} else if strings.HasPrefix(patternSegment, "{") && strings.HasSuffix(patternSegment, "}") {
 			if pathSegment == "" {
 				return "", false
 			}
-		default:
+		} else {
 			if pathSegment != patternSegment {
 				return "", false
 			}

@@ -624,6 +624,26 @@ pub struct CreateCheckpointRequest {
     pub ttl_ms: Option<u64>,
 }
 
+/// Request to create a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CreateSnapshotRequest {
+    /// A label that does not need to be unique.
+    pub name: String,
+    /// Snapshot lifetime from the current server time, in milliseconds.
+    pub ttl_ms: u64,
+}
+
+/// Request to extend a read snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ExtendSnapshotRequest {
+    /// Requested lifetime from the server's current time, in milliseconds.
+    pub ttl_ms: u64,
+}
+
 /// Result of releasing a checkpoint pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -658,6 +678,8 @@ pub enum CheckpointOwnerSummary {
     Snapshot {
         /// A label that does not need to be unique.
         name: String,
+        /// When the snapshot lease expires, in Unix milliseconds.
+        expires_at_ms: u64,
     },
 }
 
@@ -686,6 +708,45 @@ pub struct Checkpoint {
     pub manifest_no: ManifestNo,
 }
 
+/// A live snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SnapshotSummary {
+    /// Snapshot id.
+    pub snapshot_id: CheckpointId,
+    /// Namespace whose state the snapshot captured.
+    pub namespace_id: NamespaceId,
+    /// Snapshot label.
+    pub name: String,
+    /// Namespace sequence captured by the snapshot.
+    pub head_seq: ChangeSeq,
+    /// Time the snapshot record was created, in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// When the snapshot lease expires, in Unix milliseconds.
+    pub expires_at_ms: u64,
+}
+
+impl SnapshotSummary {
+    /// Converts a snapshot-owned checkpoint to a snapshot summary.
+    pub fn from_checkpoint(checkpoint: Checkpoint) -> Option<Self> {
+        let CheckpointOwnerSummary::Snapshot {
+            name,
+            expires_at_ms,
+        } = checkpoint.owner
+        else {
+            return None;
+        };
+        Some(Self {
+            snapshot_id: checkpoint.checkpoint_id,
+            namespace_id: checkpoint.namespace_id,
+            name,
+            head_seq: checkpoint.checkpoint_seq,
+            created_at_ms: checkpoint.created_at_ms,
+            expires_at_ms,
+        })
+    }
+}
+
 /// One page of active checkpoint records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -698,6 +759,29 @@ pub struct ListCheckpointsResponse {
     /// Opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+/// One page of live read snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ListSnapshotsResponse {
+    /// Namespace the snapshots belong to.
+    pub namespace_id: NamespaceId,
+    /// Live snapshot records in ascending snapshot-id order.
+    pub snapshots: Vec<SnapshotSummary>,
+    /// Opaque cursor for the next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// Result of releasing a read snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReleaseSnapshotResponse {
+    /// Namespace the snapshot belonged to.
+    pub namespace_id: NamespaceId,
+    /// Released snapshot id.
+    pub snapshot_id: CheckpointId,
 }
 
 /// How one WAL flush satisfied its goal.

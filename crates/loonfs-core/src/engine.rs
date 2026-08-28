@@ -36,7 +36,8 @@ use loonfs_api::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, ContentRef,
     DeleteNamespaceResponse, DirectoryPageCursor, FileBytes, FileRevision, FileRevisionsPageCursor,
     FlushWalResponse, InodeId, Namespace, NamespaceId, Page, PageRequest, PathEntry,
-    ReleaseCheckpointResponse, RevisionNo, TrashEntry, TrashPageCursor, UploadId,
+    ReleaseCheckpointResponse, ReleaseSnapshotResponse, RevisionNo, TrashEntry, TrashPageCursor,
+    UploadId,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
@@ -934,6 +935,38 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse> {
         crate::checkpoint::release_checkpoint(
+            &self.store,
+            &self.namespace_id,
+            checkpoint_id,
+            &self.mutation_context()?,
+        )
+        .await
+    }
+
+    /// Extends a live snapshot without passing its lifetime ceiling.
+    pub async fn extend_snapshot(
+        &self,
+        checkpoint_id: &CheckpointId,
+        requested_expires_at_ms: u64,
+        max_lifetime_ms: u64,
+    ) -> Result<Checkpoint> {
+        crate::checkpoint::extend_snapshot_expiry(
+            &self.store,
+            &self.namespace_id,
+            checkpoint_id,
+            requested_expires_at_ms,
+            max_lifetime_ms,
+            &self.mutation_context()?,
+        )
+        .await
+    }
+
+    /// Releases a snapshot. Repeated releases succeed.
+    pub async fn release_snapshot(
+        &self,
+        checkpoint_id: &CheckpointId,
+    ) -> Result<ReleaseSnapshotResponse> {
+        crate::checkpoint::release_snapshot(
             &self.store,
             &self.namespace_id,
             checkpoint_id,

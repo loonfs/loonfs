@@ -81,6 +81,7 @@ either way.
     "core.namespaces.create": true,
     "core.namespaces.fork": true,
     "core.namespaces.delete": true,
+    "core.snapshots": true,
     "core.attributes": true,
     "core.inodes.list_children": true,
     "query.grep": true
@@ -137,6 +138,9 @@ Registered limit keys:
 | `commit.max_external_content_refs` | Most distinct external content refs one commit's operations may name. Over-limit requests answer `invalid_request` before planning. |
 | `commit.max_message_bytes` | Largest accepted commit `message`, in bytes; a longer one answers `invalid_request` before planning. |
 | `maintenance.gc.min_grace_window_ms` | Smallest accepted `grace_window_ms` on a `gc` request; smaller values answer `invalid_request`. Derived from the publication budgets, not tuned. |
+| `snapshot.max_ttl_ms` | Largest `ttl_ms` accepted by snapshot create and extend requests. A larger value returns `invalid_request`. |
+| `snapshot.max_lifetime_ms` | Largest snapshot lifetime measured from the record's creation time. Extension never moves the expiry past this ceiling. |
+| `snapshot.max_live_per_namespace` | Most live, unexpired snapshots one namespace may hold. Creation past this limit returns `snapshot_quota_exceeded`. |
 | `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
 | `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. The query keys identify the operation's contract even though grep now shares the standard pagination values. |
 | `query.grep.scan_budget_files` | Files a plan-less `allow_scan` grep will scan before refusing with `query_unindexable`. |
@@ -154,6 +158,7 @@ hoc.
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
+| `core.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
 | `core.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
@@ -260,11 +265,14 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no head, so it does not exist. |
 | `namespace_deleted` | 410 | The namespace's head records the terminal deleted status. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
+| `snapshot_not_found` | 404 | The snapshot id names no checkpoint record. Refresh state or choose another snapshot. |
+| `snapshot_gone` | 410 | The snapshot record exists but is released or expired. The message names which terminal condition applies. |
 | `path_not_found` | 404 | No visible entry at the path. |
 | `inode_not_found` | 404 | The requested visible or retained inode does not exist. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session with this id, or one that was aborted: an aborted session will never select content, so it reports the absence that its deletion will. |
 | `namespace_exists` | 409 | The create or fork target already exists: another namespace holds the id. |
+| `snapshot_quota_exceeded` | 409 | Creating the snapshot would pass the namespace's live-snapshot limit. Release a snapshot or wait for a lease to expire. |
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
@@ -746,12 +754,16 @@ The table below lists the retry class for every v0 operation.
 | Read an upload session | `get_upload` | `idempotent` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
 | Abort an upload session | `abort_upload` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
 | Read committed changes | `list_changes` | `idempotent` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
+| Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`; requires `name` and `ttl_ms` |
+| List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
+| Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling |
+| Release a snapshot | `release_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/release` (idempotent and one-way) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/admin/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/admin/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Release a checkpoint | `release_checkpoint` | `idempotent` | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
+| Release a checkpoint | `release_checkpoint` | `idempotent` | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; records owned by another operation are rejected) |
 | Run maintenance | `run_maintenance` | `not_idempotent` | `POST /v0/admin/namespaces/{ns}/maintenance/run` |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/admin/namespaces/{ns}/grep/index` |
@@ -910,6 +922,24 @@ present, with that instant in the entry: expiry is not release — garbage
 collection is what turns a passed expiry into one — so until a pass reaches
 it the record is still a root, and reads still serve from it. Listing it is
 the honest answer to the question the route is asked.
+
+#### Snapshots
+
+A snapshot is a time-bounded view of a namespace. Its checkpoint record id is
+its `snapshot_id`. Creation requires `name` and `ttl_ms`. The ttl cannot exceed
+`snapshot.max_ttl_ms` or `snapshot.max_lifetime_ms`.
+
+An extension measures its requested ttl from the server's current time. It
+never moves the expiry past `snapshot.max_lifetime_ms` from the record's
+`created_at_ms`. A namespace may hold at most
+`snapshot.max_live_per_namespace` live snapshots.
+
+Snapshot listing returns only snapshot-owned records whose leases have not
+expired. The admin checkpoint listing keeps expired records visible until
+collection releases them. Snapshot release is idempotent and one-way. A
+second release succeeds, including after the record is reaped.
+
+These operations manage the snapshot lifetime.
 
 #### Store contract probe
 

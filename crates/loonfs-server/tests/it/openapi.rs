@@ -220,6 +220,16 @@ fn openapi_documents_current_server_paths() {
         ("/v0/namespaces/{namespace_id}", "get"),
         ("/v0/namespaces/{namespace_id}", "delete"),
         ("/v0/namespaces/{namespace_id}/forks", "post"),
+        ("/v0/namespaces/{namespace_id}/snapshots", "post"),
+        ("/v0/namespaces/{namespace_id}/snapshots", "get"),
+        (
+            "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
+            "post",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
+            "post",
+        ),
         ("/v0/admin/namespaces/{namespace_id}/diagnostics", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/entries", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/entry", "get"),
@@ -300,6 +310,12 @@ fn openapi_documents_current_server_paths() {
     assert_query_params(
         paths,
         "/v0/admin/namespaces/{namespace_id}/checkpoints",
+        "get",
+        &["limit", "cursor"],
+    );
+    assert_query_params(
+        paths,
+        "/v0/namespaces/{namespace_id}/snapshots",
         "get",
         &["limit", "cursor"],
     );
@@ -834,6 +850,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         ),
         ("/v0/namespaces/{namespace_id}/filesystem/trash", "get"),
         ("/v0/admin/namespaces/{namespace_id}/checkpoints", "get"),
+        ("/v0/namespaces/{namespace_id}/snapshots", "get"),
         ("/v0/namespaces/{namespace_id}/changes", "get"),
         ("/v0/namespaces/{namespace_id}/grep", "get"),
     ] {
@@ -959,6 +976,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             "get",
             "cursor",
         ),
+        ("/v0/namespaces/{namespace_id}/snapshots", "get", "cursor"),
     ] {
         let parameter = query_parameter(paths, path, method, parameter_name);
         assert_eq!(
@@ -1092,6 +1110,11 @@ fn openapi_names_tagged_one_of_alternatives() {
             "unexpected oneOf schema names for `{schema_name}`"
         );
     }
+
+    let snapshot_owner = schemas
+        .get("CheckpointOwnerSnapshot")
+        .expect("snapshot checkpoint-owner schema");
+    assert!(required_fields(snapshot_owner).contains("expires_at_ms"));
 }
 
 /// Responses that flatten a Rust enum, and the fields their envelope adds to

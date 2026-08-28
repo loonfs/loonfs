@@ -151,6 +151,23 @@ pub enum CoreError {
     CheckpointUnavailable(String),
     #[error("invalid checkpoint request: {0}")]
     InvalidCheckpointRequest(String),
+    #[error("snapshot `{snapshot_id}` was not found")]
+    SnapshotNotFound {
+        snapshot_id: loonfs_api::CheckpointId,
+    },
+    #[error("snapshot `{snapshot_id}` is gone: {reason}")]
+    SnapshotGone {
+        snapshot_id: loonfs_api::CheckpointId,
+        reason: String,
+    },
+    #[error(
+        "namespace `{namespace_id}` already has its limit of {max_live} live snapshots; \
+         release one or wait for a lease to expire"
+    )]
+    SnapshotQuotaExceeded {
+        namespace_id: loonfs_api::NamespaceId,
+        max_live: usize,
+    },
     #[error(
         "metadata publication budget exceeded after {elapsed_ms}ms (budget {budget_ms}ms); \
          the root was not published"
@@ -386,6 +403,9 @@ impl CoreError {
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
+            CoreError::SnapshotNotFound { .. } => ErrorCode::SnapshotNotFound,
+            CoreError::SnapshotGone { .. } => ErrorCode::SnapshotGone,
+            CoreError::SnapshotQuotaExceeded { .. } => ErrorCode::SnapshotQuotaExceeded,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::InodeNotFound(_) => ErrorCode::InodeNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,

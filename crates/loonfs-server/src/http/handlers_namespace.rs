@@ -9,18 +9,23 @@ use super::{
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
-use loonfs::{CheckpointPageCursor, CreateNamespaceOptions, DeleteNamespaceOptions};
+use loonfs::{
+    CheckpointPageCursor, CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions,
+};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
     decode_namespace_cursor, CapabilityDocument, Checkpoint, CheckpointId, CreateCheckpointRequest,
-    CreateNamespaceRequest, ErrorCode, ForkNamespaceRequest, ListCheckpointsResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, PageRequest, PaginationPolicy,
-    ReleaseCheckpointResponse, FEATURE_ADMIN_GREP_INDEX, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
-    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    CreateNamespaceRequest, CreateSnapshotRequest, ErrorCode, ExtendSnapshotRequest,
+    ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, PageRequest, PaginationPolicy, ReleaseCheckpointResponse,
+    ReleaseSnapshotResponse, SnapshotSummary, FEATURE_ADMIN_GREP_INDEX,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_SNAPSHOT_MAX_LIFETIME_MS,
+    LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE, LIMIT_SNAPSHOT_MAX_TTL_MS,
     LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
 };
@@ -127,6 +132,18 @@ pub(super) async fn get_capabilities(
     capabilities.limits.insert(
         LIMIT_DOWNLOAD_MAX_CONCURRENT.to_owned(),
         state.config.max_concurrent_downloads as u64,
+    );
+    capabilities.limits.insert(
+        LIMIT_SNAPSHOT_MAX_TTL_MS.to_owned(),
+        state.config.snapshot_max_ttl_ms,
+    );
+    capabilities.limits.insert(
+        LIMIT_SNAPSHOT_MAX_LIFETIME_MS.to_owned(),
+        state.config.snapshot_max_lifetime_ms,
+    );
+    capabilities.limits.insert(
+        LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE.to_owned(),
+        state.config.snapshot_max_live_per_namespace as u64,
     );
     // The runtime handles describe the core and admin planes. Grep is a
     // composed extension, so this deployment — not the runtime — says
@@ -370,6 +387,244 @@ pub(super) async fn fork_namespace(
     feature = "openapi",
     utoipa::path(
         post,
+        operation_id = "create_snapshot",
+        path = "/v0/namespaces/{namespace_id}/snapshots",
+        tag = "namespaces",
+        summary = "Create snapshot",
+        description = "Creates a snapshot of the current namespace state. Every call creates a new snapshot.",
+        params(("namespace_id" = String, Path, description = "Namespace id")),
+        request_body = CreateSnapshotRequest,
+        responses(
+            (status = 200, description = "Snapshot created", body = SnapshotSummary),
+            (status = 400, description = "Invalid namespace id, name, or ttl", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 409, description = "Snapshot quota exceeded", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn create_snapshot(
+    State(state): State<AppState>,
+    namespace_id_path: NamespaceIdPath,
+    query: AppQuery<NoQuery>,
+    AppJson(request): AppJson<CreateSnapshotRequest>,
+) -> Result<Json<SnapshotSummary>, ApiResponseError> {
+    let namespace_id = namespace_id_path.into_id()?;
+    query.into_params()?;
+    let now_ms = super::handlers_uploads::current_unix_ms()?;
+    let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
+    state
+        .admin
+        .ensure_snapshot_quota(
+            &namespace_id,
+            now_ms,
+            state.config.snapshot_max_live_per_namespace,
+        )
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    let checkpoint = state
+        .admin
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: request.name,
+                expires_at_ms,
+            },
+        )
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("/name")
+        })?;
+    Ok(Json(SnapshotSummary::from_checkpoint(checkpoint).expect(
+        "snapshot creation returns a snapshot-owned checkpoint",
+    )))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        operation_id = "list_snapshots",
+        path = "/v0/namespaces/{namespace_id}/snapshots",
+        tag = "namespaces",
+        summary = "List snapshots",
+        description = "Lists live snapshots in snapshot-id order. Released and expired snapshots are omitted.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
+            ("cursor" = Option<String>, Query, description = "Opaque snapshot-list page cursor")
+        ),
+        responses(
+            (status = 200, description = "Live snapshots", body = ListSnapshotsResponse),
+            (status = 400, description = "Invalid namespace id, limit, or cursor", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn list_snapshots(
+    State(state): State<AppState>,
+    namespace_id_path: NamespaceIdPath,
+    headers: HeaderMap,
+    query: AppQuery<CheckpointPageQuery>,
+) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
+    authorize(state.config.auth_policy(), &headers)?;
+    let namespace_id = namespace_id_path.into_id()?;
+    let query = query.into_params()?;
+    let cursor = decode_checkpoint_cursor(query.cursor.as_deref(), &namespace_id)?;
+    let response = state
+        .admin
+        .list_snapshots_page(
+            &namespace_id,
+            PageRequest {
+                limit: resolve_page_limit(query.limit)?,
+                cursor,
+            },
+        )
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        operation_id = "extend_snapshot",
+        path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
+        tag = "namespaces",
+        summary = "Extend snapshot",
+        description = "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("snapshot_id" = String, Path, description = "Snapshot id")
+        ),
+        request_body = ExtendSnapshotRequest,
+        responses(
+            (status = 200, description = "Snapshot extended", body = SnapshotSummary),
+            (status = 400, description = "Invalid id or ttl", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Snapshot not found", body = ApiError),
+            (status = 410, description = "Snapshot released or expired", body = ApiError),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn extend_snapshot(
+    State(state): State<AppState>,
+    namespace_id_path: NamespaceIdPath,
+    path: AppPath<SnapshotPathParams>,
+    query: AppQuery<NoQuery>,
+    AppJson(request): AppJson<ExtendSnapshotRequest>,
+) -> Result<Json<SnapshotSummary>, ApiResponseError> {
+    let namespace_id = namespace_id_path.into_id()?;
+    let SnapshotPathParams { snapshot_id } = path.into_params()?;
+    query.into_params()?;
+    let snapshot_id = parse_snapshot_id(&snapshot_id)?;
+    let now_ms = super::handlers_uploads::current_unix_ms()?;
+    let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
+    let response = state
+        .admin
+        .extend_snapshot(
+            &namespace_id,
+            &snapshot_id,
+            requested_expires_at_ms,
+            state.config.snapshot_max_lifetime_ms,
+        )
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        operation_id = "release_snapshot",
+        path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
+        tag = "namespaces",
+        summary = "Release snapshot",
+        description = "Releases a snapshot by id. Repeated releases succeed.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("snapshot_id" = String, Path, description = "Snapshot id")
+        ),
+        responses(
+            (status = 200, description = "Snapshot release accepted", body = ReleaseSnapshotResponse),
+            (status = 400, description = "Invalid id or non-snapshot record", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn release_snapshot(
+    State(state): State<AppState>,
+    namespace_id_path: NamespaceIdPath,
+    path: AppPath<SnapshotPathParams>,
+    headers: HeaderMap,
+    query: AppQuery<NoQuery>,
+) -> Result<Json<ReleaseSnapshotResponse>, ApiResponseError> {
+    authorize(state.config.auth_policy(), &headers)?;
+    let namespace_id = namespace_id_path.into_id()?;
+    let SnapshotPathParams { snapshot_id } = path.into_params()?;
+    query.into_params()?;
+    let snapshot_id = parse_snapshot_id(&snapshot_id)?;
+    let response = state
+        .admin
+        .release_snapshot(&namespace_id, &snapshot_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct SnapshotPathParams {
+    snapshot_id: String,
+}
+
+fn parse_snapshot_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
+    CheckpointId::parse(value)
+        .map_err(|error| invalid_path_id_error("snapshot_id", value, error.reason()))
+}
+
+fn snapshot_expiry_from_ttl(
+    state: &AppState,
+    now_ms: u64,
+    ttl_ms: u64,
+) -> Result<u64, ApiResponseError> {
+    if ttl_ms == 0 || ttl_ms > state.config.snapshot_max_ttl_ms {
+        return Err(ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            &format!(
+                "ttl_ms must be greater than zero and may not exceed the \
+                 `{LIMIT_SNAPSHOT_MAX_TTL_MS}` limit of {} milliseconds",
+                state.config.snapshot_max_ttl_ms
+            ),
+        )
+        .with_param("/ttl_ms"));
+    }
+    if ttl_ms > state.config.snapshot_max_lifetime_ms {
+        return Err(ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            &format!(
+                "ttl_ms may not exceed the `{LIMIT_SNAPSHOT_MAX_LIFETIME_MS}` limit of {} \
+                 milliseconds",
+                state.config.snapshot_max_lifetime_ms
+            ),
+        )
+        .with_param("/ttl_ms"));
+    }
+    Ok(now_ms.saturating_add(ttl_ms))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
         operation_id = "create_checkpoint",
         path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
         tag = "admin",
@@ -441,15 +696,7 @@ pub(super) async fn list_checkpoints(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
-    let cursor = query
-        .cursor
-        .as_deref()
-        .map(|cursor| decode_namespace_cursor::<CheckpointPageCursor>(cursor, &namespace_id))
-        .transpose()
-        .map_err(|error| {
-            ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string())
-                .with_param("cursor")
-        })?;
+    let cursor = decode_checkpoint_cursor(query.cursor.as_deref(), &namespace_id)?;
     let response = state
         .admin
         .list_checkpoints_page(
@@ -479,7 +726,7 @@ pub(super) async fn list_checkpoints(
         ),
         responses(
             (status = 200, description = "Checkpoint release accepted (including an already released or reaped checkpoint)", body = ReleaseCheckpointResponse),
-            (status = 400, description = "Invalid id, or the checkpoint is fork-owned", body = ApiError),
+            (status = 400, description = "Invalid id, or the checkpoint is owned by another operation", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             crate::http::openapi::UnavailableResponses
@@ -514,6 +761,19 @@ pub(super) struct CheckpointPathParams {
 fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
     CheckpointId::parse(value)
         .map_err(|error| invalid_path_id_error("checkpoint_id", value, error.reason()))
+}
+
+fn decode_checkpoint_cursor(
+    cursor: Option<&str>,
+    namespace_id: &loonfs_api::NamespaceId,
+) -> Result<Option<CheckpointPageCursor>, ApiResponseError> {
+    cursor
+        .map(|cursor| decode_namespace_cursor::<CheckpointPageCursor>(cursor, namespace_id))
+        .transpose()
+        .map_err(|error| {
+            ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string())
+                .with_param("cursor")
+        })
 }
 
 #[cfg_attr(
