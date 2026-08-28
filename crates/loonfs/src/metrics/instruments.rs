@@ -126,7 +126,7 @@ impl RuntimeInstruments {
         }
     }
 
-    /// Records one read handled through a snapshot-pinned view.
+    /// Records one snapshot-backed metadata view.
     pub(crate) fn snapshot_view_read(&self) {
         if let Some(installed) = &self.installed {
             installed.cache.snapshot_view_reads.increment(1);
@@ -612,7 +612,7 @@ impl RuntimeCacheInstruments {
             ),
             snapshot_view_reads: recorder.register_counter(
                 "loonfs.runtime_cache.snapshot_view_reads",
-                "Metadata reads served through a snapshot-pinned view",
+                "Snapshot-backed metadata views created by the runtime",
                 &[],
             ),
             metadata_segment: Arc::new(MetadataSegmentCacheInstruments::register(recorder)),

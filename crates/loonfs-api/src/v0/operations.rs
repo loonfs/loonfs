@@ -196,9 +196,9 @@ pub struct NamespaceDiagnostics {
     pub current_manifest_no: Option<ManifestNo>,
     /// Number of visible WAL segments after the current manifest.
     pub wal_tail_segments: u64,
-    /// Number of active snapshot-owned records unexpired when diagnostics were read.
+    /// Number of snapshots that had not expired when diagnostics began.
     pub live_snapshots: u64,
-    /// Number of active user-owned records, expired or not.
+    /// Number of active user checkpoints, including expired records awaiting collection.
     pub live_checkpoints: u64,
 }
 

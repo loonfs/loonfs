@@ -387,6 +387,13 @@ fn assert_api_spec_error_codes_are_registered(spec: &str) {
                 .filter_map(|operation| operation.get("operationId")?.as_str())
         })
         .collect();
+    let schema_properties: std::collections::BTreeSet<_> = openapi["components"]["schemas"]
+        .as_object()
+        .expect("OpenAPI schemas object")
+        .values()
+        .filter_map(|schema| schema.get("properties")?.as_object())
+        .flat_map(|properties| properties.keys().map(String::as_str))
+        .collect();
 
     for token in spec
         .split('`')
@@ -394,7 +401,10 @@ fn assert_api_spec_error_codes_are_registered(spec: &str) {
         .step_by(2)
         .filter(|token| is_snake_case_token(token))
     {
-        if API_SPEC_NON_ERROR_CODE_TOKENS.contains(&token) || operation_ids.contains(token) {
+        if API_SPEC_NON_ERROR_CODE_TOKENS.contains(&token)
+            || operation_ids.contains(token)
+            || schema_properties.contains(token)
+        {
             continue;
         }
         // Valid inode IDs are examples, not error codes.

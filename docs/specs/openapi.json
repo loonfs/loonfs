@@ -5736,13 +5736,13 @@
           "live_checkpoints": {
             "type": "integer",
             "format": "int64",
-            "description": "Number of active user-owned records, expired or not.",
+            "description": "Number of active user checkpoints, including expired records awaiting collection.",
             "minimum": 0
           },
           "live_snapshots": {
             "type": "integer",
             "format": "int64",
-            "description": "Number of active snapshot-owned records unexpired when diagnostics were read.",
+            "description": "Number of snapshots that had not expired when diagnostics began.",
             "minimum": 0
           },
           "namespace_id": {

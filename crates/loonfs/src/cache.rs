@@ -60,7 +60,7 @@ pub(crate) struct CachedNamespaceAnchor {
 pub struct RuntimeCacheStats {
     /// Latest metadata reads served through the metadata-view path.
     pub latest_metadata_view_reads: usize,
-    /// Metadata reads served through a snapshot-pinned view.
+    /// Snapshot-backed metadata views created by the runtime.
     pub snapshot_view_reads: usize,
     /// WAL-tail projection cache hits.
     pub wal_tail_projection_cache_hits: usize,

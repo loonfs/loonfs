@@ -1427,8 +1427,8 @@ namespace state plus storage details used by maintenance:
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 | `current_manifest_no` | Current manifest number; omitted until the namespace has a manifest. |
 | `wal_tail_segments` | Number of visible WAL segments after the current manifest. |
-| `live_snapshots` | Number of active snapshot records whose expiry was still in the future when diagnostics were read. |
-| `live_checkpoints` | Number of active user-owned checkpoint records, including expired records awaiting collection. |
+| `live_snapshots` | Number of snapshots that had not expired when diagnostics began. |
+| `live_checkpoints` | Number of active user checkpoints, including expired records awaiting collection. |
 
 ```json
 {
