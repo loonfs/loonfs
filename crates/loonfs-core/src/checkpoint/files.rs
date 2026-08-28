@@ -8,12 +8,9 @@
 //! after the pinned sequence reads the change feed.
 
 use super::cache::MetadataSegmentCache;
-use super::error::ManifestLoadError;
-use super::load::{ensure_manifest_reference_matches, load_verified_manifest_segments_with_cache};
-use super::record::load_checkpoint_record;
+use super::read_basis::{load_pinned_checkpoint_basis, PinnedCheckpointBasis};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::MetadataView;
-use loonfs_api::wire::control::{CheckpointRecordState, CheckpointStatus};
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{
@@ -79,28 +76,10 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     request: PageRequest<CheckpointFilesPageCursor>,
 ) -> Result<CheckpointFilesPage> {
-    let record = load_pinning_checkpoint_record(store, namespace_id, checkpoint_id).await?;
-    let segments = load_verified_manifest_segments_with_cache(
-        store,
-        segment_cache,
-        namespace_id,
-        &record.manifest.manifest_object_id,
-    )
-    .await
-    .map_err(|error| match error {
-        ManifestLoadError::MissingManifest { object_key } => CoreError::CheckpointUnavailable(
-            format!("checkpoint `{checkpoint_id}` pins manifest `{object_key}`, which is gone"),
-        ),
-        other => CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(other)),
-    })?;
-    let manifest = segments.manifest();
-    ensure_manifest_reference_matches(
-        &format!("checkpoint `{checkpoint_id}` basis"),
-        &record.manifest,
-        manifest,
-    )?;
+    let PinnedCheckpointBasis { manifest, segments } =
+        load_pinned_checkpoint_basis(store, segment_cache, namespace_id, checkpoint_id).await?;
 
-    let checkpoint_seq = record.manifest.manifest_head_seq;
+    let checkpoint_seq = manifest.manifest_head_seq;
     let view = MetadataView::over_manifest_segments(&segments, checkpoint_seq);
     let mut session = view.session();
 
@@ -178,29 +157,4 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
         files,
         next_cursor,
     })
-}
-
-/// Loads the record and refuses the one lifecycle that no longer pins its
-/// basis, so a caller never reads state garbage collection may already be
-/// reclaiming.
-async fn load_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
-) -> Result<CheckpointRecordState> {
-    let Some(record) = load_checkpoint_record(store, namespace_id, checkpoint_id)
-        .await?
-        .map(|loaded| loaded.state)
-    else {
-        return Err(CoreError::CheckpointUnavailable(format!(
-            "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
-        )));
-    };
-    if record.status != (CheckpointStatus::Active {}) {
-        return Err(CoreError::CheckpointUnavailable(format!(
-            "checkpoint `{checkpoint_id}` is `{}` and no longer pins its basis",
-            record.status
-        )));
-    }
-    Ok(record)
 }

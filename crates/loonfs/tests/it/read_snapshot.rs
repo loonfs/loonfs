@@ -1,6 +1,6 @@
 //! Multi-call namespace read snapshots.
 
-use crate::common::{open_runtime_async, store};
+use crate::common::{assert_core_error_kind, open_runtime_async, store};
 use loonfs::{
     CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId, PageRequest,
     PaginationPolicy, PutFileOptions,
@@ -118,4 +118,157 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
         .get_path_entry(&namespace_id, "/later.txt", Default::default())
         .await
         .expect("latest view sees later file");
+}
+
+#[tokio::test]
+async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-checkpoint-test").await;
+    let namespace_id = NamespaceId::parse("snapshot-checkpoint-reads").expect("namespace id");
+    runtime
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    let created = runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/pinned.txt",
+            b"pinned",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create initial file");
+    let checkpoint = runtime
+        .create_checkpoint(&namespace_id)
+        .await
+        .expect("create checkpoint");
+    assert_eq!(checkpoint.checkpoint_seq, created.committed_seq);
+    let captured = runtime
+        .reader
+        .get_path_entry(&namespace_id, "/pinned.txt", Default::default())
+        .await
+        .expect("resolve the file the checkpoint captured");
+
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/pinned.txt",
+            b"replaced",
+            PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
+            },
+        )
+        .await
+        .expect("replace file after the checkpoint");
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/later.txt",
+            b"later",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create file after the checkpoint");
+
+    let snapshot = runtime
+        .reader
+        .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("pin namespace at checkpoint");
+    assert_eq!(snapshot.head_seq(), checkpoint.checkpoint_seq);
+    let pinned = snapshot
+        .get_path_entry("/pinned.txt", Default::default())
+        .await
+        .expect("resolve pinned file");
+    assert_eq!(pinned.revision_no(), captured.revision_no());
+    assert_eq!(
+        snapshot
+            .read_content_ref(pinned.content_ref().expect("file content reference"), 64)
+            .await
+            .expect("read pinned content"),
+        b"pinned"
+    );
+    let later_error = snapshot
+        .get_path_entry("/later.txt", Default::default())
+        .await
+        .expect_err("later file is absent from the checkpointed view");
+    assert_eq!(later_error.code(), ErrorCode::PathNotFound);
+
+    let page = snapshot
+        .list_path_entries_page(
+            "/",
+            PageRequest {
+                limit: PaginationPolicy::default()
+                    .resolve_limit(None)
+                    .expect("default page limit"),
+                cursor: None,
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list checkpointed root");
+    assert_eq!(page.head_seq, snapshot.head_seq());
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/pinned.txt"]
+    );
+    let states = snapshot
+        .resolve_current_files(&[captured.inode_id])
+        .await
+        .expect("resolve checkpointed inode");
+    assert_eq!(states[0].current_revision_no, captured.revision_no());
+
+    let latest = runtime
+        .reader
+        .get_file_bytes(&namespace_id, "/pinned.txt")
+        .await
+        .expect("read latest replacement");
+    assert_eq!(latest.bytes, b"replaced");
+    runtime
+        .reader
+        .get_path_entry(&namespace_id, "/later.txt", Default::default())
+        .await
+        .expect("latest view sees later file");
+}
+
+#[tokio::test]
+async fn a_released_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime =
+        open_runtime_async(store(temp_dir.path()), "snapshot-checkpoint-release-test").await;
+    let namespace_id = NamespaceId::parse("snapshot-released-checkpoint").expect("namespace id");
+    runtime
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/pinned.txt",
+            b"pinned",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create initial file");
+    let checkpoint = runtime
+        .create_checkpoint(&namespace_id)
+        .await
+        .expect("create checkpoint");
+    runtime
+        .admin
+        .release_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("release checkpoint");
+
+    assert_core_error_kind(
+        runtime
+            .reader
+            .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+            .await,
+        ErrorCode::CheckpointUnavailable,
+    );
 }
