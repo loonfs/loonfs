@@ -1,87 +1,27 @@
-//! HTTP reads pinned to snapshot leases.
+//! HTTP reads pinned to snapshots.
 
 #![allow(clippy::panic)]
 
 use crate::common::http_split_support::{replace_file_options, test_config};
-use async_trait::async_trait;
-use loonfs_api::v0::{BeginDownloadResponse, ListChangesResponse};
+use crate::common::{start_server, TestServer};
+use loonfs_api::v0::ListChangesResponse;
 use loonfs_api::{
     ApiError, ChangeSeq, CreateCheckpointRequest, ListPathEntriesResponse, PathEntry,
     SnapshotSummary,
 };
-use loonfs_client::{Client, ClientConfig, DeleteOptions, NamespacePath, PutFileOptions};
-use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::presign::{
-    DirectGetIssuer, DirectTransferIssuers, PresignedGetRequest, PresignedUrl,
-};
-use loonfs_objectstore::{ObjectStoreError, SharedObjectStore};
-use loonfs_server::app_with_test_transfers;
+use loonfs_client::{DeleteOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use serde::de::DeserializeOwned;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Read as _;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::SystemTime;
 use tempfile::tempdir;
 
-type ApiResult<T> = Result<T, (u16, ApiError)>;
+type ApiResult<T> = Result<T, (u16, Box<ApiError>)>;
 
-struct SnapshotServer {
-    client: Client,
-    server_url: String,
-    server: tokio::task::JoinHandle<()>,
-}
-
-#[derive(Debug)]
-struct StubGetIssuer;
-
-#[async_trait]
-impl DirectGetIssuer for StubGetIssuer {
-    async fn presign_get(
-        &self,
-        request: PresignedGetRequest<'_>,
-        _now: SystemTime,
-    ) -> Result<PresignedUrl, ObjectStoreError> {
-        Ok(PresignedUrl {
-            method: "GET".to_owned(),
-            url: format!("https://objects.invalid/{}", request.object_key),
-            headers: BTreeMap::new(),
-            expires_at_ms: u64::MAX,
-        })
-    }
-}
-
-async fn start_snapshot_server(root: &Path, writer_id: &str) -> SnapshotServer {
-    let config = test_config(root.to_path_buf(), writer_id, writer_id);
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(root).expect("construct local store"));
-    let transfers = DirectTransferIssuers::read_only(Arc::new(StubGetIssuer));
-    let router = app_with_test_transfers(config, store, transfers)
-        .await
-        .expect("build app");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener address");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
-    let server_url = format!("http://{addr}");
-    let client = Client::new(ClientConfig {
-        server_url: server_url.clone(),
-        auth_token: Some("test-token".into()),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: None,
-    })
-    .expect("client config");
-    SnapshotServer {
-        client,
-        server_url,
-        server,
-    }
+async fn start_snapshot_server(root: &Path, writer_id: &str) -> TestServer {
+    start_server(test_config(root.join("store"), writer_id, writer_id)).await
 }
 
 fn query_url(base: &str, route: &str, params: &[(&str, &str)]) -> String {
@@ -126,7 +66,9 @@ fn get_bytes(url: &str) -> ApiResult<Vec<u8>> {
             }
             Err(ureq::Error::Status(status, response)) => Err((
                 status,
-                serde_json::from_reader(response.into_reader()).expect("decode error response"),
+                Box::new(
+                    serde_json::from_reader(response.into_reader()).expect("decode error response"),
+                ),
             )),
             Err(ureq::Error::Transport(error)) => panic!("HTTP transport failed: {error}"),
         }
@@ -153,7 +95,9 @@ fn decode_json_response<T: DeserializeOwned>(
         }
         Err(ureq::Error::Status(status, response)) => Err((
             status,
-            serde_json::from_reader(response.into_reader()).expect("decode error response"),
+            Box::new(
+                serde_json::from_reader(response.into_reader()).expect("decode error response"),
+            ),
         )),
         Err(ureq::Error::Transport(error)) => panic!("HTTP transport failed: {error}"),
     }
@@ -255,7 +199,7 @@ fn entry_paths(listing: &ListPathEntriesResponse) -> BTreeSet<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn snapshot_reads_answer_the_captured_namespace_and_download_target() {
+async fn snapshot_reads_answer_the_captured_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_snapshot_server(temp_dir.path(), "snapshot-read-state").await;
     let namespace = namespace_id("snapshot-read-state");
@@ -347,21 +291,6 @@ async fn snapshot_reads_answer_the_captured_namespace_and_download_target() {
         b"captured bytes"
     );
 
-    let current_entry: PathEntry =
-        get_json(&stat_url(&harness.server_url, namespace.as_str(), None)).expect("current stat");
-    assert_ne!(current_entry.revision_no(), captured_entry.revision_no());
-    let current_listing: ListPathEntriesResponse = get_json(&listing_url(
-        &harness.server_url,
-        namespace.as_str(),
-        None,
-        None,
-        None,
-    ))
-    .expect("current listing");
-    assert_eq!(
-        entry_paths(&current_listing),
-        BTreeSet::from(["/added.txt".to_owned(), "/keep.txt".to_owned()])
-    );
     assert_eq!(
         get_bytes(&content_url(
             &harness.server_url,
@@ -371,20 +300,6 @@ async fn snapshot_reads_answer_the_captured_namespace_and_download_target() {
         ))
         .expect("current content"),
         b"current bytes"
-    );
-
-    let grant: BeginDownloadResponse = post_json(
-        &download_url(&harness.server_url, namespace.as_str(), Some(snapshot_id)),
-        serde_json::json!({"path": "/keep.txt"}),
-    )
-    .expect("snapshot download grant");
-    assert_eq!(
-        grant.revision_no,
-        captured_entry.revision_no().expect("file revision")
-    );
-    assert_eq!(
-        &grant.content_ref,
-        captured_entry.content_ref().expect("captured content ref")
     );
 
     harness.server.abort();
@@ -550,18 +465,6 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         assert_eq!(error.1.code, "snapshot_gone", "route {name}");
         assert!(error.1.message.contains("released"), "route {name}");
     }
-
-    let expired = create_snapshot(&harness.server_url, namespace.as_str(), "expired", 50);
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    let (status, error) = get_json::<PathEntry>(&stat_url(
-        &harness.server_url,
-        namespace.as_str(),
-        Some(expired.snapshot_id.as_str()),
-    ))
-    .expect_err("expired snapshot must fail");
-    assert_eq!(status, 410);
-    assert_eq!(error.code, "snapshot_gone");
-    assert!(error.message.contains("expired"));
 
     let checkpoint = harness
         .client

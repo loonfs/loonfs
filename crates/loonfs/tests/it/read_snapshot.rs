@@ -255,6 +255,11 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         )
         .await
         .expect("create captured file");
+    let captured = runtime
+        .reader
+        .get_path_entry(&namespace_id, "/pinned.txt", Default::default())
+        .await
+        .expect("resolve captured file");
     let now_ms = loonfs::current_time_ms().expect("current time");
     let snapshot = runtime
         .admin
@@ -282,7 +287,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .expect("replace captured file");
     let pinned = runtime
         .reader
-        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id, now_ms)
+        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
         .await
         .expect("pin live snapshot");
     assert_eq!(pinned.head_seq(), snapshot.checkpoint_seq);
@@ -294,6 +299,18 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
             .bytes,
         b"captured"
     );
+    let download = pinned
+        .create_download("/pinned.txt")
+        .await
+        .expect("resolve captured download");
+    assert_eq!(
+        download.revision_no,
+        captured.revision_no().expect("file revision")
+    );
+    assert_eq!(
+        &download.content_ref,
+        captured.content_ref().expect("content reference")
+    );
 
     runtime
         .admin
@@ -303,7 +320,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
     assert_core_error_kind(
         runtime
             .reader
-            .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id, now_ms)
+            .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
             .await,
         ErrorCode::SnapshotGone,
     );

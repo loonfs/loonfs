@@ -1,10 +1,4 @@
-//! Download-grant handler: the read half of the direct transfer plane.
-//!
-//! A deployment that lets a client write an object straight into the bucket
-//! must be able to hand that object back, and above `download.max_content_bytes`
-//! it cannot do that by proxying. So the same issuer that authorizes the
-//! write authorizes the read, gated on the same proof, and the two are
-//! advertised together.
+//! Direct-download handlers.
 
 use super::error::ApiResponseError;
 use super::handlers_filesystem::{
@@ -28,12 +22,7 @@ use loonfs_api::{
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use std::time::Duration;
 
-/// Lifetime of one read capability, the same window a whole-object write
-/// gets.
-///
-/// It bounds a transfer, not a session: a reader that runs out of time asks
-/// for another grant, which costs a few bytes of JSON and no retransfer,
-/// and nothing is left holding a standing read capability on the bucket.
+/// Lifetime of a presigned download URL.
 const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[cfg_attr(
@@ -47,7 +36,7 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
         description = "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.max_content_bytes`.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Authorize the file revision this live snapshot selected")
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Use the file revision captured by this snapshot")
         ),
         request_body = BeginDownloadRequest,
         responses(
@@ -61,20 +50,10 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
         )
     )
 )]
-/// Issues one short-lived read capability for the content object behind a
-/// path.
+/// Issues a short-lived download URL for a file.
 ///
-/// The grant names one immutable content object, so a commit landing
-/// afterwards neither invalidates it nor changes what it reads: the client
-/// receives the bytes of the revision it asked for, and the reference in
-/// the response is what it checks them against. The raw object key stays
-/// server-side exactly as it does for `direct_put` — a client learns a URL
-/// that expires, not an address it can revisit.
-///
-/// No download permit is taken, deliberately, and no `download.max_content_bytes`
-/// applies. Both bound the memory a proxied read costs this process, and
-/// this route reads metadata and signs a string: the file's bytes never
-/// come here at all, which is the entire point.
+/// This endpoint reads metadata but does not proxy the file bytes, so buffered
+/// download limits do not apply.
 pub(super) async fn create_download(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
@@ -86,9 +65,6 @@ pub(super) async fn create_download(
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     reject_snapshot_with_revision(snapshot_id.as_ref(), request.revision_no)?;
     let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
-    // A store either authorizes direct transfers or it does not, and one
-    // that does can always sign a read — so this asks for the bundle, not
-    // for a direction within it.
     let issuer = direct_get_issuer(&state)?;
 
     let target = match snapshot {

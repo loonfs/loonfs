@@ -23,6 +23,7 @@ mod tls;
 
 #[cfg(feature = "openapi")]
 pub use self::openapi::openapi_document;
+#[cfg(feature = "test-support")]
 pub use self::serve::app_with_test_transfers;
 pub use self::serve::{
     app, app_with_store, check_config, probe_store, serve, serve_with_shutdown, ServeError,

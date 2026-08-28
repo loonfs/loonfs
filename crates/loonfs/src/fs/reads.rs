@@ -20,12 +20,8 @@ use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 
 /// A namespace metadata view pinned to one head sequence.
 ///
-/// Create one with [`FsReader::pin_namespace`] when several related reads
-/// must describe the same filesystem state, or with
-/// [`FsReader::pin_namespace_at_checkpoint`] to describe the state one
-/// checkpoint captured. [`FsReader::pin_namespace_at_snapshot`] adds the
-/// snapshot lease policy. Immutable content selected by this view remains
-/// safe to read through [`Self::read_content_ref`].
+/// Create one from the current state, a checkpoint, or a live snapshot. All
+/// reads through the value use the same state even if new commits arrive.
 #[must_use]
 pub struct FsReadSnapshot {
     engine: NamespaceReaderEngine<SharedObjectStore>,
@@ -482,18 +478,14 @@ impl FsReader {
         })
     }
 
-    /// Pins one namespace at a live snapshot lease.
-    ///
-    /// Checkpoint pins are policy-free. Snapshot pins enforce snapshot
-    /// ownership and refuse expired or released leases against the supplied
-    /// `now_ms`, so a wire layer owns its clock.
+    /// Pins the namespace state captured by a live snapshot.
     pub async fn pin_namespace_at_snapshot(
         &self,
         namespace_id: &NamespaceId,
         snapshot_id: &CheckpointId,
-        now_ms: u64,
     ) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
+        let now_ms = loonfs_core::time::current_time_ms()?;
         let (engine, context) = self
             .core
             .pinned_read_at_snapshot(namespace_id, snapshot_id, now_ms)

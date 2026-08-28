@@ -191,14 +191,14 @@ impl utoipa::ToSchema for OpenApiDefaultFalseBoolean {}
         path = "/v0/namespaces/{namespace_id}/filesystem/entries",
         tag = "filesystem",
         summary = "List directory",
-        description = "Lists a directory at the current namespace head or at a live snapshot when `snapshot_id` is provided.",
+        description = "Lists a directory from the current state or a live snapshot.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor"),
             ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
-            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Read the directory as this live snapshot captured it")
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Use the directory state captured by this snapshot")
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_api::ListPathEntriesResponse),
@@ -260,12 +260,12 @@ pub(super) async fn list_path_entries(
         path = "/v0/namespaces/{namespace_id}/filesystem/entry",
         tag = "filesystem",
         summary = "Stat path",
-        description = "Returns metadata for a path at the current namespace head or at a live snapshot when `snapshot_id` is provided.",
+        description = "Returns path metadata from the current state or a live snapshot.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
             ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
-            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Read the path as this live snapshot captured it")
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Use the path state captured by this snapshot")
         ),
         responses(
             (status = 200, description = "Authoritative path entry", body = loonfs_api::PathEntry),
@@ -317,12 +317,12 @@ pub(super) async fn get_path_entry(
         path = "/v0/namespaces/{namespace_id}/filesystem/content",
         tag = "filesystem",
         summary = "Read file",
-        description = "Returns file bytes for the current revision at a path, for a specific retained revision when `revision_no` is provided, or for the revision selected by a live snapshot when `snapshot_id` is provided.",
+        description = "Returns the current file bytes, a retained revision, or the revision captured by a live snapshot.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
             ("revision_no" = Option<RevisionNo>, Query, description = "Optional prior revision number; cannot be combined with snapshot_id"),
-            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Read the file revision this live snapshot selected")
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Use the file revision captured by this snapshot")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
@@ -592,12 +592,12 @@ pub(super) async fn create_commit(
         path = "/v0/namespaces/{namespace_id}/changes",
         tag = "filesystem",
         summary = "List changes after a sequence",
-        description = "Returns committed changes from the write-ahead log. When `snapshot_id` is provided, the feed ends at the sequence that snapshot captured.",
+        description = "Returns committed changes after a sequence. A snapshot limits the feed to its captured sequence.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("after_seq" = loonfs_api::ChangeSeq, Query, description = "Return committed changes after this sequence"),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "End the feed at the sequence this live snapshot captured")
+            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "End the feed at this snapshot's captured sequence")
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
@@ -685,10 +685,9 @@ pub(super) async fn pin_requested_snapshot(
     let Some(snapshot_id) = snapshot_id else {
         return Ok(None);
     };
-    let now_ms = current_unix_ms()?;
     state
         .reader
-        .pin_namespace_at_snapshot(namespace_id, &snapshot_id, now_ms)
+        .pin_namespace_at_snapshot(namespace_id, &snapshot_id)
         .await
         .map(Some)
         .map_err(|error| {
@@ -704,8 +703,7 @@ pub(super) fn reject_snapshot_with_revision(
     if snapshot_id.is_some() && revision_no.is_some() {
         return Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
-            "revision_no cannot be combined with snapshot_id; a snapshot read serves the revision \
-             selected by the snapshot",
+            "revision_no cannot be combined with snapshot_id",
         )
         .with_param("revision_no"));
     }

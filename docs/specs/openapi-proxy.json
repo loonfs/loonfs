@@ -62,7 +62,7 @@
           "filesystem"
         ],
         "summary": "List changes after a sequence",
-        "description": "Returns committed changes from the write-ahead log. When `snapshot_id` is provided, the feed ends at the sequence that snapshot captured.",
+        "description": "Returns committed changes after a sequence. A snapshot limits the feed to its captured sequence.",
         "operationId": "list_changes",
         "parameters": [
           {
@@ -99,7 +99,7 @@
           {
             "name": "snapshot_id",
             "in": "query",
-            "description": "End the feed at the sequence this live snapshot captured",
+            "description": "End the feed at this snapshot's captured sequence",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/CheckpointId"
@@ -277,7 +277,7 @@
           "filesystem"
         ],
         "summary": "Read file",
-        "description": "Returns file bytes for the current revision at a path, for a specific retained revision when `revision_no` is provided, or for the revision selected by a live snapshot when `snapshot_id` is provided.",
+        "description": "Returns the current file bytes, a retained revision, or the revision captured by a live snapshot.",
         "operationId": "get_file_bytes",
         "parameters": [
           {
@@ -310,7 +310,7 @@
           {
             "name": "snapshot_id",
             "in": "query",
-            "description": "Read the file revision this live snapshot selected",
+            "description": "Use the file revision captured by this snapshot",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/CheckpointId"
@@ -411,7 +411,7 @@
           {
             "name": "snapshot_id",
             "in": "query",
-            "description": "Authorize the file revision this live snapshot selected",
+            "description": "Use the file revision captured by this snapshot",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/CheckpointId"
@@ -502,7 +502,7 @@
           "filesystem"
         ],
         "summary": "List directory",
-        "description": "Lists a directory at the current namespace head or at a live snapshot when `snapshot_id` is provided.",
+        "description": "Lists a directory from the current state or a live snapshot.",
         "operationId": "list_path_entries",
         "parameters": [
           {
@@ -558,7 +558,7 @@
           {
             "name": "snapshot_id",
             "in": "query",
-            "description": "Read the directory as this live snapshot captured it",
+            "description": "Use the directory state captured by this snapshot",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/CheckpointId"
@@ -634,7 +634,7 @@
           "filesystem"
         ],
         "summary": "Stat path",
-        "description": "Returns metadata for a path at the current namespace head or at a live snapshot when `snapshot_id` is provided.",
+        "description": "Returns path metadata from the current state or a live snapshot.",
         "operationId": "get_path_entry",
         "parameters": [
           {
@@ -668,7 +668,7 @@
           {
             "name": "snapshot_id",
             "in": "query",
-            "description": "Read the path as this live snapshot captured it",
+            "description": "Use the path state captured by this snapshot",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/CheckpointId"
