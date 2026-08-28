@@ -10,7 +10,7 @@ use crate::index_read::{
 };
 use crate::keyspace::{manifest_key, segment_key};
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
-use crate::reads::{published_revision, resolve_batch_size, NamespaceReads};
+use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, PinnedNamespaceReads};
 use crate::root::{
     load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepIndexStatus,
     GrepManifestState,
@@ -443,7 +443,10 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
 /// Paging stops as soon as the tail exceeds the query's tail budget: past
 /// that the query either fails as lagging or serves the index's cut, and
 /// neither needs the rest of the feed enumerated.
-async fn tail_revisions(reads: &NamespaceReads<'_>, resume: ChangeFeedResume) -> Result<TailScan> {
+async fn tail_revisions(
+    reads: &PinnedNamespaceReads<'_>,
+    resume: ChangeFeedResume,
+) -> Result<TailScan> {
     let mut inodes = BTreeSet::new();
     let mut after_seq = resume.after_seq();
     loop {
@@ -616,7 +619,7 @@ enum CandidateContent {
 /// reaches the same inode. It also supplies the content reference, so the
 /// oversized skip stays a decision on declared size, before any fetch.
 async fn candidate_content(
-    reads: &NamespaceReads<'_>,
+    reads: &PinnedNamespaceReads<'_>,
     candidate: &GrepContentCandidate,
 ) -> CandidateContent {
     let entry = match reads.resolve_path(&candidate.path).await {
@@ -666,7 +669,8 @@ impl GrepService {
         reads: &NamespaceReads<'_>,
         store: &S,
     ) -> Result<GrepResponse> {
-        let head_seq = reads.head_seq().await?;
+        let reads = reads.pin().await?;
+        let head_seq = reads.head_seq();
         let limit = limit.as_usize();
         let fingerprint = request.fingerprint();
         let resume = match &request.cursor {
@@ -739,14 +743,14 @@ impl GrepService {
                 }
                 // A full scan includes all files at the current head, so it
                 // does not need a separate scan of recent unindexed changes.
-                candidates.unfiltered = scan_candidate_inodes(reads, scope.as_ref()).await?;
+                candidates.unfiltered = scan_candidate_inodes(&reads, scope.as_ref()).await?;
                 None
             }
         };
 
         let mut tail_scanned = true;
         if let Some(tail_resume) = tail_resume {
-            match tail_revisions(reads, tail_resume).await? {
+            match tail_revisions(&reads, tail_resume).await? {
                 TailScan::Within(inodes) => candidates.unfiltered.extend(inodes),
                 TailScan::OverBudget | TailScan::RebuildRequired if request.allow_stale => {
                     // Serve the index's cut and nothing newer. A candidate
@@ -883,7 +887,7 @@ impl GrepService {
             let contents = join_all(
                 batch
                     .iter()
-                    .map(|candidate| candidate_content(reads, candidate)),
+                    .map(|candidate| candidate_content(&reads, candidate)),
             )
             .await;
             // Emission stays strictly in candidate (inode) order: the batch
@@ -978,7 +982,7 @@ impl GrepService {
 /// when no path is given. The directory limit bounds the work and prevents a
 /// binding cycle from running forever.
 async fn scan_candidate_inodes(
-    reads: &NamespaceReads<'_>,
+    reads: &PinnedNamespaceReads<'_>,
     scope: Option<&PathEntry>,
 ) -> Result<BTreeSet<InodeId>> {
     let mut inodes = BTreeSet::new();

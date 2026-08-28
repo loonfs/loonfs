@@ -25,6 +25,7 @@ mod metrics_instruments;
 mod namespace_advance_observer;
 mod pagination;
 mod publication;
+mod read_snapshot;
 mod request_accounting;
 mod runtime_config;
 mod staged_content_reclamation;

@@ -147,6 +147,65 @@ fn normalize_namespace(mut response: GrepResponse, namespace_id: &NamespaceId) -
 }
 
 #[tokio::test]
+async fn grep_query_keeps_its_pinned_head_when_a_matching_file_commits_mid_query() {
+    let temp_dir = tempdir().expect("tempdir");
+    let base = Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let base_store: SharedObjectStore = base.clone();
+    let namespace_id = NamespaceId::parse("query-pin").expect("namespace id");
+    let writer = FsWriter::builder_with_store(base_store.clone())
+        .writer_id("query-pin-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    GrepHost::new(&base_store, "query-pin-index")
+        .await
+        .enable_grep_index(&namespace_id)
+        .await
+        .expect("enable empty index");
+
+    let blocking = Arc::new(BlockingStore::new(
+        base.clone(),
+        KeyPredicate::exact(root_key(&namespace_id)),
+        OperationClass::GetWithMetadata,
+    ));
+    let query_store: SharedObjectStore = blocking.clone();
+    blocking.block_next();
+    let grep_request = request("mid-query needle");
+    let query = new_query(&query_store, &namespace_id, &grep_request);
+    let publish = async {
+        blocking.wait_until_blocked().await;
+        let committed = writer
+            .put_file_bytes(
+                &namespace_id,
+                "/later.txt",
+                b"mid-query needle\n",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await;
+        blocking.release();
+        committed
+    };
+    let (pinned_response, committed) = tokio::join!(query, publish);
+    let committed = committed.expect("publish matching file while query is paused");
+    let pinned_response = pinned_response.expect("pinned query completes");
+
+    assert!(pinned_response.matches.is_empty());
+    assert!(pinned_response.head_seq < committed.committed_seq);
+
+    let latest = new_query(&query_store, &namespace_id, &grep_request)
+        .await
+        .expect("later query sees committed file");
+    assert_eq!(latest.head_seq, committed.committed_seq);
+    assert_eq!(latest.matches.len(), 1);
+    assert_eq!(latest.matches[0].path, "/later.txt");
+}
+
+#[tokio::test]
 async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
