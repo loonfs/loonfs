@@ -541,6 +541,21 @@ pub(crate) async fn run_admin_changes(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let after_seq = parse_public_ordinal_arg("--after", args.after.unwrap_or(0), ChangeSeq::parse)
         .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = args
+        .snapshot_id
+        .as_deref()
+        .map(CheckpointId::parse)
+        .transpose()
+        .map_err(|error| {
+            context.fail(
+                kind,
+                crate::error::CliError::new(
+                    ErrorCode::InvalidRequest.as_str(),
+                    format!("invalid --snapshot-id: {error}"),
+                )
+                .with_param("--snapshot-id"),
+            )
+        })?;
     let mut plan = PagePlan::new(&args.pagination);
     let mut cursor = after_seq;
     let mut response: Option<loonfs_api::v0::ListChangesResponse> = None;
@@ -549,7 +564,12 @@ pub(crate) async fn run_admin_changes(
     loop {
         let page = context
             .target
-            .list_changes(&context.namespace, cursor, plan.request_size())
+            .list_changes(
+                &context.namespace,
+                cursor,
+                plan.request_size(),
+                snapshot_id.as_ref(),
+            )
             .await
             .map_err(|error| context.fail(kind, error))?;
         plan.record(page.changes.len());

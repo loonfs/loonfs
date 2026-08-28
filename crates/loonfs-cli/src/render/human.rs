@@ -63,6 +63,47 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             "deleted {} (head_seq {})",
             response.namespace_id, response.head_seq.0
         ),
+        CommandData::SnapshotCreated(snapshot) => format!(
+            "snapshot {} created for {} at sequence {} (name: {}, expires: {})",
+            snapshot.snapshot_id,
+            snapshot.namespace_id,
+            snapshot.head_seq.0,
+            snapshot.name,
+            format_utc_ms(snapshot.expires_at_ms)
+        ),
+        CommandData::SnapshotsListed(response) => {
+            let mut lines = vec![
+                format!("live snapshots for {}", response.namespace_id),
+                "SNAPSHOT\tNAME\tSEQ\tCREATED\tEXPIRES".to_owned(),
+            ];
+            for snapshot in &response.snapshots {
+                lines.push(format!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    snapshot.snapshot_id,
+                    snapshot.name,
+                    snapshot.head_seq.0,
+                    format_utc_ms(snapshot.created_at_ms),
+                    format_utc_ms(snapshot.expires_at_ms),
+                ));
+            }
+            if response.snapshots.is_empty() {
+                lines.push("(none)".to_owned());
+            }
+            if let Some(cursor) = &response.next_cursor {
+                lines.push(format!("next_cursor: {cursor}"));
+            }
+            lines.join("\n")
+        }
+        CommandData::SnapshotExtended(snapshot) => format!(
+            "snapshot {} in {} extended to {}",
+            snapshot.snapshot_id,
+            snapshot.namespace_id,
+            format_utc_ms(snapshot.expires_at_ms)
+        ),
+        CommandData::SnapshotReleased(response) => format!(
+            "snapshot {} in {} released",
+            response.snapshot_id, response.namespace_id
+        ),
         CommandData::CheckpointCreated(checkpoint) => {
             let expiry = match checkpoint.expires_at_ms {
                 Some(expires_at_ms) => format!(", expires at {}", format_utc_ms(expires_at_ms)),

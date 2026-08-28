@@ -647,8 +647,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_policy_matches_admin_operation_classes() {
+    async fn retry_policy_matches_snapshot_and_admin_operation_classes() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+
+        let (transport, client) = single_attempt_probe();
+        assert_single_attempt(
+            client
+                .create_snapshot(&namespace_id, "backup", 10_000)
+                .await,
+            &transport,
+        );
+        drop(transport);
 
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(

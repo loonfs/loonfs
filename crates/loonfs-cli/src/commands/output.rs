@@ -5,7 +5,10 @@ use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_verdict, StoreProbeVerdict};
-use loonfs_api::v0::{GrepGcResponse, GrepIndex, ListChangesResponse, StoreProbeResponse};
+use loonfs_api::v0::{
+    GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, ReleaseSnapshotResponse,
+    SnapshotSummary, StoreProbeResponse,
+};
 use loonfs_api::{
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteNamespaceResponse,
     FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse, MaintenanceStepResponse,
@@ -162,6 +165,10 @@ pub(crate) enum CommandData {
     },
     NamespaceStatus(Namespace),
     NamespaceDeleted(DeleteNamespaceResponse),
+    SnapshotCreated(SnapshotSummary),
+    SnapshotsListed(ListSnapshotsResponse),
+    SnapshotExtended(SnapshotSummary),
+    SnapshotReleased(ReleaseSnapshotResponse),
     CheckpointCreated(Checkpoint),
     CheckpointsListed(ListCheckpointsResponse),
     CheckpointReleased(ReleaseCheckpointResponse),

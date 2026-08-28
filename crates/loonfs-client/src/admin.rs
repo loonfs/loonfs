@@ -1,4 +1,4 @@
-//! Checkpoints, maintenance, store probes, and grep administration.
+//! Snapshots, checkpoints, maintenance, store probes, and grep administration.
 
 use super::*;
 use crate::transport::{append_optional_pagination_query, append_query_param};
@@ -57,7 +57,140 @@ impl CheckpointsPager {
     }
 }
 
+/// Fetches live-snapshot pages as needed.
+#[must_use]
+pub struct SnapshotsPager {
+    client: Client,
+    namespace_id: NamespaceId,
+    page_size: Option<u32>,
+    cursor: Option<String>,
+    pending: Option<ListSnapshotsResponse>,
+    exhausted: bool,
+}
+
+impl SnapshotsPager {
+    /// Returns the next snapshot page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListSnapshotsResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .client
+            .list_snapshots_page(&self.namespace_id, self.page_size, self.cursor.as_deref())
+            .await;
+        Some(page.inspect(|page| {
+            self.cursor = page.next_cursor.clone();
+            self.exhausted = self.cursor.is_none();
+        }))
+    }
+
+    /// Returns at most `max_items` snapshots.
+    ///
+    /// Unused snapshots from the last page remain available to later calls.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<SnapshotSummary>> {
+        let mut snapshots = Vec::new();
+        while snapshots.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - snapshots.len()).min(page.snapshots.len());
+            if take < page.snapshots.len() {
+                let remaining = page.snapshots.split_off(take);
+                snapshots.extend(page.snapshots);
+                page.snapshots = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            snapshots.extend(page.snapshots);
+        }
+        Ok(snapshots)
+    }
+}
+
 impl Client {
+    /// Saves the namespace's current state for a limited time.
+    /// Retrying this request starts a distinct attempt.
+    pub async fn create_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        name: &str,
+        ttl_ms: u64,
+    ) -> Result<SnapshotSummary> {
+        let url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
+        self.request_json_once(
+            self.post(&url),
+            Some(&CreateSnapshotRequest {
+                name: name.to_owned(),
+                ttl_ms,
+            }),
+        )
+        .await
+    }
+
+    /// Creates a snapshot pager beginning at `cursor`.
+    pub fn list_snapshots_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> SnapshotsPager {
+        SnapshotsPager {
+            client: self.clone(),
+            namespace_id: namespace_id.clone(),
+            page_size,
+            cursor,
+            pending: None,
+            exhausted: false,
+        }
+    }
+
+    /// Lists one bounded page of available snapshots.
+    pub async fn list_snapshots_page(
+        &self,
+        namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListSnapshotsResponse> {
+        let mut url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
+        let mut has_query = false;
+        append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
+        self.request_json::<(), ListSnapshotsResponse>(self.get(&url), None)
+            .await
+    }
+
+    /// Extends a snapshot's lifetime. Repeating the same request is safe.
+    pub async fn extend_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+        ttl_ms: u64,
+    ) -> Result<SnapshotSummary> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
+            self.base_url
+        );
+        self.request_json(self.post(&url), Some(&ExtendSnapshotRequest { ttl_ms }))
+            .await
+    }
+
+    /// Releases a snapshot. Releasing it again succeeds.
+    pub async fn release_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+    ) -> Result<ReleaseSnapshotResponse> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
+            self.base_url
+        );
+        self.request_json::<(), ReleaseSnapshotResponse>(self.post(&url), None)
+            .await
+    }
+
     /// Returns namespace state and storage details used by maintenance.
     pub async fn get_namespace_diagnostics(
         &self,

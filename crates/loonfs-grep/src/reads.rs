@@ -125,6 +125,7 @@ impl<'a> NamespaceReads<'a> {
                 absolute_path.as_str(),
                 StatPathOptions {
                     include_attributes: false,
+                    snapshot_id: None,
                 },
             )
             .await?)
@@ -260,6 +261,7 @@ impl PinnedNamespaceReads<'_> {
                 absolute_path.as_str(),
                 StatPathOptions {
                     include_attributes: false,
+                    snapshot_id: None,
                 },
             )
             .await?)

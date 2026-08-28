@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Selects a retained revision or snapshot for a download. Set at most one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DownloadOptions {
+    /// Download one retained revision instead of the current file.
+    pub revision_no: Option<RevisionNo>,
+    /// Download the file revision captured by this snapshot.
+    pub snapshot_id: Option<CheckpointId>,
+}
+
 /// A direct download returned in verified, bounded chunks.
 ///
 /// Verification completes only when [`Self::next_chunk`] returns `None`.
@@ -119,12 +128,32 @@ impl Client {
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
     ) -> Result<BeginDownloadResponse> {
-        let url = format!(
+        self.create_download_with_options(
+            spec,
+            &DownloadOptions {
+                revision_no,
+                snapshot_id: None,
+            },
+        )
+        .await
+    }
+
+    /// Requests short-lived direct access to a revision or snapshot.
+    pub async fn create_download_with_options(
+        &self,
+        spec: &NamespacePath,
+        options: &DownloadOptions,
+    ) -> Result<BeginDownloadResponse> {
+        let mut url = format!(
             "{}/v0/namespaces/{}/filesystem/downloads",
             self.base_url,
             spec.namespace().as_str()
         );
-        let request = match revision_no {
+        if let Some(snapshot_id) = &options.snapshot_id {
+            url.push_str("?snapshot_id=");
+            url.push_str(snapshot_id.as_str());
+        }
+        let request = match options.revision_no {
             Some(revision_no) => {
                 BeginDownloadRequest::for_revision(spec.absolute_path().clone(), revision_no)
             }

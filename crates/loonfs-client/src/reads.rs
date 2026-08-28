@@ -3,6 +3,24 @@
 use super::*;
 use crate::transport::{append_optional_pagination_query, append_query_param};
 
+/// Selects a retained revision or snapshot for a file read. Set at most one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadFileOptions {
+    /// Read one retained revision instead of the current file.
+    pub revision_no: Option<RevisionNo>,
+    /// Read the file revision captured by this snapshot.
+    pub snapshot_id: Option<CheckpointId>,
+}
+
+/// Optional selectors for one change-feed page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListChangesOptions {
+    /// Maximum number of changes in the page.
+    pub limit: Option<u32>,
+    /// End the feed at this snapshot's captured sequence.
+    pub snapshot_id: Option<CheckpointId>,
+}
+
 /// Fetches directory pages as needed.
 ///
 /// [`Self::next`] returns one page with its metadata. [`Self::collect_up_to`]
@@ -272,6 +290,7 @@ pub struct ChangesPager {
     namespace_id: NamespaceId,
     after_seq: ChangeSeq,
     page_size: Option<u32>,
+    snapshot_id: Option<CheckpointId>,
     pending: Option<ListChangesResponse>,
     exhausted: bool,
 }
@@ -287,7 +306,14 @@ impl ChangesPager {
         }
         let page = self
             .client
-            .list_changes(&self.namespace_id, self.after_seq, self.page_size)
+            .list_changes_with_options(
+                &self.namespace_id,
+                self.after_seq,
+                &ListChangesOptions {
+                    limit: self.page_size,
+                    snapshot_id: self.snapshot_id.clone(),
+                },
+            )
             .await;
         Some(page.inspect(|page| {
             self.exhausted = page.next_after_seq.is_none();
@@ -425,6 +451,14 @@ impl Client {
             "include_attributes",
             &options.include_attributes.to_string(),
         );
+        if let Some(snapshot_id) = &options.snapshot_id {
+            append_query_param(
+                &mut url,
+                &mut has_query,
+                "snapshot_id",
+                snapshot_id.as_str(),
+            );
+        }
         self.request_json::<(), _>(self.get(&url), None).await
     }
 
@@ -447,6 +481,14 @@ impl Client {
             "include_attributes",
             &options.include_attributes.to_string(),
         );
+        if let Some(snapshot_id) = &options.snapshot_id {
+            append_query_param(
+                &mut url,
+                &mut has_query,
+                "snapshot_id",
+                snapshot_id.as_str(),
+            );
+        }
         self.request_json::<(), _>(self.get(&url), None).await
     }
 
@@ -521,13 +563,8 @@ impl Client {
 
     /// Reads the file's current contents into memory.
     pub async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
-        let url = format!(
-            "{}/v0/namespaces/{}/filesystem/content?path={}",
-            self.base_url,
-            spec.namespace().as_str(),
-            urlencoding::encode(spec.absolute_path().as_str())
-        );
-        self.request_bytes(&url).await
+        self.get_file_bytes_with_options(spec, &ReadFileOptions::default())
+            .await
     }
 
     /// Reads the requested file revision into memory.
@@ -536,13 +573,45 @@ impl Client {
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        let url = format!(
-            "{}/v0/namespaces/{}/filesystem/content?path={}&revision_no={}",
+        self.get_file_bytes_with_options(
+            spec,
+            &ReadFileOptions {
+                revision_no: Some(revision_no),
+                snapshot_id: None,
+            },
+        )
+        .await
+    }
+
+    /// Reads file content from a retained revision or snapshot.
+    pub async fn get_file_bytes_with_options(
+        &self,
+        spec: &NamespacePath,
+        options: &ReadFileOptions,
+    ) -> Result<Vec<u8>> {
+        let mut url = format!(
+            "{}/v0/namespaces/{}/filesystem/content?path={}",
             self.base_url,
             spec.namespace().as_str(),
-            urlencoding::encode(spec.absolute_path().as_str()),
-            revision_no.0
+            urlencoding::encode(spec.absolute_path().as_str())
         );
+        let mut has_query = true;
+        if let Some(revision_no) = options.revision_no {
+            append_query_param(
+                &mut url,
+                &mut has_query,
+                "revision_no",
+                &revision_no.0.to_string(),
+            );
+        }
+        if let Some(snapshot_id) = &options.snapshot_id {
+            append_query_param(
+                &mut url,
+                &mut has_query,
+                "snapshot_id",
+                snapshot_id.as_str(),
+            );
+        }
         self.request_bytes(&url).await
     }
 
@@ -679,12 +748,34 @@ impl Client {
         after_seq: ChangeSeq,
         limit: Option<u32>,
     ) -> Result<ListChangesResponse> {
+        self.list_changes_with_options(
+            namespace_id,
+            after_seq,
+            &ListChangesOptions {
+                limit,
+                snapshot_id: None,
+            },
+        )
+        .await
+    }
+
+    /// Returns committed changes using the requested page and snapshot bounds.
+    pub async fn list_changes_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        options: &ListChangesOptions,
+    ) -> Result<ListChangesResponse> {
         let mut url = format!(
             "{}/v0/namespaces/{namespace_id}/changes?after_seq={}",
             self.base_url, after_seq.0
         );
-        if let Some(limit) = limit {
+        if let Some(limit) = options.limit {
             url.push_str(&format!("&limit={limit}"));
+        }
+        if let Some(snapshot_id) = &options.snapshot_id {
+            url.push_str("&snapshot_id=");
+            url.push_str(snapshot_id.as_str());
         }
         self.request_json::<(), ListChangesResponse>(self.get(&url), None)
             .await
@@ -702,6 +793,26 @@ impl Client {
             namespace_id: namespace_id.clone(),
             after_seq,
             page_size,
+            snapshot_id: None,
+            pending: None,
+            exhausted: false,
+        }
+    }
+
+    /// Creates a snapshot-bounded change-feed pager beginning after `after_seq`.
+    pub fn list_changes_pager_at_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        page_size: Option<u32>,
+        snapshot_id: &CheckpointId,
+    ) -> ChangesPager {
+        ChangesPager {
+            client: self.clone(),
+            namespace_id: namespace_id.clone(),
+            after_seq,
+            page_size,
+            snapshot_id: Some(snapshot_id.clone()),
             pending: None,
             exhausted: false,
         }

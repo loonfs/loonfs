@@ -2,7 +2,7 @@
 
 use super::progress::{rest_between_status_checks, wait_for_grep_index, GrepWaitStep};
 use super::{FileDownload, GrepWaitProgress, MaintenanceDrainProgress, StepBudget};
-use crate::backend_error::{map_namespace_scoped_runtime_error, BackendError};
+use crate::backend_error::BackendError;
 use crate::payload::LocalPayload;
 use crate::progress::ProgressReporter;
 use crate::resolve::ResolvedTarget;
@@ -10,8 +10,9 @@ use crate::uploads::UploadJournal;
 use loonfs::MaintenanceJobId;
 use loonfs_api::{
     v0::{
-        GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse, StoreProbeRequest,
-        StoreProbeResponse, UploadSession,
+        GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
+        ReleaseSnapshotResponse, SnapshotSummary, StoreProbeRequest, StoreProbeResponse,
+        UploadSession,
     },
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, CommitResponse,
     ContentRef, CreateCheckpointRequest, DeleteNamespaceResponse, GrepRequest, GrepResponse,
@@ -20,9 +21,10 @@ use loonfs_api::{
     PathEntry, ReleaseCheckpointResponse, RevisionNo, UploadId,
 };
 use loonfs_client::{
-    ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions,
-    MoveOptions, NamespacePath, PutFileOptions, RestoreRevisionOptions, StatPathOptions,
-    UndeleteOptions, UpdateAttributesOptions,
+    ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, DownloadOptions,
+    ListChangesOptions, ListPathEntriesOptions, MoveOptions, NamespacePath, PutFileOptions,
+    ReadFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 use std::sync::Arc;
 
@@ -45,30 +47,6 @@ fn maintenance_host_needs_an_embedded_profile() -> BackendError {
          own maintenance; use `loonfs admin maintenance step` for one pass or `loonfs admin \
          index status` to inspect the index",
     )
-}
-
-/// Directory pager for embedded and remote profiles.
-pub(crate) enum PathEntriesPager {
-    Embedded {
-        pager: loonfs::PathEntriesPager,
-        namespace_id: NamespaceId,
-    },
-    Remote(loonfs_client::PathEntriesPager),
-}
-
-impl PathEntriesPager {
-    /// Returns the next page with its metadata.
-    pub(crate) async fn next(&mut self) -> Option<Result<ListPathEntriesResponse, BackendError>> {
-        match self {
-            Self::Embedded {
-                pager,
-                namespace_id,
-            } => pager.next().await.map(|result| {
-                result.map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
-            }),
-            Self::Remote(pager) => pager.next().await.map(|result| result.map_err(Into::into)),
-        }
-    }
 }
 
 /// Implements CLI operations for embedded and remote targets.
@@ -170,59 +148,50 @@ impl ResolvedTarget {
         }
     }
 
-    /// Creates a directory pager that fetches pages as needed.
-    pub(crate) fn list_path_entries_pager(
-        &self,
-        spec: &NamespacePath,
-        page_size: Option<u32>,
-        cursor: Option<&str>,
-    ) -> Result<PathEntriesPager, BackendError> {
-        match self {
-            Self::Embedded(target) => Ok(PathEntriesPager::Embedded {
-                pager: target
-                    .backend
-                    .list_path_entries_pager(spec, page_size, cursor)?,
-                namespace_id: spec.namespace().clone(),
-            }),
-            Self::Remote(target) => Ok(PathEntriesPager::Remote(
-                target.client.list_path_entries_pager(
-                    spec,
-                    page_size,
-                    cursor.map(ToOwned::to_owned),
-                    &ListPathEntriesOptions::default(),
-                ),
-            )),
-        }
-    }
-
     /// Lists one page of a directory, for callers that bound their output.
     pub(crate) async fn list_path_entries_page(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
+        snapshot_id: Option<&CheckpointId>,
     ) -> Result<ListPathEntriesResponse, BackendError> {
         match self {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .list_path_entries_page(spec, limit, cursor)
+                    .list_path_entries_page(spec, limit, cursor, snapshot_id)
                     .await
             }
             Self::Remote(target) => Ok(target
                 .client
-                .list_path_entries_page(spec, limit, cursor, &ListPathEntriesOptions::default())
+                .list_path_entries_page(
+                    spec,
+                    limit,
+                    cursor,
+                    &ListPathEntriesOptions {
+                        snapshot_id: snapshot_id.cloned(),
+                        ..ListPathEntriesOptions::default()
+                    },
+                )
                 .await?),
         }
     }
 
-    /// Describes a single path entry, attributes included.
-    pub(crate) async fn get_path_entry(
+    /// Describes a path from the current state or a snapshot.
+    pub(crate) async fn get_path_entry_at_snapshot(
         &self,
         spec: &NamespacePath,
+        snapshot_id: Option<&CheckpointId>,
     ) -> Result<PathEntry, BackendError> {
-        self.get_path_entry_projected(spec, &StatPathOptions::default())
-            .await
+        self.get_path_entry_projected(
+            spec,
+            &StatPathOptions {
+                snapshot_id: snapshot_id.cloned(),
+                ..StatPathOptions::default()
+            },
+        )
+        .await
     }
 
     /// Describes one visible inode, including its attributes.
@@ -250,10 +219,20 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
     ) -> Result<PathEntry, BackendError> {
+        self.get_path_entry_without_attributes_at_snapshot(spec, None)
+            .await
+    }
+
+    pub(crate) async fn get_path_entry_without_attributes_at_snapshot(
+        &self,
+        spec: &NamespacePath,
+        snapshot_id: Option<&CheckpointId>,
+    ) -> Result<PathEntry, BackendError> {
         self.get_path_entry_projected(
             spec,
             &StatPathOptions {
                 include_attributes: false,
+                snapshot_id: snapshot_id.cloned(),
             },
         )
         .await
@@ -270,14 +249,23 @@ impl ResolvedTarget {
         }
     }
 
-    /// Reads a file's current content.
-    pub(crate) async fn get_file_bytes(
+    /// Reads file content from a revision or snapshot.
+    pub(crate) async fn get_file_bytes_with_options(
         &self,
         spec: &NamespacePath,
+        options: &ReadFileOptions,
     ) -> Result<Vec<u8>, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.get_file_bytes(spec).await,
-            Self::Remote(target) => Ok(target.client.get_file_bytes(spec).await?),
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .get_file_bytes_with_options(spec, options)
+                    .await
+            }
+            Self::Remote(target) => Ok(target
+                .client
+                .get_file_bytes_with_options(spec, options)
+                .await?),
         }
     }
 
@@ -294,12 +282,22 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
+        snapshot_id: Option<&CheckpointId>,
         size_bytes: Option<u64>,
         start_offset: u64,
     ) -> Result<FileDownload, BackendError> {
         if let (Self::Remote(target), Some(size_bytes)) = (self, size_bytes) {
             if target.client.offers_direct_download(size_bytes).await? {
-                let grant = target.client.create_download(spec, revision_no).await?;
+                let grant = target
+                    .client
+                    .create_download_with_options(
+                        spec,
+                        &DownloadOptions {
+                            revision_no,
+                            snapshot_id: snapshot_id.cloned(),
+                        },
+                    )
+                    .await?;
                 return Ok(FileDownload::Direct {
                     stream: Box::new(
                         target
@@ -311,9 +309,16 @@ impl ResolvedTarget {
                 });
             }
         }
-        if let Some(revision_no) = revision_no {
+        if revision_no.is_some() || snapshot_id.is_some() {
             return Ok(FileDownload::Whole(
-                self.get_file_revision_bytes(spec, revision_no).await?,
+                self.get_file_bytes_with_options(
+                    spec,
+                    &ReadFileOptions {
+                        revision_no,
+                        snapshot_id: snapshot_id.cloned(),
+                    },
+                )
+                .await?,
             ));
         }
         match self {
@@ -420,26 +425,6 @@ impl ResolvedTarget {
                 )
                 .await
             }
-        }
-    }
-
-    /// Reads a retained file revision's content.
-    pub(crate) async fn get_file_revision_bytes(
-        &self,
-        spec: &NamespacePath,
-        revision_no: RevisionNo,
-    ) -> Result<Vec<u8>, BackendError> {
-        match self {
-            Self::Embedded(target) => {
-                target
-                    .backend
-                    .get_file_revision_bytes(spec, revision_no)
-                    .await
-            }
-            Self::Remote(target) => Ok(target
-                .client
-                .get_file_revision_bytes(spec, revision_no)
-                .await?),
         }
     }
 
@@ -666,6 +651,89 @@ impl ResolvedTarget {
         }
     }
 
+    /// Saves the namespace's current state for a limited time.
+    pub(crate) async fn create_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        name: &str,
+        ttl_ms: u64,
+    ) -> Result<SnapshotSummary, BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .create_snapshot(namespace_id, name, ttl_ms)
+                    .await
+            }
+            Self::Remote(target) => Ok(target
+                .client
+                .create_snapshot(namespace_id, name, ttl_ms)
+                .await?),
+        }
+    }
+
+    /// Lists one page of available snapshots.
+    pub(crate) async fn list_snapshots_page(
+        &self,
+        namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListSnapshotsResponse, BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .list_snapshots_page(namespace_id, limit, cursor)
+                    .await
+            }
+            Self::Remote(target) => Ok(target
+                .client
+                .list_snapshots_page(namespace_id, limit, cursor)
+                .await?),
+        }
+    }
+
+    /// Extends a snapshot's lifetime.
+    pub(crate) async fn extend_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+        ttl_ms: u64,
+    ) -> Result<SnapshotSummary, BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .extend_snapshot(namespace_id, snapshot_id, ttl_ms)
+                    .await
+            }
+            Self::Remote(target) => Ok(target
+                .client
+                .extend_snapshot(namespace_id, snapshot_id, ttl_ms)
+                .await?),
+        }
+    }
+
+    /// Releases one snapshot. Repeated releases succeed.
+    pub(crate) async fn release_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+    ) -> Result<ReleaseSnapshotResponse, BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .release_snapshot(namespace_id, snapshot_id)
+                    .await
+            }
+            Self::Remote(target) => Ok(target
+                .client
+                .release_snapshot(namespace_id, snapshot_id)
+                .await?),
+        }
+    }
+
     // --- maintenance/admin plane (`admin/v0`) ---
 
     /// Creates or reuses a named, user-owned checkpoint pinning the
@@ -809,17 +877,25 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
+        snapshot_id: Option<&CheckpointId>,
     ) -> Result<ListChangesResponse, BackendError> {
         match self {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .list_changes(namespace_id, after_seq, limit)
+                    .list_changes(namespace_id, after_seq, limit, snapshot_id)
                     .await
             }
             Self::Remote(target) => Ok(target
                 .client
-                .list_changes(namespace_id, after_seq, limit)
+                .list_changes_with_options(
+                    namespace_id,
+                    after_seq,
+                    &ListChangesOptions {
+                        limit,
+                        snapshot_id: snapshot_id.cloned(),
+                    },
+                )
                 .await?),
         }
     }

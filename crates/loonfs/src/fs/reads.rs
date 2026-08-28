@@ -18,6 +18,17 @@ use loonfs_api::{
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 
+/// Runtime readers require callers to pin snapshots explicitly.
+fn reject_snapshot_option(snapshot_id: &Option<CheckpointId>, reader: &str) -> Result<()> {
+    if snapshot_id.is_some() {
+        return Err(loonfs_core::Error::InvalidCheckpointRequest(format!(
+            "snapshot_id is not supported by {reader}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// A namespace metadata view pinned to one head sequence.
 ///
 /// Create one from the current state, a checkpoint, or a live snapshot. All
@@ -46,6 +57,10 @@ impl FsReadSnapshot {
         absolute_path: &str,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
+        reject_snapshot_option(
+            &options.snapshot_id,
+            "FsReadSnapshot because it is already pinned",
+        )?;
         Ok(self
             .engine
             .resolve_path(absolute_path, options, &self.context)
@@ -59,6 +74,7 @@ impl FsReadSnapshot {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
+        reject_snapshot_option(&options.snapshot_id, "here; this view is already pinned")?;
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         let page = self
@@ -536,6 +552,10 @@ impl FsReader {
         absolute_path: &str,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
+        reject_snapshot_option(
+            &options.snapshot_id,
+            "FsReader; call pin_namespace_at_snapshot first",
+        )?;
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
@@ -618,6 +638,10 @@ impl FsReader {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
+        reject_snapshot_option(
+            &options.snapshot_id,
+            "FsReader; call pin_namespace_at_snapshot first",
+        )?;
         self.core.record_trace_context(&tracing::Span::current());
         let (mut response, next_cursor) = self
             .list_path_entries_page_typed(namespace_id, absolute_path, request, options)

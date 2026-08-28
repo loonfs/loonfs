@@ -272,6 +272,17 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         )
         .await
         .expect("create snapshot");
+    let snapshot_options = loonfs::StatPathOptions {
+        snapshot_id: Some(snapshot.checkpoint_id.clone()),
+        ..Default::default()
+    };
+    assert_core_error_kind(
+        runtime
+            .reader
+            .get_path_entry(&namespace_id, "/pinned.txt", snapshot_options.clone())
+            .await,
+        ErrorCode::InvalidRequest,
+    );
 
     runtime
         .put_file_bytes(
@@ -290,6 +301,10 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
         .await
         .expect("pin live snapshot");
+    assert_core_error_kind(
+        pinned.get_path_entry("/pinned.txt", snapshot_options).await,
+        ErrorCode::InvalidRequest,
+    );
     assert_eq!(pinned.head_seq(), snapshot.checkpoint_seq);
     assert_eq!(
         pinned

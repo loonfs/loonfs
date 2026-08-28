@@ -240,6 +240,7 @@ async fn the_client_round_trips_the_read_options() {
             &path("/docs/report.txt"),
             &StatPathOptions {
                 include_attributes: false,
+                snapshot_id: None,
             },
         )
         .await
@@ -259,6 +260,7 @@ async fn the_client_round_trips_the_read_options() {
         &path("/docs"),
         &ListPathEntriesOptions {
             include_attributes: true,
+            snapshot_id: None,
         },
     )
     .await
