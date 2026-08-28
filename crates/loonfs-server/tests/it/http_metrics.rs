@@ -106,6 +106,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     );
     assert!(first.contains_key("loonfs_metadata_segment_cache_gets_total{result=\"hit\"}"));
     assert!(first.contains_key("loonfs_runtime_cache_latest_metadata_view_reads_total"));
+    assert!(first.contains_key("loonfs_runtime_cache_snapshot_view_reads_total"));
     assert!(first.contains_key("loonfs_grep_block_cache_gets_total{result=\"hit\"}"));
     assert!(first.contains_key("loonfs_wal_tail_projection_cache_retained_rows"));
     assert_eq!(

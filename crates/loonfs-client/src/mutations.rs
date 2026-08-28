@@ -671,6 +671,8 @@ mod tests {
             retention_floor_seq: ChangeSeq(1),
             current_manifest_no: None,
             wal_tail_segments: 2,
+            live_snapshots: 3,
+            live_checkpoints: 4,
         };
         let transport = crate::transport::test_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),

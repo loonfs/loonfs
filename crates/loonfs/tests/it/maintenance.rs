@@ -64,7 +64,7 @@ fn namespace_diagnostics_reports_wal_tail_segments() {
     assert_eq!(status.current_manifest_no, None);
     assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
-    assert_eq!(store.count(OperationClass::List), 0);
+    assert_eq!(store.count(OperationClass::List), 1);
 }
 
 #[test]
@@ -97,6 +97,57 @@ fn namespace_diagnostics_counts_wal_tail_without_reading_segments() {
         .expect("status with populated tail");
     assert_eq!(status.wal_tail_segments, 3);
     assert_eq!(store.count(OperationClass::Read), 0);
+}
+
+#[test]
+fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "diagnostic-checkpoint-count-test");
+    let source = namespace_id("source");
+    let target = namespace_id("target");
+
+    fs.create_namespace_blocking(&source, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    block_on(fs.admin.create_checkpoint(
+        &source,
+        CreateCheckpointOptions {
+            name: "durable".to_owned(),
+            ttl_ms: None,
+        },
+    ))
+    .expect("create durable checkpoint");
+    block_on(fs.admin.create_checkpoint(
+        &source,
+        CreateCheckpointOptions {
+            name: "expired".to_owned(),
+            ttl_ms: Some(0),
+        },
+    ))
+    .expect("create expired checkpoint");
+    block_on(fs.admin.create_snapshot(
+        &source,
+        CreateSnapshotOptions {
+            name: "expired".to_owned(),
+            expires_at_ms: 1,
+        },
+    ))
+    .expect("create expired snapshot record");
+    block_on(fs.admin.create_snapshot(
+        &source,
+        CreateSnapshotOptions {
+            name: "live".to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+    ))
+    .expect("create live snapshot");
+    fs.fork_namespace_blocking(&source, &target)
+        .expect("fork namespace");
+
+    let diagnostics = fs
+        .namespace_diagnostics_blocking(&source)
+        .expect("read diagnostics");
+    assert_eq!(diagnostics.live_snapshots, 1);
+    assert_eq!(diagnostics.live_checkpoints, 2);
 }
 
 /// Pointers a head published before the accelerator was sized to cover the

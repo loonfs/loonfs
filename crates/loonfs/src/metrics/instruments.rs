@@ -126,6 +126,13 @@ impl RuntimeInstruments {
         }
     }
 
+    /// Records one read handled through a snapshot-pinned view.
+    pub(crate) fn snapshot_view_read(&self) {
+        if let Some(installed) = &self.installed {
+            installed.cache.snapshot_view_reads.increment(1);
+        }
+    }
+
     /// Returns the metadata-segment cache metrics observer, if metrics are enabled.
     pub(crate) fn metadata_segment_cache_observer(
         &self,
@@ -567,6 +574,7 @@ impl MaintenanceJobInstruments {
 /// Metrics for caches owned by the runtime. All instruments are registered together.
 struct RuntimeCacheInstruments {
     latest_metadata_view_reads: Arc<dyn CounterHandle>,
+    snapshot_view_reads: Arc<dyn CounterHandle>,
     metadata_segment: Arc<MetadataSegmentCacheInstruments>,
     wal_tail_projection: Arc<WalTailProjectionCacheInstruments>,
 }
@@ -600,6 +608,11 @@ impl RuntimeCacheInstruments {
             latest_metadata_view_reads: recorder.register_counter(
                 "loonfs.runtime_cache.latest_metadata_view_reads",
                 "Latest metadata reads served through the metadata-view path",
+                &[],
+            ),
+            snapshot_view_reads: recorder.register_counter(
+                "loonfs.runtime_cache.snapshot_view_reads",
+                "Metadata reads served through a snapshot-pinned view",
                 &[],
             ),
             metadata_segment: Arc::new(MetadataSegmentCacheInstruments::register(recorder)),
@@ -1022,6 +1035,7 @@ mod tests {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let instruments = RuntimeInstruments::new(Some(recorder.clone()));
         instruments.latest_metadata_view_read();
+        instruments.snapshot_view_read();
 
         let metadata = instruments
             .metadata_segment_cache_observer()
@@ -1050,6 +1064,7 @@ mod tests {
                 &[][..],
                 1,
             ),
+            ("loonfs.runtime_cache.snapshot_view_reads", &[][..], 1),
             (
                 "loonfs.metadata_segment_cache.gets",
                 &[("result", "hit")][..],

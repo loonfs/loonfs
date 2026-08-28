@@ -745,6 +745,8 @@ async fn admin_namespace_diagnostics_route_answers_storage_fields() {
     assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(0));
     assert_eq!(diagnostics.current_manifest_no, None);
     assert_eq!(diagnostics.wal_tail_segments, 1);
+    assert_eq!(diagnostics.live_snapshots, 0);
+    assert_eq!(diagnostics.live_checkpoints, 0);
 
     state.writer.shutdown().await.expect("shutdown writer");
 }
@@ -895,6 +897,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
 
     for name in [
         "loonfs_runtime_cache_latest_metadata_view_reads_total",
+        "loonfs_runtime_cache_snapshot_view_reads_total",
         "loonfs_metadata_segment_cache_gets_total",
         "loonfs_metadata_segment_cache_inserts_total",
         "loonfs_metadata_segment_cache_evictions_total",

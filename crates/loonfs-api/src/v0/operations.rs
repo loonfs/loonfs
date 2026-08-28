@@ -196,6 +196,10 @@ pub struct NamespaceDiagnostics {
     pub current_manifest_no: Option<ManifestNo>,
     /// Number of visible WAL segments after the current manifest.
     pub wal_tail_segments: u64,
+    /// Number of active snapshot-owned records unexpired when diagnostics were read.
+    pub live_snapshots: u64,
+    /// Number of active user-owned records, expired or not.
+    pub live_checkpoints: u64,
 }
 
 /// Result of deleting a namespace.
@@ -1422,6 +1426,8 @@ mod tests {
             retention_floor_seq: ChangeSeq(4),
             current_manifest_no: Some(ManifestNo(8)),
             wal_tail_segments: 3,
+            live_snapshots: 2,
+            live_checkpoints: 5,
         };
         assert_eq!(
             serde_json::to_value(diagnostics).expect("serialize namespace diagnostics"),
@@ -1430,7 +1436,9 @@ mod tests {
                 "head_seq": 11,
                 "retention_floor_seq": 4,
                 "current_manifest_no": 8,
-                "wal_tail_segments": 3
+                "wal_tail_segments": 3,
+                "live_snapshots": 2,
+                "live_checkpoints": 5
             })
         );
     }

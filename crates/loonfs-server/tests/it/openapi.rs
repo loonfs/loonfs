@@ -842,6 +842,18 @@ fn openapi_publishes_namespace_diagnostics_in_the_admin_plane() {
         operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
         "#/components/schemas/NamespaceDiagnostics"
     );
+    let diagnostics = &spec["components"]["schemas"]["NamespaceDiagnostics"];
+    assert_eq!(
+        required_fields(diagnostics),
+        BTreeSet::from([
+            "head_seq",
+            "live_checkpoints",
+            "live_snapshots",
+            "namespace_id",
+            "retention_floor_seq",
+            "wal_tail_segments",
+        ])
+    );
 }
 
 #[test]

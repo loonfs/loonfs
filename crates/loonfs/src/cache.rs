@@ -60,6 +60,8 @@ pub(crate) struct CachedNamespaceAnchor {
 pub struct RuntimeCacheStats {
     /// Latest metadata reads served through the metadata-view path.
     pub latest_metadata_view_reads: usize,
+    /// Metadata reads served through a snapshot-pinned view.
+    pub snapshot_view_reads: usize,
     /// WAL-tail projection cache hits.
     pub wal_tail_projection_cache_hits: usize,
     /// WAL-tail projection cache misses.
@@ -98,6 +100,7 @@ pub struct RuntimeCacheStats {
 
 pub(crate) struct RuntimeCacheStatsInner {
     latest_metadata_view_reads: AtomicUsize,
+    snapshot_view_reads: AtomicUsize,
     instruments: Arc<RuntimeInstruments>,
 }
 
@@ -105,6 +108,7 @@ impl RuntimeCacheStatsInner {
     pub(crate) fn new(instruments: Arc<RuntimeInstruments>) -> Self {
         Self {
             latest_metadata_view_reads: AtomicUsize::new(0),
+            snapshot_view_reads: AtomicUsize::new(0),
             instruments,
         }
     }
@@ -116,6 +120,7 @@ impl RuntimeCacheStatsInner {
     ) -> RuntimeCacheStats {
         RuntimeCacheStats {
             latest_metadata_view_reads: self.latest_metadata_view_reads.load(Ordering::SeqCst),
+            snapshot_view_reads: self.snapshot_view_reads.load(Ordering::SeqCst),
             wal_tail_projection_cache_hits: wal_tail_projection_cache.hits,
             wal_tail_projection_cache_misses: wal_tail_projection_cache.misses,
             wal_tail_projection_cache_inserts: wal_tail_projection_cache.inserts,
@@ -145,6 +150,11 @@ impl RuntimeCacheStatsInner {
         self.latest_metadata_view_reads
             .fetch_add(1, Ordering::SeqCst);
         self.instruments.latest_metadata_view_read();
+    }
+
+    pub(crate) fn record_snapshot_view_read(&self) {
+        self.snapshot_view_reads.fetch_add(1, Ordering::SeqCst);
+        self.instruments.snapshot_view_read();
     }
 }
 
