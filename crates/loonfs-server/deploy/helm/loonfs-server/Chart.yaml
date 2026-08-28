@@ -4,5 +4,5 @@ description: The LoonFS server, one active process behind the v0 HTTP API.
 type: application
 # Keep both values equal to `workspace.package.version`. `version` identifies
 # the chart package, and `appVersion` identifies the LoonFS server version.
-version: 0.2.1
-appVersion: "0.2.1"
+version: 0.3.0
+appVersion: "0.3.0"
