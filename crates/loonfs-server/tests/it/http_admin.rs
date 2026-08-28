@@ -210,6 +210,16 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(repeated.manifest_no, first.manifest_no);
     assert_eq!(repeated.expires_at_ms, first.expires_at_ms);
     assert!(repeated.created_at_ms >= first.created_at_ms);
+    client
+        .fork_namespace(&namespace, &namespace_id("fork"))
+        .await
+        .expect("fork namespace");
+    let diagnostics = client
+        .get_namespace_diagnostics(&namespace)
+        .await
+        .expect("read checkpoint diagnostics");
+    assert_eq!(diagnostics.live_snapshots, 0);
+    assert_eq!(diagnostics.live_checkpoints, 2);
 
     // Releasing a checkpoint twice returns the same result.
     let released = post_checkpoint_release(
@@ -232,6 +242,11 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     )
     .expect("repeat release");
     assert_eq!(released_again, released);
+    let diagnostics = client
+        .get_namespace_diagnostics(&namespace)
+        .await
+        .expect("read diagnostics after release");
+    assert_eq!(diagnostics.live_checkpoints, 1);
     let bogus_release =
         post_checkpoint_release(&server_url, namespace.as_str(), "not-a-checkpoint-id")
             .expect_err("malformed checkpoint id");

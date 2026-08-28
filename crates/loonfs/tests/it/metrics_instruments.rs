@@ -8,8 +8,8 @@
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use loonfs::{
-    CreateNamespaceOptions, FsBackgroundWork, MaintenanceJobId, MaintenanceStepConclusion,
-    MetadataMaintenanceOptions, PutFileOptions,
+    CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions, FsBackgroundWork,
+    MaintenanceJobId, MaintenanceStepConclusion, MetadataMaintenanceOptions, PutFileOptions,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
@@ -173,6 +173,63 @@ fn a_collection_step_reports_what_the_pass_retained() {
         ),
         0,
         "a fresh namespace has nothing to reclaim yet"
+    );
+}
+
+#[test]
+fn snapshot_pins_report_the_snapshot_view_counter() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let namespace_id = namespace_id("snapshot-metrics");
+    let (stats, snapshot) = block_on(async {
+        let fs = open_runtime_with_async(store(temp_dir.path()), "snapshot-metrics", |builder| {
+            builder.metrics_recorder(recorder.clone())
+        })
+        .await;
+        fs.writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        let checkpoint = fs
+            .admin
+            .create_checkpoint(
+                &namespace_id,
+                CreateCheckpointOptions {
+                    name: "operator".to_owned(),
+                    ttl_ms: None,
+                },
+            )
+            .await
+            .expect("create checkpoint");
+        let _checkpoint_view = fs
+            .reader
+            .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+            .await
+            .expect("pin checkpoint");
+        let read_snapshot = fs
+            .admin
+            .create_snapshot(
+                &namespace_id,
+                CreateSnapshotOptions {
+                    name: "reader".to_owned(),
+                    expires_at_ms: u64::MAX,
+                },
+            )
+            .await
+            .expect("create snapshot");
+        let _snapshot_view = fs
+            .reader
+            .pin_namespace_at_snapshot(&namespace_id, &read_snapshot.checkpoint_id)
+            .await
+            .expect("pin snapshot");
+        (fs.reader.runtime_cache_stats(), recorder.snapshot())
+    });
+
+    assert_eq!(stats.latest_metadata_view_reads, 0);
+    assert_eq!(stats.snapshot_view_reads, 1);
+    assert_eq!(
+        counter(&snapshot, "loonfs.runtime_cache.snapshot_view_reads", &[],),
+        1
     );
 }
 

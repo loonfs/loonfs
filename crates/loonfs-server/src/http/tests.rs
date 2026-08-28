@@ -387,6 +387,13 @@ fn assert_api_spec_error_codes_are_registered(spec: &str) {
                 .filter_map(|operation| operation.get("operationId")?.as_str())
         })
         .collect();
+    let schema_properties: std::collections::BTreeSet<_> = openapi["components"]["schemas"]
+        .as_object()
+        .expect("OpenAPI schemas object")
+        .values()
+        .filter_map(|schema| schema.get("properties")?.as_object())
+        .flat_map(|properties| properties.keys().map(String::as_str))
+        .collect();
 
     for token in spec
         .split('`')
@@ -394,7 +401,10 @@ fn assert_api_spec_error_codes_are_registered(spec: &str) {
         .step_by(2)
         .filter(|token| is_snake_case_token(token))
     {
-        if API_SPEC_NON_ERROR_CODE_TOKENS.contains(&token) || operation_ids.contains(token) {
+        if API_SPEC_NON_ERROR_CODE_TOKENS.contains(&token)
+            || operation_ids.contains(token)
+            || schema_properties.contains(token)
+        {
             continue;
         }
         // Valid inode IDs are examples, not error codes.
@@ -745,6 +755,8 @@ async fn admin_namespace_diagnostics_route_answers_storage_fields() {
     assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(0));
     assert_eq!(diagnostics.current_manifest_no, None);
     assert_eq!(diagnostics.wal_tail_segments, 1);
+    assert_eq!(diagnostics.live_snapshots, 0);
+    assert_eq!(diagnostics.live_checkpoints, 0);
 
     state.writer.shutdown().await.expect("shutdown writer");
 }
@@ -895,6 +907,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
 
     for name in [
         "loonfs_runtime_cache_latest_metadata_view_reads_total",
+        "loonfs_runtime_cache_snapshot_view_reads_total",
         "loonfs_metadata_segment_cache_gets_total",
         "loonfs_metadata_segment_cache_inserts_total",
         "loonfs_metadata_segment_cache_evictions_total",

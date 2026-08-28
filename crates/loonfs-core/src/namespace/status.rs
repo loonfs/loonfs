@@ -116,6 +116,8 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
         retention_floor_seq: loaded.retention_floor_seq,
         current_manifest_no: loaded.current_manifest_no,
         wal_tail_segments,
+        live_snapshots: 0,
+        live_checkpoints: 0,
     })
 }
 
@@ -158,5 +160,7 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
         retention_floor_seq,
         current_manifest_no: None,
         wal_tail_segments: 0,
+        live_snapshots: 0,
+        live_checkpoints: 0,
     })
 }

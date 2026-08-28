@@ -506,6 +506,7 @@ impl FsReader {
             .core
             .pinned_read_at_snapshot(namespace_id, snapshot_id, now_ms)
             .await?;
+        self.core.inner.cache_stats.record_snapshot_view_read();
         Ok(FsReadSnapshot {
             engine,
             context,

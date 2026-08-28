@@ -5720,7 +5720,9 @@
           "namespace_id",
           "head_seq",
           "retention_floor_seq",
-          "wal_tail_segments"
+          "wal_tail_segments",
+          "live_snapshots",
+          "live_checkpoints"
         ],
         "properties": {
           "current_manifest_no": {
@@ -5730,6 +5732,18 @@
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Current visible namespace sequence."
+          },
+          "live_checkpoints": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of active user checkpoints, including expired records awaiting collection.",
+            "minimum": 0
+          },
+          "live_snapshots": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of snapshots that had not expired when diagnostics began.",
+            "minimum": 0
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",

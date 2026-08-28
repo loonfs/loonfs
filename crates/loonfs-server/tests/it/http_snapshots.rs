@@ -140,6 +140,13 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
     assert!(created.created_at_ms <= after_create);
     assert!(created.expires_at_ms >= before_create + 5_000);
     assert!(created.expires_at_ms <= after_create + 5_000);
+    let diagnostics = harness
+        .client
+        .get_namespace_diagnostics(&namespace)
+        .await
+        .expect("read snapshot diagnostics");
+    assert_eq!(diagnostics.live_snapshots, 1);
+    assert_eq!(diagnostics.live_checkpoints, 0);
 
     let listed = list_snapshots(&harness.server_url, namespace.as_str()).expect("list snapshot");
     assert_eq!(listed.snapshots, vec![created.clone()]);
@@ -182,6 +189,12 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
         .expect("list after release")
         .snapshots
         .is_empty());
+    let diagnostics = harness
+        .client
+        .get_namespace_diagnostics(&namespace)
+        .await
+        .expect("read diagnostics after release");
+    assert_eq!(diagnostics.live_snapshots, 0);
     assert_eq!(
         release_snapshot(
             &harness.server_url,

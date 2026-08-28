@@ -168,7 +168,40 @@ impl FsAdmin {
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceDiagnostics> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?)
+        let mut diagnostics =
+            loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?;
+        let now_ms = self.actor.mutation_context()?.now_ms;
+        let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
+        let mut cursor = None;
+        loop {
+            let page = self
+                .engine(namespace_id)
+                .list_checkpoints_page(PageRequest {
+                    limit: loonfs_api::EffectiveLimit::new(page_limit),
+                    cursor,
+                })
+                .await
+                .map_err(RuntimeError::from)?;
+            for checkpoint in page.items {
+                match checkpoint.owner {
+                    loonfs_api::CheckpointOwnerSummary::User { .. } => {
+                        diagnostics.live_checkpoints =
+                            diagnostics.live_checkpoints.saturating_add(1);
+                    }
+                    loonfs_api::CheckpointOwnerSummary::Snapshot { expires_at_ms, .. }
+                        if expires_at_ms > now_ms =>
+                    {
+                        diagnostics.live_snapshots = diagnostics.live_snapshots.saturating_add(1);
+                    }
+                    loonfs_api::CheckpointOwnerSummary::Fork { .. }
+                    | loonfs_api::CheckpointOwnerSummary::Snapshot { .. } => {}
+                }
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(diagnostics);
+            };
+            cursor = Some(next_cursor);
+        }
     }
 
     /// Runs one bounded maintenance step against a namespace.
