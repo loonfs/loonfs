@@ -12,6 +12,7 @@ mod partial;
 mod profile;
 mod profile_config;
 mod recursive;
+mod snapshot;
 
 pub(crate) use self::output::{
     CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus, ListingHeadDrift,
@@ -77,6 +78,9 @@ pub(crate) async fn run(
         }
         Command::Namespace { command } => {
             namespace::run_namespace_command(kind, config_path, command, runtime).await
+        }
+        Command::Snapshot { command } => {
+            snapshot::run_snapshot_command(kind, config_path, command).await
         }
         Command::Use(args) => namespace::run_namespace_use(kind, config_path, args).await,
         Command::Current(args) => namespace::run_namespace_current(kind, config_path, args).await,

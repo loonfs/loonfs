@@ -8,3 +8,4 @@ mod inspection;
 mod output;
 mod profile;
 mod recursive;
+mod snapshots;

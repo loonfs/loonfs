@@ -29,11 +29,12 @@ use loonfs_api::{
         BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
         BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse,
         CommitResponse as ApiCommitResponse, CommittedChange, CompleteMultipartUploadRequest,
-        CompleteUploadRequest, CompletedUploadPart, ContentToken, GrepGcRequest, GrepGcResponse,
-        GrepIndex, ListChangesResponse, ObjectTransferAccess, SignUploadPartsRequest,
-        SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest, StoreProbeResponse,
-        UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim, UploadSession,
-        UploadSessionStatus,
+        CompleteUploadRequest, CompletedUploadPart, ContentToken, CreateSnapshotRequest,
+        ExtendSnapshotRequest, GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse,
+        ListSnapshotsResponse, ObjectTransferAccess, ReleaseSnapshotResponse,
+        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, SnapshotSummary,
+        StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadContentResponse,
+        UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
     },
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, Checksum,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
@@ -51,12 +52,13 @@ use payload::PartReader;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-pub use admin::CheckpointsPager;
+pub use admin::{CheckpointsPager, SnapshotsPager};
 pub use config::ClientConfig;
 pub use error::ClientError;
 pub use payload::{PayloadSource, PayloadStream};
 pub use reads::{
-    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, TrashPager,
+    ChangesPager, FileRevisionsPager, InodeChildrenPager, ListChangesOptions, PathEntriesPager,
+    ReadFileOptions, TrashPager,
 };
 use transport::{StdMonotonicTimer, TransportRetryPolicy, WireRequest, IO_INACTIVITY_TIMEOUT};
 pub use ClientError as Error;
@@ -73,7 +75,7 @@ pub use loonfs_api::options::{
 /// Result type returned by the client.
 pub type Result<T> = std::result::Result<T, ClientError>;
 
-pub use downloads::DirectDownloadStream;
+pub use downloads::{DirectDownloadStream, DownloadOptions};
 pub use namespace_path::NamespacePath;
 pub use uploads::staging::{
     MultipartUploadJournal, MultipartUploadResume, STREAMING_PUT_MIN_BYTES,

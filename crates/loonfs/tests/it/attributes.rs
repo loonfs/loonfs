@@ -207,6 +207,7 @@ fn read_options_project_grouped_attributes_or_none() {
         "/docs/report.txt",
         StatPathOptions {
             include_attributes: false,
+            snapshot_id: None,
         },
     ))
     .expect("stat without attributes");
@@ -228,6 +229,7 @@ fn read_options_project_grouped_attributes_or_none() {
         },
         ListPathEntriesOptions {
             include_attributes: true,
+            snapshot_id: None,
         },
     ))
     .expect("list with attributes");

@@ -1,7 +1,7 @@
 //! Client-side recursive transfers: `put -r`, `get -r`, and `cp -r`.
 //!
-//! Traversal is unpinned and tolerates directory changes between pages. Each
-//! file uses the corresponding single-file operation and commits independently.
+//! Traversal follows current state unless a snapshot is selected. Each file
+//! uses the corresponding single-file operation and commits independently.
 //! Transfers use bounded concurrency and report failures per file.
 
 use super::context::CommandContext;
@@ -15,7 +15,7 @@ use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
 use futures::StreamExt;
-use loonfs_api::{DestinationBehavior, ErrorCode, InodeKind, PathEntryKind};
+use loonfs_api::{CheckpointId, DestinationBehavior, ErrorCode, InodeKind, PathEntryKind};
 use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -297,13 +297,14 @@ pub(crate) async fn run_get_tree(
     local_root: &Path,
     force: bool,
     runtime: RuntimeBehavior,
+    snapshot_id: Option<&CheckpointId>,
 ) -> Result<CommandOutput, CommandFailure> {
     let mut tally = TreeTally::new();
     // Fail early if the destination cannot be created.
     let root_outcome = create_local_directory(local_root)
         .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;
     tally.record_directory(root_outcome);
-    let listing = walk_remote_tree(context, kind, "remote_path", remote_root).await?;
+    let listing = walk_remote_tree(context, kind, "remote_path", remote_root, snapshot_id).await?;
     if !runtime.json {
         if let Some(drift) = listing.head_drift.as_ref() {
             crate::render::write_listing_drift_warning(drift);
@@ -340,6 +341,7 @@ pub(crate) async fn run_get_tree(
                 context,
                 &spec,
                 None,
+                snapshot_id,
                 job.size_bytes,
                 &local,
                 job.content_ref.as_ref(),
@@ -402,7 +404,7 @@ pub(crate) async fn run_copy_tree(
     message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let listing = walk_remote_tree(context, kind, "source_path", source_root).await?;
+    let listing = walk_remote_tree(context, kind, "source_path", source_root, None).await?;
     if !runtime.json {
         if let Some(drift) = listing.head_drift.as_ref() {
             crate::render::write_listing_drift_warning(drift);
@@ -626,6 +628,7 @@ async fn walk_remote_tree(
     kind: CommandKind,
     remote_param: &str,
     root: &str,
+    snapshot_id: Option<&CheckpointId>,
 ) -> Result<RemoteTree, CommandFailure> {
     let mut tree = RemoteTree {
         directories: Vec::new(),
@@ -643,13 +646,15 @@ async fn walk_remote_tree(
         };
         let spec = parse_remote(context, listed, remote_param)
             .map_err(|error| context.fail(kind, error))?;
-        let mut pager = context
-            .target
-            .list_path_entries_pager(&spec, None, None)
-            .map_err(|error| context.fail(kind, error))?;
-        while let Some(response) = pager.next().await {
-            let response = response.map_err(|error| context.fail(kind, error))?;
+        let mut cursor = None;
+        loop {
+            let response = context
+                .target
+                .list_path_entries_page(&spec, None, cursor.as_deref(), snapshot_id)
+                .await
+                .map_err(|error| context.fail(kind, error))?;
             heads.observe(response.head_seq);
+            cursor = response.next_cursor;
             for entry in response.entries {
                 let Some(name) = entry.display_name.as_ref() else {
                     continue;
@@ -675,6 +680,9 @@ async fn walk_remote_tree(
                         content_ref: Some(content_ref),
                     }),
                 }
+            }
+            if cursor.is_none() {
+                break;
             }
         }
     }
@@ -802,7 +810,7 @@ mod tests {
         assert_eq!(
             context
                 .target
-                .get_file_bytes(&spec)
+                .get_file_bytes_with_options(&spec, &loonfs_client::ReadFileOptions::default())
                 .await
                 .expect("read the uploaded file back"),
             large,

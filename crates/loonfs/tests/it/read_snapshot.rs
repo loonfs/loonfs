@@ -325,3 +325,55 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         ErrorCode::SnapshotGone,
     );
 }
+
+#[tokio::test]
+async fn embedded_readers_refuse_the_snapshot_id_option() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-option-test").await;
+    let namespace_id = NamespaceId::parse("snapshot-option-refusal").expect("namespace id");
+    runtime
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    let created = runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/pinned.txt",
+            b"pinned",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create file");
+    let snapshot = runtime
+        .admin
+        .create_snapshot(
+            &namespace_id,
+            loonfs::CreateSnapshotOptions {
+                name: "option-refusal".to_owned(),
+                expires_at_ms: u64::MAX,
+            },
+        )
+        .await
+        .expect("create snapshot");
+    let with_option = loonfs::StatPathOptions {
+        snapshot_id: Some(snapshot.checkpoint_id.clone()),
+        ..Default::default()
+    };
+    assert_core_error_kind(
+        runtime
+            .reader
+            .get_path_entry(&namespace_id, "/pinned.txt", with_option.clone())
+            .await,
+        ErrorCode::InvalidRequest,
+    );
+    let pinned = runtime
+        .reader
+        .pin_namespace_at_checkpoint(&namespace_id, &snapshot.checkpoint_id)
+        .await
+        .expect("pin at snapshot record");
+    assert_core_error_kind(
+        pinned.get_path_entry("/pinned.txt", with_option).await,
+        ErrorCode::InvalidRequest,
+    );
+    assert_eq!(pinned.head_seq(), created.committed_seq);
+}

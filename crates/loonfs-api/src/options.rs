@@ -10,8 +10,8 @@
 //! options reach the wire as query parameters the surface builds from them.
 
 use crate::{
-    ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, CommitId, DeleteDirectoryBehavior,
-    DestinationBehavior, InodeId, RevisionNo,
+    ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, CheckpointId, CommitId,
+    DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo,
 };
 use std::collections::BTreeMap;
 
@@ -46,12 +46,18 @@ pub struct StatPathOptions {
     /// capped at 64 KiB, so the cost of including it is bounded by the
     /// request.
     pub include_attributes: bool,
+    /// Read the path state captured by this live snapshot.
+    ///
+    /// This applies to path stat operations. Inode stat operations do not
+    /// accept snapshot selection.
+    pub snapshot_id: Option<CheckpointId>,
 }
 
 impl Default for StatPathOptions {
     fn default() -> Self {
         Self {
             include_attributes: true,
+            snapshot_id: None,
         }
     }
 }
@@ -67,6 +73,8 @@ pub struct ListPathEntriesOptions {
     /// declares no byte budget anywhere. A caller that wants attributes for a
     /// whole directory asks for them, and pages accordingly.
     pub include_attributes: bool,
+    /// Read the directory state captured by this live snapshot.
+    pub snapshot_id: Option<CheckpointId>,
 }
 
 /// Options for listing a directory's children by parent inode.

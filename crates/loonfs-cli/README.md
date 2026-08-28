@@ -166,29 +166,44 @@ Namespace management
   loonfs current
     Show the selected profile and namespace
 
+Snapshot management
+  loonfs snapshot create <namespace> --name <label> --ttl-ms <ms>
+    Capture the namespace's current state for the requested lifetime
+
+  loonfs snapshot list <namespace> [--limit <n>] [--page-size <n>]
+                                   [--cursor <cursor>] [--all] [--jsonl]
+    List live snapshots in ID order
+
+  loonfs snapshot extend <namespace> <snapshot-id> --ttl-ms <ms>
+    Extend a live snapshot's lease from now, within its lifetime limit
+
+  loonfs snapshot release <namespace> <snapshot-id>
+    Release a snapshot. Repeating the command succeeds.
+
 Pagination
-  ls, grep, revisions, trash, changes, and admin checkpoint list return one
-  page by default. --limit sets the total maximum across pages, --page-size
-  controls each request, and --cursor resumes a previous result. --all fetches
-  every page for human output. --json returns a bounded document and cannot be
-  combined with --all. Use --jsonl to stream every result. changes uses
-  --after instead of --cursor.
+  ls, grep, revisions, trash, changes, snapshot list, and admin checkpoint
+  list return one page by default. --limit sets the total maximum across
+  pages, --page-size controls each request, and --cursor resumes a previous
+  result. --all fetches every page for human output. --json returns a bounded
+  document and cannot be combined with --all. Use --jsonl to stream every
+  result. changes uses --after instead of --cursor.
 
 Reading
   loonfs ls [path] [--limit <n>] [--page-size <n>] [--cursor <cursor>]
-                   [--all] [--jsonl]
+                   [--all] [--jsonl] [--snapshot-id <id>]
     List the entries of a directory, or `/` when the path is omitted
 
-  loonfs stat <path>
+  loonfs stat <path> [--snapshot-id <id>]
   loonfs stat --inode <inode-id>
     Describe a path or visible inode. The output includes its kind, size,
     revision, content digest, and attributes
 
-  loonfs cat <path> [--revision <n>]
+  loonfs cat <path> [--revision <n>] [--snapshot-id <id>]
     Print a file's bytes to stdout; --revision prints that revision instead
     of the current content
 
-  loonfs get <remote-path> [local-destination] [-r] [--revision <n>] [--force]
+  loonfs get <remote-path> [local-destination] [-r] [--revision <n>]
+             [--snapshot-id <id>] [--force]
     Download one file, or use -r to download a directory. For recursive
     downloads, the local destination is the root of the downloaded contents.
     Existing files are not overwritten unless --force is set. --revision
@@ -278,9 +293,10 @@ History and recovery
     somewhere else, or when the deletion did not record a binding
 
   loonfs changes [--after <seq>] [--limit <n>] [--page-size <n>]
-                 [--all] [--jsonl]
+                 [--all] [--jsonl] [--snapshot-id <id>]
     List committed changes after a sequence number. When --after is omitted,
-    start at the beginning of retained history
+    start at the beginning of retained history. --snapshot-id ends the feed
+    at the snapshot's captured sequence.
 
 Inspection and diagnostics
   loonfs capabilities [--profile <name>]

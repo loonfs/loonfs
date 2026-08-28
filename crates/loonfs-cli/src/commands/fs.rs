@@ -27,13 +27,13 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
-    AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId,
-    CommitResponse, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind,
-    ListPathEntriesResponse, NamespaceId, RevisionNo,
+    AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq,
+    CheckpointId, CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior,
+    DestinationBehavior, ErrorCode, InodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
 use loonfs_client::{
     CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
-    UpdateAttributesOptions,
+    ReadFileOptions, UpdateAttributesOptions,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -49,6 +49,17 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
             CommitId::parse(value).map_err(|error| {
                 CliError::invalid_request(format!("invalid --commit-id: {error}"))
                     .with_param("--commit-id")
+            })
+        })
+        .transpose()
+}
+
+fn parse_snapshot_id_arg(snapshot_id: Option<&str>) -> Result<Option<CheckpointId>, CliError> {
+    snapshot_id
+        .map(|value| {
+            CheckpointId::parse(value).map_err(|error| {
+                CliError::invalid_request(format!("invalid --snapshot-id: {error}"))
+                    .with_param("--snapshot-id")
             })
         })
         .transpose()
@@ -80,6 +91,7 @@ async fn follow_path_entry_pages(
     spec: &NamespacePath,
     pagination: &PaginationArgs,
     cursor: Option<&str>,
+    snapshot_id: Option<&CheckpointId>,
     mut visit: impl FnMut(Vec<loonfs_api::PathEntry>) -> Result<(), CliError>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut plan = PagePlan::new(pagination);
@@ -88,7 +100,7 @@ async fn follow_path_entry_pages(
     loop {
         let page = context
             .target
-            .list_path_entries_page(spec, plan.request_size(), cursor.as_deref())
+            .list_path_entries_page(spec, plan.request_size(), cursor.as_deref(), snapshot_id)
             .await
             .map_err(|error| context.fail(kind, error))?;
         let ListPathEntriesResponse {
@@ -132,6 +144,8 @@ pub(crate) async fn run_filesystem_ls(
         allow_root,
     )
     .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = parse_snapshot_id_arg(args.snapshot_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let streams_pages = args.pagination.jsonl || (args.pagination.all && !runtime.json);
     if streams_pages {
         let stdout = io::stdout();
@@ -142,6 +156,7 @@ pub(crate) async fn run_filesystem_ls(
             &spec,
             &args.pagination,
             args.cursor.as_deref(),
+            snapshot_id.as_ref(),
             |entries| {
                 write_path_entries_page(&mut stdout, &entries, args.pagination.jsonl)
                     .map_err(CliError::io)
@@ -168,6 +183,7 @@ pub(crate) async fn run_filesystem_ls(
         &spec,
         &args.pagination,
         args.cursor.as_deref(),
+        snapshot_id.as_ref(),
         |page| {
             entries.extend(page);
             Ok(())
@@ -200,6 +216,8 @@ pub(crate) async fn run_filesystem_stat(
     args: FilesystemStatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let snapshot_id = parse_snapshot_id_arg(args.snapshot_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let entry = match args.inode {
         Some(inode_id) => context.target.get_inode(&context.namespace, inode_id).await,
         None => {
@@ -210,7 +228,10 @@ pub(crate) async fn run_filesystem_stat(
             let allow_root = true;
             let spec = namespace_path(&context.namespace, "path", path, allow_root)
                 .map_err(|error| context.fail(kind, error))?;
-            context.target.get_path_entry(&spec).await
+            context
+                .target
+                .get_path_entry_at_snapshot(&spec, snapshot_id.as_ref())
+                .await
         }
     }
     .map_err(|error| context.fail(kind, error))?;
@@ -423,16 +444,19 @@ pub(crate) async fn run_filesystem_cat(
         .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let bytes = match revision_no {
-        Some(revision_no) => {
-            context
-                .target
-                .get_file_revision_bytes(&spec, revision_no)
-                .await
-        }
-        None => context.target.get_file_bytes(&spec).await,
-    }
-    .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = parse_snapshot_id_arg(args.snapshot_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
+    let bytes = context
+        .target
+        .get_file_bytes_with_options(
+            &spec,
+            &ReadFileOptions {
+                revision_no,
+                snapshot_id,
+            },
+        )
+        .await
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -471,9 +495,11 @@ pub(crate) async fn run_filesystem_get(
         .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = parse_snapshot_id_arg(args.snapshot_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
-        .get_path_entry_without_attributes(&spec)
+        .get_path_entry_without_attributes_at_snapshot(&spec, snapshot_id.as_ref())
         .await
         .map_err(|error| context.fail(kind, error))?;
     if args.recursive {
@@ -513,6 +539,7 @@ pub(crate) async fn run_filesystem_get(
             &local_root,
             args.force,
             runtime,
+            snapshot_id.as_ref(),
         )
         .await;
     }
@@ -532,7 +559,13 @@ pub(crate) async fn run_filesystem_get(
         // and bytes already piped onward are somewhere this CLI cannot see.
         let mut download = context
             .target
-            .open_file_download(&spec, revision_no, entry.size_bytes(), 0)
+            .open_file_download(
+                &spec,
+                revision_no,
+                snapshot_id.as_ref(),
+                entry.size_bytes(),
+                0,
+            )
             .await
             .map_err(|error| context.fail(kind, error))?;
         stream_download_to_stdout(&mut download)
@@ -556,6 +589,7 @@ pub(crate) async fn run_filesystem_get(
         &context,
         &spec,
         revision_no,
+        snapshot_id.as_ref(),
         entry.size_bytes(),
         &destination,
         entry.content_ref(),
@@ -607,6 +641,7 @@ pub(super) async fn open_resumable_download(
     context: &CommandContext,
     spec: &NamespacePath,
     revision_no: Option<RevisionNo>,
+    snapshot_id: Option<&CheckpointId>,
     size_bytes: Option<u64>,
     destination: &Path,
     content_ref: Option<&ContentRef>,
@@ -617,7 +652,7 @@ pub(super) async fn open_resumable_download(
         .map_or(0, |meta| partial::resumable_bytes(destination, meta));
     let download = context
         .target
-        .open_file_download(spec, revision_no, size_bytes, start_offset)
+        .open_file_download(spec, revision_no, snapshot_id, size_bytes, start_offset)
         .await?;
     Ok((download, meta))
 }

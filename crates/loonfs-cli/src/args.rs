@@ -32,6 +32,7 @@ Context and configuration:
   init        Interactively create a config and first profile
   profile     Manage connection profiles
   namespace   Manage namespaces
+  snapshot    Manage point-in-time snapshots
   use         Set a profile's default namespace
   current     Show the selected profile and namespace
   config      Inspect the CLI config file
@@ -151,6 +152,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: NamespaceCommand,
     },
+    /// Create, list, extend, or release point-in-time snapshots.
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
+    },
     /// Set the default namespace for a profile.
     /// This sets the interactive default; concurrent automation should pass
     /// `--namespace` or set `LOONFS_NAMESPACE`.
@@ -264,6 +270,9 @@ impl Command {
             Self::Revisions(args) => Some(&args.pagination),
             Self::Trash(args) => Some(&args.pagination),
             Self::Changes(args) => Some(&args.pagination),
+            Self::Snapshot {
+                command: SnapshotCommand::List(args),
+            } => Some(&args.pagination),
             Self::Admin {
                 command:
                     AdminCommand::Checkpoint {
@@ -706,6 +715,9 @@ pub(crate) struct FilesystemLsArgs {
     /// Resume from a cursor returned by a previous listing.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
+    /// Read the point-in-time state captured by this snapshot.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -727,6 +739,14 @@ pub(crate) struct FilesystemStatArgs {
     /// Visible inode to describe instead of a path.
     #[arg(long, value_name = "INODE_ID", value_parser = parse_public_inode_id)]
     pub inode: Option<InodeId>,
+    /// Read the point-in-time state captured by this snapshot.
+    #[arg(
+        long,
+        value_hint = ValueHint::Other,
+        requires = "path",
+        conflicts_with = "inode"
+    )]
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -836,6 +856,9 @@ pub(crate) struct FilesystemCatArgs {
     /// Print this revision instead of the current content.
     #[arg(long)]
     pub revision: Option<u64>,
+    /// Read the point-in-time state captured by this snapshot.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -886,6 +909,9 @@ pub(crate) struct FilesystemGetArgs {
     /// Download this revision instead of the current content.
     #[arg(long)]
     pub revision: Option<u64>,
+    /// Read the point-in-time state captured by this snapshot.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub snapshot_id: Option<String>,
     /// Overwrite existing local files.
     #[arg(long)]
     pub force: bool,
@@ -1031,6 +1057,76 @@ pub(crate) struct ChangesArgs {
     pub after: Option<u64>,
     #[command(flatten)]
     pub pagination: PaginationArgs,
+    /// Read the point-in-time state captured by this snapshot.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SnapshotCommand {
+    /// Capture the namespace's current state for a bounded time.
+    Create(SnapshotCreateArgs),
+    /// List live snapshots in snapshot-id order.
+    List(SnapshotListArgs),
+    /// Extend a live snapshot's lease.
+    Extend(SnapshotExtendArgs),
+    /// Release a snapshot.
+    Release(SnapshotReleaseArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SnapshotTargetArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+    #[command(flatten)]
+    pub request: RequestBehaviorArgs,
+    /// Namespace whose snapshots to manage.
+    #[arg(value_hint = ValueHint::Other)]
+    pub namespace_id: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SnapshotCreateArgs {
+    #[command(flatten)]
+    pub target: SnapshotTargetArgs,
+    /// Snapshot label. Labels do not need to be unique.
+    #[arg(long)]
+    pub name: String,
+    /// Snapshot lifetime from now, in milliseconds.
+    #[arg(long)]
+    pub ttl_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SnapshotListArgs {
+    #[command(flatten)]
+    pub target: SnapshotTargetArgs,
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    /// Resume from a cursor returned by a previous listing.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SnapshotExtendArgs {
+    #[command(flatten)]
+    pub target: SnapshotTargetArgs,
+    /// Snapshot id to extend.
+    #[arg(value_hint = ValueHint::Other)]
+    pub snapshot_id: String,
+    /// Snapshot lifetime from now, in milliseconds.
+    #[arg(long)]
+    pub ttl_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SnapshotReleaseArgs {
+    #[command(flatten)]
+    pub target: SnapshotTargetArgs,
+    /// Snapshot id to release.
+    #[arg(value_hint = ValueHint::Other)]
+    pub snapshot_id: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1327,6 +1423,10 @@ pub(crate) enum CommandKind {
     NamespaceDelete,
     NamespaceFork,
     NamespaceUse,
+    SnapshotCreate,
+    SnapshotList,
+    SnapshotExtend,
+    SnapshotRelease,
     Current,
     FilesystemLs,
     FilesystemStat,
@@ -1380,6 +1480,10 @@ impl CommandKind {
             CommandKind::NamespaceDelete => "namespace_delete",
             CommandKind::NamespaceFork => "namespace_fork",
             CommandKind::NamespaceUse => "namespace_use",
+            CommandKind::SnapshotCreate => "snapshot_create",
+            CommandKind::SnapshotList => "snapshot_list",
+            CommandKind::SnapshotExtend => "snapshot_extend",
+            CommandKind::SnapshotRelease => "snapshot_release",
             CommandKind::Current => "current",
             CommandKind::FilesystemLs => "filesystem_ls",
             CommandKind::FilesystemStat => "filesystem_stat",
@@ -1441,6 +1545,12 @@ impl Cli {
                 NamespaceCommand::Show(_) => CommandKind::NamespaceShow,
                 NamespaceCommand::Delete(_) => CommandKind::NamespaceDelete,
                 NamespaceCommand::Fork(_) => CommandKind::NamespaceFork,
+            },
+            Command::Snapshot { command } => match command {
+                SnapshotCommand::Create(_) => CommandKind::SnapshotCreate,
+                SnapshotCommand::List(_) => CommandKind::SnapshotList,
+                SnapshotCommand::Extend(_) => CommandKind::SnapshotExtend,
+                SnapshotCommand::Release(_) => CommandKind::SnapshotRelease,
             },
             Command::Use(_) => CommandKind::NamespaceUse,
             Command::Current(_) => CommandKind::Current,
@@ -1662,6 +1772,20 @@ mod tests {
                 "--cursor",
                 "c",
             ],
+            &[
+                "loonfs",
+                "snapshot",
+                "list",
+                "demo",
+                "--limit",
+                "5",
+                "--page-size",
+                "2",
+                "--all",
+                "--jsonl",
+                "--cursor",
+                "c",
+            ],
         ];
         for arguments in cases {
             let cli = Cli::try_parse_from(*arguments).expect("pagination arguments parse");
@@ -1685,6 +1809,9 @@ mod tests {
                 "--all",
                 "--limit",
                 "5",
+            ],
+            &[
+                "loonfs", "--json", "snapshot", "list", "demo", "--all", "--limit", "5",
             ],
             &["loonfs", "--json", "trash", "--all", "--limit", "5"],
             &["loonfs", "--json", "changes", "--all", "--limit", "5"],
@@ -1764,6 +1891,10 @@ mod tests {
             (CommandKind::NamespaceDelete, "namespace_delete"),
             (CommandKind::NamespaceFork, "namespace_fork"),
             (CommandKind::NamespaceUse, "namespace_use"),
+            (CommandKind::SnapshotCreate, "snapshot_create"),
+            (CommandKind::SnapshotList, "snapshot_list"),
+            (CommandKind::SnapshotExtend, "snapshot_extend"),
+            (CommandKind::SnapshotRelease, "snapshot_release"),
             (CommandKind::Current, "current"),
             (CommandKind::FilesystemLs, "filesystem_ls"),
             (CommandKind::FilesystemStat, "filesystem_stat"),
@@ -1830,6 +1961,9 @@ mod tests {
         let namespace = subcommand(&command, "namespace");
         assert_subcommands(namespace, &["create", "show", "delete", "fork"]);
 
+        let snapshot = subcommand(&command, "snapshot");
+        assert_subcommands(snapshot, &["create", "list", "extend", "release"]);
+
         let admin = subcommand(&command, "admin");
         assert_subcommands(
             admin,
@@ -1853,6 +1987,55 @@ mod tests {
         assert_subcommands(subcommand(admin, "maintenance"), &["run", "step", "flush"]);
         assert_subcommands(subcommand(admin, "retention"), &["advance"]);
         assert_subcommands(subcommand(admin, "store"), &["probe"]);
+    }
+
+    #[test]
+    fn snapshot_commands_and_read_flags_follow_the_public_grammar() {
+        Cli::try_parse_from([
+            "loonfs", "snapshot", "create", "demo", "--name", "report", "--ttl-ms", "5000",
+        ])
+        .expect("snapshot create grammar");
+        Cli::try_parse_from([
+            "loonfs",
+            "snapshot",
+            "extend",
+            "demo",
+            "chk_00000000000000000000000000000001",
+            "--ttl-ms",
+            "5000",
+        ])
+        .expect("snapshot extend grammar");
+        for arguments in [
+            vec!["loonfs", "ls", "/", "--snapshot-id", "snapshot"],
+            vec!["loonfs", "stat", "/doc", "--snapshot-id", "snapshot"],
+            vec!["loonfs", "cat", "/doc", "--snapshot-id", "snapshot"],
+            vec!["loonfs", "get", "/doc", "--snapshot-id", "snapshot"],
+            vec!["loonfs", "changes", "--snapshot-id", "snapshot"],
+        ] {
+            Cli::try_parse_from(arguments).expect("snapshot read flag");
+        }
+        assert!(Cli::try_parse_from([
+            "loonfs",
+            "stat",
+            "--inode",
+            "ino_2",
+            "--snapshot-id",
+            "snapshot",
+        ])
+        .is_err());
+
+        let mut command = Cli::command();
+        for name in ["ls", "stat", "cat", "get", "changes"] {
+            let help = command
+                .find_subcommand_mut(name)
+                .expect("read command")
+                .render_long_help()
+                .to_string();
+            assert!(
+                help.contains("Read the point-in-time state captured by this snapshot"),
+                "{name} help:\n{help}"
+            );
+        }
     }
 
     #[test]
