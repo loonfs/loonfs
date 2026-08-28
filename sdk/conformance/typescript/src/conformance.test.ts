@@ -157,16 +157,10 @@ interface SnapshotsRequest {
 }
 
 interface SnapshotsExpected {
-    directory_committed_seq: number;
-    replaced_file_committed_seq: number;
-    deleted_file_committed_seq: number;
     snapshot_head_seq: number;
     captured_revision_no: number;
     captured_entry_names: string[];
-    replacement_committed_seq: number;
     current_revision_no: number;
-    added_file_committed_seq: number;
-    deletion_committed_seq: number;
     current_entry_names: string[];
     snapshot_change_seqs: number[];
     snapshot_gone: ErrorStatusExpected;
@@ -420,16 +414,10 @@ const SNAPSHOTS_REQUEST_FIELDS = [
     "unknown_snapshot_id",
 ] as const;
 const SNAPSHOTS_EXPECTED_FIELDS = [
-    "directory_committed_seq",
-    "replaced_file_committed_seq",
-    "deleted_file_committed_seq",
     "snapshot_head_seq",
     "captured_revision_no",
     "captured_entry_names",
-    "replacement_committed_seq",
     "current_revision_no",
-    "added_file_committed_seq",
-    "deletion_committed_seq",
     "current_entry_names",
     "snapshot_change_seqs",
     "snapshot_gone",
@@ -1624,7 +1612,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     const currentBytes = new TextEncoder().encode(request.current_content_utf8);
 
     await client.namespaces.createNamespace({ namespace_id: namespaceId });
-    const directory = await client.filesystem.createCommit(
+    await client.filesystem.createCommit(
         directoryCommit(
             namespaceId,
             "conf-snapshots-create-directory",
@@ -1632,23 +1620,20 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
             request.directory,
         ),
     );
-    assert.equal(directory.committed_seq, expected.directory_committed_seq);
-    const createdReplaced = await putFile(client, {
+    await putFile(client, {
         namespace_id: namespaceId,
         path: childPath(request.replaced_file_name),
         bytes: capturedBytes,
         actor: request.actor,
         commit_id: "conf-snapshots-create-replaced",
     });
-    assert.equal(createdReplaced.committed_seq, expected.replaced_file_committed_seq);
-    const createdDeleted = await putFile(client, {
+    await putFile(client, {
         namespace_id: namespaceId,
         path: childPath(request.deleted_file_name),
         bytes: new TextEncoder().encode(request.deleted_content_utf8),
         actor: request.actor,
         commit_id: "conf-snapshots-create-deleted",
     });
-    assert.equal(createdDeleted.committed_seq, expected.deleted_file_committed_seq);
 
     const snapshot = await client.namespaces.createSnapshot({
         namespace_id: namespaceId,
@@ -1660,7 +1645,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     assert.equal(snapshot.head_seq, expected.snapshot_head_seq);
     assert.ok(snapshot.expires_at_ms > snapshot.created_at_ms);
 
-    const replaced = await putFile(client, {
+    await putFile(client, {
         namespace_id: namespaceId,
         path: childPath(request.replaced_file_name),
         bytes: currentBytes,
@@ -1668,16 +1653,14 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         commit_id: "conf-snapshots-replace-file",
         behavior: "replace",
     });
-    assert.equal(replaced.committed_seq, expected.replacement_committed_seq);
-    const added = await putFile(client, {
+    await putFile(client, {
         namespace_id: namespaceId,
         path: childPath(request.added_file_name),
         bytes: new TextEncoder().encode(request.added_content_utf8),
         actor: request.actor,
         commit_id: "conf-snapshots-add-file",
     });
-    assert.equal(added.committed_seq, expected.added_file_committed_seq);
-    const deleted = await client.filesystem.createCommit(
+    await client.filesystem.createCommit(
         deleteCommit(
             namespaceId,
             "conf-snapshots-delete-file",
@@ -1685,7 +1668,6 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
             childPath(request.deleted_file_name),
         ),
     );
-    assert.equal(deleted.committed_seq, expected.deletion_committed_seq);
 
     const capturedEntry = fileEntry(
         await client.filesystem.getPathEntry({

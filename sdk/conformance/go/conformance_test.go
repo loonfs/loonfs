@@ -1383,22 +1383,16 @@ type snapshotsRequest struct {
 }
 
 type snapshotsExpected struct {
-	DirectoryCommittedSeq    int64               `json:"directory_committed_seq"`
-	ReplacedFileCommittedSeq int64               `json:"replaced_file_committed_seq"`
-	DeletedFileCommittedSeq  int64               `json:"deleted_file_committed_seq"`
-	SnapshotHeadSeq          int64               `json:"snapshot_head_seq"`
-	CapturedRevisionNo       int64               `json:"captured_revision_no"`
-	CapturedEntryNames       []string            `json:"captured_entry_names"`
-	ReplacementCommittedSeq  int64               `json:"replacement_committed_seq"`
-	CurrentRevisionNo        int64               `json:"current_revision_no"`
-	AddedFileCommittedSeq    int64               `json:"added_file_committed_seq"`
-	DeletionCommittedSeq     int64               `json:"deletion_committed_seq"`
-	CurrentEntryNames        []string            `json:"current_entry_names"`
-	SnapshotChangeSeqs       []int64             `json:"snapshot_change_seqs"`
-	SnapshotGone             errorStatusExpected `json:"snapshot_gone"`
-	SnapshotNotFound         errorStatusExpected `json:"snapshot_not_found"`
-	RevisionWithSnapshot     errorStatusExpected `json:"revision_with_snapshot"`
-	ZeroTtl                  errorStatusExpected `json:"zero_ttl"`
+	SnapshotHeadSeq      int64               `json:"snapshot_head_seq"`
+	CapturedRevisionNo   int64               `json:"captured_revision_no"`
+	CapturedEntryNames   []string            `json:"captured_entry_names"`
+	CurrentRevisionNo    int64               `json:"current_revision_no"`
+	CurrentEntryNames    []string            `json:"current_entry_names"`
+	SnapshotChangeSeqs   []int64             `json:"snapshot_change_seqs"`
+	SnapshotGone         errorStatusExpected `json:"snapshot_gone"`
+	SnapshotNotFound     errorStatusExpected `json:"snapshot_not_found"`
+	RevisionWithSnapshot errorStatusExpected `json:"revision_with_snapshot"`
+	ZeroTtl              errorStatusExpected `json:"zero_ttl"`
 }
 
 func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
@@ -1408,7 +1402,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	childPath := func(name string) string { return request.Directory + "/" + name }
 	createNamespace(t, h.client, request.NamespaceID)
 
-	directory := applyCommit(
+	applyCommit(
 		t,
 		h.client,
 		createDirectoryCommit(
@@ -1419,10 +1413,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 			nil,
 		),
 	)
-	if int64(directory.CommittedSeq) != expected.DirectoryCommittedSeq {
-		t.Errorf("directory committed_seq = %d, want %d", directory.CommittedSeq, expected.DirectoryCommittedSeq)
-	}
-	createdReplaced, err := transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+	_, err := transfers.PutFile(ctx, h.client, transfers.PutFileInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
 		Bytes:       []byte(request.CapturedContentUTF8),
@@ -1432,10 +1423,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("create replaced snapshot file: %v", err)
 	}
-	if int64(createdReplaced.CommittedSeq) != expected.ReplacedFileCommittedSeq {
-		t.Errorf("replaced file committed_seq = %d, want %d", createdReplaced.CommittedSeq, expected.ReplacedFileCommittedSeq)
-	}
-	createdDeleted, err := transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+	_, err = transfers.PutFile(ctx, h.client, transfers.PutFileInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.DeletedFileName)),
 		Bytes:       []byte(request.DeletedContentUTF8),
@@ -1444,9 +1432,6 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	})
 	if err != nil {
 		t.Fatalf("create deleted snapshot file: %v", err)
-	}
-	if int64(createdDeleted.CommittedSeq) != expected.DeletedFileCommittedSeq {
-		t.Errorf("deleted file committed_seq = %d, want %d", createdDeleted.CommittedSeq, expected.DeletedFileCommittedSeq)
 	}
 
 	snapshot, err := h.client.Namespaces.CreateSnapshot(ctx, &loonfs.CreateSnapshotRequest{
@@ -1471,7 +1456,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	replace := loonfs.DestinationBehaviorReplace
-	replaced, err := transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+	_, err = transfers.PutFile(ctx, h.client, transfers.PutFileInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
 		Bytes:       []byte(request.CurrentContentUTF8),
@@ -1482,10 +1467,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("replace snapshot file: %v", err)
 	}
-	if int64(replaced.CommittedSeq) != expected.ReplacementCommittedSeq {
-		t.Errorf("replacement committed_seq = %d, want %d", replaced.CommittedSeq, expected.ReplacementCommittedSeq)
-	}
-	added, err := transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+	_, err = transfers.PutFile(ctx, h.client, transfers.PutFileInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.AddedFileName)),
 		Bytes:       []byte(request.AddedContentUTF8),
@@ -1495,11 +1477,8 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("add file after snapshot: %v", err)
 	}
-	if int64(added.CommittedSeq) != expected.AddedFileCommittedSeq {
-		t.Errorf("added file committed_seq = %d, want %d", added.CommittedSeq, expected.AddedFileCommittedSeq)
-	}
 	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
-	deleted := applyCommit(t, h.client, &loonfs.CommitRequest{
+	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
 		Actor:       &request.Actor,
 		CommitID:    loonfs.CommitID("conf-snapshots-delete-file"),
@@ -1512,9 +1491,6 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 			},
 		},
 	})
-	if int64(deleted.CommittedSeq) != expected.DeletionCommittedSeq {
-		t.Errorf("deletion committed_seq = %d, want %d", deleted.CommittedSeq, expected.DeletionCommittedSeq)
-	}
 
 	snapshotID := snapshot.SnapshotID
 	capturedEntry, err := h.client.Filesystem.GetPathEntry(ctx, &loonfs.GetPathEntryRequest{

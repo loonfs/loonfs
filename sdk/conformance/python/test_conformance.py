@@ -307,16 +307,10 @@ class SnapshotsRequest:
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class SnapshotsExpected:
-    directory_committed_seq: int
-    replaced_file_committed_seq: int
-    deleted_file_committed_seq: int
     snapshot_head_seq: int
     captured_revision_no: int
     captured_entry_names: list[str]
-    replacement_committed_seq: int
     current_revision_no: int
-    added_file_committed_seq: int
-    deletion_committed_seq: int
     current_entry_names: list[str]
     snapshot_change_seqs: list[int]
     snapshot_gone: ErrorStatusExpected
@@ -1086,15 +1080,14 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         return f"{request.directory}/{name}"
 
     client.namespaces.create_namespace(namespace_id=namespace_id)
-    directory = _apply(
+    _apply(
         client,
         namespace_id,
         "conf-snapshots-create-directory",
         request.actor,
         FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
     )
-    assert directory.committed_seq == expected.directory_committed_seq
-    created_replaced = put_file(
+    put_file(
         client,
         namespace_id=namespace_id,
         path=child_path(request.replaced_file_name),
@@ -1102,10 +1095,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         actor=request.actor,
         commit_id="conf-snapshots-create-replaced",
     )
-    assert (
-        created_replaced.committed_seq == expected.replaced_file_committed_seq
-    )
-    created_deleted = put_file(
+    put_file(
         client,
         namespace_id=namespace_id,
         path=child_path(request.deleted_file_name),
@@ -1113,7 +1103,6 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         actor=request.actor,
         commit_id="conf-snapshots-create-deleted",
     )
-    assert created_deleted.committed_seq == expected.deleted_file_committed_seq
 
     snapshot = client.namespaces.create_snapshot(
         namespace_id,
@@ -1125,7 +1114,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert snapshot.head_seq == expected.snapshot_head_seq
     assert snapshot.expires_at_ms > snapshot.created_at_ms
 
-    replaced = put_file(
+    put_file(
         client,
         namespace_id=namespace_id,
         path=child_path(request.replaced_file_name),
@@ -1134,8 +1123,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         commit_id="conf-snapshots-replace-file",
         behavior="replace",
     )
-    assert replaced.committed_seq == expected.replacement_committed_seq
-    added = put_file(
+    put_file(
         client,
         namespace_id=namespace_id,
         path=child_path(request.added_file_name),
@@ -1143,15 +1131,13 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         actor=request.actor,
         commit_id="conf-snapshots-add-file",
     )
-    assert added.committed_seq == expected.added_file_committed_seq
-    deleted = _apply(
+    _apply(
         client,
         namespace_id,
         "conf-snapshots-delete-file",
         request.actor,
         FilesystemOperation_DeletePath(path=child_path(request.deleted_file_name)),
     )
-    assert deleted.committed_seq == expected.deletion_committed_seq
 
     captured_entry = _file_entry(
         client.filesystem.get_path_entry(

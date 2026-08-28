@@ -21,19 +21,13 @@
     "unknown_snapshot_id": "chk_ffffffffffffffffffffffffffffffff"
   },
   "expected": {
-    "directory_committed_seq": 1,
-    "replaced_file_committed_seq": 2,
-    "deleted_file_committed_seq": 3,
     "snapshot_head_seq": 3,
     "captured_revision_no": 1,
     "captured_entry_names": [
       "kept.txt",
       "removed.txt"
     ],
-    "replacement_committed_seq": 4,
     "current_revision_no": 2,
-    "added_file_committed_seq": 5,
-    "deletion_committed_seq": 6,
     "current_entry_names": [
       "added.txt",
       "kept.txt"

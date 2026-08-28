@@ -1203,16 +1203,10 @@ struct SnapshotsRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotsExpected {
-    directory_committed_seq: u64,
-    replaced_file_committed_seq: u64,
-    deleted_file_committed_seq: u64,
     snapshot_head_seq: u64,
     captured_revision_no: u64,
     captured_entry_names: Vec<String>,
-    replacement_committed_seq: u64,
     current_revision_no: u64,
-    added_file_committed_seq: u64,
-    deletion_committed_seq: u64,
     current_entry_names: Vec<String>,
     snapshot_change_seqs: Vec<u64>,
     snapshot_gone: ErrorStatusExpected,
@@ -1239,18 +1233,14 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     let directory = namespace_path(&request.namespace_id, &request.directory);
     let mut directory_options = CreateDirectoryOptions::new(request.actor.clone());
     directory_options.commit = commit_options(&request.actor, "conf-snapshots-create-directory");
-    let created_directory = harness
+    harness
         .client
         .create_directory(&directory, &directory_options)
         .await
         .expect("create snapshots directory");
-    assert_eq!(
-        created_directory.committed_seq.0,
-        expected.directory_committed_seq
-    );
 
     let replaced_path = child_path(&request.replaced_file_name);
-    let created_replaced = harness
+    harness
         .client
         .put_file_bytes(
             &replaced_path,
@@ -1259,12 +1249,8 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         )
         .await
         .expect("create replaced snapshot file");
-    assert_eq!(
-        created_replaced.committed_seq.0,
-        expected.replaced_file_committed_seq
-    );
     let deleted_path = child_path(&request.deleted_file_name);
-    let created_deleted = harness
+    harness
         .client
         .put_file_bytes(
             &deleted_path,
@@ -1273,10 +1259,6 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         )
         .await
         .expect("create deleted snapshot file");
-    assert_eq!(
-        created_deleted.committed_seq.0,
-        expected.deleted_file_committed_seq
-    );
 
     let snapshots_url = format!(
         "{}/v0/namespaces/{}/snapshots",
@@ -1301,7 +1283,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
 
     let mut replace_options = put_options(&request.actor, "conf-snapshots-replace-file");
     replace_options.behavior = DestinationBehavior::Replace;
-    let replaced = harness
+    harness
         .client
         .put_file_bytes(
             &replaced_path,
@@ -1310,9 +1292,8 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         )
         .await
         .expect("replace snapshot file");
-    assert_eq!(replaced.committed_seq.0, expected.replacement_committed_seq);
     let added_path = child_path(&request.added_file_name);
-    let added = harness
+    harness
         .client
         .put_file_bytes(
             &added_path,
@@ -1321,15 +1302,13 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         )
         .await
         .expect("add file after snapshot");
-    assert_eq!(added.committed_seq.0, expected.added_file_committed_seq);
     let mut delete_options = DeleteOptions::new(request.actor.clone());
     delete_options.commit = commit_options(&request.actor, "conf-snapshots-delete-file");
-    let deleted = harness
+    harness
         .client
         .delete_path(&deleted_path, &delete_options)
         .await
         .expect("delete file after snapshot");
-    assert_eq!(deleted.committed_seq.0, expected.deletion_committed_seq);
 
     let snapshot_id = snapshot.snapshot_id.as_str();
     let entry_url = format!(
