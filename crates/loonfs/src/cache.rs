@@ -364,13 +364,7 @@ impl ReadCore {
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
-    /// Pins the metadata view one checkpoint captured rather than the
-    /// current one.
-    ///
-    /// The live head still supplies the namespace identity and status a read
-    /// needs at any sequence; every sequence-bearing field comes from the
-    /// checkpoint's manifest. The latest-view counter stays out of it: this
-    /// is not a latest-view read.
+    /// Pins the metadata view captured by a checkpoint.
     pub(crate) async fn pinned_read_at_checkpoint(
         &self,
         namespace_id: &NamespaceId,

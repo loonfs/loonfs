@@ -440,13 +440,9 @@ impl FsReader {
         Ok(FsReadSnapshot { engine, context })
     }
 
-    /// Pins one namespace metadata view at the state a checkpoint captured.
+    /// Pins the namespace state captured by a checkpoint.
     ///
-    /// The returned snapshot keeps path lookup, directory listing, inode
-    /// resolution, and content selection at the checkpointed sequence,
-    /// however far the current head has moved on. A missing or released
-    /// checkpoint, or a pinned basis that no longer loads, returns
-    /// `checkpoint_unavailable` rather than falling back to current state.
+    /// Missing or released checkpoints return `checkpoint_unavailable`.
     pub async fn pin_namespace_at_checkpoint(
         &self,
         namespace_id: &NamespaceId,

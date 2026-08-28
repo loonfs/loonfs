@@ -1,11 +1,4 @@
-//! Enumerating the files a checkpoint pins.
-//!
-//! A checkpoint pins one immutable manifest. This module walks that
-//! manifest's inode family in ascending inode-id order and answers, for
-//! every file visible in exactly that pinned state, the revision and content
-//! reference the checkpoint recorded for it. Nothing here consults the live
-//! head, the WAL, or any later manifest: a consumer that wants what changed
-//! after the pinned sequence reads the change feed.
+//! Lists files from the manifest pinned by a checkpoint.
 
 use super::cache::MetadataSegmentCache;
 use super::read_basis::{load_pinned_checkpoint_basis, PinnedCheckpointBasis};
@@ -18,16 +11,10 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 
-/// Inode rows read per scan wave. Directories and invisible inodes are
-/// filtered out after the read, so a page of files may need several waves;
-/// the floor keeps a small page size from paying one scan per row.
+/// Minimum number of inode rows scanned at once.
 const INODE_SCAN_WAVE_ROWS: usize = 64;
 
-/// Where a file enumeration resumes: strictly after this inode id.
-///
-/// Enumeration order is ascending inode id, which is also the durable row
-/// order of the inode family, so a resume is one range bound — it never
-/// re-reads a row at or before `after_inode_id`.
+/// Resumes a file listing after this inode id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointFilesPageCursor {
     /// Last inode id returned by the previous page.
@@ -38,23 +25,20 @@ pub struct CheckpointFilesPageCursor {
 /// checkpoint pinned for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointFile {
-    /// The file's inode identity, stable across renames and replacements.
+    /// The file's inode id.
     pub inode_id: InodeId,
-    /// The file's current revision as of the checkpointed sequence.
+    /// The file revision at the checkpointed sequence.
     pub revision_no: RevisionNo,
-    /// Immutable bytes that revision published.
+    /// The revision's content reference.
     pub content_ref: ContentRef,
-    /// Byte length carried by `content_ref`, lifted out for planners that
-    /// size work before reading anything.
+    /// The file size in bytes.
     pub size_bytes: u64,
 }
 
 /// One page of the files a checkpoint pins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointFilesPage {
-    /// The sequence the checkpoint pins. Every file in the page is the
-    /// state at this sequence, and the change feed after it is exactly what
-    /// this page does not cover.
+    /// The sequence captured by the checkpoint.
     pub checkpoint_seq: ChangeSeq,
     /// Files in ascending inode-id order.
     pub files: Vec<CheckpointFile>,
@@ -64,11 +48,8 @@ pub struct CheckpointFilesPage {
 
 /// Lists files visible in the state pinned by `checkpoint_id`.
 ///
-/// The checkpoint manifest is read without replaying later WAL entries.
-/// Visibility rules match current reads, and directories are omitted. Missing
-/// or released records and missing pinned manifests return
-/// `checkpoint_unavailable` without falling back to current state. Expiry is
-/// enforced when garbage collection releases the record, not during reads.
+/// Later WAL entries are not replayed. Directories are omitted. Missing or
+/// released checkpoints return `checkpoint_unavailable`.
 pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -83,8 +64,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     let view = MetadataView::over_manifest_segments(&segments, checkpoint_seq);
     let mut session = view.session();
 
-    // One row past the page proves whether another file exists, so a cursor
-    // is handed out only when it will answer something.
+    // Read one extra file to determine whether another page exists.
     let wanted = request.limit.limit_plus_one();
     let wave_rows = wanted.max(INODE_SCAN_WAVE_ROWS);
     let mut lower_bound = match request.cursor {
@@ -106,8 +86,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
         let family_exhausted = rows.len() < wave_rows;
-        // Advance before consuming the wave: the next wave starts strictly
-        // after the last row this one read, whatever the filters keep.
+        // Resume after the last scanned row, including rows filtered out below.
         match rows.last() {
             Some((row_key, _)) => lower_bound = format!("{row_key}\0"),
             None => break,

@@ -1,11 +1,4 @@
-//! Resolving a checkpoint id into the state it pinned.
-//!
-//! A checkpoint pins one immutable manifest. This module loads the record,
-//! refuses the lifecycle that no longer pins a basis, and verifies the
-//! manifest against every coordinate the record carries for it. Consumers
-//! either scan the pinned segments directly or pin a read context to the
-//! head the manifest describes; neither consults the live head, the WAL, or
-//! any later manifest.
+//! Reads the state pinned by a checkpoint.
 
 use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
@@ -23,23 +16,17 @@ use loonfs_objectstore::ObjectStore;
 
 /// The manifest a checkpoint pins, loaded and verified.
 pub(crate) struct PinnedCheckpointBasis<'a, S: ObjectStore + ?Sized> {
-    /// Coordinates the record pins, including the sequence it captured.
+    /// The manifest reference stored in the checkpoint.
     pub(crate) manifest: ManifestRef,
     pub(crate) segments: VerifiedMetadataSegments<'a, S>,
 }
 
-/// The head and metadata basis that describe a namespace exactly as one
-/// checkpoint captured it.
-///
-/// This type supports the `loonfs` runtime, which pairs it with its own
-/// caches to build a pinned read context.
+/// The namespace state captured by a checkpoint.
 #[derive(Debug, Clone)]
 pub struct CheckpointReadBasis {
     /// The namespace head as of the captured sequence.
     pub head: HeadState,
-    /// Identity of the immutable object this view reads, for keying read
-    /// projections. A checkpoint pins a manifest rather than a head, so the
-    /// manifest's payload checksum is what stands still here.
+    /// The pinned manifest checksum, used as the read-cache key.
     pub head_etag: String,
     /// The manifest the checkpoint pins.
     pub basis: MetadataBasis,
@@ -77,14 +64,11 @@ pub(crate) async fn load_pinned_checkpoint_basis<'a, S: ObjectStore + ?Sized>(
     })
 }
 
-/// Resolves the read basis `checkpoint_id` pins.
+/// Loads the namespace state pinned by `checkpoint_id`.
 ///
-/// `live_head` supplies only what the namespace carries for its whole life:
-/// its identity, its content store, and its current lifecycle status. Every
-/// sequence-bearing field comes from the pinned manifest, so a read over the
-/// returned pair replays no WAL and answers the captured state. A missing
-/// record, a released record, or a basis that no longer loads answers
-/// `checkpoint_unavailable` instead of the current head.
+/// Namespace identity and lifecycle fields come from `live_head`. Sequence
+/// data comes from the checkpoint's manifest, so later WAL entries are not
+/// replayed. Missing or released checkpoints return `checkpoint_unavailable`.
 pub async fn load_checkpoint_read_basis<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -102,9 +86,7 @@ pub async fn load_checkpoint_read_basis<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Loads the record and refuses the one lifecycle that no longer pins its
-/// basis, so a caller never reads state garbage collection may already be
-/// reclaiming.
+/// Loads an active checkpoint record.
 async fn load_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

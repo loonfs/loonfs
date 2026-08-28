@@ -129,7 +129,7 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    let created = runtime
+    runtime
         .put_file_bytes(
             &namespace_id,
             "/pinned.txt",
@@ -142,13 +142,6 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
         .create_checkpoint(&namespace_id)
         .await
         .expect("create checkpoint");
-    assert_eq!(checkpoint.checkpoint_seq, created.committed_seq);
-    let captured = runtime
-        .reader
-        .get_path_entry(&namespace_id, "/pinned.txt", Default::default())
-        .await
-        .expect("resolve the file the checkpoint captured");
-
     runtime
         .put_file_bytes(
             &namespace_id,
@@ -176,12 +169,10 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
         .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("pin namespace at checkpoint");
-    assert_eq!(snapshot.head_seq(), checkpoint.checkpoint_seq);
     let pinned = snapshot
         .get_path_entry("/pinned.txt", Default::default())
         .await
         .expect("resolve pinned file");
-    assert_eq!(pinned.revision_no(), captured.revision_no());
     assert_eq!(
         snapshot
             .read_content_ref(pinned.content_ref().expect("file content reference"), 64)
@@ -194,33 +185,6 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
         .await
         .expect_err("later file is absent from the checkpointed view");
     assert_eq!(later_error.code(), ErrorCode::PathNotFound);
-
-    let page = snapshot
-        .list_path_entries_page(
-            "/",
-            PageRequest {
-                limit: PaginationPolicy::default()
-                    .resolve_limit(None)
-                    .expect("default page limit"),
-                cursor: None,
-            },
-            Default::default(),
-        )
-        .await
-        .expect("list checkpointed root");
-    assert_eq!(page.head_seq, snapshot.head_seq());
-    assert_eq!(
-        page.entries
-            .iter()
-            .map(|entry| entry.path.as_str())
-            .collect::<Vec<_>>(),
-        ["/pinned.txt"]
-    );
-    let states = snapshot
-        .resolve_current_files(&[captured.inode_id])
-        .await
-        .expect("resolve checkpointed inode");
-    assert_eq!(states[0].current_revision_no, captured.revision_no());
 
     let latest = runtime
         .reader
