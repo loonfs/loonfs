@@ -1,16 +1,34 @@
-//! Snapshot-owned checkpoint expiry and release transitions.
+//! Snapshot-owned checkpoint reads, expiry, and release transitions.
 
+use super::read_basis::{load_checkpoint_read_basis_from_record, CheckpointReadBasis};
 use super::record::{
     encode_checkpoint_record, load_checkpoint_record, release_checkpoint_record,
     LoadedCheckpointRecord,
 };
+use super::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::{CoreError, Result};
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, HeadState};
 use loonfs_api::{Checkpoint, CheckpointId, NamespaceId, ReleaseSnapshotResponse};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+
+/// Resolves the read basis a live snapshot lease pins.
+pub async fn load_snapshot_read_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
+    live_head: &HeadState,
+    snapshot_id: &CheckpointId,
+    now_ms: u64,
+) -> Result<CheckpointReadBasis> {
+    let loaded = classify_live_snapshot(
+        load_checkpoint_record(store, &live_head.namespace_id, snapshot_id).await?,
+        snapshot_id,
+        now_ms,
+    )?;
+    load_checkpoint_read_basis_from_record(store, segment_cache, live_head, loaded.state).await
+}
 
 pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     store: &S,
@@ -113,8 +131,7 @@ fn classify_live_snapshot(
         }
         CheckpointOwner::User { .. } => {
             return Err(CoreError::InvalidCheckpointRequest(format!(
-                "checkpoint `{checkpoint_id}` is user-owned; snapshot extension acts only on \
-                 snapshot-owned records"
+                "`{checkpoint_id}` names a user-owned checkpoint, not a snapshot"
             )))
         }
         CheckpointOwner::Fork {
@@ -122,8 +139,8 @@ fn classify_live_snapshot(
             ..
         } => {
             return Err(CoreError::InvalidCheckpointRequest(format!(
-                "checkpoint `{checkpoint_id}` is owned by fork target `{target_namespace_id}`; \
-                 snapshot extension acts only on snapshot-owned records"
+                "`{checkpoint_id}` names a checkpoint owned by fork target \
+                 `{target_namespace_id}`, not a snapshot"
             )))
         }
     }

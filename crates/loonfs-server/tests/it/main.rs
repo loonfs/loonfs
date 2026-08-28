@@ -18,6 +18,7 @@ mod http_pagination;
 mod http_paths;
 mod http_retry;
 mod http_smoke;
+mod http_snapshot_reads;
 mod http_snapshots;
 mod http_tls;
 mod http_uploads;

@@ -293,7 +293,25 @@ fn openapi_documents_current_server_paths() {
         paths,
         "/v0/namespaces/{namespace_id}/filesystem/entries",
         "get",
-        &["path", "limit", "cursor"],
+        &["path", "limit", "cursor", "snapshot_id"],
+    );
+    assert_query_params(
+        paths,
+        "/v0/namespaces/{namespace_id}/filesystem/entry",
+        "get",
+        &["path", "snapshot_id"],
+    );
+    assert_query_params(
+        paths,
+        "/v0/namespaces/{namespace_id}/filesystem/content",
+        "get",
+        &["path", "revision_no", "snapshot_id"],
+    );
+    assert_query_params(
+        paths,
+        "/v0/namespaces/{namespace_id}/filesystem/downloads",
+        "post",
+        &["snapshot_id"],
     );
     assert_query_params(
         paths,
@@ -305,7 +323,7 @@ fn openapi_documents_current_server_paths() {
         paths,
         "/v0/namespaces/{namespace_id}/changes",
         "get",
-        &["after_seq", "limit"],
+        &["after_seq", "limit", "snapshot_id"],
     );
     assert_query_params(
         paths,

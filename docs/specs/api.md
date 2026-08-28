@@ -735,15 +735,15 @@ The table below lists the retry class for every v0 operation.
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
 | Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces` |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
-| Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
+| Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
-| List path entries | `list_path_entries` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entries?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
+| List path entries | `list_path_entries` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entries?path=/docs&limit=100&cursor=...&include_attributes=true&snapshot_id=...` (`include_attributes` is optional and defaults to `false`; `snapshot_id` is optional) |
 | List directory children by inode | `list_inode_children` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/children?limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
 | List file revisions by path | `list_file_revisions` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | List file revisions by inode | `list_file_revisions_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
-| Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` (`revision_no` is optional) |
+| Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&snapshot_id=...` (`revision_no` and `snapshot_id` are optional and mutually exclusive) |
 | Read prior file content by inode | `get_file_revision_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
-| Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` |
+| Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads?snapshot_id=...` (`snapshot_id` is optional and cannot be combined with the body's `revision_no`) |
 | Start a download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with body `{}` |
 | List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits` |
@@ -753,7 +753,7 @@ The table below lists the retry class for every v0 operation.
 | Complete an upload | `complete_upload` | `replayable` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
 | Read an upload session | `get_upload` | `idempotent` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
 | Abort an upload session | `abort_upload` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
-| Read committed changes | `list_changes` | `idempotent` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
+| Read committed changes | `list_changes` | `idempotent` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100&snapshot_id=...` (`snapshot_id` is optional) |
 | Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`; requires `name` and `ttl_ms` |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling |
@@ -939,7 +939,15 @@ expired. The admin checkpoint listing keeps expired records visible until
 collection releases them. Snapshot release is idempotent and one-way. A
 second release succeeds, including after the record is reaped.
 
-These operations manage the snapshot lifetime.
+These operations manage the snapshot lifetime. Path stat, directory listing,
+file content, download, and change-feed requests accept an optional
+`snapshot_id`. File content and download requests cannot combine `snapshot_id`
+with `revision_no`; the snapshot selects the revision. A snapshot change feed
+ends at the captured sequence, and `after_seq` cannot exceed that sequence.
+
+Snapshot reads require a live snapshot. Missing snapshots return
+`snapshot_not_found`, while released or expired snapshots return
+`snapshot_gone`. Neither case falls back to the current namespace state.
 
 #### Store contract probe
 

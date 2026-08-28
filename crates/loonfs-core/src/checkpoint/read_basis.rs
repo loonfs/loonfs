@@ -40,6 +40,16 @@ pub(crate) async fn load_pinned_checkpoint_basis<'a, S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
 ) -> Result<PinnedCheckpointBasis<'a, S>> {
     let record = load_pinning_checkpoint_record(store, namespace_id, checkpoint_id).await?;
+    load_pinned_checkpoint_basis_from_record(store, segment_cache, record).await
+}
+
+pub(crate) async fn load_pinned_checkpoint_basis_from_record<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    segment_cache: Option<&'a MetadataSegmentCache>,
+    record: CheckpointRecordState,
+) -> Result<PinnedCheckpointBasis<'a, S>> {
+    let checkpoint_id = &record.checkpoint_id;
+    let namespace_id = &record.namespace_id;
     let segments = load_verified_manifest_segments_with_cache(
         store,
         segment_cache,
@@ -75,9 +85,19 @@ pub async fn load_checkpoint_read_basis<S: ObjectStore + ?Sized>(
     live_head: &HeadState,
     checkpoint_id: &CheckpointId,
 ) -> Result<CheckpointReadBasis> {
+    let record =
+        load_pinning_checkpoint_record(store, &live_head.namespace_id, checkpoint_id).await?;
+    load_checkpoint_read_basis_from_record(store, segment_cache, live_head, record).await
+}
+
+pub(crate) async fn load_checkpoint_read_basis_from_record<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
+    live_head: &HeadState,
+    record: CheckpointRecordState,
+) -> Result<CheckpointReadBasis> {
     let PinnedCheckpointBasis { manifest, segments } =
-        load_pinned_checkpoint_basis(store, segment_cache, &live_head.namespace_id, checkpoint_id)
-            .await?;
+        load_pinned_checkpoint_basis_from_record(store, segment_cache, record).await?;
     let envelope = segments.manifest();
     Ok(CheckpointReadBasis {
         head: head_from_manifest(live_head, envelope),
