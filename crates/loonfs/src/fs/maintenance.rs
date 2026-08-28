@@ -12,14 +12,15 @@ use crate::NamespaceDiagnostics;
 use crate::{
     AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions,
     CreateSnapshotOptions, ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse,
-    MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceOptions,
-    MetadataMaintenanceResponse, NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome,
-    SharedObjectStore, WalFlushStepOutcome,
+    ListSnapshotsResponse, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceOptions,
+    MetadataMaintenanceResponse, NamespaceId, ReleaseCheckpointResponse, ReleaseSnapshotResponse,
+    ReorganizeStepOutcome, SharedObjectStore, SnapshotSummary, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
 use loonfs_core::cache::load_namespace_flush_basis;
 use loonfs_core::CheckpointPageCursor;
+use std::num::NonZeroU32;
 use tokio::time::Instant;
 use tracing::Instrument;
 
@@ -704,6 +705,49 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
+    /// Refuses a snapshot create that would pass the namespace's live quota.
+    pub async fn ensure_snapshot_quota(
+        &self,
+        namespace_id: &NamespaceId,
+        now_ms: u64,
+        max_live: usize,
+    ) -> Result<()> {
+        let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
+        let mut cursor = None;
+        let mut live_after_create = 1usize;
+        loop {
+            let page = self
+                .engine(namespace_id)
+                .list_checkpoints_page(PageRequest {
+                    limit: loonfs_api::EffectiveLimit::new(page_limit),
+                    cursor,
+                })
+                .await
+                .map_err(RuntimeError::from)?;
+            for checkpoint in page.items {
+                if matches!(
+                    checkpoint.owner,
+                    loonfs_api::CheckpointOwnerSummary::Snapshot { expires_at_ms, .. }
+                        if expires_at_ms >= now_ms
+                ) {
+                    live_after_create = live_after_create.saturating_add(1);
+                    if live_after_create > max_live {
+                        return Err(RuntimeError::Core(
+                            loonfs_core::Error::SnapshotQuotaExceeded {
+                                namespace_id: namespace_id.clone(),
+                                max_live,
+                            },
+                        ));
+                    }
+                }
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(());
+            };
+            cursor = Some(next_cursor);
+        }
+    }
+
     /// Creates a checkpoint pager beginning at `request.cursor`.
     pub fn list_checkpoints_pager(
         &self,
@@ -745,6 +789,102 @@ impl FsAdmin {
             .await?;
         response.next_cursor = super::core::encode_next_cursor(next_cursor.as_ref())?;
         Ok(response)
+    }
+
+    /// Lists one page of live snapshot-owned checkpoint records.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.list_snapshots",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.list_snapshots",
+            method = "list_snapshots_page",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn list_snapshots_page(
+        &self,
+        namespace_id: &NamespaceId,
+        request: PageRequest<CheckpointPageCursor>,
+    ) -> Result<ListSnapshotsResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let now_ms = self.actor.mutation_context()?.now_ms;
+        let requested = request.limit.as_usize();
+        let mut cursor = request.cursor;
+        let mut snapshots = Vec::with_capacity(requested);
+        loop {
+            let remaining = requested - snapshots.len();
+            let limit = NonZeroU32::new(u32::try_from(remaining).map_err(|error| {
+                RuntimeError::Core(loonfs_core::Error::Internal(format!(
+                    "snapshot page limit does not fit u32: {error}"
+                )))
+            })?)
+            .expect("a snapshot page with room remaining has a nonzero limit");
+            let page = self
+                .engine(namespace_id)
+                .list_checkpoints_page(PageRequest {
+                    limit: loonfs_api::EffectiveLimit::new(limit),
+                    cursor,
+                })
+                .await
+                .map_err(RuntimeError::from)?;
+            snapshots.extend(page.items.into_iter().filter_map(|checkpoint| {
+                SnapshotSummary::from_checkpoint(checkpoint)
+                    .filter(|snapshot| snapshot.expires_at_ms >= now_ms)
+            }));
+            match page.next_cursor {
+                Some(next_cursor) if snapshots.len() < requested => cursor = Some(next_cursor),
+                next_cursor => {
+                    return Ok(ListSnapshotsResponse {
+                        namespace_id: namespace_id.clone(),
+                        snapshots,
+                        next_cursor: super::core::encode_next_cursor(next_cursor.as_ref())?,
+                    })
+                }
+            }
+        }
+    }
+
+    /// Extends a live snapshot, capped from its durable creation time.
+    pub async fn extend_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+        requested_expires_at_ms: u64,
+        max_lifetime_ms: u64,
+    ) -> Result<SnapshotSummary> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let result = self
+            .engine(namespace_id)
+            .extend_snapshot(snapshot_id, requested_expires_at_ms, max_lifetime_ms)
+            .await
+            .map_err(RuntimeError::from)
+            .and_then(|checkpoint| {
+                SnapshotSummary::from_checkpoint(checkpoint).ok_or_else(|| {
+                    RuntimeError::Core(loonfs_core::Error::Internal(
+                        "snapshot extension returned a non-snapshot checkpoint".to_owned(),
+                    ))
+                })
+            });
+        self.finish_namespace_mutation(namespace_id, result)
+    }
+
+    /// Releases a snapshot-owned checkpoint by id. Idempotent.
+    pub async fn release_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+    ) -> Result<ReleaseSnapshotResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let result = self
+            .engine(namespace_id)
+            .release_snapshot(snapshot_id)
+            .await
+            .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     async fn list_checkpoints_page_typed(

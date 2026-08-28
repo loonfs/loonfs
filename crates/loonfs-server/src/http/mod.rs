@@ -45,8 +45,9 @@ use self::handlers_inodes::{
     get_file_revision_bytes_by_inode, get_inode, list_file_revisions_by_inode, list_inode_children,
 };
 use self::handlers_namespace::{
-    create_checkpoint, create_namespace, delete_namespace, fork_namespace, get_namespace,
-    get_namespace_diagnostics, list_checkpoints, release_checkpoint, run_maintenance,
+    create_checkpoint, create_namespace, create_snapshot, delete_namespace, extend_snapshot,
+    fork_namespace, get_namespace, get_namespace_diagnostics, list_checkpoints, list_snapshots,
+    release_checkpoint, release_snapshot, run_maintenance,
 };
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, get_grep_index, grep,
@@ -284,6 +285,18 @@ fn router(state: AppState) -> Router {
             get(get_namespace).delete(delete_namespace),
         )
         .route("/v0/namespaces/{namespace_id}/forks", post(fork_namespace))
+        .route(
+            "/v0/namespaces/{namespace_id}/snapshots",
+            post(create_snapshot).get(list_snapshots),
+        )
+        .route(
+            "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
+            post(extend_snapshot),
+        )
+        .route(
+            "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
+            post(release_snapshot),
+        )
         .route(
             "/v0/admin/namespaces/{namespace_id}/diagnostics",
             get(get_namespace_diagnostics),

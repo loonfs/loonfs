@@ -29,14 +29,15 @@ pub use downloads::{
 pub use operations::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, Checkpoint,
     CheckpointOwnerSummary, CommitRequest, CreateCheckpointRequest, CreateNamespaceRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, DeletedObjectCounts, DestinationBehavior,
-    ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
-    ListFileRevisionsResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics,
-    ReleaseCheckpointResponse, ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates,
-    RetainedReason, StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest,
-    StoreProbeResponse, WalFlushStepOutcome,
+    CreateSnapshotRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DeletedObjectCounts,
+    DestinationBehavior, ErrorDetails, ExtendSnapshotRequest, FileRevision, FilesystemOperation,
+    FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListSnapshotsResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, ReleaseCheckpointResponse,
+    ReleaseSnapshotResponse, ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates,
+    RetainedReason, SnapshotSummary, StoreProbeCheckOutcome, StoreProbeCheckResult,
+    StoreProbeRequest, StoreProbeResponse, WalFlushStepOutcome,
 };
 pub use reads::{
     AttributesProjection, FileBytes, ListInodeChildrenResponse, ListPathEntriesResponse,

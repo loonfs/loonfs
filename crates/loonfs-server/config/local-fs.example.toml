@@ -36,6 +36,12 @@ writer_id = "loonfs-server-local"
 # as the `download.max_content_bytes` capability limit. Defaults to 256 MiB.
 #max_download_bytes = 268435456
 
+# Snapshot request ttl, total lifetime from creation, and live quota per
+# namespace. These are advertised through the matching `snapshot.*` limits.
+#snapshot_max_ttl_ms = 86400000
+#snapshot_max_lifetime_ms = 604800000
+#snapshot_max_live_per_namespace = 16
+
 # How many proxied upload bodies the server will stream at once and how many
 # content reads it will buffer at once. Requests past a cap answer 503
 # `server_busy`. Upload memory tracks one transfer part per admitted body.

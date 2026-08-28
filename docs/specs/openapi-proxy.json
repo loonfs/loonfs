@@ -1077,6 +1077,357 @@
         }
       }
     },
+    "/v0/namespace-aliases/{namespace_alias}/snapshots": {
+      "get": {
+        "tags": [
+          "namespaces"
+        ],
+        "summary": "List snapshots",
+        "description": "Lists one page of live snapshots in snapshot-id order. Released and expired snapshots are omitted. The cursor resumes the checkpoint inventory and does not create a snapshot.",
+        "operationId": "list_snapshots",
+        "parameters": [
+          {
+            "name": "namespace_alias",
+            "in": "path",
+            "description": "Application namespace alias",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque snapshot-list page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Live snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSnapshotsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id, limit, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "idempotent",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.snapshots"
+        }
+      },
+      "post": {
+        "tags": [
+          "namespaces"
+        ],
+        "summary": "Create snapshot",
+        "description": "Creates one time-bounded read snapshot over the current namespace state. Every call creates a new snapshot, so the operation is not idempotent. It refuses an invalid name or ttl and creation past the namespace quota.",
+        "operationId": "create_snapshot",
+        "parameters": [
+          {
+            "name": "namespace_alias",
+            "in": "path",
+            "description": "Application namespace alias",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSnapshotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Snapshot created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id, name, or ttl",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Snapshot quota exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "not_idempotent"
+      }
+    },
+    "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend": {
+      "post": {
+        "tags": [
+          "namespaces"
+        ],
+        "summary": "Extend snapshot",
+        "description": "Extends a live snapshot without passing its lifetime ceiling. It refuses non-snapshot records and snapshots that are released or expired. Repeating the request has the same outcome.",
+        "operationId": "extend_snapshot",
+        "parameters": [
+          {
+            "name": "namespace_alias",
+            "in": "path",
+            "description": "Application namespace alias",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "description": "Snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtendSnapshotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Snapshot extended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or ttl",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Snapshot not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Snapshot released or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "idempotent"
+      }
+    },
+    "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/release": {
+      "post": {
+        "tags": [
+          "namespaces"
+        ],
+        "summary": "Release snapshot",
+        "description": "Releases a snapshot by id. The transition is idempotent and one-way. It refuses checkpoint records owned by users or forks.",
+        "operationId": "release_snapshot",
+        "parameters": [
+          {
+            "name": "namespace_alias",
+            "in": "path",
+            "description": "Application namespace alias",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "description": "Snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot release accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseSnapshotResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or non-snapshot record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "x-loonfs-retry": "idempotent"
+      }
+    },
     "/v0/namespace-aliases/{namespace_alias}/uploads": {
       "post": {
         "tags": [
@@ -1977,6 +2328,12 @@
         "maximum": 9007199254740991,
         "minimum": 0
       },
+      "CheckpointId": {
+        "type": "string",
+        "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version.",
+        "example": "chk_00000000000000000000000000000002",
+        "pattern": "^chk_[0-9a-f]{32}$"
+      },
       "Checksum": {
         "type": "object",
         "description": "An algorithm and its canonical lowercase-hex checksum value.\n\nThe enclosing value defines which bytes the checksum covers.",
@@ -2244,6 +2601,27 @@
         },
         "additionalProperties": false
       },
+      "CreateSnapshotRequest": {
+        "type": "object",
+        "description": "Request to create a time-bounded read snapshot.",
+        "required": [
+          "name",
+          "ttl_ms"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Label recorded on the snapshot record. A label, not a key: several\nrecords may carry the same name over different bases."
+          },
+          "ttl_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Required snapshot lifetime from the server's current time, in\nmilliseconds.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "DeleteDirectoryBehavior": {
         "type": "string",
         "description": "Directory delete behavior for path-oriented deletes.",
@@ -2377,6 +2755,22 @@
             "description": "Oldest sequence still promised for incremental replay."
           }
         }
+      },
+      "ExtendSnapshotRequest": {
+        "type": "object",
+        "description": "Request to extend a read snapshot.",
+        "required": [
+          "ttl_ms"
+        ],
+        "properties": {
+          "ttl_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requested lifetime from the server's current time, in milliseconds.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "FileRevision": {
         "type": "object",
@@ -2721,6 +3115,31 @@
           }
         }
       },
+      "ListSnapshotsResponse": {
+        "type": "object",
+        "description": "One page of live read snapshots.",
+        "required": [
+          "namespace_id",
+          "snapshots"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the snapshots belong to."
+          },
+          "next_cursor": {
+            "type": "string",
+            "description": "Opaque cursor for the next page."
+          },
+          "snapshots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotSummary"
+            },
+            "description": "Live snapshot records in ascending snapshot-id order."
+          }
+        }
+      },
       "ListTrashResponse": {
         "type": "object",
         "description": "One trash listing page: the namespace's recoverable deletions.",
@@ -2794,6 +3213,24 @@
           }
         }
       },
+      "ReleaseSnapshotResponse": {
+        "type": "object",
+        "description": "Result of releasing a read snapshot.",
+        "required": [
+          "namespace_id",
+          "snapshot_id"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the snapshot belonged to."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Snapshot the release targeted."
+          }
+        }
+      },
       "RevisionNo": {
         "type": "integer",
         "format": "int64",
@@ -2861,6 +3298,48 @@
             "format": "int32",
             "description": "Part number this capability writes.",
             "minimum": 0
+          }
+        }
+      },
+      "SnapshotSummary": {
+        "type": "object",
+        "description": "One live read snapshot.",
+        "required": [
+          "snapshot_id",
+          "namespace_id",
+          "name",
+          "head_seq",
+          "created_at_ms",
+          "expires_at_ms"
+        ],
+        "properties": {
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time the snapshot record was created, in Unix milliseconds.",
+            "minimum": 0
+          },
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the snapshot lease expires, in Unix milliseconds.",
+            "minimum": 0
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence captured by the snapshot."
+          },
+          "name": {
+            "type": "string",
+            "description": "Application-facing label recorded on the snapshot."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose state the snapshot captured."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Durable checkpoint-record id used as the snapshot id."
           }
         }
       },
@@ -4311,6 +4790,10 @@
     {
       "name": "system",
       "description": "Server health, readiness, metrics, and capability discovery"
+    },
+    {
+      "name": "namespaces",
+      "description": "Namespace lifecycle and status"
     },
     {
       "name": "filesystem",

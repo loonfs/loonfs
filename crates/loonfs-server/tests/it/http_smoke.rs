@@ -13,8 +13,10 @@ use loonfs_api::{
     DEFAULT_PAGE_LIMIT, LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_DOWNLOAD_MAX_CONCURRENT,
     LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
-    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
+    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use loonfs_client::{ClientError, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
@@ -154,6 +156,7 @@ async fn capabilities_endpoint_advertises_capabilities() {
     assert!(capabilities.supports("core.namespaces.create"));
     assert!(capabilities.supports("core.namespaces.fork"));
     assert!(capabilities.supports("core.namespaces.delete"));
+    assert!(capabilities.supports("core.snapshots"));
     // A local-filesystem deployment presigns nothing, so none of the three
     // transfer capabilities is advertised — and because it presigns no
     // uploads either, no file it holds can be larger than it will proxy.
@@ -187,6 +190,15 @@ async fn capabilities_endpoint_advertises_capabilities() {
         (LIMIT_UPLOAD_MAX_CONTENT_BYTES, config.max_upload_bytes),
         (LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, 8 * 1024 * 1024),
         (LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, config.max_download_bytes),
+        (LIMIT_SNAPSHOT_MAX_TTL_MS, config.snapshot_max_ttl_ms),
+        (
+            LIMIT_SNAPSHOT_MAX_LIFETIME_MS,
+            config.snapshot_max_lifetime_ms,
+        ),
+        (
+            LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
+            config.snapshot_max_live_per_namespace as u64,
+        ),
         (
             LIMIT_UPLOAD_MAX_CONCURRENT,
             config.max_concurrent_uploads as u64,

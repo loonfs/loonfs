@@ -91,6 +91,19 @@ pub struct ServerConfig {
     /// `download.max_content_bytes` capability limit.
     #[serde(default = "default_max_download_bytes")]
     pub max_download_bytes: u64,
+    /// Largest `ttl_ms` accepted by snapshot create and extend requests.
+    /// Advertised as the `snapshot.max_ttl_ms` capability limit.
+    #[serde(default = "default_snapshot_max_ttl_ms")]
+    pub snapshot_max_ttl_ms: u64,
+    /// Largest snapshot lifetime measured from its durable creation time.
+    /// Extensions clamp to this ceiling. Advertised as the
+    /// `snapshot.max_lifetime_ms` capability limit.
+    #[serde(default = "default_snapshot_max_lifetime_ms")]
+    pub snapshot_max_lifetime_ms: u64,
+    /// Most live, unexpired snapshots one namespace may hold. Advertised as
+    /// the `snapshot.max_live_per_namespace` capability limit.
+    #[serde(default = "default_snapshot_max_live_per_namespace")]
+    pub snapshot_max_live_per_namespace: usize,
     /// How many proxied upload bodies the server will stream at once;
     /// requests past the cap answer `server_busy` before any transfer.
     /// Worst-case upload memory is this times one streamed part, since
@@ -166,6 +179,18 @@ fn default_max_download_bytes() -> u64 {
     // will serve back. Content ingested past this through `direct_put`
     // needs a raised limit to be read through the server.
     256 * 1024 * 1024
+}
+
+fn default_snapshot_max_ttl_ms() -> u64 {
+    86_400_000
+}
+
+fn default_snapshot_max_lifetime_ms() -> u64 {
+    604_800_000
+}
+
+fn default_snapshot_max_live_per_namespace() -> usize {
+    16
 }
 
 fn default_max_concurrent_uploads() -> usize {
@@ -472,6 +497,30 @@ impl ServerConfig {
         if self.max_download_bytes == 0 {
             return Err(ServerConfigError::InvalidField {
                 field: "max_download_bytes",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.snapshot_max_ttl_ms == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "snapshot_max_ttl_ms",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.snapshot_max_lifetime_ms == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "snapshot_max_lifetime_ms",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.snapshot_max_ttl_ms > self.snapshot_max_lifetime_ms {
+            return Err(ServerConfigError::InvalidField {
+                field: "snapshot_max_ttl_ms",
+                reason: "must not exceed `snapshot_max_lifetime_ms`".to_owned(),
+            });
+        }
+        if self.snapshot_max_live_per_namespace == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "snapshot_max_live_per_namespace",
                 reason: "must be greater than zero".to_owned(),
             });
         }

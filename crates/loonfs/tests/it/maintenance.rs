@@ -721,7 +721,8 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
     assert_eq!(
         snapshot.owner,
         CheckpointOwnerSummary::Snapshot {
-            name: "report-run".to_owned()
+            name: "report-run".to_owned(),
+            expires_at_ms,
         }
     );
 

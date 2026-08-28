@@ -482,7 +482,8 @@ async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
     assert_eq!(
         listed.checkpoints[0].owner,
         CheckpointOwnerSummary::Snapshot {
-            name: "report-run".to_owned()
+            name: "report-run".to_owned(),
+            expires_at_ms,
         }
     );
     assert_eq!(listed.checkpoints[0].expires_at_ms, Some(expires_at_ms));
