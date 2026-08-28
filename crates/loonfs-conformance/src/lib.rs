@@ -35,6 +35,7 @@ const EXPECTED_CASES: &[&str] = &[
     "inode_mutations",
     "pagination",
     "proxy",
+    "snapshots",
     "upload_abort",
     "upload_direct_put",
     "upload_multipart",

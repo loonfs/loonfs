@@ -36,6 +36,7 @@ const EXPECTED_CASES = [
     "inode_mutations",
     "pagination",
     "proxy",
+    "snapshots",
     "upload_abort",
     "upload_direct_put",
     "upload_multipart",
@@ -136,6 +137,42 @@ interface InodeMutationsExpected {
     deleted_committed_seq: number;
     stale_binding_generation: ErrorStatusExpected;
     malformed_binding_generation: ErrorStatusExpected;
+}
+
+interface SnapshotsRequest {
+    namespace_id: string;
+    directory: string;
+    actor: ActorValue;
+    snapshot_name: string;
+    replaced_file_name: string;
+    deleted_file_name: string;
+    added_file_name: string;
+    captured_content_utf8: string;
+    current_content_utf8: string;
+    deleted_content_utf8: string;
+    added_content_utf8: string;
+    create_ttl_ms: number;
+    extend_ttl_ms: number;
+    unknown_snapshot_id: string;
+}
+
+interface SnapshotsExpected {
+    directory_committed_seq: number;
+    replaced_file_committed_seq: number;
+    deleted_file_committed_seq: number;
+    snapshot_head_seq: number;
+    captured_revision_no: number;
+    captured_entry_names: string[];
+    replacement_committed_seq: number;
+    current_revision_no: number;
+    added_file_committed_seq: number;
+    deletion_committed_seq: number;
+    current_entry_names: string[];
+    snapshot_change_seqs: number[];
+    snapshot_gone: ErrorStatusExpected;
+    snapshot_not_found: ErrorStatusExpected;
+    revision_with_snapshot: ErrorStatusExpected;
+    zero_ttl: ErrorStatusExpected;
 }
 
 interface ChangesRequest {
@@ -366,6 +403,40 @@ const INODE_MUTATIONS_EXPECTED_FIELDS = [
     "stale_binding_generation",
     "malformed_binding_generation",
 ] as const;
+const SNAPSHOTS_REQUEST_FIELDS = [
+    "namespace_id",
+    "directory",
+    "actor",
+    "snapshot_name",
+    "replaced_file_name",
+    "deleted_file_name",
+    "added_file_name",
+    "captured_content_utf8",
+    "current_content_utf8",
+    "deleted_content_utf8",
+    "added_content_utf8",
+    "create_ttl_ms",
+    "extend_ttl_ms",
+    "unknown_snapshot_id",
+] as const;
+const SNAPSHOTS_EXPECTED_FIELDS = [
+    "directory_committed_seq",
+    "replaced_file_committed_seq",
+    "deleted_file_committed_seq",
+    "snapshot_head_seq",
+    "captured_revision_no",
+    "captured_entry_names",
+    "replacement_committed_seq",
+    "current_revision_no",
+    "added_file_committed_seq",
+    "deletion_committed_seq",
+    "current_entry_names",
+    "snapshot_change_seqs",
+    "snapshot_gone",
+    "snapshot_not_found",
+    "revision_with_snapshot",
+    "zero_ttl",
+] as const;
 const CHANGES_REQUEST_FIELDS = [
     "namespace_id",
     "path",
@@ -511,6 +582,17 @@ function decodeInodeMutations(
     return [
         testCase.request as unknown as InodeMutationsRequest,
         testCase.expected as unknown as InodeMutationsExpected,
+    ];
+}
+
+function decodeSnapshots(
+    testCase: ConformanceCase,
+): [SnapshotsRequest, SnapshotsExpected] {
+    strictObject(testCase.request, SNAPSHOTS_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, SNAPSHOTS_EXPECTED_FIELDS, `${testCase.name} expected`);
+    return [
+        testCase.request as unknown as SnapshotsRequest,
+        testCase.expected as unknown as SnapshotsExpected,
     ];
 }
 
@@ -781,10 +863,14 @@ async function readProxied(
     client: LoonFSClient,
     namespaceId: string,
     path: string,
+    snapshotId?: string,
+    revisionNo?: number,
 ): Promise<Uint8Array> {
     const response = await client.filesystem.getFileBytes({
         namespace_id: namespaceId,
         path,
+        snapshot_id: snapshotId,
+        revision_no: revisionNo,
     });
     return new Uint8Array(await response.arrayBuffer());
 }
@@ -1527,6 +1613,230 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         ],
     });
     assert.equal(deleted.committed_seq, expected.deleted_committed_seq);
+});
+
+conformanceTest("snapshots", async (activeHarness, testCase) => {
+    const [request, expected] = decodeSnapshots(testCase);
+    const client = activeHarness.client;
+    const namespaceId = request.namespace_id;
+    const childPath = (name: string): string => `${request.directory}/${name}`;
+    const capturedBytes = new TextEncoder().encode(request.captured_content_utf8);
+    const currentBytes = new TextEncoder().encode(request.current_content_utf8);
+
+    await client.namespaces.createNamespace({ namespace_id: namespaceId });
+    const directory = await client.filesystem.createCommit(
+        directoryCommit(
+            namespaceId,
+            "conf-snapshots-create-directory",
+            request.actor,
+            request.directory,
+        ),
+    );
+    assert.equal(directory.committed_seq, expected.directory_committed_seq);
+    const createdReplaced = await putFile(client, {
+        namespace_id: namespaceId,
+        path: childPath(request.replaced_file_name),
+        bytes: capturedBytes,
+        actor: request.actor,
+        commit_id: "conf-snapshots-create-replaced",
+    });
+    assert.equal(createdReplaced.committed_seq, expected.replaced_file_committed_seq);
+    const createdDeleted = await putFile(client, {
+        namespace_id: namespaceId,
+        path: childPath(request.deleted_file_name),
+        bytes: new TextEncoder().encode(request.deleted_content_utf8),
+        actor: request.actor,
+        commit_id: "conf-snapshots-create-deleted",
+    });
+    assert.equal(createdDeleted.committed_seq, expected.deleted_file_committed_seq);
+
+    const snapshot = await client.namespaces.createSnapshot({
+        namespace_id: namespaceId,
+        name: request.snapshot_name,
+        ttl_ms: request.create_ttl_ms,
+    });
+    assert.equal(snapshot.namespace_id, namespaceId);
+    assert.equal(snapshot.name, request.snapshot_name);
+    assert.equal(snapshot.head_seq, expected.snapshot_head_seq);
+    assert.ok(snapshot.expires_at_ms > snapshot.created_at_ms);
+
+    const replaced = await putFile(client, {
+        namespace_id: namespaceId,
+        path: childPath(request.replaced_file_name),
+        bytes: currentBytes,
+        actor: request.actor,
+        commit_id: "conf-snapshots-replace-file",
+        behavior: "replace",
+    });
+    assert.equal(replaced.committed_seq, expected.replacement_committed_seq);
+    const added = await putFile(client, {
+        namespace_id: namespaceId,
+        path: childPath(request.added_file_name),
+        bytes: new TextEncoder().encode(request.added_content_utf8),
+        actor: request.actor,
+        commit_id: "conf-snapshots-add-file",
+    });
+    assert.equal(added.committed_seq, expected.added_file_committed_seq);
+    const deleted = await client.filesystem.createCommit(
+        deleteCommit(
+            namespaceId,
+            "conf-snapshots-delete-file",
+            request.actor,
+            childPath(request.deleted_file_name),
+        ),
+    );
+    assert.equal(deleted.committed_seq, expected.deletion_committed_seq);
+
+    const capturedEntry = fileEntry(
+        await client.filesystem.getPathEntry({
+            namespace_id: namespaceId,
+            path: childPath(request.replaced_file_name),
+            snapshot_id: snapshot.snapshot_id,
+        }),
+    );
+    assert.equal(capturedEntry.revision_no, expected.captured_revision_no);
+    const currentEntry = fileEntry(
+        await client.filesystem.getPathEntry({
+            namespace_id: namespaceId,
+            path: childPath(request.replaced_file_name),
+        }),
+    );
+    assert.equal(currentEntry.revision_no, expected.current_revision_no);
+
+    const capturedListing = await client.filesystem.listPathEntries({
+        namespace_id: namespaceId,
+        path: request.directory,
+        snapshot_id: snapshot.snapshot_id,
+    });
+    assert.equal(capturedListing.response.head_seq, expected.snapshot_head_seq);
+    assert.deepEqual(listedNames(capturedListing.data), expected.captured_entry_names);
+    const currentListing = await client.filesystem.listPathEntries({
+        namespace_id: namespaceId,
+        path: request.directory,
+    });
+    assert.deepEqual(listedNames(currentListing.data), expected.current_entry_names);
+
+    assert.deepEqual(
+        await readProxied(
+            client,
+            namespaceId,
+            childPath(request.replaced_file_name),
+            snapshot.snapshot_id,
+        ),
+        capturedBytes,
+    );
+    assert.deepEqual(
+        await readProxied(client, namespaceId, childPath(request.replaced_file_name)),
+        currentBytes,
+    );
+
+    const feed = await client.filesystem.listChanges({
+        namespace_id: namespaceId,
+        after_seq: 0,
+        limit: 100,
+        snapshot_id: snapshot.snapshot_id,
+    });
+    assert.equal(feed.through_seq, expected.snapshot_head_seq);
+    assert.equal(feed.next_after_seq, undefined);
+    assert.deepEqual(
+        feed.changes.map((change) => change.committed_seq),
+        expected.snapshot_change_seqs,
+    );
+
+    const extended = await client.namespaces.extendSnapshot({
+        namespace_id: namespaceId,
+        snapshot_id: snapshot.snapshot_id,
+        ttl_ms: request.extend_ttl_ms,
+    });
+    assert.equal(extended.snapshot_id, snapshot.snapshot_id);
+    assert.equal(extended.head_seq, expected.snapshot_head_seq);
+    assert.equal(extended.name, request.snapshot_name);
+    assert.ok(extended.expires_at_ms > snapshot.expires_at_ms);
+
+    const listed = await client.namespaces.listSnapshots({ namespace_id: namespaceId });
+    assert.equal(listed.response.namespace_id, namespaceId);
+    assert.equal(listed.response.next_cursor, undefined);
+    assert.equal(listed.data.length, 1);
+    assert.equal(listed.data[0]?.snapshot_id, snapshot.snapshot_id);
+
+    const releaseRequest = {
+        namespace_id: namespaceId,
+        snapshot_id: snapshot.snapshot_id,
+    };
+    const firstRelease = await client.namespaces.releaseSnapshot(releaseRequest);
+    assert.equal(firstRelease.namespace_id, namespaceId);
+    assert.equal(firstRelease.snapshot_id, snapshot.snapshot_id);
+    const secondRelease = await client.namespaces.releaseSnapshot(releaseRequest);
+    assert.equal(secondRelease.namespace_id, namespaceId);
+    assert.equal(secondRelease.snapshot_id, snapshot.snapshot_id);
+
+    await assert.rejects(
+        client.filesystem.getPathEntry({
+            namespace_id: namespaceId,
+            path: childPath(request.replaced_file_name),
+            snapshot_id: snapshot.snapshot_id,
+        }),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.GoneError);
+            assert.equal(error.statusCode, expected.snapshot_gone.status);
+            assert.equal(error.body.code, expected.snapshot_gone.code);
+            return true;
+        },
+    );
+    await assert.rejects(
+        client.namespaces.extendSnapshot({
+            namespace_id: namespaceId,
+            snapshot_id: snapshot.snapshot_id,
+            ttl_ms: request.extend_ttl_ms,
+        }),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.GoneError);
+            assert.equal(error.statusCode, expected.snapshot_gone.status);
+            assert.equal(error.body.code, expected.snapshot_gone.code);
+            return true;
+        },
+    );
+    await assert.rejects(
+        client.filesystem.getPathEntry({
+            namespace_id: namespaceId,
+            path: childPath(request.replaced_file_name),
+            snapshot_id: request.unknown_snapshot_id,
+        }),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.NotFoundError);
+            assert.equal(error.statusCode, expected.snapshot_not_found.status);
+            assert.equal(error.body.code, expected.snapshot_not_found.code);
+            return true;
+        },
+    );
+    await assert.rejects(
+        readProxied(
+            client,
+            namespaceId,
+            childPath(request.replaced_file_name),
+            snapshot.snapshot_id,
+            expected.captured_revision_no,
+        ),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.BadRequestError);
+            assert.equal(error.statusCode, expected.revision_with_snapshot.status);
+            assert.equal(error.body.code, expected.revision_with_snapshot.code);
+            return true;
+        },
+    );
+    await assert.rejects(
+        client.namespaces.createSnapshot({
+            namespace_id: namespaceId,
+            name: request.snapshot_name,
+            ttl_ms: 0,
+        }),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.BadRequestError);
+            assert.equal(error.statusCode, expected.zero_ttl.status);
+            assert.equal(error.body.code, expected.zero_ttl.code);
+            return true;
+        },
+    );
 });
 
 test("proxy", { skip: environmentSkip }, async (context) => {

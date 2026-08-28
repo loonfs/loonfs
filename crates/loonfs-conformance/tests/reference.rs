@@ -6,12 +6,14 @@ use bytes::Bytes;
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompleteUploadRequest,
-    ContentToken, FilesystemChange, UploadContentClaim, UploadMode, UploadPartChecksumClaim,
-    UploadSessionStatus,
+    ContentToken, CreateSnapshotRequest, ExtendSnapshotRequest, FilesystemChange,
+    ListChangesResponse, ListSnapshotsResponse, ReleaseSnapshotResponse, SnapshotSummary,
+    UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
     ActorRef, ApiError, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
     DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation, NamespaceId,
+    PathEntry,
 };
 use loonfs_client::{
     Client, ClientConfig, ClientError, CommitOptions, CreateDirectoryOptions, DeleteOptions,
@@ -41,6 +43,7 @@ async fn rust_client_matches_the_reference_corpus() {
             "download" => run_download(&harness, case).await,
             "pagination" => run_pagination(&harness, case).await,
             "changes" => run_changes(&harness, case).await,
+            "snapshots" => run_snapshots(&harness, case).await,
             "end_to_end" => run_end_to_end(&harness, case).await,
             // Each SDK harness runs this case against its own proxy.
             "proxy" => {}
@@ -1176,6 +1179,453 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .await
         .expect("delete by inode");
     assert_eq!(deleted.committed_seq.0, expected.deleted_committed_seq);
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotsRequest {
+    namespace_id: String,
+    directory: String,
+    actor: ActorRef,
+    snapshot_name: String,
+    replaced_file_name: String,
+    deleted_file_name: String,
+    added_file_name: String,
+    captured_content_utf8: String,
+    current_content_utf8: String,
+    deleted_content_utf8: String,
+    added_content_utf8: String,
+    create_ttl_ms: u64,
+    extend_ttl_ms: u64,
+    unknown_snapshot_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotsExpected {
+    directory_committed_seq: u64,
+    replaced_file_committed_seq: u64,
+    deleted_file_committed_seq: u64,
+    snapshot_head_seq: u64,
+    captured_revision_no: u64,
+    captured_entry_names: Vec<String>,
+    replacement_committed_seq: u64,
+    current_revision_no: u64,
+    added_file_committed_seq: u64,
+    deletion_committed_seq: u64,
+    current_entry_names: Vec<String>,
+    snapshot_change_seqs: Vec<u64>,
+    snapshot_gone: ErrorStatusExpected,
+    snapshot_not_found: ErrorStatusExpected,
+    revision_with_snapshot: ErrorStatusExpected,
+    zero_ttl: ErrorStatusExpected,
+}
+
+async fn run_snapshots(harness: &Harness, case: &Case) {
+    let (request, expected) = parse_values::<SnapshotsRequest, SnapshotsExpected>(case);
+    let namespace = namespace_id(&request.namespace_id);
+    let child_path = |name: &str| {
+        namespace_path(
+            &request.namespace_id,
+            &format!("{}/{name}", request.directory),
+        )
+    };
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create snapshots namespace");
+
+    let directory = namespace_path(&request.namespace_id, &request.directory);
+    let mut directory_options = CreateDirectoryOptions::new(request.actor.clone());
+    directory_options.commit = commit_options(&request.actor, "conf-snapshots-create-directory");
+    let created_directory = harness
+        .client
+        .create_directory(&directory, &directory_options)
+        .await
+        .expect("create snapshots directory");
+    assert_eq!(
+        created_directory.committed_seq.0,
+        expected.directory_committed_seq
+    );
+
+    let replaced_path = child_path(&request.replaced_file_name);
+    let created_replaced = harness
+        .client
+        .put_file_bytes(
+            &replaced_path,
+            request.captured_content_utf8.as_bytes(),
+            &put_options(&request.actor, "conf-snapshots-create-replaced"),
+        )
+        .await
+        .expect("create replaced snapshot file");
+    assert_eq!(
+        created_replaced.committed_seq.0,
+        expected.replaced_file_committed_seq
+    );
+    let deleted_path = child_path(&request.deleted_file_name);
+    let created_deleted = harness
+        .client
+        .put_file_bytes(
+            &deleted_path,
+            request.deleted_content_utf8.as_bytes(),
+            &put_options(&request.actor, "conf-snapshots-create-deleted"),
+        )
+        .await
+        .expect("create deleted snapshot file");
+    assert_eq!(
+        created_deleted.committed_seq.0,
+        expected.deleted_file_committed_seq
+    );
+
+    let snapshots_url = format!(
+        "{}/v0/namespaces/{}/snapshots",
+        harness.server_url, request.namespace_id
+    );
+    let snapshot: SnapshotSummary = raw_success_json(
+        harness
+            .raw_client
+            .post(&snapshots_url)
+            .bearer_auth(AUTH_TOKEN)
+            .json(&CreateSnapshotRequest {
+                name: request.snapshot_name.clone(),
+                ttl_ms: request.create_ttl_ms,
+            }),
+        "create snapshot",
+    )
+    .await;
+    assert_eq!(snapshot.namespace_id, namespace);
+    assert_eq!(snapshot.name, request.snapshot_name);
+    assert_eq!(snapshot.head_seq.0, expected.snapshot_head_seq);
+    assert!(snapshot.expires_at_ms > snapshot.created_at_ms);
+
+    let mut replace_options = put_options(&request.actor, "conf-snapshots-replace-file");
+    replace_options.behavior = DestinationBehavior::Replace;
+    let replaced = harness
+        .client
+        .put_file_bytes(
+            &replaced_path,
+            request.current_content_utf8.as_bytes(),
+            &replace_options,
+        )
+        .await
+        .expect("replace snapshot file");
+    assert_eq!(replaced.committed_seq.0, expected.replacement_committed_seq);
+    let added_path = child_path(&request.added_file_name);
+    let added = harness
+        .client
+        .put_file_bytes(
+            &added_path,
+            request.added_content_utf8.as_bytes(),
+            &put_options(&request.actor, "conf-snapshots-add-file"),
+        )
+        .await
+        .expect("add file after snapshot");
+    assert_eq!(added.committed_seq.0, expected.added_file_committed_seq);
+    let mut delete_options = DeleteOptions::new(request.actor.clone());
+    delete_options.commit = commit_options(&request.actor, "conf-snapshots-delete-file");
+    let deleted = harness
+        .client
+        .delete_path(&deleted_path, &delete_options)
+        .await
+        .expect("delete file after snapshot");
+    assert_eq!(deleted.committed_seq.0, expected.deletion_committed_seq);
+
+    let snapshot_id = snapshot.snapshot_id.as_str();
+    let entry_url = format!(
+        "{}/v0/namespaces/{}/filesystem/entry",
+        harness.server_url, request.namespace_id
+    );
+    let captured_entry: PathEntry = raw_success_json(
+        harness
+            .raw_client
+            .get(&entry_url)
+            .bearer_auth(AUTH_TOKEN)
+            .query(&[
+                ("path", replaced_path.absolute_path().as_str()),
+                ("snapshot_id", snapshot_id),
+            ]),
+        "stat snapshot file",
+    )
+    .await;
+    assert_eq!(
+        captured_entry
+            .revision_no()
+            .expect("captured file revision")
+            .0,
+        expected.captured_revision_no
+    );
+    let current_entry: PathEntry = raw_success_json(
+        harness
+            .raw_client
+            .get(&entry_url)
+            .bearer_auth(AUTH_TOKEN)
+            .query(&[("path", replaced_path.absolute_path().as_str())]),
+        "stat current file",
+    )
+    .await;
+    assert_eq!(
+        current_entry
+            .revision_no()
+            .expect("current file revision")
+            .0,
+        expected.current_revision_no
+    );
+
+    let entries_url = format!(
+        "{}/v0/namespaces/{}/filesystem/entries",
+        harness.server_url, request.namespace_id
+    );
+    let captured_listing: loonfs_api::v0::ListPathEntriesResponse = raw_success_json(
+        harness
+            .raw_client
+            .get(&entries_url)
+            .bearer_auth(AUTH_TOKEN)
+            .query(&[
+                ("path", directory.absolute_path().as_str()),
+                ("snapshot_id", snapshot_id),
+            ]),
+        "list snapshot directory",
+    )
+    .await;
+    assert_eq!(captured_listing.head_seq.0, expected.snapshot_head_seq);
+    assert_eq!(
+        listed_entry_names(&captured_listing.entries),
+        expected.captured_entry_names
+    );
+    let current_listing: loonfs_api::v0::ListPathEntriesResponse = raw_success_json(
+        harness
+            .raw_client
+            .get(&entries_url)
+            .bearer_auth(AUTH_TOKEN)
+            .query(&[("path", directory.absolute_path().as_str())]),
+        "list current directory",
+    )
+    .await;
+    assert_eq!(
+        listed_entry_names(&current_listing.entries),
+        expected.current_entry_names
+    );
+
+    let content_url = format!(
+        "{}/v0/namespaces/{}/filesystem/content",
+        harness.server_url, request.namespace_id
+    );
+    let captured_content = raw_success_bytes(
+        harness
+            .raw_client
+            .get(&content_url)
+            .bearer_auth(AUTH_TOKEN)
+            .query(&[
+                ("path", replaced_path.absolute_path().as_str()),
+                ("snapshot_id", snapshot_id),
+            ]),
+        "read snapshot content",
+    )
+    .await;
+    assert_eq!(
+        captured_content.as_ref(),
+        request.captured_content_utf8.as_bytes()
+    );
+    let current_content = raw_success_bytes(
+        harness
+            .raw_client
+            .get(&content_url)
+            .bearer_auth(AUTH_TOKEN)
+            .query(&[("path", replaced_path.absolute_path().as_str())]),
+        "read current content",
+    )
+    .await;
+    assert_eq!(
+        current_content.as_ref(),
+        request.current_content_utf8.as_bytes()
+    );
+
+    let changes_url = format!(
+        "{}/v0/namespaces/{}/changes",
+        harness.server_url, request.namespace_id
+    );
+    let feed: ListChangesResponse = raw_success_json(
+        harness
+            .raw_client
+            .get(&changes_url)
+            .bearer_auth(AUTH_TOKEN)
+            .query(&[
+                ("after_seq", "0"),
+                ("limit", "100"),
+                ("snapshot_id", snapshot_id),
+            ]),
+        "list snapshot changes",
+    )
+    .await;
+    assert_eq!(feed.through_seq.0, expected.snapshot_head_seq);
+    assert_eq!(feed.next_after_seq, None);
+    assert_eq!(
+        feed.changes
+            .iter()
+            .map(|change| change.committed_seq.0)
+            .collect::<Vec<_>>(),
+        expected.snapshot_change_seqs
+    );
+
+    let extended: SnapshotSummary = raw_success_json(
+        harness
+            .raw_client
+            .post(format!("{snapshots_url}/{snapshot_id}/extend"))
+            .bearer_auth(AUTH_TOKEN)
+            .json(&ExtendSnapshotRequest {
+                ttl_ms: request.extend_ttl_ms,
+            }),
+        "extend snapshot",
+    )
+    .await;
+    assert_eq!(extended.snapshot_id, snapshot.snapshot_id);
+    assert_eq!(extended.head_seq.0, expected.snapshot_head_seq);
+    assert_eq!(extended.name, request.snapshot_name);
+    assert!(extended.expires_at_ms > snapshot.expires_at_ms);
+
+    let listed: ListSnapshotsResponse = raw_success_json(
+        harness
+            .raw_client
+            .get(&snapshots_url)
+            .bearer_auth(AUTH_TOKEN),
+        "list snapshots",
+    )
+    .await;
+    assert_eq!(listed.namespace_id, namespace);
+    assert_eq!(listed.next_cursor, None);
+    assert_eq!(listed.snapshots.len(), 1);
+    assert_eq!(listed.snapshots[0].snapshot_id, snapshot.snapshot_id);
+
+    let release_url = format!("{snapshots_url}/{snapshot_id}/release");
+    for label in ["release snapshot", "release snapshot again"] {
+        let released: ReleaseSnapshotResponse = raw_success_json(
+            harness
+                .raw_client
+                .post(&release_url)
+                .bearer_auth(AUTH_TOKEN),
+            label,
+        )
+        .await;
+        assert_eq!(released.namespace_id, namespace);
+        assert_eq!(released.snapshot_id, snapshot.snapshot_id);
+    }
+
+    let released_read = harness
+        .raw_client
+        .get(&entry_url)
+        .bearer_auth(AUTH_TOKEN)
+        .query(&[
+            ("path", replaced_path.absolute_path().as_str()),
+            ("snapshot_id", snapshot_id),
+        ])
+        .send()
+        .await
+        .expect("send released snapshot read");
+    assert_raw_status_error(released_read, &expected.snapshot_gone).await;
+    let released_extend = harness
+        .raw_client
+        .post(format!("{snapshots_url}/{snapshot_id}/extend"))
+        .bearer_auth(AUTH_TOKEN)
+        .json(&ExtendSnapshotRequest {
+            ttl_ms: request.extend_ttl_ms,
+        })
+        .send()
+        .await
+        .expect("send released snapshot extend");
+    assert_raw_status_error(released_extend, &expected.snapshot_gone).await;
+
+    let unknown_read = harness
+        .raw_client
+        .get(&entry_url)
+        .bearer_auth(AUTH_TOKEN)
+        .query(&[
+            ("path", replaced_path.absolute_path().as_str()),
+            ("snapshot_id", request.unknown_snapshot_id.as_str()),
+        ])
+        .send()
+        .await
+        .expect("send unknown snapshot read");
+    assert_raw_status_error(unknown_read, &expected.snapshot_not_found).await;
+    let revision_with_snapshot = harness
+        .raw_client
+        .get(&content_url)
+        .bearer_auth(AUTH_TOKEN)
+        .query(&[
+            ("path", replaced_path.absolute_path().as_str()),
+            ("revision_no", "1"),
+            ("snapshot_id", snapshot_id),
+        ])
+        .send()
+        .await
+        .expect("send revision with snapshot read");
+    assert_raw_status_error(revision_with_snapshot, &expected.revision_with_snapshot).await;
+    let zero_ttl = harness
+        .raw_client
+        .post(&snapshots_url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&CreateSnapshotRequest {
+            name: request.snapshot_name,
+            ttl_ms: 0,
+        })
+        .send()
+        .await
+        .expect("send zero-ttl snapshot create");
+    assert_raw_status_error(zero_ttl, &expected.zero_ttl).await;
+}
+
+fn listed_entry_names(entries: &[PathEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .display_name
+                .as_ref()
+                .expect("listed name")
+                .to_string()
+        })
+        .collect()
+}
+
+async fn raw_success_json<T>(request: reqwest::RequestBuilder, label: &str) -> T
+where
+    T: DeserializeOwned,
+{
+    let response = request
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("{label} request failed: {error}"));
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        panic!("{label} returned {status}: {body}");
+    }
+    response
+        .json()
+        .await
+        .unwrap_or_else(|error| panic!("decode {label} response: {error}"))
+}
+
+async fn raw_success_bytes(request: reqwest::RequestBuilder, label: &str) -> Bytes {
+    let response = request
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("{label} request failed: {error}"));
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        panic!("{label} returned {status}: {body}");
+    }
+    response
+        .bytes()
+        .await
+        .unwrap_or_else(|error| panic!("read {label} response: {error}"))
+}
+
+async fn assert_raw_status_error(response: reqwest::Response, expected: &ErrorStatusExpected) {
+    assert_eq!(response.status().as_u16(), expected.status);
+    let error: ApiError = response.json().await.expect("decode API error envelope");
+    assert_eq!(error.code, expected.code);
 }
 
 fn assert_api_error(error: &ClientError, expected: &ErrorStatusExpected) {
