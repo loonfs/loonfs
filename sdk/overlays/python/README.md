@@ -6,7 +6,7 @@ targets LoonFS API v0.3.x.
 ## Install
 
 ```sh
-pip install loonfs-sdk
+pip install loonfs
 ```
 
 ## Usage
@@ -14,7 +14,7 @@ pip install loonfs-sdk
 ```python
 import os
 
-from loonfs_sdk import LoonFS
+from loonfs import LoonFS
 
 client = LoonFS(
     base_url=os.environ["LOONFS_URL"],
@@ -25,7 +25,7 @@ capabilities = client.system.get_capabilities()
 ```
 
 `AsyncLoonFS` provides the same API for async applications. Upload and download
-helpers are available from `loonfs_sdk.transfers`.
+helpers are available from `loonfs.transfers`.
 
 See the [generated API reference](https://github.com/loonfs/loonfs-sdk-python/blob/main/reference.md).
 
