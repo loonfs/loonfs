@@ -1308,7 +1308,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend": {
@@ -1577,7 +1580,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}": {

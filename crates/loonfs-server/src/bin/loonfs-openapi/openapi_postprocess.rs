@@ -521,7 +521,7 @@ fn decode_json_pointer_segment(segment: &str) -> String {
     segment.replace("~1", "/").replace("~0", "~")
 }
 
-/// Adds `x-loonfs-retry` to every OpenAPI operation.
+/// Adds retry metadata to every OpenAPI operation.
 fn add_operation_retry_classes(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
     let paths = document
         .as_object_mut()
@@ -556,6 +556,12 @@ fn add_operation_retry_classes(document: &mut Value) -> Result<(), OpenapiPostpr
                 "x-loonfs-retry".to_owned(),
                 Value::String(retry_class.as_str().to_owned()),
             );
+            if retry_class == RetryClass::NotIdempotent {
+                operation.insert(
+                    "x-fern-retries".to_owned(),
+                    Value::Object(Map::from([("disabled".to_owned(), Value::Bool(true))])),
+                );
+            }
         }
     }
     Ok(())

@@ -731,6 +731,23 @@ fn every_registered_operation_publishes_its_retry_class() {
 }
 
 #[test]
+fn non_idempotent_operations_disable_generated_sdk_retries() {
+    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
+        .expect("generate openapi json");
+    let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
+    let operations = operations_by_id(&spec);
+
+    for (operation_id, retry_class) in openapi_postprocess::OPERATION_RETRY_CLASSES {
+        let fern_retries = operations[operation_id].get("x-fern-retries");
+        if *retry_class == openapi_postprocess::RetryClass::NotIdempotent {
+            assert_eq!(fern_retries, Some(&serde_json::json!({"disabled": true})));
+        } else {
+            assert_eq!(fern_retries, None);
+        }
+    }
+}
+
+#[test]
 fn cursor_list_operations_publish_the_registered_pagination_metadata() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
