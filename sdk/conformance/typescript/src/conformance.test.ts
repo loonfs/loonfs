@@ -17,7 +17,7 @@ import {
     getFile as getBrowserFile,
     putFile as putBrowserFile,
 } from "../../../generated/typescript-client/transfers.js";
-import { createProxyHandler } from "../../../proxy/typescript/src/proxy.js";
+import { createProxyHandler } from "../../../proxy/typescript/proxy.js";
 
 
 const RUNNER_SKIP = "run scripts/run-sdk-conformance.sh typescript";

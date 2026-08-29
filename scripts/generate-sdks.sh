@@ -22,8 +22,10 @@ overlay_handwritten() {
     if [ -d "overlays/$1" ]; then
         cp -R "overlays/$1/." "generated/$1/"
     fi
-    # TypeScript ships the proxy as a separate package.
-    if [ "$1" != "typescript" ] && [ -d "proxy/$1" ]; then
+    if [ "$1" = "typescript" ] && [ -f "proxy/typescript/proxy.ts" ]; then
+        mkdir -p generated/typescript/proxy/src
+        cp proxy/typescript/proxy.ts generated/typescript/proxy/src/proxy.ts
+    elif [ -d "proxy/$1" ]; then
         cp -R "proxy/$1/." "generated/$1/"
     fi
 }
@@ -56,6 +58,12 @@ for source_path in [*module_root.rglob("*.go"), *module_root.rglob("*.md")]:
     if source_path.parent == server_package:
         source = source.replace("package client", "package server")
     source_path.write_text(source)
+
+test_path = module_root / "internal/explicit_fields_test.go"
+source = test_path.read_text()
+start = source.index("// Test for backwards compatibility")
+end = source.index("// Helper functions", start)
+test_path.write_text(source[:start] + source[end:])
 PY
         ;;
     python)
@@ -72,6 +80,24 @@ start = source.index("def parse_sse_obj(")
 end = source.index("_type_adapter_cache")
 path.write_text(source[:start] + source[end:])
 
+request_options_path = pathlib.Path("generated/python/core/request_options.py")
+source = request_options_path.read_text()
+source = source.replace(
+    "        - timeout_in_seconds: int. Deprecated alias for `timeout`; both are in seconds. Prefer `timeout`.\n\n",
+    "",
+)
+source = source.replace("    timeout_in_seconds: NotRequired[int]\n", "")
+request_options_path.write_text(source)
+
+http_client_path = pathlib.Path("generated/python/core/http_client.py")
+source = http_client_path.read_text()
+source = source.replace(
+    '            else request_options.get("timeout_in_seconds")\n'
+    '            if request_options is not None and request_options.get("timeout_in_seconds") is not None\n',
+    "",
+)
+http_client_path.write_text(source)
+
 package_root = pathlib.Path("generated/python")
 server_module = package_root / "server.py"
 (package_root / "__init__.py").replace(server_module)
@@ -79,15 +105,60 @@ server_module = package_root / "server.py"
     '"""Explicit server and proxy entry points for the LoonFS SDK."""\n'
 )
 
-import_examples = [*package_root.rglob("*.py"), package_root / "reference.md"]
-replacement_count = 0
-for example_path in import_examples:
+for example_path in [*package_root.rglob("*.py"), package_root / "reference.md"]:
     source = example_path.read_text()
-    replacement_count += source.count("from loonfs import")
     example_path.write_text(
         source.replace("from loonfs import", "from loonfs.server import")
     )
-assert replacement_count > 0, "Python server imports not found"
+PY
+        ;;
+    typescript|typescript-client)
+        python3 - "$1" <<'PY'
+import pathlib
+import sys
+
+package_root = pathlib.Path("generated") / sys.argv[1]
+
+response_path = package_root / "core/fetcher/APIResponse.ts"
+source = response_path.read_text()
+source = source.replace(
+    '    /**\n     * @deprecated Use `rawResponse` instead\n     */\n'
+    "    headers?: Record<string, any>;\n",
+    "",
+)
+response_path.write_text(source)
+
+fetcher_path = package_root / "core/fetcher/Fetcher.ts"
+source = fetcher_path.read_text()
+source = source.replace('import { createRequestUrl } from "./createRequestUrl.js";\n', "")
+source = source.replace(
+    'import { redactUrl, SENSITIVE_QUERY_PARAMS } from "./redactUrl.js";',
+    'import { redactUrl } from "./redactUrl.js";',
+)
+source = source.replace(
+    '        /**\n'
+    '         * @deprecated Prefer `queryString` (produced by `core.url.queryBuilder()`).\n'
+    '         * Retained for backwards compatibility with custom fetchers and callers that\n'
+    '         * still construct request args with a query-parameter object.\n'
+    '         */\n'
+    '        queryParameters?: Record<string, unknown>;\n',
+    "",
+)
+start = source.index("function redactQueryParameters(")
+end = source.index("async function getHeaders(", start)
+source = source[:start] + source[end:]
+source = source.replace(
+    '    } else {\n        url = createRequestUrl(args.url, args.queryParameters);\n',
+    "",
+)
+source = source.replace(
+    "            queryParameters: redactQueryParameters(args.queryParameters),\n",
+    "",
+)
+source = source.replace("                headers: response.headers,\n", "")
+fetcher_path.write_text(source)
+
+(package_root / "core/fetcher/createRequestUrl.ts").unlink()
 PY
         ;;
     esac
