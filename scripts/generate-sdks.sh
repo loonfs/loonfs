@@ -35,6 +35,28 @@ prune_generated() {
         for name in admin filesystem inodes namespaces query system types uploads; do
             rm "generated/go/${name}_test.go"
         done
+        python3 - <<'PY'
+import pathlib
+
+module_root = pathlib.Path("generated/go")
+client_package = module_root / "client"
+server_package = module_root / "server"
+client_package.replace(server_package)
+
+old_import = "github.com/loonfs/loonfs-sdk-go/client"
+new_import = "github.com/loonfs/loonfs-sdk-go/server"
+replacement_count = 0
+for source_path in [*module_root.rglob("*.go"), *module_root.rglob("*.md")]:
+    source = source_path.read_text()
+    replacement_count += source.count(old_import)
+    source = source.replace(old_import, new_import)
+    source = source.replace(f'client "{new_import}"', f'server "{new_import}"')
+    source = source.replace("client.NewClient", "server.NewClient")
+    if source_path.parent == server_package:
+        source = source.replace("package client", "package server")
+    source_path.write_text(source)
+assert replacement_count > 0, "Go client imports not found"
+PY
         ;;
     python)
         # LoonFS does not use server-sent events.

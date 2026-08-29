@@ -14,8 +14,8 @@ import (
 	"strings"
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
-	"github.com/loonfs/loonfs-sdk-go/client"
 	"github.com/loonfs/loonfs-sdk-go/option"
+	"github.com/loonfs/loonfs-sdk-go/server"
 )
 
 const (
@@ -78,7 +78,7 @@ type GetFileResult struct {
 
 // PutFile uploads bytes, completes the upload, and commits the content to a path.
 // Streaming and resume are follow-ups.
-func PutFile(ctx context.Context, c *client.Client, in PutFileInput) (*PutFileResult, error) {
+func PutFile(ctx context.Context, c *server.Client, in PutFileInput) (*PutFileResult, error) {
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
@@ -148,7 +148,7 @@ func PutFile(ctx context.Context, c *client.Client, in PutFileInput) (*PutFileRe
 
 // GetFile downloads one file revision into memory and verifies its content reference.
 // Streaming and resume are follow-ups.
-func GetFile(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileResult, error) {
+func GetFile(ctx context.Context, c *server.Client, in GetFileInput) (*GetFileResult, error) {
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
@@ -198,7 +198,7 @@ func GetFile(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileRe
 // getFileProxied reads through LoonFS when direct reads are unavailable.
 // It loads the content reference first, then requests the exact revision so
 // the reference and returned bytes describe the same file version.
-func getFileProxied(ctx context.Context, c *client.Client, in GetFileInput) (*GetFileResult, error) {
+func getFileProxied(ctx context.Context, c *server.Client, in GetFileInput) (*GetFileResult, error) {
 	revisionNo := in.RevisionNo
 	var claim *loonfs.ContentRef
 	if revisionNo == nil {
@@ -322,7 +322,7 @@ func createUploadRequest(
 
 func transferAndComplete(
 	ctx context.Context,
-	c *client.Client,
+	c *server.Client,
 	namespaceID loonfs.NamespaceID,
 	payload []byte,
 	begin *loonfs.BeginUploadResponse,
@@ -344,7 +344,7 @@ func transferAndComplete(
 
 func transferDirectPut(
 	ctx context.Context,
-	c *client.Client,
+	c *server.Client,
 	namespaceID loonfs.NamespaceID,
 	payload []byte,
 	begin *loonfs.BeginUploadResponseDirectPut,
@@ -377,7 +377,7 @@ func transferDirectPut(
 
 func transferDirectMultipart(
 	ctx context.Context,
-	c *client.Client,
+	c *server.Client,
 	namespaceID loonfs.NamespaceID,
 	payload []byte,
 	begin *loonfs.BeginUploadResponseDirectMultipart,
@@ -471,7 +471,7 @@ func transferDirectMultipart(
 
 func transferServiceProxied(
 	ctx context.Context,
-	c *client.Client,
+	c *server.Client,
 	namespaceID loonfs.NamespaceID,
 	payload []byte,
 	begin *loonfs.BeginUploadResponseServiceProxied,
@@ -499,7 +499,7 @@ func transferServiceProxied(
 	return completed, nil
 }
 
-func abortUpload(ctx context.Context, c *client.Client, namespaceID loonfs.NamespaceID, uploadID loonfs.UploadID) {
+func abortUpload(ctx context.Context, c *server.Client, namespaceID loonfs.NamespaceID, uploadID loonfs.UploadID) {
 	_, _ = c.Uploads.AbortUpload(ctx, &loonfs.AbortUploadRequest{
 		NamespaceID: string(namespaceID),
 		UploadID:    string(uploadID),

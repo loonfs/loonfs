@@ -1,7 +1,7 @@
 # LoonFS Go SDK
 
-An idiomatic Go client for the LoonFS HTTP API. SDK v0.1.x targets LoonFS API
-v0.3.x.
+One module for LoonFS server and proxy applications. SDK v0.1.x targets LoonFS
+API v0.3.x.
 
 ## Install
 
@@ -9,7 +9,9 @@ v0.3.x.
 go get github.com/loonfs/loonfs-sdk-go@latest
 ```
 
-## Usage
+Choose the package that matches where your code runs.
+
+## Server
 
 ```go
 package main
@@ -19,12 +21,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/loonfs/loonfs-sdk-go/client"
+	"github.com/loonfs/loonfs-sdk-go/server"
 	"github.com/loonfs/loonfs-sdk-go/option"
 )
 
 func main() {
-	loon := client.NewClient(
+	loon := server.NewClient(
 		option.WithBaseURL(os.Getenv("LOONFS_URL")),
 		option.WithToken(os.Getenv("LOONFS_AUTH_TOKEN")),
 	)
@@ -39,6 +41,11 @@ func main() {
 
 Upload and download helpers are available from the `transfers` package. See
 [reference.md](./reference.md) for the generated API reference.
+
+## Proxy
+
+Use the `proxy` package in your backend to forward client requests while
+keeping the LoonFS credential on the server.
 
 ## Retries
 

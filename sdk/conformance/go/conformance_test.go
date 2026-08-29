@@ -21,9 +21,9 @@ import (
 	"testing"
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
-	"github.com/loonfs/loonfs-sdk-go/client"
 	"github.com/loonfs/loonfs-sdk-go/option"
 	loonfsproxy "github.com/loonfs/loonfs-sdk-go/proxy"
+	"github.com/loonfs/loonfs-sdk-go/server"
 	"github.com/loonfs/loonfs-sdk-go/transfers"
 )
 
@@ -51,8 +51,8 @@ var expectedCases = []string{
 }
 
 type harness struct {
-	client          *client.Client
-	unauthenticated *client.Client
+	client          *server.Client
+	unauthenticated *server.Client
 	serverBaseURL   string
 	serverToken     string
 }
@@ -76,11 +76,11 @@ func TestSDKConformance(t *testing.T) {
 		t.Fatalf("load conformance cases: %v", err)
 	}
 	h := &harness{
-		client: client.NewClient(
+		client: server.NewClient(
 			option.WithBaseURL(baseURL),
 			option.WithToken(token),
 		),
-		unauthenticated: client.NewClient(option.WithBaseURL(baseURL)),
+		unauthenticated: server.NewClient(option.WithBaseURL(baseURL)),
 		serverBaseURL:   baseURL,
 		serverToken:     token,
 	}
@@ -1318,7 +1318,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 
 func stageContent(
 	t *testing.T,
-	sdk *client.Client,
+	sdk *server.Client,
 	namespaceID string,
 	payload []byte,
 ) (*loonfs.ContentRef, *loonfs.ContentToken) {
@@ -1661,7 +1661,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 
 func readSDKFileBytes(
 	t *testing.T,
-	sdk *client.Client,
+	sdk *server.Client,
 	request *loonfs.GetFileBytesRequest,
 	label string,
 ) []byte {
@@ -2539,7 +2539,7 @@ func optionalString(value *string) string {
 
 func commitCompletedFile(
 	t *testing.T,
-	sdk *client.Client,
+	sdk *server.Client,
 	namespaceID string,
 	path string,
 	commitID string,
@@ -2566,7 +2566,7 @@ func commitCompletedFile(
 	})
 }
 
-func applyCommit(t *testing.T, sdk *client.Client, request *loonfs.CommitRequest) *loonfs.CommitResponse {
+func applyCommit(t *testing.T, sdk *server.Client, request *loonfs.CommitRequest) *loonfs.CommitResponse {
 	t.Helper()
 	response, err := sdk.Filesystem.CreateCommit(context.Background(), request)
 	if err != nil {
@@ -2575,7 +2575,7 @@ func applyCommit(t *testing.T, sdk *client.Client, request *loonfs.CommitRequest
 	return response
 }
 
-func statPath(t *testing.T, sdk *client.Client, namespaceID, path string) *loonfs.PathEntry {
+func statPath(t *testing.T, sdk *server.Client, namespaceID, path string) *loonfs.PathEntry {
 	t.Helper()
 	entry, err := sdk.Filesystem.GetPathEntry(context.Background(), &loonfs.GetPathEntryRequest{
 		NamespaceID: namespaceID,
@@ -2587,7 +2587,7 @@ func statPath(t *testing.T, sdk *client.Client, namespaceID, path string) *loonf
 	return entry
 }
 
-func getFile(t *testing.T, sdk *client.Client, namespaceID, path string) *transfers.GetFileResult {
+func getFile(t *testing.T, sdk *server.Client, namespaceID, path string) *transfers.GetFileResult {
 	t.Helper()
 	result, err := transfers.GetFile(context.Background(), sdk, transfers.GetFileInput{
 		NamespaceID: loonfs.NamespaceID(namespaceID),
@@ -2601,7 +2601,7 @@ func getFile(t *testing.T, sdk *client.Client, namespaceID, path string) *transf
 
 func listPathEntries(
 	t *testing.T,
-	sdk *client.Client,
+	sdk *server.Client,
 	namespaceID string,
 	path string,
 ) []*loonfs.PathEntry {
@@ -2625,7 +2625,7 @@ func listingContainsPath(entries []*loonfs.PathEntry, path string) bool {
 	return false
 }
 
-func listChanges(t *testing.T, sdk *client.Client, namespaceID string) *loonfs.ListChangesResponse {
+func listChanges(t *testing.T, sdk *server.Client, namespaceID string) *loonfs.ListChangesResponse {
 	t.Helper()
 	changes, err := sdk.Filesystem.ListChanges(context.Background(), &loonfs.ListChangesRequest{
 		NamespaceID: namespaceID,
@@ -2644,7 +2644,7 @@ func actorsEqual(left, right *loonfs.ActorRef) bool {
 	return left.ID == right.ID && left.Kind == right.Kind
 }
 
-func createNamespace(t *testing.T, sdk *client.Client, namespaceID string) {
+func createNamespace(t *testing.T, sdk *server.Client, namespaceID string) {
 	t.Helper()
 	_, err := sdk.Namespaces.CreateNamespace(
 		context.Background(),
@@ -2657,7 +2657,7 @@ func createNamespace(t *testing.T, sdk *client.Client, namespaceID string) {
 
 func applyCreateDirectory(
 	t *testing.T,
-	sdk *client.Client,
+	sdk *server.Client,
 	namespaceID string,
 	commitID string,
 	actor *loonfs.ActorRef,
