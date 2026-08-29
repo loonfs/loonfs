@@ -19,7 +19,7 @@ import httpx
 import pydantic
 import pytest
 import uvicorn
-from loonfs_sdk import (
+from loonfs import (
     ActorRef,
     BadRequestError,
     BeginUploadRequest_DirectMultipart,
@@ -57,8 +57,8 @@ from loonfs_sdk import (
     UploadSession_Aborted,
     UploadSession_Completed,
 )
-from loonfs_sdk.proxy import LoonFSProxy
-from loonfs_sdk.transfers import get_file, put_file
+from loonfs.proxy import LoonFSProxy
+from loonfs.transfers import get_file, put_file
 
 
 RUNNER_SKIP = "run scripts/run-sdk-conformance.sh python"
