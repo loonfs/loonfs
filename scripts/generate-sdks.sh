@@ -49,6 +49,23 @@ source = source.replace(import_block, "")
 start = source.index("def parse_sse_obj(")
 end = source.index("_type_adapter_cache")
 path.write_text(source[:start] + source[end:])
+
+package_root = pathlib.Path("generated/python")
+server_module = package_root / "server.py"
+(package_root / "__init__.py").replace(server_module)
+(package_root / "__init__.py").write_text(
+    '"""Explicit server and proxy entry points for the LoonFS SDK."""\n'
+)
+
+import_examples = [*package_root.rglob("*.py"), package_root / "reference.md"]
+replacement_count = 0
+for example_path in import_examples:
+    source = example_path.read_text()
+    replacement_count += source.count("from loonfs import")
+    example_path.write_text(
+        source.replace("from loonfs import", "from loonfs.server import")
+    )
+assert replacement_count > 0, "Python server imports not found"
 PY
         ;;
     esac

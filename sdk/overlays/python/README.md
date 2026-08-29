@@ -1,7 +1,7 @@
 # LoonFS Python SDK
 
-Typed synchronous and asynchronous clients for the LoonFS HTTP API. SDK v0.1.x
-targets LoonFS API v0.3.x.
+One package for LoonFS server and proxy applications. SDK v0.1.x targets LoonFS
+API v0.3.x.
 
 ## Install
 
@@ -9,12 +9,14 @@ targets LoonFS API v0.3.x.
 pip install loonfs
 ```
 
-## Usage
+Choose the module that matches where your code runs.
+
+## Server
 
 ```python
 import os
 
-from loonfs import LoonFS
+from loonfs.server import LoonFS
 
 client = LoonFS(
     base_url=os.environ["LOONFS_URL"],
@@ -26,6 +28,11 @@ capabilities = client.system.get_capabilities()
 
 `AsyncLoonFS` provides the same API for async applications. Upload and download
 helpers are available from `loonfs.transfers`.
+
+## Proxy
+
+Use `loonfs.proxy` in your backend to forward client requests while keeping the
+LoonFS credential on the server.
 
 See the [generated API reference](https://github.com/loonfs/loonfs-sdk-python/blob/main/reference.md).
 
