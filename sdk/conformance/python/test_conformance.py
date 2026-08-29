@@ -19,7 +19,7 @@ import httpx
 import pydantic
 import pytest
 import uvicorn
-from loonfs import (
+from loonfs.server import (
     ActorRef,
     BadRequestError,
     BeginUploadRequest_DirectMultipart,
