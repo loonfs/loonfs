@@ -12,6 +12,7 @@ groups:
           module:
             path: github.com/loonfs/loonfs-sdk-go
           packageName: loonfs
+          maxRetries: 0
         output:
           location: local-file-system
           path: ../../../generated/go
@@ -28,7 +29,7 @@ groups:
   typescript:
     generators:
       - name: fernapi/fern-typescript-sdk
-        version: 3.88.0
+        version: 3.88.1
         config:
           namespaceExport: LoonFS
         output:

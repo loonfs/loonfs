@@ -4,15 +4,10 @@
 requests. It maps namespace aliases to namespaces, adds the server credential, and
 forwards only the routes in the proxy API.
 
-The package requires Node 18 or newer and has no runtime dependencies.
-
-## Status
-
-This package has not been published to npm.
+The package requires Node 18 or newer and has no runtime dependencies. SDK
+v0.1.x targets LoonFS API v0.3.x.
 
 ## Install
-
-Once it is published, install it with:
 
 ```sh
 npm install @loonfs/sdk-proxy

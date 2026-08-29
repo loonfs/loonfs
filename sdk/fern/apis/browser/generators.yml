@@ -6,7 +6,7 @@ groups:
   typescript-client:
     generators:
       - name: fernapi/fern-typescript-sdk
-        version: 3.88.0
+        version: 3.88.1
         config:
           namespaceExport: LoonFS
         output:

@@ -281,7 +281,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release": {
@@ -791,7 +794,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/admin/namespaces/{namespace_id}/maintenance/run": {
@@ -879,7 +885,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/admin/store/probe": {
@@ -936,7 +945,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/capabilities": {
@@ -1058,7 +1070,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/namespaces/{namespace_id}": {
@@ -1229,7 +1244,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/changes": {
@@ -2220,7 +2238,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/grep": {
@@ -3188,7 +3209,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend": {
@@ -3457,7 +3481,10 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "not_idempotent",
+        "x-fern-retries": {
+          "disabled": true
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}": {

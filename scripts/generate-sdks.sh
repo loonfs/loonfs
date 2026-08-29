@@ -5,7 +5,7 @@
 # Usage: scripts/generate-sdks.sh [go|python|typescript|typescript-client]
 # With no argument, validates both Fern APIs and generates every SDK.
 # The browser client uses the proxy document and the browser Fern API.
-# Handwritten files under sdk/transfers/<language> are copied into each SDK
+# Handwritten transfer helpers and release overlays are copied into each SDK
 # after generation.
 
 set -eu
@@ -18,6 +18,9 @@ npx --yes "fern-api@${FERN_CLI_VERSION}" check
 overlay_handwritten() {
     if [ -d "transfers/$1" ]; then
         cp -R "transfers/$1/." "generated/$1/"
+    fi
+    if [ -d "overlays/$1" ]; then
+        cp -R "overlays/$1/." "generated/$1/"
     fi
     # TypeScript ships the proxy as a separate package.
     if [ "$1" != "typescript" ] && [ -d "proxy/$1" ]; then
@@ -58,6 +61,7 @@ generate_group() {
     npx --yes "fern-api@${FERN_CLI_VERSION}" generate --force --local --api "$api" --group "$1"
     prune_generated "$1"
     overlay_handwritten "$1"
+    python3 ../scripts/verify-sdk-retry-safety.py "$1"
 }
 
 if [ "$#" -ge 1 ]; then
