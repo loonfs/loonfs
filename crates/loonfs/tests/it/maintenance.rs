@@ -24,7 +24,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, CountingStore, KeyPredicate, OperationClass, OperationKind,
+    BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    OperationKind,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -792,6 +793,46 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
     assert_eq!(listed_snapshot.owner, snapshot.owner);
     assert_eq!(listed_snapshot.expires_at_ms, Some(expires_at_ms));
     assert_eq!(listed_snapshot.checkpoint_seq, snapshot.checkpoint_seq);
+}
+
+#[tokio::test]
+async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("snapshot-ambiguous-write");
+    let store = Arc::new(
+        FailStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+            OperationClass::PutCreateIfAbsent,
+            InjectedError::Transport("lost checkpoint write acknowledgement".to_owned()),
+        )
+        .apply_then_fail(),
+    );
+    let object_store: SharedObjectStore = store.clone();
+    let fs = open_runtime_async(object_store, "snapshot-ambiguous-write").await;
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    store.fail_next(1);
+
+    let snapshot = fs
+        .admin
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "report-run".to_owned(),
+                expires_at_ms: u64::MAX,
+            },
+        )
+        .await
+        .expect("reconcile the durable snapshot record");
+
+    assert_eq!(store.attempts(), 2);
+    let listed = collect_checkpoints(&fs.admin, &namespace_id)
+        .await
+        .expect("list checkpoints");
+    assert_eq!(listed.checkpoints.len(), 1);
+    assert_eq!(listed.checkpoints[0].checkpoint_id, snapshot.checkpoint_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

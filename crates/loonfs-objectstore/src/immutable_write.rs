@@ -47,7 +47,7 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     bytes: Bytes,
-) -> std::result::Result<(), ImmutableWriteError> {
+) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
     let timer = StdMonotonicTimer::default();
     let retry_policy = TransportRetryPolicy::DEFAULT;
     let mode = if bytes.len() as u64 >= PROVIDER_MULTIPART_THRESHOLD_BYTES {
@@ -61,7 +61,7 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
 
     loop {
         match store.put(key, bytes.clone(), mode.clone()).await {
-            Ok(_) => return Ok(()),
+            Ok(metadata) => return Ok(metadata),
             Err(error @ ObjectStoreError::PreconditionFailed { .. }) => {
                 return resolve_readback(store, key, &bytes, ambiguous_transport.unwrap_or(error))
                     .await;
@@ -93,9 +93,9 @@ async fn resolve_readback<S: ObjectStore + ?Sized>(
     key: &str,
     expected: &Bytes,
     original: ObjectStoreError,
-) -> std::result::Result<(), ImmutableWriteError> {
+) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
     match readback(store, key, expected).await {
-        Ok(ImmutableReadback::Identical(_)) => Ok(()),
+        Ok(ImmutableReadback::Identical(metadata)) => Ok(metadata),
         Ok(ImmutableReadback::Different) => Err(ImmutableWriteError::DifferentObject {
             object_key: key.to_owned(),
         }),
