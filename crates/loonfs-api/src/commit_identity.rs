@@ -11,6 +11,7 @@
 //! a receipt, while the fingerprint describes the mutation stored in that
 //! receipt.
 
+use crate::options::PutFileOptions;
 use crate::{
     AbsolutePath, ActorKind, ActorRef, AttributeRevisionNo, ChangeSeq, CommitId, ContentEvidence,
     ContentRef, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId,
@@ -83,10 +84,7 @@ enum OperationFingerprintInput<'a> {
         absolute_path: &'a str,
         parents: bool,
     },
-    // The put guards join the preimage for the same reason as the delete
-    // guard below: a changed expectation is a different logical request and
-    // must conflict rather than replay a receipt. Skipping the new identity
-    // guard when absent preserves every earlier unguarded put preimage.
+    // Omitting unset guards keeps unguarded fingerprints unchanged.
     PutFile {
         absolute_path: &'a str,
         behavior: DestinationBehavior,
@@ -397,32 +395,25 @@ pub fn semantic_commit_fingerprint(
 ///
 /// Retrying an upload creates a new content object, so its content ID differs
 /// from the ID stored by the original commit. This function substitutes the
-/// original content reference before computing the fingerprint. The path,
-/// destination behavior, expected inode and revision, message, and operation
-/// count must still match. The caller must separately verify that both
-/// content objects contain the same bytes.
-#[allow(clippy::too_many_arguments)]
+/// original content reference before computing the fingerprint. The caller
+/// must separately verify that both content objects contain the same bytes.
 pub fn put_retry_fingerprint(
     namespace_id: &NamespaceId,
-    actor: &ActorRef,
     path: &AbsolutePath,
-    behavior: DestinationBehavior,
-    expected_inode_id: Option<InodeId>,
-    expected_revision_no: Option<RevisionNo>,
-    message: Option<&str>,
+    options: &PutFileOptions,
     committed_content_ref: &ContentRef,
 ) -> Result<String, SemanticFingerprintError> {
     let operation = FilesystemOperation::PutFile {
         path: path.clone(),
         content_ref: committed_content_ref.clone(),
-        behavior,
-        expected_inode_id,
-        expected_revision_no,
+        behavior: options.behavior,
+        expected_inode_id: options.expected_inode_id,
+        expected_revision_no: options.expected_revision_no,
     };
     semantic_commit_fingerprint(
         namespace_id,
-        actor,
-        message,
+        &options.commit.actor,
+        options.commit.message.as_deref(),
         std::slice::from_ref(&operation),
     )
 }
@@ -514,12 +505,8 @@ where
     };
     let retried = put_retry_fingerprint(
         attempt.namespace_id,
-        &attempt.options.commit.actor,
         attempt.path,
-        attempt.options.behavior,
-        attempt.options.expected_inode_id,
-        attempt.options.expected_revision_no,
-        attempt.options.commit.message.as_deref(),
+        attempt.options,
         content_ref,
     );
     if retried.ok().as_deref() != Some(receipt.committed_fingerprint.as_str())
@@ -864,6 +851,7 @@ mod tests {
     #[test]
     fn a_put_retry_reaches_the_pinned_fingerprint_under_every_checksum_algorithm() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let options = PutFileOptions::new(test_actor());
         let content_id =
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id");
         let bytes = b"pinned put bytes";
@@ -886,12 +874,8 @@ mod tests {
             assert_eq!(
                 put_retry_fingerprint(
                     &namespace_id,
-                    &test_actor(),
                     &AbsolutePath::parse("/docs/report.txt").expect("path"),
-                    DestinationBehavior::NoReplace,
-                    None,
-                    None,
-                    None,
+                    &options,
                     &content_ref,
                 )
                 .expect("retry fingerprint"),
@@ -988,6 +972,10 @@ mod tests {
     fn put_retry_fingerprint_matches_the_equivalent_single_operation_request() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let path = AbsolutePath::parse("/docs/report.txt").expect("path");
+        let mut options = PutFileOptions::new(test_actor());
+        options.behavior = DestinationBehavior::Replace;
+        options.expected_revision_no = Some(RevisionNo(4));
+        options.commit.message = Some("import batch".to_owned());
         let content_ref = ContentRef::blob_v1(
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"pinned put bytes",
@@ -1008,17 +996,8 @@ mod tests {
         .expect("hand-built fingerprint");
 
         assert_eq!(
-            put_retry_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                &path,
-                DestinationBehavior::Replace,
-                None,
-                Some(RevisionNo(4)),
-                Some("import batch"),
-                &content_ref,
-            )
-            .expect("retry fingerprint"),
+            put_retry_fingerprint(&namespace_id, &path, &options, &content_ref,)
+                .expect("retry fingerprint"),
             by_hand
         );
     }
@@ -1028,102 +1007,60 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let path = AbsolutePath::parse("/a.txt").expect("path");
         let content_ref = ContentRef::blob_v1(ContentId::generate(), b"hello");
-        let baseline = put_retry_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            &path,
-            DestinationBehavior::Replace,
-            None,
-            None,
-            None,
-            &content_ref,
-        )
-        .expect("baseline");
+        let mut options = PutFileOptions::new(test_actor());
+        options.behavior = DestinationBehavior::Replace;
+        let fingerprint = |namespace_id, path, options| {
+            put_retry_fingerprint(namespace_id, path, options, &content_ref)
+                .expect("retry fingerprint")
+        };
+        let baseline = fingerprint(&namespace_id, &path, &options);
 
-        for (label, variant) in [
+        let mut changed_behavior = options.clone();
+        changed_behavior.behavior = DestinationBehavior::NoReplace;
+        let mut changed_inode = options.clone();
+        changed_inode.expected_inode_id = Some(InodeId(2));
+        let mut changed_revision = options.clone();
+        changed_revision.expected_revision_no = Some(RevisionNo(2));
+        let mut changed_message = options.clone();
+        changed_message.commit.message = Some(String::new());
+
+        for (label, fingerprint) in [
             (
                 "path",
-                put_retry_fingerprint(
+                fingerprint(
                     &namespace_id,
-                    &test_actor(),
                     &AbsolutePath::parse("/b.txt").expect("path"),
-                    DestinationBehavior::Replace,
-                    None,
-                    None,
-                    None,
-                    &content_ref,
+                    &options,
                 ),
             ),
             (
                 "behavior",
-                put_retry_fingerprint(
-                    &namespace_id,
-                    &test_actor(),
-                    &path,
-                    DestinationBehavior::NoReplace,
-                    None,
-                    None,
-                    None,
-                    &content_ref,
-                ),
+                fingerprint(&namespace_id, &path, &changed_behavior),
             ),
             (
                 "expected inode",
-                put_retry_fingerprint(
-                    &namespace_id,
-                    &test_actor(),
-                    &path,
-                    DestinationBehavior::Replace,
-                    Some(InodeId(2)),
-                    None,
-                    None,
-                    &content_ref,
-                ),
+                fingerprint(&namespace_id, &path, &changed_inode),
             ),
             (
                 "expected revision",
-                put_retry_fingerprint(
-                    &namespace_id,
-                    &test_actor(),
-                    &path,
-                    DestinationBehavior::Replace,
-                    None,
-                    Some(RevisionNo(2)),
-                    None,
-                    &content_ref,
-                ),
+                fingerprint(&namespace_id, &path, &changed_revision),
             ),
             (
                 "message",
-                put_retry_fingerprint(
-                    &namespace_id,
-                    &test_actor(),
-                    &path,
-                    DestinationBehavior::Replace,
-                    None,
-                    None,
-                    Some(""),
-                    &content_ref,
-                ),
+                fingerprint(&namespace_id, &path, &changed_message),
             ),
             (
                 "namespace",
-                put_retry_fingerprint(
+                fingerprint(
                     &NamespaceId::parse("other").expect("valid namespace id"),
-                    &test_actor(),
                     &path,
-                    DestinationBehavior::Replace,
-                    None,
-                    None,
-                    None,
-                    &content_ref,
+                    &options,
                 ),
             ),
         ] {
             assert_ne!(
-                baseline,
-                variant.expect("variant fingerprint"),
-                "a changed {label} must change the fingerprint"
+                baseline, fingerprint,
+                "changed {label} must change identity"
             );
         }
     }
@@ -1159,12 +1096,8 @@ mod tests {
             committed_seq,
             committed_fingerprint: put_retry_fingerprint(
                 &namespace_id,
-                &test_actor(),
                 &path,
-                options.behavior,
-                options.expected_inode_id,
-                options.expected_revision_no,
-                options.commit.message.as_deref(),
+                &options,
                 &content_ref,
             )
             .expect("fingerprint"),

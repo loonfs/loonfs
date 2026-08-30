@@ -162,7 +162,7 @@ hoc.
 | `core.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
 | `core.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
-| `core.write_guards` | Identity guards on replacing writes: `expected_inode_id` on `put_file`, and `destination_expected_inode_id` / `destination_expected_revision_no` on `move_path`, `copy_path`, and `move_by_inode`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so clients can gate on deployments built before the guards existed. |
+| `core.write_guards` | Replacing puts, moves, and copies can require the inode or revision that the client read. | Implemented by the core runtime, so `core/v0` advertises it. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
@@ -462,15 +462,12 @@ implies (revision identity, binding identity, name absence, directory
 emptiness, ancestor visibility) so races fail explicitly rather than
 silently merge. Those checks are evaluated where their operation runs, which
 is what lets a later operation depend on an earlier one. Callers add their
-own cross-request guards on the operation itself where staleness matters:
-`expected_inode_id` and `expected_revision_no` on a replacing put,
-`expected_inode_id` on a delete, `destination_expected_inode_id` and
-`destination_expected_revision_no` on a replacing `move_path`, `copy_path`,
-or `move_by_inode`, `deletion_seq` on an undelete,
-`expected_binding_generation` on an
-inode-addressed move or delete, and `expected_head_seq` on a namespace
-delete. A guard is evaluated against the state its own operation sees, which
-includes what earlier operations in the same request did.
+own cross-request guards on operations where staleness matters. Puts can
+check the current inode and revision. Moves and copies can check the
+destination inode and revision. Deletes, undeletes, inode-addressed writes,
+and namespace deletion have guards for their corresponding state. Each guard
+checks the state visible to its operation, including changes made by earlier
+operations in the same request.
 
 Commit bodies reject unknown fields so a misspelled guard cannot be ignored. For example, dropping a letter from `expected_revision_no` returns `invalid_request` instead of applying an unguarded write.
 
@@ -564,11 +561,8 @@ responsible for its own reconciliation. LoonFS chooses this documented
 horizon over an unbounded receipt index deliberately: detecting a dropped
 id would require remembering every id forever.
 
-Caller-supplied race guards (`expected_inode_id` on delete and put,
-`expected_revision_no` on put, and the destination inode and revision guards
-on `move_path`, `copy_path`, and `move_by_inode`) are part of the commit's
-semantic identity, so changing, adding, or removing a guard while reusing a
-`commit_id` fails with `commit_id_reuse_conflict`.
+Write guards are part of the commit's identity. Reusing a `commit_id` after
+changing a guard fails with `commit_id_reuse_conflict`.
 
 A put's content is part of that identity too, and identity means *which
 content object*, not what bytes it holds. So:
@@ -1806,28 +1800,14 @@ the source in one commit; a replacing copy appends a revision to the
 destination inode, keeping its identity and revision history. Only a file
 destination can be replaced, and a path never replaces itself.
 
-Replacing `move_path`, `copy_path`, and `move_by_inode` operations may carry
-`destination_expected_inode_id` and
-`destination_expected_revision_no`. The guards require `replace` behavior
-and apply only while the destination still resolves to that inode and holds
-that revision. An inode mismatch answers `path_conflict`, a revision mismatch
-answers `stale_revision`, and a vacant destination under either guard answers
-`path_not_found`.
+Replacing puts can include `expected_inode_id`, `expected_revision_no`, or
+both. Replacing moves and copies use `destination_expected_inode_id` and
+`destination_expected_revision_no`. These fields let a client require the
+same file and revision that it previously read.
 
-A replacing `put_file` may also carry `expected_revision_no`: the put then
-applies only while the file's current revision is still that one, so a raced
-write fails with the revision conflict's expected/actual details instead of
-silently stacking a revision on state the caller never saw. The guard
-asserts an existing file — an absent path answers `path_not_found`, and
-combining it with `no_replace` is `invalid_request`. Like the delete guard,
-it is part of the commit's semantic identity for commit-id reuse.
-
-A replacing `put_file` may also carry `expected_inode_id`. The guard requires
-`replace` behavior and applies only while the path still resolves to that
-inode, so a raced delete-and-recreate answers `path_conflict` instead of
-stacking a revision onto a file the caller never read. A missing file answers
-`path_not_found`. It composes with `expected_revision_no`: identity and
-version are the two halves of one observation.
+Guards require `replace` behavior. An inode mismatch returns `path_conflict`,
+a revision mismatch returns `stale_revision`, and a missing destination
+returns `path_not_found`.
 
 Five operations use inode IDs instead of paths. They let clients act on an entry they previously read even if its path has changed. An unknown or hidden inode returns `inode_not_found`.
 

@@ -124,13 +124,11 @@ pub struct PutFileOptions {
     pub behavior: DestinationBehavior,
     /// Actor, commit ID, and message.
     pub commit: CommitOptions,
-    /// Requires `Replace` behavior. The put applies only while the path still
-    /// resolves to this inode, so a raced delete-and-recreate fails instead
-    /// of stacking a revision onto a file the caller never read.
+    /// Replace only if the path still points to this inode.
+    /// Requires `Replace` behavior.
     pub expected_inode_id: Option<InodeId>,
-    /// Replace only while the file's current revision is still this one.
-    /// Requires `Replace` behavior; a raced write fails instead of stacking a
-    /// revision on state the caller never saw.
+    /// Replace only if the file still has this revision.
+    /// Requires `Replace` behavior.
     pub expected_revision_no: Option<RevisionNo>,
 }
 
@@ -196,11 +194,11 @@ pub struct MoveOptions {
     pub behavior: DestinationBehavior,
     /// Actor, commit ID, and message.
     pub commit: CommitOptions,
-    /// Requires `Replace` behavior. The replacement applies only while the
-    /// destination still resolves to this inode.
+    /// Replace only if the destination still points to this inode.
+    /// Requires `Replace` behavior.
     pub destination_expected_inode_id: Option<InodeId>,
-    /// Requires `Replace` behavior. The replacement applies only while the
-    /// destination still holds this revision.
+    /// Replace only if the destination still has this revision.
+    /// Requires `Replace` behavior.
     pub destination_expected_revision_no: Option<RevisionNo>,
 }
 
@@ -223,11 +221,11 @@ pub struct CopyOptions {
     pub behavior: DestinationBehavior,
     /// Actor, commit ID, and message.
     pub commit: CommitOptions,
-    /// Requires `Replace` behavior. The replacement applies only while the
-    /// destination still resolves to this inode.
+    /// Replace only if the destination still points to this inode.
+    /// Requires `Replace` behavior.
     pub destination_expected_inode_id: Option<InodeId>,
-    /// Requires `Replace` behavior. The replacement applies only while the
-    /// destination still holds this revision.
+    /// Replace only if the destination still has this revision.
+    /// Requires `Replace` behavior.
     pub destination_expected_revision_no: Option<RevisionNo>,
 }
 

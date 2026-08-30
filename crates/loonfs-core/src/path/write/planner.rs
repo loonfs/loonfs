@@ -12,7 +12,9 @@ use super::plan_create::{
 };
 use super::plan_delete::plan_publish_delete_path;
 use super::plan_restore::plan_publish_restore_revision;
-use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
+use super::plan_transfer::{
+    plan_publish_copy_file_path, plan_publish_move_path, DestinationGuards,
+};
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use crate::commit::{
     validate_ops, CandidateAllocation, CommitFingerprint, CommitNumbering, PublishValidationView,
@@ -216,8 +218,10 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 *to_parent_inode_id,
                 to_display_name,
                 *behavior,
-                *destination_expected_inode_id,
-                *destination_expected_revision_no,
+                DestinationGuards::new(
+                    *destination_expected_inode_id,
+                    *destination_expected_revision_no,
+                ),
                 view,
             )
             .await
@@ -233,8 +237,10 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 from_path,
                 to_path,
                 *behavior,
-                *destination_expected_inode_id,
-                *destination_expected_revision_no,
+                DestinationGuards::new(
+                    *destination_expected_inode_id,
+                    *destination_expected_revision_no,
+                ),
                 view,
             )
             .await
@@ -250,8 +256,10 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 from_path,
                 to_path,
                 *behavior,
-                *destination_expected_inode_id,
-                *destination_expected_revision_no,
+                DestinationGuards::new(
+                    *destination_expected_inode_id,
+                    *destination_expected_revision_no,
+                ),
                 view,
                 allocation,
             )

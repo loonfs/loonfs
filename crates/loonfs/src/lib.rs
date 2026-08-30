@@ -26,6 +26,7 @@
 //!         loonfs::PutFileOptions {
 //!             behavior: loonfs::DestinationBehavior::Replace,
 //!             commit,
+//!             expected_inode_id: None,
 //!             expected_revision_no: None,
 //!         },
 //!     )

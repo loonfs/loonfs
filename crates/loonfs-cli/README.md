@@ -225,12 +225,13 @@ Writing
   service/loonfs-cli identifies the tool, not the human running it.
 
   loonfs put <local-path|-> [remote-path] [-r] [--force]
-             [--expected-revision <n>] [--actor-kind <kind> --actor-id <id>]
+             [--expected-inode-id <id>] [--expected-revision <n>]
+             [--actor-kind <kind> --actor-id <id>]
     Upload a local file, standard input when the local path is `-`, or with
-    -r the directory tree rooted at the local path; --force replaces an
-    existing destination, and --expected-revision replaces only while the
-    file is still at that revision, so a raced write fails instead of
-    stacking on it
+    -r the directory tree rooted at the local path. --force replaces an
+    existing destination. The expected value flags replace only if the file
+    still has the inode or revision that you read. They cannot be used with
+    -r
 
   loonfs mkdir <path> [-p] [--actor-kind <kind> --actor-id <id>]
     Create a directory; -p creates missing parents as well and succeeds when
@@ -260,14 +261,20 @@ Writing
     commit; the output carries the handle `loonfs undelete` needs
 
   loonfs mv <source> <dest> [--force]
+            [--destination-expected-inode-id <id>]
+            [--destination-expected-revision <n>]
             [--actor-kind <kind> --actor-id <id>]
     Move or rename a path, a directory included, in one commit; --force
-    replaces an existing destination
+    replaces an existing destination. The expected value flags replace only
+    if the destination still has the inode or revision that you read
 
   loonfs cp <source> <dest> [-r] [--force]
+            [--destination-expected-inode-id <id>]
+            [--destination-expected-revision <n>]
             [--actor-kind <kind> --actor-id <id>]
     Copy a file, or with -r the directory tree rooted at the source;
-    --force replaces an existing destination
+    --force replaces an existing destination. The expected value flags use
+    the same checks as mv and cannot be used with -r
 
 History and recovery
   loonfs revisions <path> [--limit <n>] [--page-size <n>] [--cursor <cursor>]

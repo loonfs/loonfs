@@ -285,10 +285,7 @@ pub enum FilesystemOperation {
         /// Whether an existing file may receive a new revision instead of causing a conflict.
         #[serde(default)]
         behavior: DestinationBehavior,
-        /// When set (with `replace` behavior), the put applies only while
-        /// the path still resolves to this inode; a raced delete-and-recreate
-        /// fails instead of stacking a revision onto a file the caller never
-        /// read, and a missing file answers `path_not_found`.
+        /// With `replace` behavior, require the path to still point to this inode.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -299,10 +296,7 @@ pub enum FilesystemOperation {
             schema(schema_with = crate::public_inode_id::schema)
         )]
         expected_inode_id: Option<InodeId>,
-        /// When set (with `replace` behavior), the put applies only while
-        /// the file's current revision is still this one; a raced write
-        /// fails the request instead of silently stacking on it, and a
-        /// missing file answers `path_not_found`.
+        /// With `replace` behavior, require the file to still have this revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_revision_no: Option<RevisionNo>,
@@ -394,8 +388,7 @@ pub enum FilesystemOperation {
         /// Whether an existing destination file may be replaced.
         #[serde(default)]
         behavior: DestinationBehavior,
-        /// When set (with `replace` behavior), the replacement applies only
-        /// while the destination still resolves to this inode.
+        /// With `replace` behavior, require the destination to still point to this inode.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -406,8 +399,7 @@ pub enum FilesystemOperation {
             schema(schema_with = crate::public_inode_id::schema)
         )]
         destination_expected_inode_id: Option<InodeId>,
-        /// When set (with `replace` behavior), the replacement applies only
-        /// while the destination still holds this revision.
+        /// With `replace` behavior, require the destination to still have this revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         destination_expected_revision_no: Option<RevisionNo>,
@@ -436,8 +428,7 @@ pub enum FilesystemOperation {
         /// Whether an existing destination file may be replaced.
         #[serde(default)]
         behavior: DestinationBehavior,
-        /// When set (with `replace` behavior), the replacement applies only
-        /// while the destination name still resolves to this inode.
+        /// With `replace` behavior, require the destination to still point to this inode.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -448,8 +439,7 @@ pub enum FilesystemOperation {
             schema(schema_with = crate::public_inode_id::schema)
         )]
         destination_expected_inode_id: Option<InodeId>,
-        /// When set (with `replace` behavior), the replacement applies only
-        /// while the destination still holds this revision.
+        /// With `replace` behavior, require the destination to still have this revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         destination_expected_revision_no: Option<RevisionNo>,
@@ -464,8 +454,7 @@ pub enum FilesystemOperation {
         /// Whether an existing destination file may receive a copied revision.
         #[serde(default)]
         behavior: DestinationBehavior,
-        /// When set (with `replace` behavior), the replacement applies only
-        /// while the destination still resolves to this inode.
+        /// With `replace` behavior, require the destination to still point to this inode.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -476,8 +465,7 @@ pub enum FilesystemOperation {
             schema(schema_with = crate::public_inode_id::schema)
         )]
         destination_expected_inode_id: Option<InodeId>,
-        /// When set (with `replace` behavior), the replacement applies only
-        /// while the destination still holds this revision.
+        /// With `replace` behavior, require the destination to still have this revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         destination_expected_revision_no: Option<RevisionNo>,

@@ -939,13 +939,11 @@ pub(crate) struct FilesystemPutArgs {
     /// Replace the remote destination if it already exists.
     #[arg(long)]
     pub force: bool,
-    /// Replace only while the path still resolves to this inode (implies
-    /// --force); a raced delete-and-recreate fails instead of replacing it.
-    #[arg(long, value_parser = parse_public_inode_id)]
-    pub expected_inode: Option<InodeId>,
-    /// Replace only while the file's current revision is still this one
-    /// (implies --force); a raced write fails instead of stacking on it.
-    #[arg(long)]
+    /// Replace only if the path still points to this inode. Implies --force.
+    #[arg(long, value_parser = parse_public_inode_id, conflicts_with = "recursive")]
+    pub expected_inode_id: Option<InodeId>,
+    /// Replace only if the file still has this revision. Implies --force.
+    #[arg(long, conflicts_with = "recursive")]
     pub expected_revision: Option<u64>,
     /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
@@ -975,13 +973,11 @@ pub(crate) struct FilesystemTransferArgs {
     /// Replace the destination if it already exists.
     #[arg(long)]
     pub force: bool,
-    /// Replace only while the destination still resolves to this inode
-    /// (implies --force).
-    #[arg(long, value_parser = parse_public_inode_id)]
-    pub destination_expected_inode: Option<InodeId>,
-    /// Replace only while the destination still holds this revision
-    /// (implies --force).
-    #[arg(long)]
+    /// Replace only if the destination still points to this inode. Implies --force.
+    #[arg(long, value_parser = parse_public_inode_id, conflicts_with = "recursive")]
+    pub destination_expected_inode_id: Option<InodeId>,
+    /// Replace only if the destination still has this revision. Implies --force.
+    #[arg(long, conflicts_with = "recursive")]
     pub destination_expected_revision: Option<u64>,
     /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a

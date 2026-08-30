@@ -1,7 +1,7 @@
 //! Plans inode-addressed mutations.
 
 use super::plan_delete::publish_plan_delete;
-use super::plan_transfer::{publish_plan_move, validate_destination_guards};
+use super::plan_transfer::{publish_plan_move, DestinationGuards};
 use super::publish_path_planning::{
     publish_check_binding_generation, publish_child_display_path,
     publish_child_name_absent_precondition, publish_classify_replace_destination,
@@ -93,22 +93,16 @@ pub(super) async fn plan_publish_put_file_revision_by_inode<S: ObjectStore + ?Si
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn plan_publish_move_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     expected_binding_generation: &str,
     to_parent_inode_id: InodeId,
     to_display_name: &DisplayName,
     behavior: DestinationBehavior,
-    destination_expected_inode_id: Option<InodeId>,
-    destination_expected_revision_no: Option<RevisionNo>,
+    guards: DestinationGuards,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
-    validate_destination_guards(
-        behavior,
-        destination_expected_inode_id,
-        destination_expected_revision_no,
-    )?;
+    guards.validate(behavior)?;
     let source = publish_resolve_visible_inode(view, inode_id).await?;
     publish_check_binding_generation(view, &source, expected_binding_generation)?;
     let target_parent = publish_resolve_visible_directory(view, to_parent_inode_id).await?;
@@ -124,8 +118,7 @@ pub(super) async fn plan_publish_move_by_inode<S: ObjectStore + ?Sized>(
         to_display_name,
         replaced,
         &destination_path,
-        destination_expected_inode_id,
-        destination_expected_revision_no,
+        guards,
     )
     .await
 }

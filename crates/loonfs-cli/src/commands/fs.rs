@@ -1216,18 +1216,16 @@ fn put_file_options(
         .expected_revision
         .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
         .transpose()?;
-    // The guards are stronger replace statements, so they imply --force
-    // rather than demanding both flags.
-    let behavior = if args.force || args.expected_inode.is_some() || expected_revision_no.is_some()
-    {
-        DestinationBehavior::Replace
-    } else {
-        DestinationBehavior::NoReplace
-    };
+    let behavior =
+        if args.force || args.expected_inode_id.is_some() || expected_revision_no.is_some() {
+            DestinationBehavior::Replace
+        } else {
+            DestinationBehavior::NoReplace
+        };
     Ok(PutFileOptions {
         behavior,
         commit: commit_options(actor, commit_id, args.message.clone()),
-        expected_inode_id: args.expected_inode,
+        expected_inode_id: args.expected_inode_id,
         expected_revision_no,
     })
 }
@@ -1571,7 +1569,7 @@ async fn run_filesystem_transfer(
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let behavior = if args.force
-        || args.destination_expected_inode.is_some()
+        || args.destination_expected_inode_id.is_some()
         || destination_expected_revision_no.is_some()
     {
         DestinationBehavior::Replace
@@ -1633,7 +1631,7 @@ async fn run_filesystem_transfer(
                 &loonfs_client::CopyOptions {
                     behavior,
                     commit: commit_options(&context.actor, commit_id, args.message.clone()),
-                    destination_expected_inode_id: args.destination_expected_inode,
+                    destination_expected_inode_id: args.destination_expected_inode_id,
                     destination_expected_revision_no,
                 },
             )
@@ -1647,7 +1645,7 @@ async fn run_filesystem_transfer(
                 &loonfs_client::MoveOptions {
                     behavior,
                     commit: commit_options(&context.actor, commit_id, args.message.clone()),
-                    destination_expected_inode_id: args.destination_expected_inode,
+                    destination_expected_inode_id: args.destination_expected_inode_id,
                     destination_expected_revision_no,
                 },
             )

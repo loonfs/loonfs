@@ -4100,7 +4100,7 @@
           },
           "expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "When set (with `replace` behavior), the put applies only while\nthe file's current revision is still this one; a raced write\nfails the request instead of silently stacking on it, and a\nmissing file answers `path_not_found`."
+            "description": "With `replace` behavior, require the file to still have this revision."
           },
           "kind": {
             "type": "string",
@@ -4260,7 +4260,7 @@
           },
           "destination_expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "When set (with `replace` behavior), the replacement applies only\nwhile the destination still holds this revision."
+            "description": "With `replace` behavior, require the destination to still have this revision."
           },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -4301,7 +4301,7 @@
           },
           "destination_expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "When set (with `replace` behavior), the replacement applies only\nwhile the destination still holds this revision."
+            "description": "With `replace` behavior, require the destination to still have this revision."
           },
           "expected_binding_generation": {
             "type": "string",
@@ -4352,7 +4352,7 @@
           },
           "destination_expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "When set (with `replace` behavior), the replacement applies only\nwhile the destination still holds this revision."
+            "description": "With `replace` behavior, require the destination to still have this revision."
           },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",

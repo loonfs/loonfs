@@ -163,16 +163,9 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     if (expected_revision_no.is_some() || expected_inode_id.is_some())
         && behavior == DestinationBehavior::NoReplace
     {
-        let guard = if expected_inode_id.is_some() && expected_revision_no.is_some() {
-            "expected_inode_id and expected_revision_no assert existing file state"
-        } else if expected_inode_id.is_some() {
-            "expected_inode_id asserts an existing file inode"
-        } else {
-            "expected_revision_no asserts an existing file revision"
-        };
-        return Err(CoreError::InvalidCommitRequest(format!(
-            "{guard}, which contradicts no_replace; use replace behavior with the guard"
-        )));
+        return Err(CoreError::InvalidCommitRequest(
+            "write guards require replace behavior".to_owned(),
+        ));
     }
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
@@ -216,10 +209,6 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
                 .latest_revision_head(existing.inode_id)
                 .await?
                 .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
-            // A caller-supplied guard replaces the freshly-read revision in
-            // both the op and the precondition, so commit validation rejects
-            // a raced write with the existing base-revision-mismatch error
-            // and its expected/actual details.
             let base_revision_no = expected_revision_no.unwrap_or(revision.revision_no);
             preconditions.push(publish_binding_is_precondition(view, &existing).await?);
             ops.push(ApiCommitOp::ReplaceFile {
@@ -236,8 +225,6 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
             });
         }
         Err(error) if is_missing_visible_path(&error) => {
-            // The guards assert an existing file; an absent path fails that
-            // assertion rather than silently creating.
             if expected_revision_no.is_some() || expected_inode_id.is_some() {
                 return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
             }
