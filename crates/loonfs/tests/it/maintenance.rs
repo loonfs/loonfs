@@ -16,13 +16,19 @@ use loonfs_api::wire::control::{
     HeadState, HeadStateEnvelope,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_objectstore::keys::{metadata_manifest_object, wal_head, wal_segment_prefix};
+use loonfs_objectstore::keys::{
+    checkpoint_prefix, metadata_manifest_object, wal_head, wal_segment_prefix,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{
+    BlockingStore, CountingStore, KeyPredicate, OperationClass, OperationKind,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]
@@ -786,6 +792,108 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
     assert_eq!(listed_snapshot.owner, snapshot.owner);
     assert_eq!(listed_snapshot.expires_at_ms, Some(expires_at_ms));
     assert_eq!(listed_snapshot.checkpoint_seq, snapshot.checkpoint_seq);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("snapshot-quota-race");
+    let checkpoint_key_prefix = checkpoint_prefix(&namespace_id);
+    let checkpoint_writes = Arc::new(AtomicUsize::new(0));
+    let checkpoint_writes_seen = checkpoint_writes.clone();
+    let checkpoint_write_gate = Arc::new(BlockingStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        move |operation| {
+            let matches = operation.key().starts_with(&checkpoint_key_prefix)
+                && matches!(
+                    operation.kind(),
+                    OperationKind::Put { .. } | OperationKind::PutStreamed { .. }
+                );
+            if matches {
+                checkpoint_writes_seen.fetch_add(1, Ordering::SeqCst);
+            }
+            matches
+        },
+    ));
+    let checkpoint_list_prefix = checkpoint_prefix(&namespace_id);
+    let checkpoint_lists = Arc::new(AtomicUsize::new(0));
+    let checkpoint_lists_seen = checkpoint_lists.clone();
+    let checkpoint_list_gate = Arc::new(BlockingStore::matching(
+        checkpoint_write_gate.clone(),
+        move |operation| {
+            let matches = operation.key() == checkpoint_list_prefix
+                && matches!(operation.kind(), OperationKind::List);
+            if matches {
+                checkpoint_lists_seen.fetch_add(1, Ordering::SeqCst);
+            }
+            matches
+        },
+    ));
+    let object_store: SharedObjectStore = checkpoint_list_gate.clone();
+    let fs = open_runtime_async(object_store, "snapshot-quota-race").await;
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+
+    checkpoint_list_gate.arm();
+    checkpoint_write_gate.arm();
+    let first_admin = fs.admin.clone();
+    let first_namespace = namespace_id.clone();
+    let first = tokio::spawn(async move {
+        first_admin
+            .create_snapshot_with_quota(
+                &first_namespace,
+                CreateSnapshotOptions {
+                    name: "first".to_owned(),
+                    expires_at_ms: u64::MAX,
+                },
+                0,
+                1,
+            )
+            .await
+    });
+    let second_admin = fs.admin.clone();
+    let second_namespace = namespace_id.clone();
+    let second = tokio::spawn(async move {
+        second_admin
+            .create_snapshot_with_quota(
+                &second_namespace,
+                CreateSnapshotOptions {
+                    name: "second".to_owned(),
+                    expires_at_ms: u64::MAX,
+                },
+                0,
+                1,
+            )
+            .await
+    });
+
+    wait_for_operations(&checkpoint_lists, 2).await;
+    checkpoint_list_gate.release();
+    wait_for_operations(&checkpoint_writes, 2).await;
+    checkpoint_list_gate.arm();
+    checkpoint_write_gate.release();
+    wait_for_operations(&checkpoint_lists, 4).await;
+    checkpoint_list_gate.release();
+
+    let first = first.await.expect("first create task");
+    let second = second.await.expect("second create task");
+    assert_core_error_kind(first, ErrorCode::SnapshotQuotaExceeded);
+    assert_core_error_kind(second, ErrorCode::SnapshotQuotaExceeded);
+    let listed = collect_checkpoints(&fs.admin, &namespace_id)
+        .await
+        .expect("list checkpoints after raced creates");
+    assert!(listed.checkpoints.is_empty());
+}
+
+async fn wait_for_operations(counter: &AtomicUsize, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while counter.load(Ordering::SeqCst) < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {expected} operations"));
 }
 
 #[test]

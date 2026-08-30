@@ -417,23 +417,16 @@ pub(super) async fn create_snapshot(
     query.into_params()?;
     let now_ms = super::handlers_uploads::current_unix_ms()?;
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
-    state
-        .admin
-        .ensure_snapshot_quota(
-            &namespace_id,
-            now_ms,
-            state.config.snapshot_max_live_per_namespace,
-        )
-        .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let checkpoint = state
         .admin
-        .create_snapshot(
+        .create_snapshot_with_quota(
             &namespace_id,
             CreateSnapshotOptions {
                 name: request.name,
                 expires_at_ms,
             },
+            now_ms,
+            state.config.snapshot_max_live_per_namespace,
         )
         .await
         .map_err(|error| {
