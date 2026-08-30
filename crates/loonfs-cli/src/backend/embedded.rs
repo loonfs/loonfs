@@ -796,22 +796,16 @@ impl EmbeddedBackend {
     ) -> Result<SnapshotSummary, BackendError> {
         let now_ms = validate_embedded_snapshot_ttl(namespace_id, ttl_ms)?;
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
-        self.admin
-            .ensure_snapshot_quota(
-                namespace_id,
-                now_ms,
-                EMBEDDED_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-            )
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?;
         let checkpoint = self
             .admin
-            .create_snapshot(
+            .create_snapshot_with_quota(
                 namespace_id,
                 CreateSnapshotOptions {
                     name: name.to_owned(),
                     expires_at_ms,
                 },
+                now_ms,
+                EMBEDDED_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
             )
             .await
             .map_err(|error| {

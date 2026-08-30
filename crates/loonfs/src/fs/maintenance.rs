@@ -738,6 +738,32 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
+    /// Creates a snapshot only when the namespace has quota for it.
+    ///
+    /// The second quota check closes the race between concurrent callers that
+    /// both observe the same free slot. A caller that loses that race releases
+    /// its tentative snapshot before returning the quota error.
+    pub async fn create_snapshot_with_quota(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateSnapshotOptions,
+        now_ms: u64,
+        max_live: usize,
+    ) -> Result<Checkpoint> {
+        self.ensure_snapshot_quota(namespace_id, now_ms, max_live)
+            .await?;
+        let checkpoint = self.create_snapshot(namespace_id, options).await?;
+        if let Err(error) = self
+            .ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 0)
+            .await
+        {
+            self.release_snapshot(namespace_id, &checkpoint.checkpoint_id)
+                .await?;
+            return Err(error);
+        }
+        Ok(checkpoint)
+    }
+
     /// Checks whether the namespace has room for another live snapshot.
     pub async fn ensure_snapshot_quota(
         &self,
@@ -745,9 +771,29 @@ impl FsAdmin {
         now_ms: u64,
         max_live: usize,
     ) -> Result<()> {
+        self.ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 1)
+            .await
+    }
+
+    async fn ensure_live_snapshot_limit(
+        &self,
+        namespace_id: &NamespaceId,
+        now_ms: u64,
+        max_live: usize,
+        additional_live: usize,
+    ) -> Result<()> {
         let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
         let mut cursor = None;
-        let mut live_after_create = 1usize;
+        let mut live_with_additional = additional_live;
+        let quota_error = || {
+            RuntimeError::Core(loonfs_core::Error::SnapshotQuotaExceeded {
+                namespace_id: namespace_id.clone(),
+                max_live,
+            })
+        };
+        if live_with_additional > max_live {
+            return Err(quota_error());
+        }
         loop {
             let page = self
                 .engine(namespace_id)
@@ -763,14 +809,9 @@ impl FsAdmin {
                     loonfs_api::CheckpointOwnerSummary::Snapshot { expires_at_ms, .. }
                         if expires_at_ms > now_ms
                 ) {
-                    live_after_create = live_after_create.saturating_add(1);
-                    if live_after_create > max_live {
-                        return Err(RuntimeError::Core(
-                            loonfs_core::Error::SnapshotQuotaExceeded {
-                                namespace_id: namespace_id.clone(),
-                                max_live,
-                            },
-                        ));
+                    live_with_additional = live_with_additional.saturating_add(1);
+                    if live_with_additional > max_live {
+                        return Err(quota_error());
                     }
                 }
             }
