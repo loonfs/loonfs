@@ -84,6 +84,7 @@ either way.
     "core.snapshots": true,
     "core.attributes": true,
     "core.inodes.list_children": true,
+    "core.write_guards": true,
     "query.grep": true
   },
   "limits": {
@@ -161,6 +162,7 @@ hoc.
 | `core.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
 | `core.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
+| `core.write_guards` | Identity guards on replacing writes: `expected_inode_id` on `put_file`, and `destination_expected_inode_id` / `destination_expected_revision_no` on `move_path`, `copy_path`, and `move_by_inode`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so clients can gate on deployments built before the guards existed. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
