@@ -326,8 +326,8 @@ impl Client {
                     from_path: from.absolute_path().clone(),
                     to_path: to.absolute_path().clone(),
                     behavior: options.behavior,
-                    destination_expected_inode_id: options.destination_expected_inode_id,
-                    destination_expected_revision_no: options.destination_expected_revision_no,
+                    expected_destination_inode_id: options.expected_destination_inode_id,
+                    expected_destination_revision_no: options.expected_destination_revision_no,
                 },
             ),
         )
@@ -358,8 +358,8 @@ impl Client {
                     from_path: from.absolute_path().clone(),
                     to_path: to.absolute_path().clone(),
                     behavior: options.behavior,
-                    destination_expected_inode_id: options.destination_expected_inode_id,
-                    destination_expected_revision_no: options.destination_expected_revision_no,
+                    expected_destination_inode_id: options.expected_destination_inode_id,
+                    expected_destination_revision_no: options.expected_destination_revision_no,
                 },
             ),
         )

@@ -124,11 +124,11 @@ pub struct PutFileOptions {
     pub behavior: DestinationBehavior,
     /// Actor, commit ID, and message.
     pub commit: CommitOptions,
-    /// Replace only if the path still points to this inode.
-    /// Requires `Replace` behavior.
+    /// The request replaces only if the path still points to this inode.
+    /// This guard requires `Replace` behavior.
     pub expected_inode_id: Option<InodeId>,
-    /// Replace only if the file still has this revision.
-    /// Requires `Replace` behavior.
+    /// The request replaces only if the file still has this revision.
+    /// This guard requires `Replace` behavior and `expected_inode_id`.
     pub expected_revision_no: Option<RevisionNo>,
 }
 
@@ -194,12 +194,12 @@ pub struct MoveOptions {
     pub behavior: DestinationBehavior,
     /// Actor, commit ID, and message.
     pub commit: CommitOptions,
-    /// Replace only if the destination still points to this inode.
-    /// Requires `Replace` behavior.
-    pub destination_expected_inode_id: Option<InodeId>,
-    /// Replace only if the destination still has this revision.
-    /// Requires `Replace` behavior.
-    pub destination_expected_revision_no: Option<RevisionNo>,
+    /// The request replaces only if the destination still points to this inode.
+    /// This guard requires `Replace` behavior.
+    pub expected_destination_inode_id: Option<InodeId>,
+    /// The request replaces only if the destination still has this revision.
+    /// This guard requires `Replace` behavior and `expected_destination_inode_id`.
+    pub expected_destination_revision_no: Option<RevisionNo>,
 }
 
 impl MoveOptions {
@@ -208,8 +208,8 @@ impl MoveOptions {
         Self {
             behavior: DestinationBehavior::NoReplace,
             commit: CommitOptions::new(actor),
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         }
     }
 }
@@ -221,12 +221,12 @@ pub struct CopyOptions {
     pub behavior: DestinationBehavior,
     /// Actor, commit ID, and message.
     pub commit: CommitOptions,
-    /// Replace only if the destination still points to this inode.
-    /// Requires `Replace` behavior.
-    pub destination_expected_inode_id: Option<InodeId>,
-    /// Replace only if the destination still has this revision.
-    /// Requires `Replace` behavior.
-    pub destination_expected_revision_no: Option<RevisionNo>,
+    /// The request replaces only if the destination still points to this inode.
+    /// This guard requires `Replace` behavior.
+    pub expected_destination_inode_id: Option<InodeId>,
+    /// The request replaces only if the destination still has this revision.
+    /// This guard requires `Replace` behavior and `expected_destination_inode_id`.
+    pub expected_destination_revision_no: Option<RevisionNo>,
 }
 
 impl CopyOptions {
@@ -235,8 +235,8 @@ impl CopyOptions {
         Self {
             behavior: DestinationBehavior::NoReplace,
             commit: CommitOptions::new(actor),
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         }
     }
 }

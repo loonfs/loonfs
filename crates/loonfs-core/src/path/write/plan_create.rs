@@ -6,6 +6,7 @@ use super::publish_path_planning::{
     publish_reject_tombstoned_path_ancestor, publish_resolve_parent_directory,
     CompiledFilesystemOperation, PublishPathPlanningView,
 };
+use super::ExpectedFileState;
 use crate::commit::{
     CandidateAllocation, CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
     CommitValidationError,
@@ -14,7 +15,7 @@ use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{
     AbsolutePath, ChangeSeq, ContentRef, DestinationBehavior, InodeId, InodeKind, NameKey,
-    RevisionNo, ROOT_INODE_ID,
+    ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -154,19 +155,11 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     content_ref: ContentRef,
     behavior: DestinationBehavior,
-    expected_revision_no: Option<RevisionNo>,
-    expected_inode_id: Option<InodeId>,
+    expected_file_state: Option<ExpectedFileState>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     allocation: &mut CandidateAllocation,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
-    if (expected_revision_no.is_some() || expected_inode_id.is_some())
-        && behavior == DestinationBehavior::NoReplace
-    {
-        return Err(CoreError::InvalidCommitRequest(
-            "write guards require replace behavior".to_owned(),
-        ));
-    }
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
         .metadata_state
@@ -187,12 +180,12 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
                     existing_display_name: Some(existing.display_name.clone()),
                 });
             }
-            if let Some(expected) = expected_inode_id {
-                if existing.inode_id != expected {
+            if let Some(expected) = expected_file_state {
+                if existing.inode_id != expected.inode_id {
                     return Err(CommitValidationError::BindingPreconditionMismatch {
                         parent_inode_id: existing.parent_inode_id.unwrap_or(ROOT_INODE_ID),
                         name_key: NameKey::for_display_name(&final_name),
-                        expected_child_inode_id: expected,
+                        expected_child_inode_id: expected.inode_id,
                         actual_child_inode_id: existing.inode_id,
                     }
                     .into());
@@ -209,7 +202,9 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
                 .latest_revision_head(existing.inode_id)
                 .await?
                 .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
-            let base_revision_no = expected_revision_no.unwrap_or(revision.revision_no);
+            let base_revision_no = expected_file_state
+                .and_then(|expected| expected.revision_no)
+                .unwrap_or(revision.revision_no);
             preconditions.push(publish_binding_is_precondition(view, &existing).await?);
             ops.push(ApiCommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
@@ -225,7 +220,7 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
             });
         }
         Err(error) if is_missing_visible_path(&error) => {
-            if expected_revision_no.is_some() || expected_inode_id.is_some() {
+            if expected_file_state.is_some() {
                 return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
             }
             let child_inode_id = allocation.allocate()?;

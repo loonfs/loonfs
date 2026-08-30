@@ -621,6 +621,15 @@ impl std::fmt::Display for WriterFence {
 
 fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetails> {
     match error {
+        CommitValidationError::BindingPreconditionMismatch {
+            expected_child_inode_id,
+            actual_child_inode_id,
+            ..
+        } => Some(ErrorDetails {
+            expected_inode_id: Some(*expected_child_inode_id),
+            actual_inode_id: Some(*actual_child_inode_id),
+            ..ErrorDetails::default()
+        }),
         CommitValidationError::ReplaceFileBaseRevisionMismatch {
             inode_id,
             expected,

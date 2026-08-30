@@ -939,11 +939,11 @@ pub(crate) struct FilesystemPutArgs {
     /// Replace the remote destination if it already exists.
     #[arg(long)]
     pub force: bool,
-    /// Replace only if the path still points to this inode. Implies --force.
+    /// This guard replaces only if the path still points to this inode. It implies --force.
     #[arg(long, value_parser = parse_public_inode_id, conflicts_with = "recursive")]
     pub expected_inode_id: Option<InodeId>,
-    /// Replace only if the file still has this revision. Implies --force.
-    #[arg(long, conflicts_with = "recursive")]
+    /// This guard replaces only if the file still has this revision and inode. It implies --force.
+    #[arg(long, conflicts_with = "recursive", requires = "expected_inode_id")]
     pub expected_revision: Option<u64>,
     /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
@@ -973,12 +973,16 @@ pub(crate) struct FilesystemTransferArgs {
     /// Replace the destination if it already exists.
     #[arg(long)]
     pub force: bool,
-    /// Replace only if the destination still points to this inode. Implies --force.
+    /// This guard replaces only if the destination still points to this inode. It implies --force.
     #[arg(long, value_parser = parse_public_inode_id, conflicts_with = "recursive")]
-    pub destination_expected_inode_id: Option<InodeId>,
-    /// Replace only if the destination still has this revision. Implies --force.
-    #[arg(long, conflicts_with = "recursive")]
-    pub destination_expected_revision: Option<u64>,
+    pub expected_destination_inode_id: Option<InodeId>,
+    /// This guard replaces only if the destination still has this revision and inode. It implies --force.
+    #[arg(
+        long,
+        conflicts_with = "recursive",
+        requires = "expected_destination_inode_id"
+    )]
+    pub expected_destination_revision: Option<u64>,
     /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
@@ -1681,6 +1685,34 @@ mod tests {
 
         Cli::try_parse_from(["loonfs", "stat", "/doc"]).expect("path target");
         Cli::try_parse_from(["loonfs", "stat", "--inode", "ino_2"]).expect("inode target");
+    }
+
+    #[test]
+    fn revision_guards_require_matching_inode_guards() {
+        for arguments in [
+            vec![
+                "loonfs",
+                "cp",
+                "/source.txt",
+                "/destination.txt",
+                "--expected-destination-revision",
+                "1",
+            ],
+            vec![
+                "loonfs",
+                "put",
+                "payload.txt",
+                "/destination.txt",
+                "--expected-revision",
+                "1",
+            ],
+        ] {
+            let error = Cli::try_parse_from(arguments).expect_err("inode guard is required");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+        }
     }
 
     fn assert_selected_target(cli: &Cli, profile: &str, namespace: &str) {

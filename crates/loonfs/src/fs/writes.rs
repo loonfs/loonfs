@@ -645,8 +645,8 @@ impl FsWriter {
                     from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                     to_path: loonfs_core::path::parse_mutation_path(to_path)?,
                     behavior: options.behavior,
-                    destination_expected_inode_id: options.destination_expected_inode_id,
-                    destination_expected_revision_no: options.destination_expected_revision_no,
+                    expected_destination_inode_id: options.expected_destination_inode_id,
+                    expected_destination_revision_no: options.expected_destination_revision_no,
                 },
             )),
         )
@@ -684,8 +684,8 @@ impl FsWriter {
                     from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                     to_path: loonfs_core::path::parse_mutation_path(to_path)?,
                     behavior: options.behavior,
-                    destination_expected_inode_id: options.destination_expected_inode_id,
-                    destination_expected_revision_no: options.destination_expected_revision_no,
+                    expected_destination_inode_id: options.expected_destination_inode_id,
+                    expected_destination_revision_no: options.expected_destination_revision_no,
                 },
             )),
         )

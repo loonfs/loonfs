@@ -1561,16 +1561,16 @@ async fn run_filesystem_transfer(
 
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
-    let destination_expected_revision_no = args
-        .destination_expected_revision
+    let expected_destination_revision_no = args
+        .expected_destination_revision
         .map(|value| {
-            parse_public_ordinal_arg("--destination-expected-revision", value, RevisionNo::parse)
+            parse_public_ordinal_arg("--expected-destination-revision", value, RevisionNo::parse)
         })
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let behavior = if args.force
-        || args.destination_expected_inode_id.is_some()
-        || destination_expected_revision_no.is_some()
+        || args.expected_destination_inode_id.is_some()
+        || expected_destination_revision_no.is_some()
     {
         DestinationBehavior::Replace
     } else {
@@ -1631,8 +1631,8 @@ async fn run_filesystem_transfer(
                 &loonfs_client::CopyOptions {
                     behavior,
                     commit: commit_options(&context.actor, commit_id, args.message.clone()),
-                    destination_expected_inode_id: args.destination_expected_inode_id,
-                    destination_expected_revision_no,
+                    expected_destination_inode_id: args.expected_destination_inode_id,
+                    expected_destination_revision_no,
                 },
             )
             .await
@@ -1645,8 +1645,8 @@ async fn run_filesystem_transfer(
                 &loonfs_client::MoveOptions {
                     behavior,
                     commit: commit_options(&context.actor, commit_id, args.message.clone()),
-                    destination_expected_inode_id: args.destination_expected_inode_id,
-                    destination_expected_revision_no,
+                    expected_destination_inode_id: args.expected_destination_inode_id,
+                    expected_destination_revision_no,
                 },
             )
             .await

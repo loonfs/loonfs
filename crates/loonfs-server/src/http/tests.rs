@@ -1751,8 +1751,8 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
                         commit_id: None,
                         message: None,
                     },
-                    destination_expected_inode_id: None,
-                    destination_expected_revision_no: None,
+                    expected_destination_inode_id: None,
+                    expected_destination_revision_no: None,
                 },
             )
             .await,
@@ -1866,8 +1866,8 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
                         commit_id: None,
                         message: None,
                     },
-                    destination_expected_inode_id: None,
-                    destination_expected_revision_no: None,
+                    expected_destination_inode_id: None,
+                    expected_destination_revision_no: None,
                 },
             )
             .await,
@@ -1917,19 +1917,34 @@ async fn http_guarded_put_rejects_a_delete_recreate_race() {
         )
         .await
         .expect("recreate path");
+    let recreated = harness
+        .client
+        .get_path_entry(&target, &Default::default())
+        .await
+        .expect("observe recreated file");
 
     let mut guarded = replace_file_options();
     guarded.expected_inode_id = Some(observed.inode_id);
     guarded.expected_revision_no = Some(RevisionNo(1));
-    assert_api_error(
-        harness
-            .client
-            .put_file_bytes(&target, b"must not land", &guarded)
-            .await,
-        409,
-        "path_conflict",
-        None,
-    );
+    match harness
+        .client
+        .put_file_bytes(&target, b"must not land", &guarded)
+        .await
+        .expect_err("the recreated inode must fail the guard")
+    {
+        ClientError::Api {
+            status,
+            code,
+            details: Some(details),
+            ..
+        } => {
+            assert_eq!(status, 409);
+            assert_eq!(code, "path_conflict");
+            assert_eq!(details.expected_inode_id, Some(observed.inode_id));
+            assert_eq!(details.actual_inode_id, Some(recreated.inode_id));
+        }
+        other => panic!("expected structured path conflict, got {other:?}"),
+    }
 
     harness.server.abort();
 }
@@ -1981,8 +1996,8 @@ async fn http_guarded_move_rejects_a_bumped_destination_revision() {
                     commit: loonfs_api::options::CommitOptions::new(
                         loonfs_test_support::test_actor(),
                     ),
-                    destination_expected_inode_id: Some(observed.inode_id),
-                    destination_expected_revision_no: Some(RevisionNo(1)),
+                    expected_destination_inode_id: Some(observed.inode_id),
+                    expected_destination_revision_no: Some(RevisionNo(1)),
                 },
             )
             .await,
@@ -2051,8 +2066,8 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
                     commit_id: None,
                     message: None,
                 },
-                destination_expected_inode_id: None,
-                destination_expected_revision_no: None,
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
         .await

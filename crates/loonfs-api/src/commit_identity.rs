@@ -114,9 +114,9 @@ enum OperationFingerprintInput<'a> {
         to_display_name: &'a str,
         behavior: DestinationBehavior,
         #[serde(skip_serializing_if = "Option::is_none")]
-        destination_expected_inode_id: Option<InodeId>,
+        expected_destination_inode_id: Option<InodeId>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        destination_expected_revision_no: Option<RevisionNo>,
+        expected_destination_revision_no: Option<RevisionNo>,
     },
     DeleteByInode {
         inode_id: InodeId,
@@ -136,18 +136,18 @@ enum OperationFingerprintInput<'a> {
         to_path: &'a str,
         behavior: DestinationBehavior,
         #[serde(skip_serializing_if = "Option::is_none")]
-        destination_expected_inode_id: Option<InodeId>,
+        expected_destination_inode_id: Option<InodeId>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        destination_expected_revision_no: Option<RevisionNo>,
+        expected_destination_revision_no: Option<RevisionNo>,
     },
     CopyFilePath {
         from_path: &'a str,
         to_path: &'a str,
         behavior: DestinationBehavior,
         #[serde(skip_serializing_if = "Option::is_none")]
-        destination_expected_inode_id: Option<InodeId>,
+        expected_destination_inode_id: Option<InodeId>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        destination_expected_revision_no: Option<RevisionNo>,
+        expected_destination_revision_no: Option<RevisionNo>,
     },
     RestoreRevision {
         absolute_path: &'a str,
@@ -261,16 +261,16 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             to_parent_inode_id,
             to_display_name,
             behavior,
-            destination_expected_inode_id,
-            destination_expected_revision_no,
+            expected_destination_inode_id,
+            expected_destination_revision_no,
         } => OperationFingerprintInput::MoveByInode {
             inode_id: *inode_id,
             expected_binding_generation,
             to_parent_inode_id: *to_parent_inode_id,
             to_display_name: to_display_name.as_str(),
             behavior: *behavior,
-            destination_expected_inode_id: *destination_expected_inode_id,
-            destination_expected_revision_no: *destination_expected_revision_no,
+            expected_destination_inode_id: *expected_destination_inode_id,
+            expected_destination_revision_no: *expected_destination_revision_no,
         },
         FilesystemOperation::DeleteByInode {
             inode_id,
@@ -294,27 +294,27 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             from_path,
             to_path,
             behavior,
-            destination_expected_inode_id,
-            destination_expected_revision_no,
+            expected_destination_inode_id,
+            expected_destination_revision_no,
         } => OperationFingerprintInput::MovePath {
             from_path: from_path.as_str(),
             to_path: to_path.as_str(),
             behavior: *behavior,
-            destination_expected_inode_id: *destination_expected_inode_id,
-            destination_expected_revision_no: *destination_expected_revision_no,
+            expected_destination_inode_id: *expected_destination_inode_id,
+            expected_destination_revision_no: *expected_destination_revision_no,
         },
         FilesystemOperation::CopyPath {
             from_path,
             to_path,
             behavior,
-            destination_expected_inode_id,
-            destination_expected_revision_no,
+            expected_destination_inode_id,
+            expected_destination_revision_no,
         } => OperationFingerprintInput::CopyFilePath {
             from_path: from_path.as_str(),
             to_path: to_path.as_str(),
             behavior: *behavior,
-            destination_expected_inode_id: *destination_expected_inode_id,
-            destination_expected_revision_no: *destination_expected_revision_no,
+            expected_destination_inode_id: *expected_destination_inode_id,
+            expected_destination_revision_no: *expected_destination_revision_no,
         },
         FilesystemOperation::RestoreRevision {
             path,
@@ -551,6 +551,16 @@ mod tests {
         AttributeValue::parse(value).expect("valid attribute value")
     }
 
+    fn fingerprint(operation: FilesystemOperation) -> String {
+        semantic_commit_fingerprint(
+            &NamespaceId::parse("demo").expect("valid namespace id"),
+            &test_actor(),
+            None,
+            &[operation],
+        )
+        .expect("fingerprint")
+    }
+
     fn update_attributes(
         set: impl IntoIterator<Item = (&'static str, AttributeValue)>,
         remove: impl IntoIterator<Item = &'static str>,
@@ -696,8 +706,8 @@ mod tests {
             to_parent_inode_id: InodeId(7),
             to_display_name: DisplayName::parse("report.txt").expect("display name"),
             behavior: DestinationBehavior::NoReplace,
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         };
 
         let fingerprint = |generation| {
@@ -849,6 +859,75 @@ mod tests {
     }
 
     #[test]
+    fn put_file_guards_change_the_fingerprint_deterministically() {
+        let content_ref = ContentRef::blob_v1(
+            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+            b"guarded put bytes",
+        );
+        let operation = |expected_inode_id, expected_revision_no| FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+            content_ref: content_ref.clone(),
+            behavior: DestinationBehavior::Replace,
+            expected_inode_id,
+            expected_revision_no,
+        };
+
+        let unguarded = fingerprint(operation(None, None));
+        let inode_only = fingerprint(operation(Some(InodeId(7)), None));
+        let first_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(3))));
+        let next_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(4))));
+
+        assert_ne!(unguarded, inode_only);
+        assert_ne!(inode_only, first_revision);
+        assert_ne!(first_revision, next_revision);
+        assert_eq!(
+            first_revision,
+            fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(3))))
+        );
+    }
+
+    fn assert_destination_guards_change_fingerprint(
+        operation: impl Fn(Option<InodeId>, Option<RevisionNo>) -> FilesystemOperation,
+    ) {
+        let unguarded = fingerprint(operation(None, None));
+        let first_inode = fingerprint(operation(Some(InodeId(7)), None));
+        let other_inode = fingerprint(operation(Some(InodeId(8)), None));
+        let first_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(3))));
+        let other_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(4))));
+
+        assert_ne!(unguarded, first_inode);
+        assert_ne!(first_inode, other_inode);
+        assert_ne!(first_inode, first_revision);
+        assert_ne!(first_revision, other_revision);
+        assert_eq!(
+            first_revision,
+            fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(3))))
+        );
+    }
+
+    #[test]
+    fn move_and_copy_destination_guards_change_the_fingerprint_deterministically() {
+        assert_destination_guards_change_fingerprint(|inode_id, revision_no| {
+            FilesystemOperation::MovePath {
+                from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+                to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+                behavior: DestinationBehavior::Replace,
+                expected_destination_inode_id: inode_id,
+                expected_destination_revision_no: revision_no,
+            }
+        });
+        assert_destination_guards_change_fingerprint(|inode_id, revision_no| {
+            FilesystemOperation::CopyPath {
+                from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+                to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+                behavior: DestinationBehavior::Replace,
+                expected_destination_inode_id: inode_id,
+                expected_destination_revision_no: revision_no,
+            }
+        });
+    }
+
+    #[test]
     fn a_put_retry_reaches_the_pinned_fingerprint_under_every_checksum_algorithm() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let options = PutFileOptions::new(test_actor());
@@ -974,6 +1053,7 @@ mod tests {
         let path = AbsolutePath::parse("/docs/report.txt").expect("path");
         let mut options = PutFileOptions::new(test_actor());
         options.behavior = DestinationBehavior::Replace;
+        options.expected_inode_id = Some(InodeId(42));
         options.expected_revision_no = Some(RevisionNo(4));
         options.commit.message = Some("import batch".to_owned());
         let content_ref = ContentRef::blob_v1(
@@ -989,7 +1069,7 @@ mod tests {
                 path: path.clone(),
                 content_ref: content_ref.clone(),
                 behavior: DestinationBehavior::Replace,
-                expected_inode_id: None,
+                expected_inode_id: Some(InodeId(42)),
                 expected_revision_no: Some(RevisionNo(4)),
             }],
         )
@@ -1020,6 +1100,7 @@ mod tests {
         let mut changed_inode = options.clone();
         changed_inode.expected_inode_id = Some(InodeId(2));
         let mut changed_revision = options.clone();
+        changed_revision.expected_inode_id = Some(InodeId(2));
         changed_revision.expected_revision_no = Some(RevisionNo(2));
         let mut changed_message = options.clone();
         changed_message.commit.message = Some(String::new());

@@ -94,8 +94,8 @@ async fn move_path<S: ObjectStore + ?Sized>(
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
             behavior: DestinationBehavior::NoReplace,
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         context,
     )
@@ -118,8 +118,8 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
             behavior: DestinationBehavior::NoReplace,
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         context,
     )
@@ -1134,8 +1134,8 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
                     from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                     behavior: DestinationBehavior::NoReplace,
-                    destination_expected_inode_id: None,
-                    destination_expected_revision_no: None,
+                    expected_destination_inode_id: None,
+                    expected_destination_revision_no: None,
                 },
             )),
         ],
@@ -1493,7 +1493,7 @@ async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
 }
 
 #[tokio::test]
-async fn put_inode_guard_rejects_a_recreated_path() {
+async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1566,11 +1566,11 @@ async fn put_inode_guard_rejects_a_recreated_path() {
         }
         other => panic!("expected binding mismatch, got {other:?}"),
     }
-    put_file_with_guards(
+    let error = put_file_with_guards(
         &store,
         &namespace_id,
         "/docs/aba.txt",
-        b"revision-only landed",
+        b"revision-only must not land",
         WriteGuards {
             inode_id: None,
             revision_no: Some(RevisionNo(1)),
@@ -1579,7 +1579,71 @@ async fn put_inode_guard_rejects_a_recreated_path() {
         "revision-only-put-aba",
     )
     .await
-    .expect("the revision-only ABA shape still matches the new inode");
+    .expect_err("a revision cannot identify the inode occupying a path");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/aba.txt")
+            .await
+            .expect("recreated file remains visible")
+            .bytes,
+        b"new inode"
+    );
+
+    put_file_with_guards(
+        &store,
+        &namespace_id,
+        "/docs/aba.txt",
+        b"inode only",
+        WriteGuards {
+            inode_id: Some(recreated.inode_id),
+            revision_no: None,
+        },
+        &context,
+        "inode-only-put",
+    )
+    .await
+    .expect("an inode-only guard allows replacement");
+    put_file_with_guards(
+        &store,
+        &namespace_id,
+        "/docs/aba.txt",
+        b"inode and revision",
+        WriteGuards {
+            inode_id: Some(recreated.inode_id),
+            revision_no: Some(RevisionNo(2)),
+        },
+        &context,
+        "inode-revision-put",
+    )
+    .await
+    .expect("matching inode and revision guards allow replacement");
+
+    let rejected_content = store_bytes_as_content(&store, &namespace_id, b"must not land")
+        .await
+        .expect("stage rejected content");
+    let error = submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("no-replace-guarded-put")),
+        FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/docs/aba.txt").expect("path"),
+            content_ref: rejected_content.into_content_ref(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: Some(recreated.inode_id),
+            expected_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect_err("no-replace rejects every put guard");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/aba.txt")
+            .await
+            .expect("guarded file remains visible")
+            .bytes,
+        b"inode and revision"
+    );
 }
 
 #[tokio::test]
@@ -1812,8 +1876,8 @@ async fn move_replace_atomically_replaces_a_file_destination() {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )
@@ -1831,8 +1895,8 @@ async fn move_replace_atomically_replaces_a_file_destination() {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )
@@ -1882,8 +1946,8 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/dir").expect("path"),
             behavior: DestinationBehavior::Replace,
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )
@@ -1900,8 +1964,8 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )
@@ -1954,8 +2018,8 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
-            destination_expected_inode_id: None,
-            destination_expected_revision_no: None,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )
@@ -1980,7 +2044,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
 }
 
 #[tokio::test]
-async fn move_replace_checks_the_destination_revision() {
+async fn move_path_guard_matrix_checks_the_destination_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1994,6 +2058,16 @@ async fn move_replace_checks_the_destination_revision() {
             "/docs/destination.txt",
             b"destination".as_slice(),
             "seed-move-destination",
+        ),
+        (
+            "/docs/inode-source.txt",
+            b"inode source".as_slice(),
+            "seed-inode-move-source",
+        ),
+        (
+            "/docs/inode-destination.txt",
+            b"inode destination".as_slice(),
+            "seed-inode-move-destination",
         ),
     ] {
         write_file_bytes(
@@ -2010,6 +2084,73 @@ async fn move_replace_checks_the_destination_revision() {
     let destination = resolve_path(&store, &namespace_id, "/docs/destination.txt")
         .await
         .expect("observe destination");
+    let inode_destination = resolve_path(&store, &namespace_id, "/docs/inode-destination.txt")
+        .await
+        .expect("observe inode-only destination");
+
+    submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("move-inode-only-destination-guard")),
+        FilesystemOperation::MovePath {
+            from_path: AbsolutePath::parse("/docs/inode-source.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/inode-destination.txt").expect("path"),
+            behavior: DestinationBehavior::Replace,
+            expected_destination_inode_id: Some(inode_destination.inode_id),
+            expected_destination_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect("an inode-only destination guard allows a move");
+
+    let error = submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("move-revision-only-destination-guard")),
+        FilesystemOperation::MovePath {
+            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+            behavior: DestinationBehavior::Replace,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: Some(RevisionNo(1)),
+        },
+        &context,
+    )
+    .await
+    .expect_err("a destination revision requires its inode");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+    let error = submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("move-no-replace-destination-guard")),
+        FilesystemOperation::MovePath {
+            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+            behavior: DestinationBehavior::NoReplace,
+            expected_destination_inode_id: Some(destination.inode_id),
+            expected_destination_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect_err("no-replace rejects every destination guard");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/source.txt")
+            .await
+            .expect("source remains after rejected moves")
+            .bytes,
+        b"source"
+    );
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/destination.txt")
+            .await
+            .expect("destination remains after rejected moves")
+            .bytes,
+        b"destination"
+    );
 
     let error = submit_operation(
         &store,
@@ -2019,8 +2160,8 @@ async fn move_replace_checks_the_destination_revision() {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
-            destination_expected_inode_id: Some(destination.inode_id),
-            destination_expected_revision_no: Some(RevisionNo(2)),
+            expected_destination_inode_id: Some(destination.inode_id),
+            expected_destination_revision_no: Some(RevisionNo(2)),
         },
         &context,
     )
@@ -2036,8 +2177,8 @@ async fn move_replace_checks_the_destination_revision() {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
-            destination_expected_inode_id: Some(destination.inode_id),
-            destination_expected_revision_no: Some(RevisionNo(1)),
+            expected_destination_inode_id: Some(destination.inode_id),
+            expected_destination_revision_no: Some(RevisionNo(1)),
         },
         &context,
     )
@@ -2053,7 +2194,7 @@ async fn move_replace_checks_the_destination_revision() {
 }
 
 #[tokio::test]
-async fn copy_replace_rejects_a_recreated_destination() {
+async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -2116,8 +2257,8 @@ async fn copy_replace_rejects_a_recreated_destination() {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
-            destination_expected_inode_id: Some(old.inode_id),
-            destination_expected_revision_no: Some(RevisionNo(1)),
+            expected_destination_inode_id: Some(old.inode_id),
+            expected_destination_revision_no: Some(RevisionNo(1)),
         },
         &context,
     )
@@ -2132,10 +2273,82 @@ async fn copy_replace_rejects_a_recreated_destination() {
         }) if expected_child_inode_id == old.inode_id
             && actual_child_inode_id == recreated.inode_id
     ));
+
+    let error = submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("copy-revision-only-destination-guard")),
+        FilesystemOperation::CopyPath {
+            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
+            behavior: DestinationBehavior::Replace,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: Some(RevisionNo(1)),
+        },
+        &context,
+    )
+    .await
+    .expect_err("a destination revision requires its inode");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+    let error = submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("copy-no-replace-destination-guard")),
+        FilesystemOperation::CopyPath {
+            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
+            behavior: DestinationBehavior::NoReplace,
+            expected_destination_inode_id: Some(recreated.inode_id),
+            expected_destination_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect_err("no-replace rejects every destination guard");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/aba-destination.txt")
+            .await
+            .expect("destination remains after rejected copies")
+            .bytes,
+        b"new destination"
+    );
+
+    submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("copy-inode-only-destination-guard")),
+        FilesystemOperation::CopyPath {
+            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
+            behavior: DestinationBehavior::Replace,
+            expected_destination_inode_id: Some(recreated.inode_id),
+            expected_destination_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect("an inode-only destination guard allows a copy");
+    submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("copy-inode-revision-destination-guard")),
+        FilesystemOperation::CopyPath {
+            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
+            behavior: DestinationBehavior::Replace,
+            expected_destination_inode_id: Some(recreated.inode_id),
+            expected_destination_revision_no: Some(RevisionNo(2)),
+        },
+        &context,
+    )
+    .await
+    .expect("matching inode and revision guards allow a copy");
 }
 
 #[tokio::test]
-async fn move_by_inode_checks_the_destination_guard() {
+async fn move_by_inode_guard_matrix_checks_the_destination_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -2163,15 +2376,49 @@ async fn move_by_inode_checks_the_destination_guard() {
     )
     .await
     .expect("seed destination");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/source-two.txt",
+        b"source two",
+        &context,
+        Some("seed-inode-move-source-two"),
+    )
+    .await
+    .expect("seed second source");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/destination-two.txt",
+        b"destination two",
+        &context,
+        Some("seed-inode-move-destination-two"),
+    )
+    .await
+    .expect("seed second destination");
     let docs = resolve_path(&store, &namespace_id, "/docs")
         .await
         .expect("resolve destination parent");
     let source = resolve_path(&store, &namespace_id, "/docs/source.txt")
         .await
         .expect("resolve source");
+    let destination = resolve_path(&store, &namespace_id, "/docs/destination.txt")
+        .await
+        .expect("resolve destination");
+    let source_two = resolve_path(&store, &namespace_id, "/docs/source-two.txt")
+        .await
+        .expect("resolve second source");
+    let destination_two = resolve_path(&store, &namespace_id, "/docs/destination-two.txt")
+        .await
+        .expect("resolve second destination");
     let binding_generation = source
         .binding_generation
+        .clone()
         .expect("named source has a binding generation");
+    let binding_generation_two = source_two
+        .binding_generation
+        .clone()
+        .expect("second source has a binding generation");
 
     let error = submit_operation(
         &store,
@@ -2179,17 +2426,108 @@ async fn move_by_inode_checks_the_destination_guard() {
         test_commit_id(Some("inode-move-wrong-destination")),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
-            expected_binding_generation: binding_generation,
+            expected_binding_generation: binding_generation.clone(),
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
             behavior: DestinationBehavior::Replace,
-            destination_expected_inode_id: Some(source.inode_id),
-            destination_expected_revision_no: Some(RevisionNo(1)),
+            expected_destination_inode_id: Some(source.inode_id),
+            expected_destination_revision_no: Some(RevisionNo(1)),
         },
         &context,
     )
     .await
     .expect_err("a wrong inode guard must fail an inode-addressed move");
     assert_eq!(error.code(), ErrorCode::PathConflict);
+
+    let error = submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("inode-move-revision-only-destination")),
+        FilesystemOperation::MoveByInode {
+            inode_id: source.inode_id,
+            expected_binding_generation: binding_generation.clone(),
+            to_parent_inode_id: docs.inode_id,
+            to_display_name: loonfs_api::DisplayName::parse("destination.txt")
+                .expect("display name"),
+            behavior: DestinationBehavior::Replace,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: Some(RevisionNo(1)),
+        },
+        &context,
+    )
+    .await
+    .expect_err("a destination revision requires its inode");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+    let error = submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("inode-move-no-replace-destination-guard")),
+        FilesystemOperation::MoveByInode {
+            inode_id: source.inode_id,
+            expected_binding_generation: binding_generation.clone(),
+            to_parent_inode_id: docs.inode_id,
+            to_display_name: loonfs_api::DisplayName::parse("destination.txt")
+                .expect("display name"),
+            behavior: DestinationBehavior::NoReplace,
+            expected_destination_inode_id: Some(destination.inode_id),
+            expected_destination_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect_err("no-replace rejects every destination guard");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/source.txt")
+            .await
+            .expect("source remains after rejected inode moves")
+            .bytes,
+        b"source"
+    );
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/destination.txt")
+            .await
+            .expect("destination remains after rejected inode moves")
+            .bytes,
+        b"destination"
+    );
+
+    submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("inode-move-inode-only-destination-guard")),
+        FilesystemOperation::MoveByInode {
+            inode_id: source.inode_id,
+            expected_binding_generation: binding_generation,
+            to_parent_inode_id: docs.inode_id,
+            to_display_name: loonfs_api::DisplayName::parse("destination.txt")
+                .expect("display name"),
+            behavior: DestinationBehavior::Replace,
+            expected_destination_inode_id: Some(destination.inode_id),
+            expected_destination_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect("an inode-only destination guard allows an inode move");
+    submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(Some("inode-move-inode-revision-destination-guard")),
+        FilesystemOperation::MoveByInode {
+            inode_id: source_two.inode_id,
+            expected_binding_generation: binding_generation_two,
+            to_parent_inode_id: docs.inode_id,
+            to_display_name: loonfs_api::DisplayName::parse("destination-two.txt")
+                .expect("display name"),
+            behavior: DestinationBehavior::Replace,
+            expected_destination_inode_id: Some(destination_two.inode_id),
+            expected_destination_revision_no: Some(RevisionNo(1)),
+        },
+        &context,
+    )
+    .await
+    .expect("matching inode and revision guards allow an inode move");
 }

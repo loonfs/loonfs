@@ -1,13 +1,14 @@
 //! Plans inode-addressed mutations.
 
 use super::plan_delete::publish_plan_delete;
-use super::plan_transfer::{publish_plan_move, DestinationGuards};
+use super::plan_transfer::publish_plan_move;
 use super::publish_path_planning::{
     publish_check_binding_generation, publish_child_display_path,
     publish_child_name_absent_precondition, publish_classify_replace_destination,
     publish_resolve_visible_child, publish_resolve_visible_directory,
     publish_resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
 };
+use super::ExpectedFileState;
 use crate::commit::{
     CandidateAllocation, CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
 };
@@ -99,10 +100,9 @@ pub(super) async fn plan_publish_move_by_inode<S: ObjectStore + ?Sized>(
     to_parent_inode_id: InodeId,
     to_display_name: &DisplayName,
     behavior: DestinationBehavior,
-    guards: DestinationGuards,
+    expected_destination: Option<ExpectedFileState>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
-    guards.validate(behavior)?;
     let source = publish_resolve_visible_inode(view, inode_id).await?;
     publish_check_binding_generation(view, &source, expected_binding_generation)?;
     let target_parent = publish_resolve_visible_directory(view, to_parent_inode_id).await?;
@@ -118,7 +118,7 @@ pub(super) async fn plan_publish_move_by_inode<S: ObjectStore + ?Sized>(
         to_display_name,
         replaced,
         &destination_path,
-        guards,
+        expected_destination,
     )
     .await
 }

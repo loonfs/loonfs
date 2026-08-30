@@ -33,8 +33,6 @@ pub const FEATURE_ATTRIBUTES: &str = "core.attributes";
 /// the key exists so inode-driven sync clients can gate on deployments built
 /// before the route.
 pub const FEATURE_INODES_LIST_CHILDREN: &str = "core.inodes.list_children";
-/// Replacing writes can require the inode or revision that the caller read.
-pub const FEATURE_WRITE_GUARDS: &str = "core.write_guards";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 /// Starting presigned `direct_multipart` upload sessions. Independent of

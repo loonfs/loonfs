@@ -12,10 +12,9 @@ use super::plan_create::{
 };
 use super::plan_delete::plan_publish_delete_path;
 use super::plan_restore::plan_publish_restore_revision;
-use super::plan_transfer::{
-    plan_publish_copy_file_path, plan_publish_move_path, DestinationGuards,
-};
+use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
+use super::validate_expected_file_state;
 use crate::commit::{
     validate_ops, CandidateAllocation, CommitFingerprint, CommitNumbering, PublishValidationView,
     ValidatedCommitPlan, ValidatedOp,
@@ -143,8 +142,13 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 path,
                 content_ref.clone(),
                 *behavior,
-                *expected_revision_no,
-                *expected_inode_id,
+                validate_expected_file_state(
+                    *behavior,
+                    *expected_inode_id,
+                    *expected_revision_no,
+                    "expected_revision_no",
+                    "expected_inode_id",
+                )?,
                 view,
                 allocation,
             )
@@ -209,8 +213,8 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             to_parent_inode_id,
             to_display_name,
             behavior,
-            destination_expected_inode_id,
-            destination_expected_revision_no,
+            expected_destination_inode_id,
+            expected_destination_revision_no,
         } => {
             plan_publish_move_by_inode(
                 *inode_id,
@@ -218,10 +222,13 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 *to_parent_inode_id,
                 to_display_name,
                 *behavior,
-                DestinationGuards::new(
-                    *destination_expected_inode_id,
-                    *destination_expected_revision_no,
-                ),
+                validate_expected_file_state(
+                    *behavior,
+                    *expected_destination_inode_id,
+                    *expected_destination_revision_no,
+                    "expected_destination_revision_no",
+                    "expected_destination_inode_id",
+                )?,
                 view,
             )
             .await
@@ -230,17 +237,20 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             from_path,
             to_path,
             behavior,
-            destination_expected_inode_id,
-            destination_expected_revision_no,
+            expected_destination_inode_id,
+            expected_destination_revision_no,
         } => {
             plan_publish_move_path(
                 from_path,
                 to_path,
                 *behavior,
-                DestinationGuards::new(
-                    *destination_expected_inode_id,
-                    *destination_expected_revision_no,
-                ),
+                validate_expected_file_state(
+                    *behavior,
+                    *expected_destination_inode_id,
+                    *expected_destination_revision_no,
+                    "expected_destination_revision_no",
+                    "expected_destination_inode_id",
+                )?,
                 view,
             )
             .await
@@ -249,17 +259,20 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             from_path,
             to_path,
             behavior,
-            destination_expected_inode_id,
-            destination_expected_revision_no,
+            expected_destination_inode_id,
+            expected_destination_revision_no,
         } => {
             plan_publish_copy_file_path(
                 from_path,
                 to_path,
                 *behavior,
-                DestinationGuards::new(
-                    *destination_expected_inode_id,
-                    *destination_expected_revision_no,
-                ),
+                validate_expected_file_state(
+                    *behavior,
+                    *expected_destination_inode_id,
+                    *expected_destination_revision_no,
+                    "expected_destination_revision_no",
+                    "expected_destination_inode_id",
+                )?,
                 view,
                 allocation,
             )

@@ -263,12 +263,17 @@ async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
         .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
         .await
         .expect("first unguarded put");
+    let observed = runtime
+        .get_path_entry(&namespace_id, PATH)
+        .await
+        .expect("stat path");
     let error = runtime
         .put_file_bytes(
             &namespace_id,
             PATH,
             b"stable bytes\n",
             PutFileOptions {
+                expected_inode_id: Some(observed.inode_id),
                 expected_revision_no: Some(RevisionNo(1)),
                 ..options(&commit_id)
             },

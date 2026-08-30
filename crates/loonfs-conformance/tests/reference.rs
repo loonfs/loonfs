@@ -1078,8 +1078,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 to_parent_inode_id: inode_directory_id,
                 to_display_name: display_name(&request.moved_file_name),
                 behavior: DestinationBehavior::NoReplace,
-                destination_expected_inode_id: None,
-                destination_expected_revision_no: None,
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
     };

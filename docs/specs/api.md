@@ -84,7 +84,6 @@ either way.
     "core.snapshots": true,
     "core.attributes": true,
     "core.inodes.list_children": true,
-    "core.write_guards": true,
     "query.grep": true
   },
   "limits": {
@@ -162,7 +161,6 @@ hoc.
 | `core.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
 | `core.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
-| `core.write_guards` | Replacing puts, moves, and copies can require the inode or revision that the client read. | Implemented by the core runtime, so `core/v0` advertises it. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
@@ -241,6 +239,7 @@ The codes that populate it:
 | Code | Detail fields |
 | --- | --- |
 | `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
+| `path_conflict` | `expected_inode_id`, `actual_inode_id` when an inode guard found a different inode at the path |
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision) |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
@@ -1800,14 +1799,23 @@ the source in one commit; a replacing copy appends a revision to the
 destination inode, keeping its identity and revision history. Only a file
 destination can be replaced, and a path never replaces itself.
 
-Replacing puts can include `expected_inode_id`, `expected_revision_no`, or
-both. Replacing moves and copies use `destination_expected_inode_id` and
-`destination_expected_revision_no`. These fields let a client require the
-same file and revision that it previously read.
+Replacing puts can include `expected_inode_id` alone or pair it with
+`expected_revision_no`. Replacing moves and copies use
+`expected_destination_inode_id` alone or pair it with
+`expected_destination_revision_no`. A destination or path revision guard
+requires its matching inode guard because a revision identifies a version
+within one inode, not the inode occupying a path. A revision-only guard
+returns `invalid_request`.
 
 Guards require `replace` behavior. An inode mismatch returns `path_conflict`,
 a revision mismatch returns `stale_revision`, and a missing destination
 returns `path_not_found`.
+
+These guards assert content revisions only. A guarded put or replacing copy
+proceeds after an attribute-only update when the inode and content revision
+still match. A replacing move deletes the destination inode, including its
+attributes. Attribute-level concurrency uses
+`expected_attributes_revision_no` separately.
 
 Five operations use inode IDs instead of paths. They let clients act on an entry they previously read even if its path has changed. An unknown or hidden inode returns `inode_not_found`.
 

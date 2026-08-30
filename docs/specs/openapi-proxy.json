@@ -2749,6 +2749,12 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Head sequence the namespace was actually at, which is what a caller\nthat still means to delete it retries against."
           },
+          "actual_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
           "actual_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
             "description": "Revision that is actually current; absent when the inode has none."
@@ -2780,6 +2786,12 @@
           "expected_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Head sequence a namespace delete required the namespace to still be\nat."
+          },
+          "expected_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           },
           "expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
@@ -4100,7 +4112,7 @@
           },
           "expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior, require the file to still have this revision."
+            "description": "With `replace` behavior and an inode guard, the request requires this content revision."
           },
           "kind": {
             "type": "string",
@@ -4252,15 +4264,15 @@
             "$ref": "#/components/schemas/DestinationBehavior",
             "description": "Whether an existing destination file may be replaced."
           },
-          "destination_expected_inode_id": {
+          "expected_destination_inode_id": {
             "type": "string",
             "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           },
-          "destination_expected_revision_no": {
+          "expected_destination_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior, require the destination to still have this revision."
+            "description": "With `replace` behavior and an inode guard, the request requires this content revision."
           },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -4293,19 +4305,19 @@
             "$ref": "#/components/schemas/DestinationBehavior",
             "description": "Whether an existing destination file may be replaced."
           },
-          "destination_expected_inode_id": {
+          "expected_binding_generation": {
+            "type": "string",
+            "description": "Binding generation required for the move."
+          },
+          "expected_destination_inode_id": {
             "type": "string",
             "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           },
-          "destination_expected_revision_no": {
+          "expected_destination_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior, require the destination to still have this revision."
-          },
-          "expected_binding_generation": {
-            "type": "string",
-            "description": "Binding generation required for the move."
+            "description": "With `replace` behavior and an inode guard, the request requires this content revision."
           },
           "inode_id": {
             "type": "string",
@@ -4344,15 +4356,15 @@
             "$ref": "#/components/schemas/DestinationBehavior",
             "description": "Whether an existing destination file may receive a copied revision."
           },
-          "destination_expected_inode_id": {
+          "expected_destination_inode_id": {
             "type": "string",
             "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           },
-          "destination_expected_revision_no": {
+          "expected_destination_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior, require the destination to still have this revision."
+            "description": "With `replace` behavior and an inode guard, the request requires this content revision."
           },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",

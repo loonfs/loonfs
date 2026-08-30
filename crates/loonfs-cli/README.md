@@ -230,8 +230,8 @@ Writing
     Upload a local file, standard input when the local path is `-`, or with
     -r the directory tree rooted at the local path. --force replaces an
     existing destination. The expected value flags replace only if the file
-    still has the inode or revision that you read. They cannot be used with
-    -r
+    still has the inode and optional revision that you read. A revision guard
+    requires the inode guard, and neither can be used with -r
 
   loonfs mkdir <path> [-p] [--actor-kind <kind> --actor-id <id>]
     Create a directory; -p creates missing parents as well and succeeds when
@@ -261,16 +261,16 @@ Writing
     commit; the output carries the handle `loonfs undelete` needs
 
   loonfs mv <source> <dest> [--force]
-            [--destination-expected-inode-id <id>]
-            [--destination-expected-revision <n>]
+            [--expected-destination-inode-id <id>]
+            [--expected-destination-revision <n>]
             [--actor-kind <kind> --actor-id <id>]
     Move or rename a path, a directory included, in one commit; --force
     replaces an existing destination. The expected value flags replace only
-    if the destination still has the inode or revision that you read
+    if the destination still has the inode and optional revision that you read
 
   loonfs cp <source> <dest> [-r] [--force]
-            [--destination-expected-inode-id <id>]
-            [--destination-expected-revision <n>]
+            [--expected-destination-inode-id <id>]
+            [--expected-destination-revision <n>]
             [--actor-kind <kind> --actor-id <id>]
     Copy a file, or with -r the directory tree rooted at the source;
     --force replaces an existing destination. The expected value flags use

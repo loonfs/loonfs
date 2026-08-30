@@ -451,6 +451,11 @@ async fn http_put_conflict_stands_when_only_a_guard_changed() {
         .put_file_bytes(&target, b"stable bytes\n", &replacing)
         .await
         .expect("first put");
+    let observed = harness
+        .client
+        .get_path_entry(&target, &Default::default())
+        .await
+        .expect("stat path");
 
     match harness
         .client
@@ -474,6 +479,7 @@ async fn http_put_conflict_stands_when_only_a_guard_changed() {
             &target,
             b"stable bytes\n",
             &PutFileOptions {
+                expected_inode_id: Some(observed.inode_id),
                 expected_revision_no: Some(RevisionNo(1)),
                 ..replacing
             },
@@ -793,8 +799,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
                 },
-                destination_expected_inode_id: None,
-                destination_expected_revision_no: None,
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
         .await
@@ -811,8 +817,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
                 },
-                destination_expected_inode_id: None,
-                destination_expected_revision_no: None,
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
         .await
@@ -844,8 +850,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
                 },
-                destination_expected_inode_id: None,
-                destination_expected_revision_no: None,
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
         .await
@@ -862,8 +868,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
                 },
-                destination_expected_inode_id: None,
-                destination_expected_revision_no: None,
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
         .await
@@ -970,8 +976,8 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
                     commit_id: None,
                     message: None,
                 },
-                destination_expected_inode_id: None,
-                destination_expected_revision_no: None,
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
         .await
