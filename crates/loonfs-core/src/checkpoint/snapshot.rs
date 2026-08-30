@@ -66,6 +66,25 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
         {
             Ok(_) => Ok(CasAttempt::Settled(super::checkpoint_summary(next))),
             Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
+            Err(error @ ObjectStoreError::Transport { .. }) => {
+                let current = classify_live_snapshot(
+                    load_checkpoint_record(store, namespace_id, checkpoint_id).await?,
+                    checkpoint_id,
+                    context.now_ms,
+                )?;
+                let CheckpointOwner::Snapshot { expires_at_ms, .. } = &current.state.owner else {
+                    return Err(CoreError::Internal(
+                        "live snapshot classification returned a non-snapshot owner".to_owned(),
+                    ));
+                };
+                if *expires_at_ms >= new_expires_at_ms {
+                    Ok(CasAttempt::Settled(super::checkpoint_summary(
+                        current.state,
+                    )))
+                } else {
+                    Err(CoreError::store(&object_key, &error))
+                }
+            }
             Err(error) => Err(CoreError::store(&object_key, &error)),
         }
     })
