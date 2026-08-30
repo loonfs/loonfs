@@ -286,6 +286,20 @@ pub enum FilesystemOperation {
         #[serde(default)]
         behavior: DestinationBehavior,
         /// When set (with `replace` behavior), the put applies only while
+        /// the path still resolves to this inode; a raced delete-and-recreate
+        /// fails instead of stacking a revision onto a file the caller never
+        /// read, and a missing file answers `path_not_found`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        expected_inode_id: Option<InodeId>,
+        /// When set (with `replace` behavior), the put applies only while
         /// the file's current revision is still this one; a raced write
         /// fails the request instead of silently stacking on it, and a
         /// missing file answers `path_not_found`.
@@ -380,6 +394,23 @@ pub enum FilesystemOperation {
         /// Whether an existing destination file may be replaced.
         #[serde(default)]
         behavior: DestinationBehavior,
+        /// When set (with `replace` behavior), the replacement applies only
+        /// while the destination still resolves to this inode.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        destination_expected_inode_id: Option<InodeId>,
+        /// When set (with `replace` behavior), the replacement applies only
+        /// while the destination still holds this revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        destination_expected_revision_no: Option<RevisionNo>,
     },
     /// Move an inode if its current binding matches.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMoveByInode"))]
@@ -405,6 +436,23 @@ pub enum FilesystemOperation {
         /// Whether an existing destination file may be replaced.
         #[serde(default)]
         behavior: DestinationBehavior,
+        /// When set (with `replace` behavior), the replacement applies only
+        /// while the destination name still resolves to this inode.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        destination_expected_inode_id: Option<InodeId>,
+        /// When set (with `replace` behavior), the replacement applies only
+        /// while the destination still holds this revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        destination_expected_revision_no: Option<RevisionNo>,
     },
     /// Copy one file path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationCopyPath"))]
@@ -416,6 +464,23 @@ pub enum FilesystemOperation {
         /// Whether an existing destination file may receive a copied revision.
         #[serde(default)]
         behavior: DestinationBehavior,
+        /// When set (with `replace` behavior), the replacement applies only
+        /// while the destination still resolves to this inode.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
+        destination_expected_inode_id: Option<InodeId>,
+        /// When set (with `replace` behavior), the replacement applies only
+        /// while the destination still holds this revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        destination_expected_revision_no: Option<RevisionNo>,
     },
     /// Restore a deleted file or subtree.
     ///
@@ -1519,6 +1584,8 @@ mod tests {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
             behavior: DestinationBehavior::Replace,
+            destination_expected_inode_id: Some(InodeId(7)),
+            destination_expected_revision_no: Some(RevisionNo(3)),
         };
         assert_eq!(
             serde_json::to_value(&move_path).expect("move op json"),
@@ -1526,7 +1593,9 @@ mod tests {
                 "kind": "move_path",
                 "from_path": "/docs/a.txt",
                 "to_path": "/docs/b.txt",
-                "behavior": "replace"
+                "behavior": "replace",
+                "destination_expected_inode_id": "ino_7",
+                "destination_expected_revision_no": 3
             })
         );
 
@@ -1534,6 +1603,8 @@ mod tests {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
             behavior: DestinationBehavior::Replace,
+            destination_expected_inode_id: Some(InodeId(7)),
+            destination_expected_revision_no: Some(RevisionNo(3)),
         };
         assert_eq!(
             serde_json::to_value(&copy_path).expect("copy op json"),
@@ -1541,7 +1612,9 @@ mod tests {
                 "kind": "copy_path",
                 "from_path": "/docs/a.txt",
                 "to_path": "/docs/b.txt",
-                "behavior": "replace"
+                "behavior": "replace",
+                "destination_expected_inode_id": "ino_7",
+                "destination_expected_revision_no": 3
             })
         );
 
@@ -1652,6 +1725,7 @@ mod tests {
             put,
             FilesystemOperation::PutFile {
                 behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
                 expected_revision_no: None,
                 ..
             }
@@ -1683,6 +1757,8 @@ mod tests {
                 from_path: path("/docs/a.txt"),
                 to_path: path("/docs/b.txt"),
                 behavior: DestinationBehavior::NoReplace,
+                destination_expected_inode_id: None,
+                destination_expected_revision_no: None,
             }
         );
 
@@ -1698,6 +1774,8 @@ mod tests {
                 from_path: path("/docs/a.txt"),
                 to_path: path("/docs/b.txt"),
                 behavior: DestinationBehavior::NoReplace,
+                destination_expected_inode_id: None,
+                destination_expected_revision_no: None,
             }
         );
     }
@@ -1711,6 +1789,7 @@ mod tests {
                     path: path("/docs/a.txt"),
                     content_ref: content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
                     expected_revision_no: None,
                 },
                 serde_json::json!({

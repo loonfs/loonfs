@@ -83,14 +83,17 @@ enum OperationFingerprintInput<'a> {
         absolute_path: &'a str,
         parents: bool,
     },
-    // The put guard joins the preimage for the same reason as the delete
-    // guard below: a changed expected revision is a different logical
-    // request and must conflict rather than replay a receipt.
+    // The put guards join the preimage for the same reason as the delete
+    // guard below: a changed expectation is a different logical request and
+    // must conflict rather than replay a receipt. Skipping the new identity
+    // guard when absent preserves every earlier unguarded put preimage.
     PutFile {
         absolute_path: &'a str,
         behavior: DestinationBehavior,
         content_ref: ContentRefFingerprintInput<'a>,
         expected_revision_no: Option<RevisionNo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expected_inode_id: Option<InodeId>,
     },
     CreateDirByInode {
         parent_inode_id: InodeId,
@@ -112,6 +115,10 @@ enum OperationFingerprintInput<'a> {
         to_parent_inode_id: InodeId,
         to_display_name: &'a str,
         behavior: DestinationBehavior,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination_expected_inode_id: Option<InodeId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination_expected_revision_no: Option<RevisionNo>,
     },
     DeleteByInode {
         inode_id: InodeId,
@@ -130,11 +137,19 @@ enum OperationFingerprintInput<'a> {
         from_path: &'a str,
         to_path: &'a str,
         behavior: DestinationBehavior,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination_expected_inode_id: Option<InodeId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination_expected_revision_no: Option<RevisionNo>,
     },
     CopyFilePath {
         from_path: &'a str,
         to_path: &'a str,
         behavior: DestinationBehavior,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination_expected_inode_id: Option<InodeId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination_expected_revision_no: Option<RevisionNo>,
     },
     RestoreRevision {
         absolute_path: &'a str,
@@ -208,12 +223,14 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             path,
             content_ref,
             behavior,
+            expected_inode_id,
             expected_revision_no,
         } => OperationFingerprintInput::PutFile {
             absolute_path: path.as_str(),
             behavior: *behavior,
             content_ref: content_ref_fingerprint_input(content_ref),
             expected_revision_no: *expected_revision_no,
+            expected_inode_id: *expected_inode_id,
         },
         FilesystemOperation::CreateDirectoryByInode {
             parent_inode_id,
@@ -246,12 +263,16 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             to_parent_inode_id,
             to_display_name,
             behavior,
+            destination_expected_inode_id,
+            destination_expected_revision_no,
         } => OperationFingerprintInput::MoveByInode {
             inode_id: *inode_id,
             expected_binding_generation,
             to_parent_inode_id: *to_parent_inode_id,
             to_display_name: to_display_name.as_str(),
             behavior: *behavior,
+            destination_expected_inode_id: *destination_expected_inode_id,
+            destination_expected_revision_no: *destination_expected_revision_no,
         },
         FilesystemOperation::DeleteByInode {
             inode_id,
@@ -275,19 +296,27 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             from_path,
             to_path,
             behavior,
+            destination_expected_inode_id,
+            destination_expected_revision_no,
         } => OperationFingerprintInput::MovePath {
             from_path: from_path.as_str(),
             to_path: to_path.as_str(),
             behavior: *behavior,
+            destination_expected_inode_id: *destination_expected_inode_id,
+            destination_expected_revision_no: *destination_expected_revision_no,
         },
         FilesystemOperation::CopyPath {
             from_path,
             to_path,
             behavior,
+            destination_expected_inode_id,
+            destination_expected_revision_no,
         } => OperationFingerprintInput::CopyFilePath {
             from_path: from_path.as_str(),
             to_path: to_path.as_str(),
             behavior: *behavior,
+            destination_expected_inode_id: *destination_expected_inode_id,
+            destination_expected_revision_no: *destination_expected_revision_no,
         },
         FilesystemOperation::RestoreRevision {
             path,
@@ -369,14 +398,16 @@ pub fn semantic_commit_fingerprint(
 /// Retrying an upload creates a new content object, so its content ID differs
 /// from the ID stored by the original commit. This function substitutes the
 /// original content reference before computing the fingerprint. The path,
-/// destination behavior, expected revision, message, and operation count must
-/// still match. The caller must separately verify that both content objects
-/// contain the same bytes.
+/// destination behavior, expected inode and revision, message, and operation
+/// count must still match. The caller must separately verify that both
+/// content objects contain the same bytes.
+#[allow(clippy::too_many_arguments)]
 pub fn put_retry_fingerprint(
     namespace_id: &NamespaceId,
     actor: &ActorRef,
     path: &AbsolutePath,
     behavior: DestinationBehavior,
+    expected_inode_id: Option<InodeId>,
     expected_revision_no: Option<RevisionNo>,
     message: Option<&str>,
     committed_content_ref: &ContentRef,
@@ -385,6 +416,7 @@ pub fn put_retry_fingerprint(
         path: path.clone(),
         content_ref: committed_content_ref.clone(),
         behavior,
+        expected_inode_id,
         expected_revision_no,
     };
     semantic_commit_fingerprint(
@@ -485,6 +517,7 @@ where
         &attempt.options.commit.actor,
         attempt.path,
         attempt.options.behavior,
+        attempt.options.expected_inode_id,
         attempt.options.expected_revision_no,
         attempt.options.commit.message.as_deref(),
         content_ref,
@@ -676,6 +709,8 @@ mod tests {
             to_parent_inode_id: InodeId(7),
             to_display_name: DisplayName::parse("report.txt").expect("display name"),
             behavior: DestinationBehavior::NoReplace,
+            destination_expected_inode_id: None,
+            destination_expected_revision_no: None,
         };
 
         let fingerprint = |generation| {
@@ -814,6 +849,7 @@ mod tests {
                     b"pinned put bytes",
                 ),
                 behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
                 expected_revision_no: None,
             }],
         )
@@ -855,6 +891,7 @@ mod tests {
                     DestinationBehavior::NoReplace,
                     None,
                     None,
+                    None,
                     &content_ref,
                 )
                 .expect("retry fingerprint"),
@@ -875,6 +912,7 @@ mod tests {
             path: AbsolutePath::parse(path).expect("path"),
             content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }
     }
@@ -963,6 +1001,7 @@ mod tests {
                 path: path.clone(),
                 content_ref: content_ref.clone(),
                 behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
                 expected_revision_no: Some(RevisionNo(4)),
             }],
         )
@@ -974,6 +1013,7 @@ mod tests {
                 &test_actor(),
                 &path,
                 DestinationBehavior::Replace,
+                None,
                 Some(RevisionNo(4)),
                 Some("import batch"),
                 &content_ref,
@@ -995,6 +1035,7 @@ mod tests {
             DestinationBehavior::Replace,
             None,
             None,
+            None,
             &content_ref,
         )
         .expect("baseline");
@@ -1009,6 +1050,7 @@ mod tests {
                     DestinationBehavior::Replace,
                     None,
                     None,
+                    None,
                     &content_ref,
                 ),
             ),
@@ -1021,6 +1063,20 @@ mod tests {
                     DestinationBehavior::NoReplace,
                     None,
                     None,
+                    None,
+                    &content_ref,
+                ),
+            ),
+            (
+                "expected inode",
+                put_retry_fingerprint(
+                    &namespace_id,
+                    &test_actor(),
+                    &path,
+                    DestinationBehavior::Replace,
+                    Some(InodeId(2)),
+                    None,
+                    None,
                     &content_ref,
                 ),
             ),
@@ -1031,6 +1087,7 @@ mod tests {
                     &test_actor(),
                     &path,
                     DestinationBehavior::Replace,
+                    None,
                     Some(RevisionNo(2)),
                     None,
                     &content_ref,
@@ -1044,6 +1101,7 @@ mod tests {
                     &path,
                     DestinationBehavior::Replace,
                     None,
+                    None,
                     Some(""),
                     &content_ref,
                 ),
@@ -1055,6 +1113,7 @@ mod tests {
                     &test_actor(),
                     &path,
                     DestinationBehavior::Replace,
+                    None,
                     None,
                     None,
                     &content_ref,
@@ -1103,6 +1162,7 @@ mod tests {
                 &test_actor(),
                 &path,
                 options.behavior,
+                options.expected_inode_id,
                 options.expected_revision_no,
                 options.commit.message.as_deref(),
                 &content_ref,

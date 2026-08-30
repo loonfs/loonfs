@@ -127,6 +127,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             path: AbsolutePath::parse("/docs/retry.txt").expect("path"),
             content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -169,6 +170,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
                     commit_id: Some(commit_id.clone()),
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )
@@ -204,6 +206,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
                     commit_id: Some(commit_id.clone()),
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )
@@ -229,6 +232,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
                     commit_id: Some(commit_id),
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )
@@ -268,6 +272,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
             commit_id: Some(commit_id.clone()),
             message: Some(message.to_owned()),
         },
+        expected_inode_id: None,
         expected_revision_no: None,
     };
 
@@ -360,6 +365,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
             commit_id: Some(commit_id.clone()),
             message: Some("import batch".to_owned()),
         },
+        expected_inode_id: None,
         expected_revision_no: None,
     };
 
@@ -436,6 +442,7 @@ async fn http_put_conflict_stands_when_only_a_guard_changed() {
             commit_id: Some(commit_id.clone()),
             message: None,
         },
+        expected_inode_id: None,
         expected_revision_no: None,
     };
 
@@ -524,6 +531,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
                         path: AbsolutePath::parse("/docs/batch.txt").expect("path"),
                         content_ref: staged.content_ref.clone(),
                         behavior: DestinationBehavior::Replace,
+                        expected_inode_id: None,
                         expected_revision_no: None,
                     },
                     FilesystemOperation::CreateDirectory {
@@ -548,6 +556,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
                     commit_id: Some(commit_id),
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )
@@ -679,6 +688,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
             commit_id: Some(commit_id.clone()),
             message: None,
         },
+        expected_inode_id: None,
         expected_revision_no: None,
     };
 
@@ -783,6 +793,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
                 },
+                destination_expected_inode_id: None,
+                destination_expected_revision_no: None,
             },
         )
         .await
@@ -799,6 +811,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
                 },
+                destination_expected_inode_id: None,
+                destination_expected_revision_no: None,
             },
         )
         .await
@@ -830,6 +844,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
                 },
+                destination_expected_inode_id: None,
+                destination_expected_revision_no: None,
             },
         )
         .await
@@ -846,6 +862,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
                 },
+                destination_expected_inode_id: None,
+                destination_expected_revision_no: None,
             },
         )
         .await
@@ -952,6 +970,8 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
                     commit_id: None,
                     message: None,
                 },
+                destination_expected_inode_id: None,
+                destination_expected_revision_no: None,
             },
         )
         .await

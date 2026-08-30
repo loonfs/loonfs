@@ -117,6 +117,7 @@ fn put_file(absolute_path: &str, content_ref: loonfs_api::ContentRef) -> Filesys
         path: AbsolutePath::parse(absolute_path).expect("path"),
         content_ref,
         behavior: DestinationBehavior::NoReplace,
+        expected_inode_id: None,
         expected_revision_no: None,
     }
 }
@@ -379,6 +380,8 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
                     from_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
                     to_path: AbsolutePath::parse("/docs/moved.txt").expect("path"),
                     behavior: DestinationBehavior::NoReplace,
+                    destination_expected_inode_id: None,
+                    destination_expected_revision_no: None,
                 },
             ),
             CommitRequest::single(
@@ -553,6 +556,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
             path: AbsolutePath::parse("/restore.txt").expect("path"),
             content_ref: second.into_content_ref(),
             behavior: DestinationBehavior::Replace,
+            expected_inode_id: None,
             expected_revision_no: None,
         },
         &context,
@@ -650,6 +654,7 @@ async fn a_guarded_put_reports_the_stale_revision_before_missing_content_without
                 path: AbsolutePath::parse("/docs/replace.txt").expect("path"),
                 content_ref: missing_content.clone(),
                 behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
                 expected_revision_no: Some(RevisionNo(99)),
             },
         ))],
@@ -984,6 +989,7 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
             path: AbsolutePath::parse("/docs/guarded.txt").expect("path"),
             content_ref,
             behavior: DestinationBehavior::Replace,
+            expected_inode_id: None,
             expected_revision_no: Some(RevisionNo(expected)),
         };
 

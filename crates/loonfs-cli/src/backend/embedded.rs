@@ -1645,6 +1645,7 @@ mod tests {
                             commit: loonfs_client::CommitOptions::new(
                                 loonfs_test_support::test_actor(),
                             ),
+                            expected_inode_id: None,
                             expected_revision_no: None,
                         },
                     )

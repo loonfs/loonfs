@@ -72,6 +72,8 @@ async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
             from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/renamed.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
+            destination_expected_inode_id: None,
+            destination_expected_revision_no: None,
         },
         context,
     )
@@ -217,6 +219,8 @@ async fn revision_write_requires_the_current_revision_and_survives_a_move() {
             from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
             to_path: AbsolutePath::parse("/report.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
+            destination_expected_inode_id: None,
+            destination_expected_revision_no: None,
         },
         &context,
     )
@@ -265,6 +269,8 @@ async fn move_requires_the_current_binding_generation() {
             to_parent_inode_id: ROOT_INODE_ID,
             to_display_name: display_name("moved.txt"),
             behavior: DestinationBehavior::NoReplace,
+            destination_expected_inode_id: None,
+            destination_expected_revision_no: None,
         },
         &context,
     )
@@ -282,6 +288,8 @@ async fn move_requires_the_current_binding_generation() {
             to_parent_inode_id: ROOT_INODE_ID,
             to_display_name: display_name("moved.txt"),
             behavior: DestinationBehavior::NoReplace,
+            destination_expected_inode_id: None,
+            destination_expected_revision_no: None,
         },
         &context,
     )
@@ -366,6 +374,8 @@ async fn earlier_move_makes_a_later_guard_stale_and_rolls_back_the_commit() {
                     to_parent_inode_id: ROOT_INODE_ID,
                     to_display_name: display_name("moved.txt"),
                     behavior: DestinationBehavior::NoReplace,
+                    destination_expected_inode_id: None,
+                    destination_expected_revision_no: None,
                 },
                 FilesystemOperation::DeleteByInode {
                     inode_id: report_inode_id,
@@ -433,6 +443,8 @@ async fn content_write_preserves_the_guard_for_a_later_move() {
                     to_parent_inode_id: ROOT_INODE_ID,
                     to_display_name: display_name("moved.txt"),
                     behavior: DestinationBehavior::NoReplace,
+                    destination_expected_inode_id: None,
+                    destination_expected_revision_no: None,
                 },
             ],
         },

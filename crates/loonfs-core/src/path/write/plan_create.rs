@@ -13,7 +13,8 @@ use crate::commit::{
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{
-    AbsolutePath, ChangeSeq, ContentRef, DestinationBehavior, InodeId, InodeKind, RevisionNo,
+    AbsolutePath, ChangeSeq, ContentRef, DestinationBehavior, InodeId, InodeKind, NameKey,
+    RevisionNo, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -154,16 +155,24 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     content_ref: ContentRef,
     behavior: DestinationBehavior,
     expected_revision_no: Option<RevisionNo>,
+    expected_inode_id: Option<InodeId>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     allocation: &mut CandidateAllocation,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
-    if expected_revision_no.is_some() && behavior == DestinationBehavior::NoReplace {
-        return Err(CoreError::InvalidCommitRequest(
-            "expected_revision_no asserts an existing file revision, which \
-             contradicts no_replace; use replace behavior with the guard"
-                .to_owned(),
-        ));
+    if (expected_revision_no.is_some() || expected_inode_id.is_some())
+        && behavior == DestinationBehavior::NoReplace
+    {
+        let guard = if expected_inode_id.is_some() && expected_revision_no.is_some() {
+            "expected_inode_id and expected_revision_no assert existing file state"
+        } else if expected_inode_id.is_some() {
+            "expected_inode_id asserts an existing file inode"
+        } else {
+            "expected_revision_no asserts an existing file revision"
+        };
+        return Err(CoreError::InvalidCommitRequest(format!(
+            "{guard}, which contradicts no_replace; use replace behavior with the guard"
+        )));
     }
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
@@ -184,6 +193,17 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
                     path: absolute_path.as_str().to_owned(),
                     existing_display_name: Some(existing.display_name.clone()),
                 });
+            }
+            if let Some(expected) = expected_inode_id {
+                if existing.inode_id != expected {
+                    return Err(CommitValidationError::BindingPreconditionMismatch {
+                        parent_inode_id: existing.parent_inode_id.unwrap_or(ROOT_INODE_ID),
+                        name_key: NameKey::for_display_name(&final_name),
+                        expected_child_inode_id: expected,
+                        actual_child_inode_id: existing.inode_id,
+                    }
+                    .into());
+                }
             }
             if existing.inode_kind != InodeKind::File {
                 return Err(CoreError::ExpectedFile {
@@ -216,9 +236,9 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
             });
         }
         Err(error) if is_missing_visible_path(&error) => {
-            // The guard asserts an existing file at a revision; an absent
-            // path fails that assertion rather than silently creating.
-            if expected_revision_no.is_some() {
+            // The guards assert an existing file; an absent path fails that
+            // assertion rather than silently creating.
+            if expected_revision_no.is_some() || expected_inode_id.is_some() {
                 return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
             }
             let child_inode_id = allocation.allocate()?;

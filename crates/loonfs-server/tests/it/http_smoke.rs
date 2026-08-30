@@ -283,6 +283,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
                     commit_id: Some(CommitId::parse("smoke-write-1").expect("valid commit id")),
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )

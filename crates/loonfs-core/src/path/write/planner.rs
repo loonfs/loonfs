@@ -134,6 +134,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             path,
             content_ref,
             behavior,
+            expected_inode_id,
             expected_revision_no,
         } => {
             plan_publish_put_file_content_ref(
@@ -141,6 +142,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 content_ref.clone(),
                 *behavior,
                 *expected_revision_no,
+                *expected_inode_id,
                 view,
                 allocation,
             )
@@ -205,6 +207,8 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             to_parent_inode_id,
             to_display_name,
             behavior,
+            destination_expected_inode_id,
+            destination_expected_revision_no,
         } => {
             plan_publish_move_by_inode(
                 *inode_id,
@@ -212,6 +216,8 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 *to_parent_inode_id,
                 to_display_name,
                 *behavior,
+                *destination_expected_inode_id,
+                *destination_expected_revision_no,
                 view,
             )
             .await
@@ -220,12 +226,37 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             from_path,
             to_path,
             behavior,
-        } => plan_publish_move_path(from_path, to_path, *behavior, view).await,
+            destination_expected_inode_id,
+            destination_expected_revision_no,
+        } => {
+            plan_publish_move_path(
+                from_path,
+                to_path,
+                *behavior,
+                *destination_expected_inode_id,
+                *destination_expected_revision_no,
+                view,
+            )
+            .await
+        }
         FilesystemOperation::CopyPath {
             from_path,
             to_path,
             behavior,
-        } => plan_publish_copy_file_path(from_path, to_path, *behavior, view, allocation).await,
+            destination_expected_inode_id,
+            destination_expected_revision_no,
+        } => {
+            plan_publish_copy_file_path(
+                from_path,
+                to_path,
+                *behavior,
+                *destination_expected_inode_id,
+                *destination_expected_revision_no,
+                view,
+                allocation,
+            )
+            .await
+        }
         FilesystemOperation::RestoreRevision {
             path,
             source_revision_no,
@@ -516,6 +547,7 @@ mod tests {
                 path: AbsolutePath::parse("/dead/new.txt").expect("path"),
                 content_ref: staged.into_content_ref(),
                 behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
                 expected_revision_no: None,
             }),
         )
@@ -542,6 +574,7 @@ mod tests {
                         path: AbsolutePath::parse("/reports/a.txt").expect("path"),
                         content_ref: staged.content_ref().clone(),
                         behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
                         expected_revision_no: None,
                     },
                 ],
@@ -608,6 +641,7 @@ mod tests {
                         path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
                         content_ref: staged.content_ref().clone(),
                         behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
                         expected_revision_no: None,
                     },
                 ],

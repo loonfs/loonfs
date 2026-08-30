@@ -212,6 +212,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
                 path: target.absolute_path().clone(),
                 content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
                 expected_revision_no: None,
             }],
         },
@@ -1123,6 +1124,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
                 path: target.absolute_path().clone(),
                 content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
                 expected_revision_no: None,
             }],
         },
@@ -1171,6 +1173,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )
@@ -1188,6 +1191,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )
@@ -1275,6 +1279,7 @@ fn put_options(commit_id: &str) -> loonfs_client::PutFileOptions {
             commit_id: Some(CommitId::parse(commit_id).expect("valid commit id")),
             message: None,
         },
+        expected_inode_id: None,
         expected_revision_no: None,
     }
 }

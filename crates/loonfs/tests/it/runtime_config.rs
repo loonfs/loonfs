@@ -80,6 +80,7 @@ fn filesystem_operations_match_core_semantics() {
                 commit_id: None,
                 message: None,
             },
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     )
@@ -149,6 +150,7 @@ fn forked_namespace_shares_content_then_diverges() {
                 commit_id: None,
                 message: None,
             },
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     )

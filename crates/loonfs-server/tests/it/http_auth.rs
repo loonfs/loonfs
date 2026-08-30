@@ -102,6 +102,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
             path: AbsolutePath::parse("/bad-token.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -142,6 +143,7 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
             path: AbsolutePath::parse("/missing-token.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -182,6 +184,7 @@ async fn path_put_with_valid_content_token_succeeds() {
             path: AbsolutePath::parse("/valid-token.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -230,6 +233,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
             path: AbsolutePath::parse("/token-replay.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -299,6 +303,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
             path: AbsolutePath::parse("/irrelevant-token.txt").expect("path"),
             content_ref: target.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -346,6 +351,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
             path: AbsolutePath::parse("/first.txt").expect("path"),
             content_ref: first.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -366,6 +372,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
             path: AbsolutePath::parse("/first-copy.txt").expect("path"),
             content_ref: first.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };

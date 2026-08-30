@@ -6981,6 +6981,12 @@
             "$ref": "#/components/schemas/ContentRef",
             "description": "Immutable bytes that must be covered by a valid preparation proof."
           },
+          "expected_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
           "expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
             "description": "When set (with `replace` behavior), the put applies only while\nthe file's current revision is still this one; a raced write\nfails the request instead of silently stacking on it, and a\nmissing file answers `path_not_found`."
@@ -7135,6 +7141,16 @@
             "$ref": "#/components/schemas/DestinationBehavior",
             "description": "Whether an existing destination file may be replaced."
           },
+          "destination_expected_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "destination_expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "When set (with `replace` behavior), the replacement applies only\nwhile the destination still holds this revision."
+          },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",
             "description": "Absolute source path that must resolve to a visible inode."
@@ -7165,6 +7181,16 @@
           "behavior": {
             "$ref": "#/components/schemas/DestinationBehavior",
             "description": "Whether an existing destination file may be replaced."
+          },
+          "destination_expected_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "destination_expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "When set (with `replace` behavior), the replacement applies only\nwhile the destination still holds this revision."
           },
           "expected_binding_generation": {
             "type": "string",
@@ -7206,6 +7232,16 @@
           "behavior": {
             "$ref": "#/components/schemas/DestinationBehavior",
             "description": "Whether an existing destination file may receive a copied revision."
+          },
+          "destination_expected_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "destination_expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "When set (with `replace` behavior), the replacement applies only\nwhile the destination still holds this revision."
           },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",

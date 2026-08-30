@@ -155,6 +155,7 @@ mod tests {
                     path: AbsolutePath::parse(absolute_path).expect("path"),
                     content_ref: content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
                     expected_revision_no: None,
                 },
             ),
@@ -246,6 +247,7 @@ mod tests {
                 path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: staged.content_ref().clone(),
                 behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         );
@@ -271,6 +273,7 @@ mod tests {
                 path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 content_ref: staged.content_ref().clone(),
                 behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         );

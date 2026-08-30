@@ -112,6 +112,7 @@ impl VisibilityHarness {
                     path: AbsolutePath::parse(path).expect("valid path"),
                     content_ref,
                     behavior,
+                    expected_inode_id: None,
                     expected_revision_no: None,
                 },
             ),
@@ -138,6 +139,8 @@ impl VisibilityHarness {
             from_path: AbsolutePath::parse(from_path).expect("valid source path"),
             to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
             behavior: DestinationBehavior::NoReplace,
+            destination_expected_inode_id: None,
+            destination_expected_revision_no: None,
         })
         .await
     }
@@ -147,6 +150,8 @@ impl VisibilityHarness {
             from_path: AbsolutePath::parse(from_path).expect("valid source path"),
             to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
             behavior: DestinationBehavior::NoReplace,
+            destination_expected_inode_id: None,
+            destination_expected_revision_no: None,
         })
         .await
     }
@@ -535,6 +540,8 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
                 to_path: AbsolutePath::parse("/safe/reverse-branch")
                     .expect("valid destination path"),
                 behavior: DestinationBehavior::NoReplace,
+                destination_expected_inode_id: None,
+                destination_expected_revision_no: None,
             },
         ])
         .await
@@ -554,6 +561,8 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
                 from_path: AbsolutePath::parse("/source/branch").expect("valid source path"),
                 to_path: AbsolutePath::parse("/safe/branch").expect("valid destination path"),
                 behavior: DestinationBehavior::NoReplace,
+                destination_expected_inode_id: None,
+                destination_expected_revision_no: None,
             },
             FilesystemOperation::DeletePath {
                 path: AbsolutePath::parse("/source").expect("valid path"),

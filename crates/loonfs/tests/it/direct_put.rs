@@ -337,6 +337,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
                 commit_id: None,
                 message: None,
             },
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     )
@@ -369,6 +370,7 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
                 commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
                 message: None,
             },
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     )
@@ -489,6 +491,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                             path: parse_mutation_path(path).expect("valid mutation path"),
                             content_ref,
                             behavior: DestinationBehavior::NoReplace,
+                            expected_inode_id: None,
                             expected_revision_no: None,
                         },
                     ),
@@ -661,6 +664,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
                 commit_id: None,
                 message: None,
             },
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     )

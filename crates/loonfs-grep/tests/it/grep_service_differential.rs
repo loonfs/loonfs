@@ -118,6 +118,7 @@ async fn publish_same_content_files(
                             .expect("batch path"),
                         content_ref: content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
                         expected_revision_no: None,
                     },
                 ),
@@ -350,6 +351,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs::CommitOptions::new(loonfs_test_support::test_actor()),
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )

@@ -374,6 +374,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
                 .expect("valid absolute path"),
             content_ref: content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         });
         prepared.push(content);
