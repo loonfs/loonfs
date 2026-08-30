@@ -15,7 +15,7 @@ use crate::namespace::control_snapshot::resolve_retention_floor_seq;
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, WalFloorState};
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
-use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
+use loonfs_api::{AdvanceRetentionResponse, ChangeSeq, NamespaceId};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use std::collections::BTreeSet;
@@ -51,6 +51,22 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
         .await?;
     }
     Ok(())
+}
+
+/// Reads back a monotonic floor after a write whose outcome is unknown.
+///
+/// Any value at or above the requested target proves that the operation is
+/// already settled, whether this writer or a concurrent writer published it.
+async fn load_floor_at_or_above<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    target_floor: ChangeSeq,
+) -> Result<Option<ChangeSeq>> {
+    match load_wal_floor_object(store, namespace_id).await {
+        Ok(loaded) if loaded.state.floor_seq >= target_floor => Ok(Some(loaded.state.floor_seq)),
+        Ok(_) | Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
+        Err(error) => Err(CoreError::ControlObjectLoad(error)),
+    }
 }
 
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
@@ -147,6 +163,12 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         match published {
             Ok(_) => Ok(CasAttempt::Settled(target_floor)),
             Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
+            Err(error @ ObjectStoreError::Transport { .. }) => {
+                match load_floor_at_or_above(store, namespace_id, target_floor).await? {
+                    Some(floor_seq) => Ok(CasAttempt::Settled(floor_seq)),
+                    None => Err(CoreError::store(object_key, &error)),
+                }
+            }
             Err(error) => Err(CoreError::store(object_key, &error)),
         }
     })

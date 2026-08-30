@@ -119,20 +119,14 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?
     else {
-        return match create_first_metadata_root(store, namespace_id, &candidate, updated_at_ms)
-            .await?
-        {
-            Some(root) => Ok(ManifestPublicationOutcome::Published(root)),
-            None => {
-                classify_current_root(
-                    store,
-                    namespace_id,
-                    &candidate,
-                    expected_predecessor.as_ref(),
-                )
-                .await
-            }
-        };
+        return create_first_metadata_root(
+            store,
+            namespace_id,
+            &candidate,
+            expected_predecessor.as_ref(),
+            updated_at_ms,
+        )
+        .await;
     };
     match root_transition(&loaded.state, &candidate, expected_predecessor.as_ref()) {
         RootTransition::InstallAgainstCurrent => {}
@@ -258,13 +252,16 @@ fn ensure_legal_successor(
 
 /// Publishes the namespace's first `metadata/root.json`.
 ///
-/// Returns `None` when another publisher wins the conditional create.
+/// A confirmed conflict and an ambiguous transport result are both resolved
+/// by reading the authoritative root and applying the same classification as
+/// the later CAS path.
 async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     candidate: &ManifestRef,
+    expected_predecessor: Option<&ManifestObjectId>,
     updated_at_ms: u64,
-) -> Result<Option<MetadataRootState>> {
+) -> Result<ManifestPublicationOutcome> {
     let object_key = metadata_root(namespace_id);
     let next = MetadataRootState {
         namespace_id: namespace_id.clone(),
@@ -279,8 +276,20 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
             }
         })?;
     match store.put_if_absent(&object_key, Bytes::from(encoded)).await {
-        Ok(_) => Ok(Some(next)),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(None),
+        Ok(_) => Ok(ManifestPublicationOutcome::Published(next)),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {
+            classify_current_root(store, namespace_id, candidate, expected_predecessor).await
+        }
+        Err(error @ ObjectStoreError::Transport { .. }) => {
+            match classify_current_root(store, namespace_id, candidate, expected_predecessor)
+                .await?
+            {
+                ManifestPublicationOutcome::RootCasRaceLost => {
+                    Err(CoreError::store(&object_key, &error))
+                }
+                outcome => Ok(outcome),
+            }
+        }
         Err(error) => Err(CoreError::store(&object_key, &error)),
     }
 }
