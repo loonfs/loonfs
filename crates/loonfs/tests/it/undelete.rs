@@ -89,6 +89,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
                 commit_id: None,
                 message: None,
             },
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     )

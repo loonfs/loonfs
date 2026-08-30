@@ -94,6 +94,7 @@ def put_file(
     commit_id: str,
     message: str | None = None,
     behavior: DestinationBehavior | None = None,
+    expected_inode_id: str | None = None,
     expected_revision_no: RevisionNo | None = None,
     http_client: httpx.Client | None = None,
 ) -> PutFileResult:
@@ -111,6 +112,8 @@ def put_file(
     operation_arguments = {"path": path, "content_ref": staged.content_ref}
     if behavior is not None:
         operation_arguments["behavior"] = behavior
+    if expected_inode_id is not None:
+        operation_arguments["expected_inode_id"] = expected_inode_id
     if expected_revision_no is not None:
         operation_arguments["expected_revision_no"] = expected_revision_no
     operation = FilesystemOperation_PutFile(**operation_arguments)

@@ -1528,6 +1528,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
             path: AbsolutePath::parse("/file.txt").expect("path"),
             content_ref: prepared_content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     );

@@ -20,7 +20,7 @@ use loonfs::{
 use loonfs_api::ErrorCode;
 use loonfs_api::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
-    PaginationPolicy, FEATURE_QUERY_GREP,
+    PaginationPolicy, RevisionNo, FEATURE_QUERY_GREP,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
@@ -78,6 +78,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "content_scan_deferred",
     "content_store_id",
     "content_tokens",
+    "copy_path",
     "create_directory_by_inode",
     "created_by",
     "created_at_ms",
@@ -1650,6 +1651,7 @@ async fn runtime_created_state_is_readable_through_http() {
                 commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
                 message: None,
             },
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     )
@@ -1749,6 +1751,8 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
                         commit_id: None,
                         message: None,
                     },
+                    expected_destination_inode_id: None,
+                    expected_destination_revision_no: None,
                 },
             )
             .await,
@@ -1862,11 +1866,143 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
                         commit_id: None,
                         message: None,
                     },
+                    expected_destination_inode_id: None,
+                    expected_destination_revision_no: None,
                 },
             )
             .await,
         409,
         "path_conflict",
+        None,
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_guarded_put_rejects_a_delete_recreate_race() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/docs/guarded.txt",
+        b"old inode",
+        "seed-guarded-put",
+    )
+    .await;
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    let target = NamespacePath::parse("demo", "/docs/guarded.txt").expect("target");
+    let observed = harness
+        .client
+        .get_path_entry(&target, &Default::default())
+        .await
+        .expect("observe file");
+    harness
+        .client
+        .delete_path(
+            &target,
+            &DeleteOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("delete observed file");
+    harness
+        .client
+        .put_file_bytes(
+            &target,
+            b"new inode",
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("recreate path");
+    let recreated = harness
+        .client
+        .get_path_entry(&target, &Default::default())
+        .await
+        .expect("observe recreated file");
+
+    let mut guarded = replace_file_options();
+    guarded.expected_inode_id = Some(observed.inode_id);
+    guarded.expected_revision_no = Some(RevisionNo(1));
+    match harness
+        .client
+        .put_file_bytes(&target, b"must not land", &guarded)
+        .await
+        .expect_err("the recreated inode must fail the guard")
+    {
+        ClientError::Api {
+            status,
+            code,
+            details: Some(details),
+            ..
+        } => {
+            assert_eq!(status, 409);
+            assert_eq!(code, "path_conflict");
+            assert_eq!(details.expected_inode_id, Some(observed.inode_id));
+            assert_eq!(details.actual_inode_id, Some(recreated.inode_id));
+        }
+        other => panic!("expected structured path conflict, got {other:?}"),
+    }
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_guarded_move_rejects_a_bumped_destination_revision() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/docs/source.txt",
+        b"source",
+        "seed-guarded-move-source",
+    )
+    .await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/docs/destination.txt",
+        b"destination v1",
+        "seed-guarded-move-destination",
+    )
+    .await;
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    let from = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
+    let to = NamespacePath::parse("demo", "/docs/destination.txt").expect("destination");
+    let observed = harness
+        .client
+        .get_path_entry(&to, &Default::default())
+        .await
+        .expect("observe destination");
+    harness
+        .client
+        .put_file_bytes(&to, b"destination v2", &replace_file_options())
+        .await
+        .expect("bump destination revision");
+
+    assert_api_error(
+        harness
+            .client
+            .move_path(
+                &from,
+                &to,
+                &MoveOptions {
+                    behavior: DestinationBehavior::Replace,
+                    commit: loonfs_api::options::CommitOptions::new(
+                        loonfs_test_support::test_actor(),
+                    ),
+                    expected_destination_inode_id: Some(observed.inode_id),
+                    expected_destination_revision_no: Some(RevisionNo(1)),
+                },
+            )
+            .await,
+        409,
+        "stale_revision",
         None,
     );
 
@@ -1930,6 +2066,8 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
                     commit_id: None,
                     message: None,
                 },
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
         .await
@@ -3361,6 +3499,7 @@ async fn write_file_bytes(
                 commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                 message: None,
             },
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     )

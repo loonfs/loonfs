@@ -8,6 +8,7 @@ use super::publish_path_planning::{
     publish_resolve_visible_child, publish_resolve_visible_directory,
     publish_resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
 };
+use super::ExpectedFileState;
 use crate::commit::{
     CandidateAllocation, CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
 };
@@ -99,6 +100,7 @@ pub(super) async fn plan_publish_move_by_inode<S: ObjectStore + ?Sized>(
     to_parent_inode_id: InodeId,
     to_display_name: &DisplayName,
     behavior: DestinationBehavior,
+    expected_destination: Option<ExpectedFileState>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let source = publish_resolve_visible_inode(view, inode_id).await?;
@@ -116,6 +118,7 @@ pub(super) async fn plan_publish_move_by_inode<S: ObjectStore + ?Sized>(
         to_display_name,
         replaced,
         &destination_path,
+        expected_destination,
     )
     .await
 }

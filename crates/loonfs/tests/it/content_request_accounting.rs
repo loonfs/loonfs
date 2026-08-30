@@ -210,6 +210,7 @@ fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> 
             path: parse_mutation_path(path).expect("valid mutation path"),
             content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     )
@@ -723,6 +724,7 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                     path: parse_mutation_path("/file.txt").expect("valid mutation path"),
                     content_ref: content_ref.clone(),
                     behavior,
+                    expected_inode_id: None,
                     expected_revision_no: None,
                 },
             );
@@ -780,6 +782,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
         path: parse_mutation_path(path).expect("valid mutation path"),
         content_ref,
         behavior: DestinationBehavior::NoReplace,
+        expected_inode_id: None,
         expected_revision_no: None,
     };
     harness
@@ -832,6 +835,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
                     commit_id: None,
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )

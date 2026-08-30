@@ -22,6 +22,7 @@ export interface PutFileInput {
     commit_id: LoonFS.CommitId;
     message?: string | null;
     behavior?: LoonFS.DestinationBehavior;
+    expected_inode_id?: string;
     expected_revision_no?: LoonFS.RevisionNo;
 }
 
@@ -72,6 +73,7 @@ export async function putFile(client: LoonFSClient, input: PutFileInput): Promis
                 path: input.path,
                 content_ref: staged.contentRef,
                 behavior: input.behavior ?? "no_replace",
+                expected_inode_id: input.expected_inode_id,
                 expected_revision_no: input.expected_revision_no,
             },
         ],

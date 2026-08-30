@@ -41,6 +41,7 @@ fn options(commit_id: &CommitId) -> PutFileOptions {
             commit_id: Some(commit_id.clone()),
             message: None,
         },
+        expected_inode_id: None,
         expected_revision_no: None,
     }
 }
@@ -262,12 +263,17 @@ async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
         .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
         .await
         .expect("first unguarded put");
+    let observed = runtime
+        .get_path_entry(&namespace_id, PATH)
+        .await
+        .expect("stat path");
     let error = runtime
         .put_file_bytes(
             &namespace_id,
             PATH,
             b"stable bytes\n",
             PutFileOptions {
+                expected_inode_id: Some(observed.inode_id),
                 expected_revision_no: Some(RevisionNo(1)),
                 ..options(&commit_id)
             },
@@ -312,6 +318,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
                         path: parse_mutation_path(PATH).expect("path"),
                         content_ref,
                         behavior: DestinationBehavior::Replace,
+                        expected_inode_id: None,
                         expected_revision_no: None,
                     },
                     FilesystemOperation::CreateDirectory {

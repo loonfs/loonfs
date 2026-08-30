@@ -576,6 +576,7 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
                     path: path("/docs/a.txt"),
                     content_ref: content.content_ref().clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
                     expected_revision_no: None,
                 },
                 set_attributes("/docs/a.txt", &[("owner", "ada")]),
@@ -892,6 +893,8 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
             from_path: path("/docs/a.txt"),
             to_path: path("/moved.txt"),
             behavior: DestinationBehavior::NoReplace,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )
@@ -1046,6 +1049,8 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
             behavior: DestinationBehavior::NoReplace,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )
@@ -1104,6 +1109,8 @@ async fn a_copy_of_a_file_without_attributes_publishes_no_attribute_event() {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
             behavior: DestinationBehavior::NoReplace,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )
@@ -1163,6 +1170,8 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
             behavior: DestinationBehavior::Replace,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )

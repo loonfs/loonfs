@@ -198,6 +198,12 @@ fn put_expected_revision_replaces_only_the_observed_revision() {
     let payload = harness.temp_dir.path().join("doc.txt");
     fs::write(&payload, b"v1").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
+    let initial_stat = harness.run(&["--json", "stat", "/doc.txt"]);
+    assert_success(&initial_stat);
+    let inode_id = json_data(&initial_stat)["inode_id"]
+        .as_str()
+        .expect("inode id")
+        .to_owned();
 
     // The guard implies --force: replacing the revision the caller observed
     // needs no second flag.
@@ -207,6 +213,8 @@ fn put_expected_revision_replaces_only_the_observed_revision() {
         "put",
         payload.to_str().expect("utf-8 path"),
         "/doc.txt",
+        "--expected-inode-id",
+        &inode_id,
         "--expected-revision",
         "1",
     ]);
@@ -223,6 +231,8 @@ fn put_expected_revision_replaces_only_the_observed_revision() {
         "put",
         payload.to_str().expect("utf-8 path"),
         "/doc.txt",
+        "--expected-inode-id",
+        &inode_id,
         "--expected-revision",
         "1",
     ]);

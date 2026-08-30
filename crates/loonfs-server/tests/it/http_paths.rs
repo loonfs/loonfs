@@ -112,6 +112,8 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
                     commit_id: None,
                     message: None,
                 },
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
         .await

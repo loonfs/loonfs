@@ -121,6 +121,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
                             .expect("path"),
                         content_ref: content_ref.clone(),
                         behavior: loonfs::DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
                         expected_revision_no: None,
                     },
                 ),

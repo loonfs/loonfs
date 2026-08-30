@@ -180,6 +180,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
             commit_id: None,
             message: None,
         },
+        expected_inode_id: None,
         expected_revision_no: None,
     };
     fs.put_file_bytes_blocking(

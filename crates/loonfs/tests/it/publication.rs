@@ -111,6 +111,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
                 path: parse_mutation_path("/b.txt").expect("mutation path"),
                 content_ref: prepared_content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         );

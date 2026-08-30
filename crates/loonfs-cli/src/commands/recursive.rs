@@ -250,6 +250,7 @@ pub(crate) async fn run_put_tree(
                         commit_id: None,
                         message,
                     },
+                    expected_inode_id: None,
                     expected_revision_no: None,
                 },
                 &progress,
@@ -483,6 +484,8 @@ pub(crate) async fn run_copy_tree(
                             commit_id: None,
                             message: message.clone(),
                         },
+                        expected_destination_inode_id: None,
+                        expected_destination_revision_no: None,
                     },
                 )
                 .await

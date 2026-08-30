@@ -310,6 +310,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
             path: AbsolutePath::parse("/uploaded.txt").expect("path"),
             content_ref: content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -468,6 +469,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
                 path: AbsolutePath::parse("/re-minted.txt").expect("path"),
                 content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
                 expected_revision_no: None,
             }],
         },

@@ -183,6 +183,7 @@ async fn warm_phase_request_accounting() {
                             .expect("path"),
                         content_ref: content_ref.clone(),
                         behavior: loonfs::DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
                         expected_revision_no: None,
                     },
                 ),
@@ -279,6 +280,7 @@ async fn warm_phase_request_accounting() {
                     commit_id: None,
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )
@@ -300,6 +302,7 @@ async fn warm_phase_request_accounting() {
                     commit_id: None,
                     message: None,
                 },
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
         )

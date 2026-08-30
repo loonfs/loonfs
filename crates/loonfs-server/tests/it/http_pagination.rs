@@ -564,6 +564,8 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
                     commit_id: None,
                     message: None,
                 },
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         )
         .await

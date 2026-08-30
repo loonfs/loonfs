@@ -239,6 +239,7 @@ The codes that populate it:
 | Code | Detail fields |
 | --- | --- |
 | `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
+| `path_conflict` | `expected_inode_id`, `actual_inode_id` when an inode guard found a different inode at the path |
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision) |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
@@ -460,12 +461,12 @@ implies (revision identity, binding identity, name absence, directory
 emptiness, ancestor visibility) so races fail explicitly rather than
 silently merge. Those checks are evaluated where their operation runs, which
 is what lets a later operation depend on an earlier one. Callers add their
-own cross-request guards on the operation itself where staleness matters:
-`expected_revision_no` on a replacing put, `expected_inode_id` on a delete,
-`deletion_seq` on an undelete, `expected_binding_generation` on an
-inode-addressed move or delete, and `expected_head_seq` on a namespace
-delete. A guard is evaluated against the state its own operation sees, which
-includes what earlier operations in the same request did.
+own cross-request guards on operations where staleness matters. Puts can
+check the current inode and revision. Moves and copies can check the
+destination inode and revision. Deletes, undeletes, inode-addressed writes,
+and namespace deletion have guards for their corresponding state. Each guard
+checks the state visible to its operation, including changes made by earlier
+operations in the same request.
 
 Commit bodies reject unknown fields so a misspelled guard cannot be ignored. For example, dropping a letter from `expected_revision_no` returns `invalid_request` instead of applying an unguarded write.
 
@@ -559,10 +560,8 @@ responsible for its own reconciliation. LoonFS chooses this documented
 horizon over an unbounded receipt index deliberately: detecting a dropped
 id would require remembering every id forever.
 
-Caller-supplied race guards (`expected_inode_id` on delete,
-`expected_revision_no` on put) are part of the commit's semantic identity,
-so changing, adding, or removing a guard while reusing a `commit_id` fails
-with `commit_id_reuse_conflict`.
+Write guards are part of the commit's identity. Reusing a `commit_id` after
+changing a guard fails with `commit_id_reuse_conflict`.
 
 A put's content is part of that identity too, and identity means *which
 content object*, not what bytes it holds. So:
@@ -1800,13 +1799,23 @@ the source in one commit; a replacing copy appends a revision to the
 destination inode, keeping its identity and revision history. Only a file
 destination can be replaced, and a path never replaces itself.
 
-A replacing `put_file` may also carry `expected_revision_no`: the put then
-applies only while the file's current revision is still that one, so a raced
-write fails with the revision conflict's expected/actual details instead of
-silently stacking a revision on state the caller never saw. The guard
-asserts an existing file — an absent path answers `path_not_found`, and
-combining it with `no_replace` is `invalid_request`. Like the delete guard,
-it is part of the commit's semantic identity for commit-id reuse.
+Replacing puts can include `expected_inode_id` alone or pair it with
+`expected_revision_no`. Replacing moves and copies use
+`expected_destination_inode_id` alone or pair it with
+`expected_destination_revision_no`. A destination or path revision guard
+requires its matching inode guard because a revision identifies a version
+within one inode, not the inode occupying a path. A revision-only guard
+returns `invalid_request`.
+
+Guards require `replace` behavior. An inode mismatch returns `path_conflict`,
+a revision mismatch returns `stale_revision`, and a missing destination
+returns `path_not_found`.
+
+These guards assert content revisions only. A guarded put or replacing copy
+proceeds after an attribute-only update when the inode and content revision
+still match. A replacing move deletes the destination inode, including its
+attributes. Attribute-level concurrency uses
+`expected_attributes_revision_no` separately.
 
 Five operations use inode IDs instead of paths. They let clients act on an entry they previously read even if its path has changed. An unknown or hidden inode returns `inode_not_found`.
 

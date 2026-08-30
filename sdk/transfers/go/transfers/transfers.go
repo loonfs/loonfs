@@ -50,6 +50,7 @@ type PutFileInput struct {
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
+	ExpectedInodeID    *string
 	ExpectedRevisionNo *loonfs.RevisionNo
 }
 
@@ -130,6 +131,7 @@ func PutFile(ctx context.Context, c *server.Client, in PutFileInput) (*PutFileRe
 				PutFile: &loonfs.FilesystemOperationPutFile{
 					Behavior:           &behavior,
 					ContentRef:         status.ContentRef,
+					ExpectedInodeID:    in.ExpectedInodeID,
 					ExpectedRevisionNo: in.ExpectedRevisionNo,
 					Path:               in.Path,
 				},

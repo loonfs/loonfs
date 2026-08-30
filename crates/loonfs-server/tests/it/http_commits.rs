@@ -69,12 +69,14 @@ fn batch(first: &ContentRef, second: &ContentRef) -> Vec<FilesystemOperation> {
             path: absolute(FIRST_FILE),
             content_ref: first.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         },
         FilesystemOperation::PutFile {
             path: absolute(SECOND_FILE),
             content_ref: second.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         },
     ]
@@ -235,6 +237,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
             path: absolute(ROOT_FILE),
             content_ref: staged.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -342,6 +345,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
             path: absolute(ROOT_FILE),
             content_ref: staged.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
             expected_revision_no: None,
         }],
     };
@@ -443,6 +447,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
                         path: absolute(FIRST_FILE),
                         content_ref: staged.content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
                         expected_revision_no: None,
                     },
                     FilesystemOperation::DeletePath {
@@ -797,6 +802,8 @@ async fn a_commit_id_used_embedded_replays_over_http() {
                 from_path: absolute("/reports/2026"),
                 to_path: absolute("/reports/2025"),
                 behavior: DestinationBehavior::NoReplace,
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
             },
         ]
     };
@@ -856,6 +863,8 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             from_path: absolute("/reports/2026"),
             to_path: absolute("/reports/2025"),
             behavior: DestinationBehavior::NoReplace,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
     ];
     let replayed = harness
@@ -942,12 +951,21 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
                     path: absolute(FIRST_FILE),
                     content_ref: first.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
                     expected_revision_no: None,
                 }],
             },
         )
         .await
         .expect("the file is created at revision 1");
+    let observed = harness
+        .client
+        .get_path_entry(
+            &NamespacePath::parse("demo", FIRST_FILE).expect("path"),
+            &Default::default(),
+        )
+        .await
+        .expect("observe the guarded file");
 
     // One replace, spelled two ways. Both name the revision that is actually
     // current, so the spelling of the guard is the only difference.
@@ -956,7 +974,8 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
             "kind": "put_file",
             "path": FIRST_FILE,
             "content_ref": second.content_ref.clone(),
-            "behavior": "replace"
+            "behavior": "replace",
+            "expected_inode_id": loonfs_api::public_inode_id::encode(observed.inode_id)
         });
         put[guard] = serde_json::json!(1);
         serde_json::json!({

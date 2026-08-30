@@ -100,6 +100,8 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
             from_path: path("/report.txt"),
             to_path: path("/copy.txt"),
             behavior: DestinationBehavior::NoReplace,
+            expected_destination_inode_id: None,
+            expected_destination_revision_no: None,
         },
         &context,
     )

@@ -246,6 +246,7 @@ pub(crate) mod commit_split_support {
                 path: AbsolutePath::parse(absolute_path).expect("path"),
                 content_ref: content.into_content_ref(),
                 behavior,
+                expected_inode_id: None,
                 expected_revision_no: None,
             },
             context,

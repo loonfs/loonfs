@@ -1216,16 +1216,16 @@ fn put_file_options(
         .expected_revision
         .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
         .transpose()?;
-    // The revision guard is a stronger replace statement, so it implies
-    // --force rather than demanding both flags.
-    let behavior = if args.force || expected_revision_no.is_some() {
-        DestinationBehavior::Replace
-    } else {
-        DestinationBehavior::NoReplace
-    };
+    let behavior =
+        if args.force || args.expected_inode_id.is_some() || expected_revision_no.is_some() {
+            DestinationBehavior::Replace
+        } else {
+            DestinationBehavior::NoReplace
+        };
     Ok(PutFileOptions {
         behavior,
         commit: commit_options(actor, commit_id, args.message.clone()),
+        expected_inode_id: args.expected_inode_id,
         expected_revision_no,
     })
 }
@@ -1561,7 +1561,17 @@ async fn run_filesystem_transfer(
 
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
-    let behavior = if args.force {
+    let expected_destination_revision_no = args
+        .expected_destination_revision
+        .map(|value| {
+            parse_public_ordinal_arg("--expected-destination-revision", value, RevisionNo::parse)
+        })
+        .transpose()
+        .map_err(|error| context.fail(kind, error))?;
+    let behavior = if args.force
+        || args.expected_destination_inode_id.is_some()
+        || expected_destination_revision_no.is_some()
+    {
         DestinationBehavior::Replace
     } else {
         DestinationBehavior::NoReplace
@@ -1621,6 +1631,8 @@ async fn run_filesystem_transfer(
                 &loonfs_client::CopyOptions {
                     behavior,
                     commit: commit_options(&context.actor, commit_id, args.message.clone()),
+                    expected_destination_inode_id: args.expected_destination_inode_id,
+                    expected_destination_revision_no,
                 },
             )
             .await
@@ -1633,6 +1645,8 @@ async fn run_filesystem_transfer(
                 &loonfs_client::MoveOptions {
                     behavior,
                     commit: commit_options(&context.actor, commit_id, args.message.clone()),
+                    expected_destination_inode_id: args.expected_destination_inode_id,
+                    expected_destination_revision_no,
                 },
             )
             .await
