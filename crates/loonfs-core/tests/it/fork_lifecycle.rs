@@ -783,7 +783,7 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
             "namespaces/{}/checkpoints/",
             source_namespace_id.as_str()
         )),
-        InjectedCreateFailure::Transport {
+        InjectedCreateFailure::PermissionDenied {
             message: "injected source checkpoint failure",
         },
     );
@@ -792,7 +792,7 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .await
         .expect_err("source checkpoint failure should abort fork before target publication");
-    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
     assert!(
         namespace_keys(&store, &clone_namespace_id).await.is_empty(),
         "the target must not be installed before the source basis is pinned"

@@ -13,7 +13,7 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::keys::{upload_session, wal_head};
-use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{ImmutableWriteError, ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
 use thiserror::Error;
 
@@ -42,16 +42,40 @@ where
 }
 
 /// Creates a control object and reports a generated-ID collision as an internal error.
+///
+/// A transport failure from the first conditional write has an unknown
+/// outcome. Retry it through the immutable-write path, which accepts success
+/// only when the generated key contains the exact intended bytes. An immediate
+/// precondition failure remains a collision rather than adopting a record from
+/// another generated-ID owner.
 pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     encoded: Bytes,
 ) -> crate::error::Result<ObjectMetadata> {
-    match store.put_if_absent(object_key, encoded).await {
-        Ok(metadata) => Ok(metadata),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Err(CoreError::Internal(format!(
+    let collision = || {
+        CoreError::Internal(format!(
             "a generated id collided with the existing control object `{object_key}`"
-        ))),
+        ))
+    };
+    match store.put_if_absent(object_key, encoded.clone()).await {
+        Ok(metadata) => Ok(metadata),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => Err(collision()),
+        Err(ObjectStoreError::Transport { .. }) => {
+            match store
+                .put_immutable_verified_with_metadata(object_key, encoded)
+                .await
+            {
+                Ok(metadata) => Ok(metadata),
+                Err(ImmutableWriteError::DifferentObject { .. }) => Err(collision()),
+                Err(ImmutableWriteError::Transport { source, .. }) => {
+                    Err(CoreError::store(object_key, &source))
+                }
+                Err(error) => Err(CoreError::Internal(format!(
+                    "generated-id write reconciliation failed for `{object_key}`: {error}"
+                ))),
+            }
+        }
         Err(error) => Err(CoreError::store(object_key, &error)),
     }
 }
@@ -260,6 +284,55 @@ mod tests {
             .put_if_absent(&wal_head(namespace_id), Bytes::from(bytes))
             .await
             .expect("write head");
+    }
+
+    #[tokio::test]
+    async fn generated_id_create_recovers_when_the_first_write_lands_ambiguously() {
+        let temp_dir = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+        let object_key = "namespaces/demo/checkpoints/chk_00000000000000000000000000000001.json";
+        let payload = Bytes::from_static(b"generated control record");
+        let store = FailStore::new(
+            inner,
+            KeyPredicate::exact(object_key),
+            OperationClass::PutCreateIfAbsent,
+            InjectedError::Transport("lost write acknowledgement".to_owned()),
+        )
+        .apply_then_fail();
+        store.fail_next(1);
+
+        let metadata =
+            create_control_object_under_generated_id(&store, object_key, payload.clone())
+                .await
+                .expect("exact read-back reconciles the landed write");
+
+        assert_eq!(store.attempts(), 2);
+        assert!(metadata.etag.is_some());
+        assert_eq!(
+            store.get(object_key, None).await.expect("read record"),
+            Some(payload)
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_id_create_does_not_adopt_an_existing_identical_record() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let object_key = "namespaces/demo/checkpoints/chk_00000000000000000000000000000001.json";
+        let payload = Bytes::from_static(b"generated control record");
+        store
+            .put_if_absent(object_key, payload.clone())
+            .await
+            .expect("seed colliding record");
+
+        let error = create_control_object_under_generated_id(&store, object_key, payload)
+            .await
+            .expect_err("an immediate precondition failure remains a collision");
+
+        assert!(matches!(
+            error,
+            CoreError::Internal(message) if message.contains("generated id collided")
+        ));
     }
 
     #[tokio::test]

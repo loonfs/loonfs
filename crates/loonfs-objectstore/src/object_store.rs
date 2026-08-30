@@ -537,6 +537,18 @@ pub trait ObjectStore: Send + Sync + Debug {
         key: &str,
         bytes: Bytes,
     ) -> std::result::Result<(), crate::ImmutableWriteError> {
+        self.put_immutable_verified_with_metadata(key, bytes)
+            .await
+            .map(|_| ())
+    }
+
+    /// Performs [`Self::put_immutable_verified`] and returns metadata from the
+    /// confirmed write or exact read-back.
+    async fn put_immutable_verified_with_metadata(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         crate::immutable_write::put(self, key, bytes).await
     }
 
@@ -646,6 +658,16 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().put_immutable_verified(key, bytes).await
     }
 
+    async fn put_immutable_verified_with_metadata(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        self.as_ref()
+            .put_immutable_verified_with_metadata(key, bytes)
+            .await
+    }
+
     async fn compare_and_swap(
         &self,
         key: &str,
@@ -740,6 +762,16 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         bytes: Bytes,
     ) -> std::result::Result<(), crate::ImmutableWriteError> {
         (*self).put_immutable_verified(key, bytes).await
+    }
+
+    async fn put_immutable_verified_with_metadata(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        (*self)
+            .put_immutable_verified_with_metadata(key, bytes)
+            .await
     }
 
     async fn compare_and_swap(

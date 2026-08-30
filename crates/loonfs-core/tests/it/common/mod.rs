@@ -363,6 +363,9 @@ pub(crate) mod commit_split_support {
         Transport {
             message: &'static str,
         },
+        PermissionDenied {
+            message: &'static str,
+        },
         PreconditionFailed {
             write_attempted_object: bool,
             additional_writes: Vec<(String, Vec<u8>)>,
@@ -377,7 +380,7 @@ pub(crate) mod commit_split_support {
             attempted_bytes: Bytes,
         ) -> Result<(), ObjectStoreError> {
             match self {
-                Self::Transport { .. } => Ok(()),
+                Self::Transport { .. } | Self::PermissionDenied { .. } => Ok(()),
                 Self::PreconditionFailed {
                     write_attempted_object,
                     additional_writes,
@@ -402,6 +405,10 @@ pub(crate) mod commit_split_support {
                 Self::Transport { message } => {
                     ObjectStoreError::transport(attempted_key, (*message).to_owned())
                 }
+                Self::PermissionDenied { message } => ObjectStoreError::PermissionDenied {
+                    object_key: attempted_key.to_owned(),
+                    message: (*message).to_owned(),
+                },
                 Self::PreconditionFailed { .. } => ObjectStoreError::PreconditionFailed {
                     object_key: attempted_key.to_owned(),
                 },
