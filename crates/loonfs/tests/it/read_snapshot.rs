@@ -8,6 +8,188 @@ use loonfs::{
 use tempfile::tempdir;
 
 #[tokio::test]
+async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-cursor-test").await;
+    let namespace_id = NamespaceId::parse("snapshot-cursor").expect("namespace id");
+    runtime
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    for name in ["a", "c", "e", "g"] {
+        runtime
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/{name}.txt"),
+                name.as_bytes(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("seed file");
+    }
+
+    let now_ms = loonfs::current_time_ms().expect("current time");
+    let first_snapshot = runtime
+        .admin
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "first".to_owned(),
+                expires_at_ms: now_ms + 60_000,
+            },
+        )
+        .await
+        .expect("create first snapshot");
+    let first_view = runtime
+        .reader
+        .pin_namespace_at_snapshot(&namespace_id, &first_snapshot.checkpoint_id)
+        .await
+        .expect("pin first snapshot");
+    let limit = PaginationPolicy::default()
+        .resolve_limit(Some(2))
+        .expect("page limit");
+    let first_page = first_view
+        .list_path_entries_page(
+            "/",
+            PageRequest {
+                limit,
+                cursor: None,
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list first snapshot page");
+    let cursor = loonfs_api::decode_cursor::<loonfs::DirectoryPageCursor>(
+        first_page.next_cursor.as_deref().expect("next cursor"),
+    )
+    .expect("decode cursor");
+    assert_eq!(
+        cursor.snapshot_id.as_ref(),
+        Some(&first_snapshot.checkpoint_id)
+    );
+
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/d.txt",
+            b"d",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("change current directory");
+    let second_snapshot = runtime
+        .admin
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "second".to_owned(),
+                expires_at_ms: now_ms + 60_000,
+            },
+        )
+        .await
+        .expect("create second snapshot");
+    let second_view = runtime
+        .reader
+        .pin_namespace_at_snapshot(&namespace_id, &second_snapshot.checkpoint_id)
+        .await
+        .expect("pin second snapshot");
+
+    assert_core_error_kind(
+        second_view
+            .list_path_entries_page(
+                "/",
+                PageRequest {
+                    limit,
+                    cursor: Some(cursor.clone()),
+                },
+                Default::default(),
+            )
+            .await,
+        ErrorCode::InvalidRequest,
+    );
+    let mut legacy_cursor = cursor.clone();
+    legacy_cursor.snapshot_id = None;
+    assert_core_error_kind(
+        second_view
+            .list_path_entries_page(
+                "/",
+                PageRequest {
+                    limit,
+                    cursor: Some(legacy_cursor.clone()),
+                },
+                Default::default(),
+            )
+            .await,
+        ErrorCode::InvalidRequest,
+    );
+    assert_core_error_kind(
+        runtime
+            .reader
+            .list_path_entries_page(
+                &namespace_id,
+                "/",
+                PageRequest {
+                    limit,
+                    cursor: Some(cursor.clone()),
+                },
+                Default::default(),
+            )
+            .await,
+        ErrorCode::InvalidRequest,
+    );
+    let root_inode_id = first_page.entries[0]
+        .parent_inode_id
+        .expect("listed entry has root parent");
+    assert_core_error_kind(
+        runtime
+            .reader
+            .list_inode_children_page(
+                &namespace_id,
+                root_inode_id,
+                PageRequest {
+                    limit,
+                    cursor: Some(cursor.clone()),
+                },
+                Default::default(),
+            )
+            .await,
+        ErrorCode::InvalidRequest,
+    );
+
+    first_view
+        .list_path_entries_page(
+            "/",
+            PageRequest {
+                limit,
+                cursor: Some(legacy_cursor),
+            },
+            Default::default(),
+        )
+        .await
+        .expect("resume a legacy cursor at its exact pinned head");
+
+    let second_page = first_view
+        .list_path_entries_page(
+            "/",
+            PageRequest {
+                limit,
+                cursor: Some(cursor),
+            },
+            Default::default(),
+        )
+        .await
+        .expect("resume the original snapshot");
+    assert_eq!(
+        second_page
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/e.txt", "/g.txt"]
+    );
+}
+
+#[tokio::test]
 async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-reader-test").await;

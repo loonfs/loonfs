@@ -599,6 +599,35 @@ async fn snapshot_page_cursors_resume_one_pinned_directory() {
             .expect("add current file");
     }
 
+    let current_resume: ApiResult<ListPathEntriesResponse> = get_json(&listing_url(
+        &harness.server_url,
+        namespace.as_str(),
+        None,
+        Some("2"),
+        Some(&cursor),
+    ));
+    let (status, error) = current_resume.expect_err("snapshot cursor must not resume live");
+    assert_eq!(status, 400);
+    assert_eq!(error.code, "invalid_request");
+
+    let later_snapshot = create_snapshot(
+        &harness.server_url,
+        namespace.as_str(),
+        "later-pagination",
+        10_000,
+    );
+    let other_snapshot_resume: ApiResult<ListPathEntriesResponse> = get_json(&listing_url(
+        &harness.server_url,
+        namespace.as_str(),
+        Some(later_snapshot.snapshot_id.as_str()),
+        Some("2"),
+        Some(&cursor),
+    ));
+    let (status, error) =
+        other_snapshot_resume.expect_err("snapshot cursor must not resume another snapshot");
+    assert_eq!(status, 400);
+    assert_eq!(error.code, "invalid_request");
+
     loop {
         let page: ListPathEntriesResponse = get_json(&listing_url(
             &harness.server_url,

@@ -1568,19 +1568,23 @@ listing on this route. A directory deleted mid-listing answers
 
 `include_attributes` works exactly as it does on the entry route and obeys the same required-siblings-together projection rule, but it defaults to `false`. This keeps the default response bounded because a page may contain up to `pagination.max_limit` entries and each attribute map may be 64 KiB. Clients that request attributes should choose a suitable page size.
 
-A cursor is an opaque ordering resume, not a snapshot pin. Every cursor in the API
-— directory listing, revision listing, grep, and the change feed alike —
-tolerates forward head drift: commits landing mid-listing never retire it,
-and the resumed page evaluates at the then-current head, continuing strictly
-after the last returned position. Each page is internally consistent at its
-own head, but a multi-page listing spans whatever heads its pages ran at: an
-entry created behind the resume position is missed, an entry deleted behind
-it was already returned, and a rename can surface as a duplicate or a miss.
-A client that needs one consistent cut re-issues the listing when `head_seq`
-changes between pages. Only a cursor minted ahead of the serving head
-answers `rebootstrap_required` — drift tolerance runs forward, never
-backward. (A malformed cursor, or one replayed against a different target,
-stays `invalid_request`.)
+A cursor is normally an opaque ordering resume, not a snapshot pin. Directory
+listing, revision listing, grep, and change-feed cursors tolerate forward head
+drift: commits landing mid-listing never retire them, and the resumed page
+evaluates at the then-current head, continuing strictly after the last returned
+position. Each page is internally consistent at its own head, but a multi-page
+listing spans whatever heads its pages ran at: an entry created behind the
+resume position is missed, an entry deleted behind it was already returned,
+and a rename can surface as a duplicate or a miss. A client that needs one
+consistent cut re-issues the listing when `head_seq` changes between pages.
+Only a cursor minted ahead of the serving head answers `rebootstrap_required`
+— drift tolerance runs forward, never backward. (A malformed cursor, or one
+replayed against a different target, stays `invalid_request`.)
+
+A directory cursor minted with `snapshot_id` is the exception: it binds to
+that snapshot's immutable view. The client must repeat the same `snapshot_id`
+on every page. Omitting it or supplying another snapshot returns
+`invalid_request` instead of combining rows from different views.
 The CLI reports the last page's head as `head_seq` and, for multi-page and
 recursive reads, reports the first and last observed heads as `head_drift`
 when they differ; a caller that needs a settled tree re-lists until the
