@@ -29,6 +29,48 @@ fn reject_snapshot_option(snapshot_id: &Option<CheckpointId>, reader: &str) -> R
     Ok(())
 }
 
+fn validate_pinned_directory_cursor(
+    cursor: Option<&DirectoryPageCursor>,
+    pinned_head_seq: ChangeSeq,
+    snapshot_id: Option<&CheckpointId>,
+) -> Result<()> {
+    let Some(cursor) = cursor else {
+        return Ok(());
+    };
+    if cursor.head_seq != pinned_head_seq {
+        return Err(CoreError::InvalidCursor(format!(
+            "directory cursor head `{}` does not match pinned head `{pinned_head_seq}`",
+            cursor.head_seq
+        ))
+        .into());
+    }
+    match (&cursor.snapshot_id, snapshot_id) {
+        (Some(actual), Some(expected)) if actual == expected => Ok(()),
+        (Some(actual), Some(expected)) => Err(CoreError::InvalidCursor(format!(
+            "directory cursor snapshot `{actual}` does not match requested snapshot `{expected}`"
+        ))
+        .into()),
+        (Some(actual), None) => Err(CoreError::InvalidCursor(format!(
+            "directory cursor is bound to snapshot `{actual}`"
+        ))
+        .into()),
+        // A cursor minted before snapshot binding has no snapshot field.
+        // Matching the immutable head makes its resume safe; the next cursor
+        // is stamped below.
+        (None, _) => Ok(()),
+    }
+}
+
+fn reject_snapshot_bound_directory_cursor(cursor: Option<&DirectoryPageCursor>) -> Result<()> {
+    let Some(snapshot_id) = cursor.and_then(|cursor| cursor.snapshot_id.as_ref()) else {
+        return Ok(());
+    };
+    Err(CoreError::InvalidCursor(format!(
+        "directory cursor is bound to snapshot `{snapshot_id}`; repeat snapshot_id on every page"
+    ))
+    .into())
+}
+
 /// A namespace metadata view pinned to one head sequence.
 ///
 /// Create one from the current state, a checkpoint, or a live snapshot. All
@@ -37,6 +79,7 @@ fn reject_snapshot_option(snapshot_id: &Option<CheckpointId>, reader: &str) -> R
 pub struct FsReadSnapshot {
     engine: NamespaceReaderEngine<SharedObjectStore>,
     context: RuntimeReadContext,
+    snapshot_id: Option<CheckpointId>,
     max_read_content_bytes: Option<u64>,
 }
 
@@ -75,12 +118,22 @@ impl FsReadSnapshot {
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
         reject_snapshot_option(&options.snapshot_id, "here; this view is already pinned")?;
+        validate_pinned_directory_cursor(
+            request.cursor.as_ref(),
+            self.head_seq(),
+            self.snapshot_id.as_ref(),
+        )?;
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let page = self
+        let mut page = self
             .engine
             .list_path_page(listed_path.as_str(), request, options, &self.context)
             .await?;
+        if let (Some(cursor), Some(snapshot_id)) =
+            (page.next_cursor.as_mut(), self.snapshot_id.as_ref())
+        {
+            cursor.snapshot_id = Some(snapshot_id.clone());
+        }
         Ok(ListPathEntriesResponse {
             namespace_id: self.namespace_id().clone(),
             path: listed_path,
@@ -470,6 +523,7 @@ impl FsReader {
         Ok(FsReadSnapshot {
             engine,
             context,
+            snapshot_id: None,
             max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
         })
     }
@@ -490,6 +544,7 @@ impl FsReader {
         Ok(FsReadSnapshot {
             engine,
             context,
+            snapshot_id: None,
             max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
         })
     }
@@ -510,6 +565,7 @@ impl FsReader {
         Ok(FsReadSnapshot {
             engine,
             context,
+            snapshot_id: Some(snapshot_id.clone()),
             max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
         })
     }
@@ -643,6 +699,7 @@ impl FsReader {
             &options.snapshot_id,
             "FsReader; call pin_namespace_at_snapshot first",
         )?;
+        reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         let (mut response, next_cursor) = self
             .list_path_entries_page_typed(namespace_id, absolute_path, request, options)
@@ -722,6 +779,7 @@ impl FsReader {
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
+        reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let page = engine

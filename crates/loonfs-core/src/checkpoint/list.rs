@@ -170,6 +170,7 @@ mod cursor_tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let directory = DirectoryPageCursor {
             head_seq: loonfs_api::ChangeSeq(1),
+            snapshot_id: None,
             directory_inode_id: loonfs_api::InodeId(1),
             last_name_key: NameKey::parse("entry").expect("name key"),
         };

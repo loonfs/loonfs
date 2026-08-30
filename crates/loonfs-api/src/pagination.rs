@@ -160,21 +160,27 @@ pub struct Page<T, C> {
 /// Cursor for one directory listing position.
 ///
 /// Directory pagination advances in canonical `name_key` order. The cursor
-/// is an ordering resume, not a snapshot pin: any head at or past `head_seq`
-/// serves the next page, resuming strictly after `last_name_key` — the same
-/// forward-only drift grep cursors tolerate.
+/// is an ordering resume for live reads: any head at or past `head_seq` serves
+/// the next page, resuming strictly after `last_name_key` — the same
+/// forward-only drift grep cursors tolerate. A cursor minted by a snapshot
+/// read also carries `snapshot_id` and can resume only against that snapshot.
 ///
-/// The cursor intentionally contains only the minting head (`head_seq`),
-/// listed directory identity (`directory_inode_id`), and resume position
-/// (`last_name_key`). HTTP clients must pass the URL namespace and the
-/// directory target — the `path` parameter, or the inode ID in the route for
-/// inode-addressed listing — on every page. Runtime/server code resolves
-/// that target at the current head and rejects the cursor unless it names
-/// `directory_inode_id`.
+/// HTTP clients must pass the URL namespace and the directory target — the
+/// `path` parameter, or the inode ID in the route for inode-addressed listing
+/// — on every page. Snapshot clients must also repeat `snapshot_id`. Runtime
+/// and server code resolve that target at the selected view and reject a
+/// cursor with a different directory or snapshot identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
+    /// Live snapshot that minted this cursor, if any.
+    ///
+    /// The omitted form preserves version-1 live cursors. A snapshot read may
+    /// accept an omitted value only when `head_seq` exactly matches its pinned
+    /// head, then stamps the snapshot id into the next cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<crate::CheckpointId>,
     /// Directory inode resolved at `head_seq`.
     // The wire field is frozen as `dir_inode_id` in page cursor version 1.
     #[serde(rename = "dir_inode_id")]
@@ -446,6 +452,10 @@ mod tests {
     fn directory_cursor_round_trips() {
         let cursor = DirectoryPageCursor {
             head_seq: ChangeSeq(11),
+            snapshot_id: Some(
+                crate::CheckpointId::parse("chk_00000000000000000000000000000001")
+                    .expect("snapshot id"),
+            ),
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         };
@@ -454,6 +464,26 @@ mod tests {
         let decoded: DirectoryPageCursor = decode_cursor(&encoded).expect("decode cursor");
 
         assert_eq!(decoded, cursor);
+    }
+
+    #[test]
+    fn live_directory_cursor_omits_the_additive_snapshot_field() {
+        let cursor = DirectoryPageCursor {
+            head_seq: ChangeSeq(11),
+            snapshot_id: None,
+            directory_inode_id: InodeId(7),
+            last_name_key: NameKey::parse("plan.md").expect("name key"),
+        };
+
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let bytes = crate::hex::hex_decode_bytes(&encoded).expect("decode hex");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("decode JSON");
+
+        assert!(json.get("snapshot_id").is_none());
+        assert_eq!(
+            decode_cursor::<DirectoryPageCursor>(&encoded).expect("decode cursor"),
+            cursor
+        );
     }
 
     #[test]
@@ -536,6 +566,7 @@ mod tests {
             kind: DirectoryPageCursor::KIND.to_owned(),
             cursor: DirectoryPageCursor {
                 head_seq: ChangeSeq(11),
+                snapshot_id: None,
                 directory_inode_id: InodeId(7),
                 last_name_key: NameKey::parse("plan.md").expect("name key"),
             },
