@@ -536,6 +536,16 @@ struct InFlightRequest {
     waiters: Vec<oneshot::Sender<CommitResult>>,
 }
 
+enum SubmissionAdmission {
+    /// This submission owns the published outcome, either as the primary or
+    /// as an exact duplicate of it.
+    OwnOutcome,
+    /// A different claim currently owns the commit ID. Its successful outcome
+    /// supplies the receipt evidence this submission needs for a useful
+    /// conflict; if it fails, this submission gets another turn at admission.
+    Contended { primary_identity: CommitFingerprint },
+}
+
 impl NamespacePublisher {
     fn new(
         namespace_id: NamespaceId,
@@ -629,8 +639,9 @@ impl NamespacePublisher {
 
     /// Admits the request before awaiting its result.
     ///
-    /// The first poll either admits the candidate or returns an error. After
-    /// admission, cancelling the caller only drops result delivery; the worker
+    /// The first poll either admits the candidate, waits behind an in-flight
+    /// claim on its commit ID, or returns an error. Once the candidate enters
+    /// the queue, cancelling the caller only drops result delivery; the worker
     /// still owns and publishes the request.
     #[allow(clippy::disallowed_methods)]
     // Monotonic time is used only to record queue latency.
@@ -638,16 +649,35 @@ impl NamespacePublisher {
         let commit_id = candidate.commit_id().clone();
         let enqueued_at = Instant::now();
         let semantic_identity = candidate.semantic_identity(&self.namespace_id)?;
-        let (sender, receiver) = oneshot::channel();
-        self.admit(commit_id, candidate, semantic_identity, sender, enqueued_at)?;
-        receiver.await.unwrap_or_else(|_| {
-            Err(
+        loop {
+            let (sender, receiver) = oneshot::channel();
+            let admission = self.admit(
+                commit_id.clone(),
+                candidate.clone(),
+                semantic_identity.clone(),
+                sender,
+                enqueued_at,
+            )?;
+            let result = receiver.await.map_err(|_| {
                 CoreError::HeadPublish(CommitHeadPublishError::OutcomeUnknown(
                     "publisher task stopped before reporting an outcome".to_owned(),
                 ))
-                .into(),
-            )
-        })
+            })?;
+            match admission {
+                SubmissionAdmission::OwnOutcome => return result,
+                SubmissionAdmission::Contended { primary_identity } => match result {
+                    Ok(response) => {
+                        return Err(CoreError::CommitIdReuseConflict {
+                            commit_id: commit_id.to_string(),
+                            committed_seq: Some(response.committed_seq),
+                            committed_fingerprint: Some(primary_identity.as_str().to_owned()),
+                        }
+                        .into())
+                    }
+                    Err(_) => continue,
+                },
+            }
+        }
     }
 
     fn admit(
@@ -657,22 +687,19 @@ impl NamespacePublisher {
         semantic_identity: CommitFingerprint,
         waiter: oneshot::Sender<CommitResult>,
         enqueued_at: Instant,
-    ) -> Result<(), CoreError> {
+    ) -> Result<SubmissionAdmission, CoreError> {
         let mut state = self.lock_state();
         self.check_admission(&state)?;
         if let Some(existing) = state.in_flight.get_mut(&commit_id) {
             if existing.semantic_identity != semantic_identity {
-                // Both claims are still in flight, so nothing has landed
-                // under this id for the caller to read back.
-                return Err(CoreError::CommitIdReuseConflict {
-                    commit_id: commit_id.to_string(),
-                    committed_seq: None,
-                    committed_fingerprint: None,
-                });
+                let primary_identity = existing.semantic_identity.clone();
+                existing.waiters.push(waiter);
+                self.trace_enqueue(queued_candidates(&state), "contended");
+                return Ok(SubmissionAdmission::Contended { primary_identity });
             }
             existing.waiters.push(waiter);
             self.trace_enqueue(queued_candidates(&state), "duplicate");
-            return Ok(());
+            return Ok(SubmissionAdmission::OwnOutcome);
         }
 
         let queued = queued_candidates(&state);
@@ -703,7 +730,7 @@ impl NamespacePublisher {
             },
         );
         self.ensure_worker(&mut state);
-        Ok(())
+        Ok(SubmissionAdmission::OwnOutcome)
     }
 
     /// Enqueues the delete as a barrier: requests admitted before it

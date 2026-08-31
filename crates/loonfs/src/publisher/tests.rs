@@ -365,6 +365,24 @@ async fn wait_for_queued_candidates(publisher: &NamespacePublisher, expected: us
     }
 }
 
+/// Yields until all expected callers are waiting on one in-flight commit ID.
+async fn wait_for_commit_waiters(
+    publisher: &NamespacePublisher,
+    commit_id: &CommitId,
+    expected: usize,
+) {
+    loop {
+        let ready = publisher_state(publisher)
+            .in_flight
+            .get(commit_id)
+            .is_some_and(|request| request.waiters.len() >= expected);
+        if ready {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
 /// Yields until a delete sits at the tail of the publisher's queue.
 async fn wait_for_queued_delete(publisher: &NamespacePublisher) {
     loop {
@@ -481,13 +499,14 @@ fn try_admit_candidate(
     let commit_id = candidate.commit_id().clone();
     let semantic_identity = candidate.semantic_identity(namespace_id)?;
     let (sender, receiver) = oneshot::channel();
-    publisher.admit(
+    let admission = publisher.admit(
         commit_id,
         candidate,
         semantic_identity,
         sender,
         Instant::now(),
     )?;
+    assert!(matches!(admission, SubmissionAdmission::OwnOutcome));
     Ok(receiver)
 }
 
@@ -682,7 +701,7 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
+async fn publisher_contender_waits_for_active_request_receipt() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
@@ -692,11 +711,11 @@ async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
-    let active = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("active", "active"),
-    );
+    let active_request = create_directory_request("active", "active");
+    let active_identity = CommitCandidate::new(active_request.clone())
+        .semantic_identity(&namespace_id)
+        .expect("active identity");
+    let active = admit_commit(&publisher, &namespace_id, active_request);
     store.wait_until_blocked().await;
 
     let duplicate = admit_commit(
@@ -704,26 +723,79 @@ async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
         &namespace_id,
         create_directory_request("active", "active"),
     );
-    let conflict = try_admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("active", "different-active"),
-    );
-    // Both claims are still in flight, so there is no receipt to name.
-    assert!(matches!(
-        conflict,
-        Err(CoreError::CommitIdReuseConflict {
-            commit_id,
-            committed_seq: None,
-            committed_fingerprint: None,
-        }) if commit_id == "active"
-    ));
+    let conflict = {
+        let publisher = publisher.clone();
+        let request = create_directory_request("active", "different-active");
+        tokio::spawn(async move { publisher.submit(CommitCandidate::new(request)).await })
+    };
+    let active_commit_id = CommitId::parse("active").expect("valid commit id");
+    wait_for_commit_waiters(&publisher, &active_commit_id, 3).await;
 
     store.release();
     let active_response = recv_commit(active, "active").await;
     let duplicate_response = recv_commit(duplicate, "duplicate").await;
+    let conflict = conflict
+        .await
+        .expect("conflict task")
+        .expect_err("different request conflicts after the primary lands");
     assert_eq!(active_response.committed_seq, ChangeSeq(1));
     assert_eq!(duplicate_response.committed_seq, ChangeSeq(1));
+    assert!(matches!(
+        conflict,
+        RuntimeError::Core(CoreError::CommitIdReuseConflict {
+            commit_id,
+            committed_seq: Some(ChangeSeq(1)),
+            committed_fingerprint: Some(fingerprint),
+        }) if commit_id == "active" && fingerprint == active_identity.as_str()
+    ));
+}
+
+#[tokio::test]
+async fn publisher_contender_retries_after_active_request_fails() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let runtime = test_runtime(store);
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+    let commit_id = CommitId::parse("handoff").expect("valid commit id");
+    let primary_identity = CommitCandidate::new(create_directory_request("handoff", "first"))
+        .semantic_identity(&namespace_id)
+        .expect("primary identity");
+    publisher_state(&publisher).in_flight.insert(
+        commit_id.clone(),
+        InFlightRequest {
+            semantic_identity: primary_identity,
+            waiters: Vec::new(),
+        },
+    );
+
+    let contender = {
+        let publisher = publisher.clone();
+        tokio::spawn(async move {
+            publisher
+                .submit(CommitCandidate::new(create_directory_request(
+                    "handoff", "second",
+                )))
+                .await
+        })
+    };
+    wait_for_commit_waiters(&publisher, &commit_id, 1).await;
+
+    let failed_primary = publisher_state(&publisher)
+        .in_flight
+        .remove(&commit_id)
+        .expect("in-flight primary");
+    for waiter in failed_primary.waiters {
+        let _ = waiter.send(Err(CoreError::Internal("primary failed".to_owned()).into()));
+    }
+
+    let response = contender
+        .await
+        .expect("contender task")
+        .expect("contender publishes after the failed primary");
+    assert_eq!(response.commit_id, commit_id);
+    assert_eq!(response.committed_seq, ChangeSeq(1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -758,19 +830,13 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
         &namespace_id,
         create_directory_request("pending-0", "pending-0"),
     );
-    let conflict = try_admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("pending-0", "different-pending"),
-    );
-    assert!(matches!(
-        conflict,
-        Err(CoreError::CommitIdReuseConflict {
-            commit_id,
-            committed_seq: None,
-            committed_fingerprint: None,
-        }) if commit_id == "pending-0"
-    ));
+    let conflict = {
+        let publisher = publisher.clone();
+        let request = create_directory_request("pending-0", "different-pending");
+        tokio::spawn(async move { publisher.submit(CommitCandidate::new(request)).await })
+    };
+    let pending_commit_id = CommitId::parse("pending-0").expect("valid commit id");
+    wait_for_commit_waiters(&publisher, &pending_commit_id, 3).await;
 
     let overflow = try_admit_commit(
         &publisher,
@@ -794,6 +860,18 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
         recv_commit(duplicate, "duplicate").await.committed_seq,
         ChangeSeq(2)
     );
+    let conflict = conflict
+        .await
+        .expect("conflict task")
+        .expect_err("different request conflicts after the primary lands");
+    assert!(matches!(
+        conflict,
+        RuntimeError::Core(CoreError::CommitIdReuseConflict {
+            commit_id,
+            committed_seq: Some(ChangeSeq(2)),
+            committed_fingerprint: Some(_),
+        }) if commit_id == "pending-0"
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

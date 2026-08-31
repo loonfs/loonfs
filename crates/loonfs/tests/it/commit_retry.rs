@@ -79,6 +79,76 @@ async fn namespace(runtime: &TestRuntime) -> NamespaceId {
     namespace_id
 }
 
+/// Advances retention and rebuilds the metadata runs that held a commit receipt.
+async fn compact_receipt_past_horizon(
+    runtime: &TestRuntime,
+    namespace_id: &NamespaceId,
+    committed_seq: ChangeSeq,
+) -> ChangeSeq {
+    // Nine rounds: the first flush builds the base run, and the next eight
+    // accumulate the delta runs that reach the fold trigger
+    // (`DEFAULT_MAX_CHECKPOINT_DELTA_RUNS`).
+    let mut last_seq = committed_seq;
+    for round in 0..9 {
+        let filler = runtime
+            .put_file_bytes(
+                namespace_id,
+                &format!("/docs/filler-{round}.txt"),
+                b"filler\n",
+                options(&CommitId::parse(format!("filler-{round}")).expect("valid commit id")),
+            )
+            .await
+            .expect("filler put");
+        last_seq = filler.committed_seq;
+        runtime
+            .create_checkpoint(namespace_id)
+            .await
+            .expect("create checkpoint");
+    }
+    let advanced = runtime
+        .admin
+        .run_maintenance(
+            namespace_id,
+            MaintenancePlan {
+                advance_retention: true,
+                ..MaintenancePlan::default()
+            },
+        )
+        .await
+        .expect("advance retention floor")
+        .retention
+        .expect("retention selected");
+    assert!(
+        advanced.retention_floor_seq > committed_seq,
+        "the floor must pass the commit for this to test anything: floor {:?}, commit {:?}",
+        advanced.retention_floor_seq,
+        committed_seq
+    );
+
+    // The floor alone leaves the receipt answering. Drain reorganization so
+    // the run families holding the receipt are rebuilt above the floor.
+    let mut folded = false;
+    for _ in 0..32 {
+        let step = runtime
+            .admin
+            .run_maintenance(namespace_id, MaintenancePlan::metadata())
+            .await
+            .expect("upkeep step")
+            .metadata_maintenance
+            .expect("metadata selected");
+        if matches!(step.reorganize, ReorganizeStepOutcome::NotNeeded) {
+            break;
+        }
+        folded = true;
+    }
+    assert!(
+        folded,
+        "reorganization must actually rebuild runs for this to test anything"
+    );
+
+    last_seq
+}
+
 #[tokio::test]
 async fn restart_replays_the_commit_actor_from_the_wal() {
     let temp_dir = tempdir().expect("tempdir");
@@ -609,72 +679,7 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
         .await
         .expect("first put");
 
-    // Move the floor strictly past the pinned commit, and pile up enough
-    // flushed runs that reorganization has real folding to do — receipts
-    // are dropped when the runs holding them are rebuilt, and rebuilding
-    // waits for enough delta runs to accumulate.
-    // Nine rounds: the first flush builds the base run, and the next eight
-    // accumulate the delta runs that reach the fold trigger
-    // (`DEFAULT_MAX_CHECKPOINT_DELTA_RUNS`).
-    let mut last_seq = first.committed_seq;
-    for round in 0..9 {
-        let filler = runtime
-            .put_file_bytes(
-                &namespace_id,
-                &format!("/docs/filler-{round}.txt"),
-                b"filler\n",
-                options(&CommitId::parse(format!("filler-{round}")).expect("valid commit id")),
-            )
-            .await
-            .expect("filler put");
-        last_seq = filler.committed_seq;
-        runtime
-            .create_checkpoint(&namespace_id)
-            .await
-            .expect("create checkpoint");
-    }
-    let advanced = runtime
-        .admin
-        .run_maintenance(
-            &namespace_id,
-            MaintenancePlan {
-                advance_retention: true,
-                ..MaintenancePlan::default()
-            },
-        )
-        .await
-        .expect("advance retention floor")
-        .retention
-        .expect("retention selected");
-    assert!(
-        advanced.retention_floor_seq > first.committed_seq,
-        "the floor must pass the commit for this to test anything: floor {:?}, commit {:?}",
-        advanced.retention_floor_seq,
-        first.committed_seq
-    );
-
-    // The floor alone leaves the receipt answering (the conflict test above
-    // proves it). Drain reorganization until it reports nothing left, so
-    // the run families holding the receipt have been rebuilt above the
-    // floor.
-    let mut folded = false;
-    for _ in 0..32 {
-        let step = runtime
-            .admin
-            .run_maintenance(&namespace_id, MaintenancePlan::metadata())
-            .await
-            .expect("upkeep step")
-            .metadata_maintenance
-            .expect("metadata selected");
-        if matches!(step.reorganize, ReorganizeStepOutcome::NotNeeded) {
-            break;
-        }
-        folded = true;
-    }
-    assert!(
-        folded,
-        "reorganization must actually rebuild runs for this to test anything"
-    );
+    let last_seq = compact_receipt_past_horizon(&runtime, &namespace_id, first.committed_seq).await;
 
     // The live session's caches still answer the receipt (a conservative,
     // longer in-process window — a rerun in the same process still replays
@@ -708,6 +713,49 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
             .expect("read file")
             .bytes,
         b"stable bytes\n",
+    );
+}
+
+#[tokio::test]
+async fn concurrent_retries_past_the_receipt_horizon_commit_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("concurrent-horizon-put").expect("valid commit id");
+
+    let first = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .await
+        .expect("first put");
+    let last_seq = compact_receipt_past_horizon(&runtime, &namespace_id, first.committed_seq).await;
+
+    // Reopen so both retries observe the durable receipt horizon rather than
+    // the conservative in-process cache.
+    drop(runtime);
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
+
+    let (left, right) = tokio::join!(
+        runtime.put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id)),
+        runtime.put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id)),
+    );
+    let left = left.expect("first late retry");
+    let right = right.expect("second late retry");
+
+    assert_eq!(left, right, "both retries resolve to the same commit");
+    assert_eq!(
+        left.committed_seq,
+        ChangeSeq(last_seq.0 + 1),
+        "only one retry advances the namespace head"
+    );
+    assert_eq!(
+        runtime
+            .admin
+            .get_namespace_diagnostics(&namespace_id)
+            .await
+            .expect("namespace diagnostics")
+            .head_seq,
+        left.committed_seq,
+        "the losing retry does not publish another commit"
     );
 }
 
