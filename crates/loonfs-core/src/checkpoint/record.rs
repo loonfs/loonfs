@@ -155,15 +155,29 @@ pub(crate) async fn release_inspected_checkpoint_record<S: ObjectStore + ?Sized>
     loaded: LoadedCheckpointRecord,
     released_at_ms: u64,
 ) -> Result<CheckpointRelease> {
+    let expected_etag = loaded.etag;
     let mut next = loaded.state;
     next.status = CheckpointStatus::Released { released_at_ms };
     let encoded = encode_checkpoint_record(&next)?;
     match store
-        .compare_and_swap(object_key, &loaded.etag, encoded)
+        .compare_and_swap(object_key, &expected_etag, encoded)
         .await
     {
         Ok(_) => Ok(CheckpointRelease::Released),
         Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CheckpointRelease::LostRace),
+        Err(error @ ObjectStoreError::Transport { .. }) => {
+            match load_checkpoint_record_at_key(store, object_key).await {
+                Ok(current) if current.state.status != (CheckpointStatus::Active {}) => {
+                    Ok(CheckpointRelease::Released)
+                }
+                Ok(current) if current.etag != expected_etag => Ok(CheckpointRelease::LostRace),
+                Ok(_) => Err(CoreError::store(object_key, &error)),
+                Err(ControlObjectLoadError::MissingObject { .. }) => {
+                    Ok(CheckpointRelease::Released)
+                }
+                Err(load_error) => Err(CoreError::ControlObjectLoad(load_error)),
+            }
+        }
         Err(error) => Err(CoreError::store(object_key, &error)),
     }
 }
@@ -250,7 +264,36 @@ pub(crate) async fn renew_fork_checkpoint_for_install<S: ObjectStore + ?Sized>(
         {
             Ok(_) => Ok(CasAttempt::Settled(renewed_expiry)),
             Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
-            // Do not install a target unless the renewal is confirmed.
+            Err(error @ ObjectStoreError::Transport { .. }) => {
+                let Some(current) =
+                    load_checkpoint_record(store, source_namespace_id, checkpoint_id).await?
+                else {
+                    return Err(unavailable("the record is gone".to_owned()));
+                };
+                if current.state.status != (CheckpointStatus::Active {}) {
+                    return Err(unavailable(format!(
+                        "the record is `{}`",
+                        current.state.status
+                    )));
+                }
+                let CheckpointOwner::Fork {
+                    target_namespace_id,
+                    expires_at_ms,
+                } = current.state.owner
+                else {
+                    return Err(unavailable("the record is not fork-owned".to_owned()));
+                };
+                if &target_namespace_id != expected_target_namespace_id {
+                    return Err(unavailable(format!(
+                        "the record pins target `{target_namespace_id}`"
+                    )));
+                }
+                if expires_at_ms >= renewed_expiry {
+                    Ok(CasAttempt::Settled(expires_at_ms))
+                } else {
+                    Err(CoreError::store(object_key, &error))
+                }
+            }
             Err(error) => Err(CoreError::store(object_key, &error)),
         }
     })

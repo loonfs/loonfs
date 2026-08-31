@@ -835,6 +835,150 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
     assert_eq!(listed.checkpoints[0].checkpoint_id, snapshot.checkpoint_id);
 }
 
+#[tokio::test]
+async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("snapshot-ambiguous-extension");
+    let checkpoint_key_prefix = checkpoint_prefix(&namespace_id);
+    let store = Arc::new(
+        FailStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::prefix(checkpoint_key_prefix),
+            OperationClass::CompareAndSwap,
+            InjectedError::Transport("lost snapshot extension acknowledgement".to_owned()),
+        )
+        .apply_then_fail(),
+    );
+    let object_store: SharedObjectStore = store.clone();
+    let fs = open_runtime_async(object_store, "snapshot-ambiguous-extension").await;
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    let snapshot = fs
+        .admin
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "report-run".to_owned(),
+                expires_at_ms: u64::MAX - 1,
+            },
+        )
+        .await
+        .expect("create snapshot");
+    store.fail_next(1);
+
+    let extended = fs
+        .admin
+        .extend_snapshot(&namespace_id, &snapshot.checkpoint_id, u64::MAX, u64::MAX)
+        .await
+        .expect("reconcile the durable snapshot extension");
+
+    assert_eq!(extended.expires_at_ms, u64::MAX);
+    assert_eq!(store.attempts(), 1);
+}
+
+#[tokio::test]
+async fn snapshot_release_recovers_an_ambiguously_landed_record_write() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("snapshot-ambiguous-release");
+    let store = Arc::new(
+        FailStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+            OperationClass::CompareAndSwap,
+            InjectedError::Transport("lost snapshot release acknowledgement".to_owned()),
+        )
+        .apply_then_fail(),
+    );
+    let object_store: SharedObjectStore = store.clone();
+    let fs = open_runtime_async(object_store, "snapshot-ambiguous-release").await;
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    let snapshot = fs
+        .admin
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "report-run".to_owned(),
+                expires_at_ms: u64::MAX,
+            },
+        )
+        .await
+        .expect("create snapshot");
+    store.fail_next(1);
+
+    fs.admin
+        .release_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .await
+        .expect("reconcile the durable snapshot release");
+
+    assert_eq!(store.attempts(), 1);
+    let listed = collect_checkpoints(&fs.admin, &namespace_id)
+        .await
+        .expect("list checkpoints");
+    assert!(listed
+        .checkpoints
+        .iter()
+        .all(|checkpoint| checkpoint.checkpoint_id != snapshot.checkpoint_id));
+}
+
+#[tokio::test]
+async fn fork_recovers_an_ambiguously_landed_checkpoint_renewal() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source = namespace_id("fork-ambiguous-renewal-source");
+    let target = namespace_id("fork-ambiguous-renewal-target");
+    let store = Arc::new(
+        FailStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::prefix(checkpoint_prefix(&source)),
+            OperationClass::CompareAndSwap,
+            InjectedError::Transport("lost fork checkpoint renewal acknowledgement".to_owned()),
+        )
+        .apply_then_fail(),
+    );
+    let object_store: SharedObjectStore = store.clone();
+    let fs = open_runtime_async(object_store, "fork-ambiguous-renewal").await;
+    fs.create_namespace(&source, CreateNamespaceOptions::default())
+        .await
+        .expect("create source namespace");
+    fs.put_file_bytes(
+        &source,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("write source file");
+    store.fail_next(1);
+
+    let forked = fs
+        .writer
+        .fork_namespace(&source, &target)
+        .await
+        .expect("reconcile the durable fork checkpoint renewal");
+
+    assert_eq!(store.attempts(), 1);
+    assert_eq!(forked.namespace_id, target);
+    let checkpoints = collect_checkpoints(&fs.admin, &source)
+        .await
+        .expect("list source checkpoints");
+    let fork_checkpoint = checkpoints
+        .checkpoints
+        .iter()
+        .find(|checkpoint| {
+            matches!(
+                &checkpoint.owner,
+                CheckpointOwnerSummary::Fork {
+                    target_namespace_id,
+                    ..
+                } if target_namespace_id == &target
+            )
+        })
+        .expect("fork checkpoint remains installed");
+    assert_eq!(fork_checkpoint.namespace_id, source);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
     let temp_dir = tempdir().expect("tempdir");
