@@ -1026,6 +1026,147 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
 }
 
 #[tokio::test]
+async fn first_root_create_recovers_when_the_write_lands_ambiguously() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(metadata_root(&namespace_id)),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("lost first-root acknowledgment".to_owned()),
+    )
+    .apply_then_fail();
+    crate::namespace::bootstrap::bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap without a root");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    store.fail_next(1);
+
+    let response = flush::flush_wal(&store, &namespace_id, &context)
+        .await
+        .expect("root read-back reconciles the landed create");
+
+    assert_eq!(response.manifest_head_seq, ChangeSeq(1));
+    assert_eq!(store.attempts(), 1);
+    assert_eq!(
+        load_metadata_root_object(&store, &namespace_id)
+            .await
+            .expect("load reconciled root")
+            .state
+            .manifest
+            .manifest_head_seq,
+        ChangeSeq(1)
+    );
+}
+
+#[tokio::test]
+async fn first_floor_create_recovers_when_the_write_lands_ambiguously() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(wal_floor(&namespace_id)),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("lost first-floor acknowledgment".to_owned()),
+    )
+    .apply_then_fail();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    flush::flush_wal(&store, &namespace_id, &context)
+        .await
+        .expect("publish root at sequence one");
+    store.fail_next(1);
+
+    let response = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("floor read-back reconciles the landed create");
+
+    assert_eq!(response.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(store.attempts(), 1);
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
+}
+
+#[tokio::test]
+async fn floor_cas_recovers_when_the_write_lands_ambiguously() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(wal_floor(&namespace_id)),
+        OperationClass::CompareAndSwap,
+        InjectedError::Transport("lost floor-CAS acknowledgment".to_owned()),
+    )
+    .apply_then_fail();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/one.txt",
+        b"one\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write first file");
+    flush::flush_wal(&store, &namespace_id, &context)
+        .await
+        .expect("publish root at sequence one");
+    advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("create the initial floor");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/two.txt",
+        b"two\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write second file");
+    flush::flush_wal(&store, &namespace_id, &context)
+        .await
+        .expect("publish root at sequence two");
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
+    store.fail_next(1);
+
+    let response = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("floor read-back reconciles the landed CAS");
+
+    assert_eq!(response.retention_floor_seq, ChangeSeq(2));
+    assert_eq!(store.attempts(), 1);
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(2));
+}
+
+#[tokio::test]
 async fn floor_cas_never_regresses_under_a_competing_advancement() {
     // A competing GC actor lands a higher floor between our verification and
     // CAS. The retry observes it and yields: floors are monotonic.

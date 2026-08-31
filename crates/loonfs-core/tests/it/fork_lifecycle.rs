@@ -29,7 +29,9 @@ use loonfs_objectstore::keys::{metadata_manifest_object, metadata_root, wal_floo
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{
+    CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -185,6 +187,31 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
 }
 
 #[tokio::test]
+async fn namespace_create_recovers_when_the_head_write_lands_ambiguously() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(wal_head(&namespace_id)),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("lost namespace-head acknowledgment".to_owned()),
+    )
+    .apply_then_fail();
+    store.fail_next(1);
+
+    let created = bootstrap_namespace(&store, &namespace_id, &mutation_context(), false)
+        .await
+        .expect("head identity reconciles the landed create");
+
+    assert_eq!(created.namespace_id, namespace_id);
+    assert_eq!(store.attempts(), 1);
+    assert_eq!(
+        head_state(&store, &namespace_id).await.status,
+        loonfs_api::wire::control::NamespaceStatus::Active {}
+    );
+}
+
+#[tokio::test]
 async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -302,6 +329,33 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     } else {
         assert!(head.fork_basis.is_some(), "the fork won");
     }
+}
+
+#[tokio::test]
+async fn fork_install_recovers_when_the_target_head_lands_ambiguously() {
+    let temp_dir = tempdir().expect("tempdir");
+    let context = mutation_context();
+    let source = namespace_id("source");
+    let target = namespace_id("target");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(wal_head(&target)),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("lost fork-head acknowledgment".to_owned()),
+    )
+    .apply_then_fail();
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+    store.fail_next(1);
+
+    let forked = fork_namespace(&store, &source, &target, &context)
+        .await
+        .expect("fork basis identity reconciles the landed target");
+
+    assert_eq!(forked.namespace_id, target);
+    assert_eq!(store.attempts(), 1);
+    let target_head = head_state(&store, &target).await;
+    let basis = target_head.fork_basis.expect("fork target basis");
+    assert_eq!(basis.manifest.owner_namespace_id, source);
 }
 
 #[tokio::test]

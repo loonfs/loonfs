@@ -187,7 +187,41 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
             }
             Ok(NamespaceHeadInstall::Exists)
         }
+        // The create may have reached the provider before its acknowledgment
+        // was lost. The immutable identity fields distinguish this attempt's
+        // installed head from a concurrent winner even after later head
+        // updates. An immediate precondition failure above remains a plain
+        // conflict because it carries no evidence that this attempt wrote.
+        Err(error @ ObjectStoreError::Transport { .. }) => {
+            let existing = match load_head_object(store, namespace_id).await {
+                Ok(loaded) => loaded.state,
+                Err(ControlObjectLoadError::MissingObject { .. }) => {
+                    return Err(CoreError::store(&object_key, &error))
+                }
+                Err(load_error) => return Err(CoreError::ControlObjectLoad(load_error)),
+            };
+            Ok(classify_ambiguous_namespace_install(head, &existing))
+        }
         Err(error) => Err(CoreError::store(&object_key, &error)),
+    }
+}
+
+/// Classifies the authoritative head after an ambiguous conditional create.
+///
+/// Deleted namespace ids stay retired. Otherwise the proposed head owns the
+/// result only when all immutable identity fields survived in the loaded
+/// head. Mutable fields may already have advanced after the create landed.
+fn classify_ambiguous_namespace_install(
+    proposed: &HeadState,
+    existing: &HeadState,
+) -> NamespaceHeadInstall {
+    if existing.status == (NamespaceStatus::Deleted {}) {
+        return NamespaceHeadInstall::Deleted;
+    }
+    if proposed.ensure_successor_identity(existing).is_ok() {
+        NamespaceHeadInstall::Landed
+    } else {
+        NamespaceHeadInstall::Exists
     }
 }
 
@@ -213,4 +247,63 @@ pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
         Vec::new(),
         Vec::new(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loonfs_api::{CommitId, WriterEpoch};
+
+    fn namespace(value: &str) -> NamespaceId {
+        NamespaceId::parse(value).expect("valid namespace id")
+    }
+
+    fn proposed_head() -> HeadState {
+        HeadState::initial(
+            namespace("demo"),
+            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+                .expect("valid content store id"),
+            1_000,
+        )
+    }
+
+    #[test]
+    fn ambiguous_install_recognizes_its_identity_after_mutable_head_fields_advance() {
+        let proposed = proposed_head();
+        let mut advanced = proposed.clone();
+        advanced.seq = ChangeSeq(1);
+        advanced.head_commit_id =
+            CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id");
+        advanced.writer_epoch = WriterEpoch(1);
+
+        assert_eq!(
+            classify_ambiguous_namespace_install(&proposed, &advanced),
+            NamespaceHeadInstall::Landed
+        );
+    }
+
+    #[test]
+    fn ambiguous_install_does_not_adopt_a_foreign_namespace_identity() {
+        let proposed = proposed_head();
+        let mut foreign = proposed.clone();
+        foreign.content_store_id = ContentStoreId::parse("cs_fedcba9876543210fedcba9876543210")
+            .expect("valid content store id");
+
+        assert_eq!(
+            classify_ambiguous_namespace_install(&proposed, &foreign),
+            NamespaceHeadInstall::Exists
+        );
+    }
+
+    #[test]
+    fn ambiguous_install_never_revives_a_deleted_namespace_id() {
+        let proposed = proposed_head();
+        let mut deleted = proposed.clone();
+        deleted.status = NamespaceStatus::Deleted {};
+
+        assert_eq!(
+            classify_ambiguous_namespace_install(&proposed, &deleted),
+            NamespaceHeadInstall::Deleted
+        );
+    }
 }
