@@ -21,10 +21,10 @@ import (
 	"testing"
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
+	"github.com/loonfs/loonfs-sdk-go/files"
 	"github.com/loonfs/loonfs-sdk-go/option"
 	loonfsproxy "github.com/loonfs/loonfs-sdk-go/proxy"
 	"github.com/loonfs/loonfs-sdk-go/server"
-	"github.com/loonfs/loonfs-sdk-go/transfers"
 )
 
 type conformanceCase struct {
@@ -378,7 +378,7 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	stat := statPath(t, h.client, request.NamespaceID, request.Path)
 	file := requireFileProjection(t, stat)
 	assertContentRefEqual(t, file.ContentRef, completedStatus.ContentRef)
-	readback := getFile(t, h.client, request.NamespaceID, request.Path)
+	readback := downloadFile(t, h.client, request.NamespaceID, request.Path)
 	if !bytes.Equal(readback.Bytes, payload) {
 		t.Error("direct PUT readback did not match payload")
 	}
@@ -523,15 +523,15 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	if int64(committed.CommittedSeq) != expected.CommittedSeq {
 		t.Errorf("committed_seq = %d, want %d", committed.CommittedSeq, expected.CommittedSeq)
 	}
-	readback := getFile(t, h.client, request.NamespaceID, request.Path)
+	readback := downloadFile(t, h.client, request.NamespaceID, request.Path)
 	if !bytes.Equal(readback.Bytes, payload) {
 		t.Error("multipart readback did not match payload")
 	}
 
 	// The same content through the high-level helper: the payload exceeds the
-	// part size, so this exercises PutFile's multipart branch.
+	// part size, so this exercises Files.Upload's multipart branch.
 	helperPath := request.Path + "-helper"
-	helperCommit, err := transfers.PutFile(context.Background(), h.client, transfers.PutFileInput{
+	helperCommit, err := h.client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(helperPath),
 		Bytes:       payload,
@@ -544,7 +544,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	if helperCommit.CommittedSeq == 0 {
 		t.Error("helper multipart put reported no committed_seq")
 	}
-	helperReadback := getFile(t, h.client, request.NamespaceID, helperPath)
+	helperReadback := downloadFile(t, h.client, request.NamespaceID, helperPath)
 	if !bytes.Equal(helperReadback.Bytes, payload) {
 		t.Error("helper multipart readback did not match payload")
 	}
@@ -628,7 +628,7 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	createNamespace(t, h.client, request.NamespaceID)
 	payload := []byte(request.ContentUTF8)
 	commitID := loonfs.CommitID(request.CommitID)
-	committed, err := transfers.PutFile(context.Background(), h.client, transfers.PutFileInput{
+	committed, err := h.client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(request.Path),
 		Bytes:       payload,
@@ -713,7 +713,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	uploadCommitID := loonfs.CommitID(request.CommitIDs.Upload)
-	upload, err := transfers.PutFile(context.Background(), h.client, transfers.PutFileInput{
+	upload, err := h.client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(request.UploadPath),
 		Bytes:       []byte(request.ContentUTF8),
@@ -737,7 +737,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	if !listingContainsPath(initialListing, request.UploadPath) {
 		t.Errorf("initial listing does not contain %q", request.UploadPath)
 	}
-	downloaded := getFile(t, h.client, request.NamespaceID, request.UploadPath)
+	downloaded := downloadFile(t, h.client, request.NamespaceID, request.UploadPath)
 	if !bytes.Equal(downloaded.Bytes, []byte(request.ContentUTF8)) {
 		t.Error("end-to-end download did not match payload")
 	}
@@ -1080,7 +1080,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		&request.Actor,
 		childPath(request.PathDirectoryName),
 	)
-	if _, err := transfers.PutFile(context.Background(), h.client, transfers.PutFileInput{
+	if _, err := h.client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.PathFileName)),
 		Bytes:       []byte(request.ContentUTF8),
@@ -1183,7 +1183,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	if revised.RevisionNo != expected.RevisedRevisionNo {
 		t.Errorf("revised revision_no = %d, want %d", revised.RevisionNo, expected.RevisedRevisionNo)
 	}
-	readback := getFile(t, h.client, request.NamespaceID, childPath(request.InodeFileName))
+	readback := downloadFile(t, h.client, request.NamespaceID, childPath(request.InodeFileName))
 	if !bytes.Equal(readback.Bytes, []byte(request.RevisedContentUTF8)) {
 		t.Error("inode-addressed revision readback did not match the revised payload")
 	}
@@ -1413,7 +1413,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 			nil,
 		),
 	)
-	_, err := transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+	_, err := h.client.Files.Upload(ctx, files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
 		Bytes:       []byte(request.CapturedContentUTF8),
@@ -1423,7 +1423,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("create replaced snapshot file: %v", err)
 	}
-	_, err = transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+	_, err = h.client.Files.Upload(ctx, files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.DeletedFileName)),
 		Bytes:       []byte(request.DeletedContentUTF8),
@@ -1456,7 +1456,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	replace := loonfs.DestinationBehaviorReplace
-	_, err = transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+	_, err = h.client.Files.Upload(ctx, files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
 		Bytes:       []byte(request.CurrentContentUTF8),
@@ -1467,7 +1467,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("replace snapshot file: %v", err)
 	}
-	_, err = transfers.PutFile(ctx, h.client, transfers.PutFileInput{
+	_, err = h.client.Files.Upload(ctx, files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.AddedFileName)),
 		Bytes:       []byte(request.AddedContentUTF8),
@@ -2587,9 +2587,9 @@ func statPath(t *testing.T, sdk *server.Client, namespaceID, path string) *loonf
 	return entry
 }
 
-func getFile(t *testing.T, sdk *server.Client, namespaceID, path string) *transfers.GetFileResult {
+func downloadFile(t *testing.T, sdk *server.Client, namespaceID, path string) *files.DownloadResult {
 	t.Helper()
-	result, err := transfers.GetFile(context.Background(), sdk, transfers.GetFileInput{
+	result, err := sdk.Files.Download(context.Background(), files.DownloadInput{
 		NamespaceID: loonfs.NamespaceID(namespaceID),
 		Path:        loonfs.AbsolutePath(path),
 	})

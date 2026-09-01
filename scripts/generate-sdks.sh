@@ -109,6 +109,18 @@ server_module = package_root / "server.py"
     '"""Explicit server and proxy entry points for the LoonFS SDK."""\n'
 )
 
+source = server_module.read_text()
+generated_import = "    from .client import AsyncLoonFS, LoonFS\n"
+assert source.count(generated_import) == 1, "generated server.py client import not found"
+source = source.replace(
+    generated_import,
+    "    from .client import AsyncLoonFS\n    from .transfers import LoonFS\n",
+)
+generated_mapping = '    "LoonFS": ".client",\n'
+assert source.count(generated_mapping) == 1, "generated server.py client mapping not found"
+source = source.replace(generated_mapping, '    "LoonFS": ".transfers",\n')
+server_module.write_text(source)
+
 for example_path in [*package_root.rglob("*.py"), package_root / "reference.md"]:
     source = example_path.read_text()
     example_path.write_text(
@@ -163,6 +175,22 @@ source = source.replace("                headers: response.headers,\n", "")
 fetcher_path.write_text(source)
 
 (package_root / "core/fetcher/createRequestUrl.ts").unlink()
+
+index_path = package_root / "index.ts"
+source = index_path.read_text()
+generated_export = 'export { LoonFSClient } from "./Client.js";\n'
+assert source.count(generated_export) == 1, "generated index.ts client export not found"
+source = source.replace(
+    generated_export,
+    'export { LoonFSClient } from "./transfers.js";\n'
+    'export type {\n'
+    '    FileDownloadInput,\n'
+    '    FileDownloadResult,\n'
+    '    FileUploadInput,\n'
+    '    FileUploadResult,\n'
+    '} from "./transfers.js";\n',
+)
+index_path.write_text(source)
 PY
         ;;
     esac

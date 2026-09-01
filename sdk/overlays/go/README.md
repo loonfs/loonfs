@@ -39,7 +39,7 @@ func main() {
 }
 ```
 
-Upload and download helpers are available from the `transfers` package. See
+`client.Files.Upload` and `client.Files.Download` transfer whole files in memory. See
 [reference.md](./reference.md) for the generated API reference.
 
 ## Proxy

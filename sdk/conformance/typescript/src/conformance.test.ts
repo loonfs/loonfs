@@ -8,15 +8,10 @@ import { pipeline } from "node:stream/promises";
 import { test } from "node:test";
 
 import { LoonFS, LoonFSClient } from "../../../generated/typescript/index.js";
-import { getFile, putFile } from "../../../generated/typescript/transfers.js";
 import {
     LoonFS as BrowserLoonFS,
     LoonFSClient as BrowserLoonFSClient,
 } from "../../../generated/typescript-client/index.js";
-import {
-    getFile as getBrowserFile,
-    putFile as putBrowserFile,
-} from "../../../generated/typescript-client/transfers.js";
 import { createProxyHandler } from "../../../proxy/typescript/proxy.js";
 
 
@@ -872,7 +867,7 @@ async function assertBrowserTransfer(
     commitId: string,
     label: string,
 ): Promise<void> {
-    const committed = await putBrowserFile(client, {
+    const committed = await client.files.upload({
         namespace_alias: namespaceAlias,
         path,
         bytes,
@@ -881,7 +876,7 @@ async function assertBrowserTransfer(
     });
     assert.ok(committed.committed_seq > 0, `${label} commit sequence is not positive`);
 
-    const readback = await getBrowserFile(client, {
+    const readback = await client.files.download({
         namespace_alias: namespaceAlias,
         path,
     });
@@ -1405,7 +1400,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
             childPath(request.path_directory_name),
         ),
     );
-    await putFile(client, {
+    await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.path_file_name),
         bytes: new TextEncoder().encode(request.content_utf8),
@@ -1620,14 +1615,14 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
             request.directory,
         ),
     );
-    await putFile(client, {
+    await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.replaced_file_name),
         bytes: capturedBytes,
         actor: request.actor,
         commit_id: "conf-snapshots-create-replaced",
     });
-    await putFile(client, {
+    await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.deleted_file_name),
         bytes: new TextEncoder().encode(request.deleted_content_utf8),
@@ -1645,7 +1640,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     assert.equal(snapshot.head_seq, expected.snapshot_head_seq);
     assert.ok(snapshot.expires_at_ms > snapshot.created_at_ms);
 
-    await putFile(client, {
+    await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.replaced_file_name),
         bytes: currentBytes,
@@ -1653,7 +1648,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         commit_id: "conf-snapshots-replace-file",
         behavior: "replace",
     });
-    await putFile(client, {
+    await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.added_file_name),
         bytes: new TextEncoder().encode(request.added_content_utf8),
@@ -2044,7 +2039,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
 
     // The rig fails only at begin. No session exists then, so mid-flow cleanup is not covered.
     await assert.rejects(
-        putBrowserFile(browserClient, {
+        browserClient.files.upload({
             namespace_alias: request.unknown_namespace_alias,
             path: `${request.proxied_path}-browser-failure`,
             bytes: payload,
@@ -2235,9 +2230,9 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     );
 
     // The same content through the high-level helper: the payload exceeds the
-    // part size, so this exercises putFile's multipart branch.
+    // part size, so this exercises files.upload's multipart branch.
     const helperPath = `${request.path}-helper`;
-    const helperCommit = await putFile(activeHarness.client, {
+    const helperCommit = await activeHarness.client.files.upload({
         namespace_id: request.namespace_id,
         path: helperPath,
         bytes: payload,
@@ -2245,7 +2240,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         commit_id: `${request.commit_id}-helper`,
     });
     assert.ok(helperCommit.committed_seq > 0, "helper multipart put reported no committed_seq");
-    const helperRead = await getFile(activeHarness.client, {
+    const helperRead = await activeHarness.client.files.download({
         namespace_id: request.namespace_id,
         path: helperPath,
     });
@@ -2284,7 +2279,7 @@ conformanceTest("download", async (activeHarness, testCase) => {
     const [request, expected] = decodeDownload(testCase);
     await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
     const payload = new TextEncoder().encode(request.content_utf8);
-    const committed = await putFile(activeHarness.client, {
+    const committed = await activeHarness.client.files.upload({
         namespace_id: request.namespace_id,
         path: request.path,
         bytes: payload,
@@ -2298,7 +2293,7 @@ conformanceTest("download", async (activeHarness, testCase) => {
             path: request.path,
         }),
     );
-    const download = await getFile(activeHarness.client, {
+    const download = await activeHarness.client.files.download({
         namespace_id: request.namespace_id,
         path: request.path,
     });
@@ -2327,7 +2322,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     assert.equal(mkdir.committed_seq, expected.mkdir_committed_seq);
 
     const payload = new TextEncoder().encode(request.content_utf8);
-    const upload = await putFile(activeHarness.client, {
+    const upload = await activeHarness.client.files.upload({
         namespace_id: request.namespace_id,
         path: request.upload_path,
         bytes: payload,
@@ -2350,7 +2345,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     });
     assert.ok(initialListing.data.some((entry) => entry.path === request.upload_path));
 
-    const downloaded = await getFile(activeHarness.client, {
+    const downloaded = await activeHarness.client.files.download({
         namespace_id: request.namespace_id,
         path: request.upload_path,
     });
