@@ -34,7 +34,8 @@ prune_generated() {
     case "$1" in
     go)
         # Fern cannot omit these generator-level model tests.
-        for name in admin filesystem inodes namespaces query system types uploads; do
+        for name in capabilities changes commits files inodes namespaces snapshots trash types uploads \
+            admin/checkpoints admin/diagnostics admin/grep_index admin/maintenance; do
             rm "generated/go/${name}_test.go"
         done
         python3 - <<'PY'
@@ -54,7 +55,10 @@ for source_path in [*module_root.rglob("*.go"), *module_root.rglob("*.md")]:
         'client "github.com/loonfs/loonfs-sdk-go/server"',
         'server "github.com/loonfs/loonfs-sdk-go/server"',
     )
-    source = source.replace("client.NewClient", "server.NewClient")
+    # Only files that import the root server package construct the root client;
+    # server/client.go builds the nested admin client through its own `client` alias.
+    if '"github.com/loonfs/loonfs-sdk-go/server"' in source:
+        source = source.replace("client.NewClient", "server.NewClient")
     if source_path.parent == server_package:
         source = source.replace("package client", "package server")
     source_path.write_text(source)

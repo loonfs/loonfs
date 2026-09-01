@@ -226,7 +226,7 @@ type errorStatusExpected struct {
 func runErrorContract(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[errorContractRequest, errorContractExpected](t, testCase)
-	_, err := h.unauthenticated.Namespaces.GetNamespace(
+	_, err := h.unauthenticated.Namespaces.Retrieve(
 		context.Background(),
 		&loonfs.GetNamespaceRequest{NamespaceID: request.NamespaceID},
 	)
@@ -271,11 +271,11 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		request.Path,
 		&request.Message,
 	)
-	first, err := h.client.Filesystem.CreateCommit(context.Background(), commit)
+	first, err := h.client.Commits.Create(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("first commit: %v", err)
 	}
-	replayed, err := h.client.Filesystem.CreateCommit(context.Background(), commit)
+	replayed, err := h.client.Commits.Create(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("replayed commit: %v", err)
 	}
@@ -317,7 +317,7 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	createNamespace(t, h.client, request.NamespaceID)
 	payload := []byte(request.ContentUTF8)
 	sizeBytes := int64(len(payload))
-	begin, err := h.client.Uploads.CreateUpload(context.Background(), &loonfs.CreateUploadRequest{
+	begin, err := h.client.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
 		Body: &loonfs.BeginUploadRequest{
 			DirectPut: &loonfs.BeginUploadDirectPut{SizeBytes: &sizeBytes},
@@ -342,7 +342,7 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
 		SizeBytes: int64(len(payload)),
 	}
-	completed, err := h.client.Uploads.CompleteUpload(context.Background(), &loonfs.CompleteUploadBody{
+	completed, err := h.client.Uploads.Complete(context.Background(), &loonfs.CompleteUploadBody{
 		NamespaceID: request.NamespaceID,
 		UploadID:    string(begin.DirectPut.UploadID),
 		Body: &loonfs.CompleteUploadRequest{
@@ -411,7 +411,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	request, expected := decodeCaseValues[multipartRequest, multipartExpected](t, testCase)
 	createNamespace(t, h.client, request.NamespaceID)
 	payload := makeBytePattern(t, request.ContentPattern)
-	begin, err := h.client.Uploads.CreateUpload(context.Background(), &loonfs.CreateUploadRequest{
+	begin, err := h.client.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
 		Body: &loonfs.BeginUploadRequest{
 			DirectMultipart: &loonfs.BeginUploadDirectMultipart{
@@ -446,7 +446,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 			PartNumber: index + 1,
 		}
 	}
-	signed, err := h.client.Uploads.SignUploadParts(context.Background(), &loonfs.SignUploadPartsRequest{
+	signed, err := h.client.Uploads.SignParts(context.Background(), &loonfs.SignUploadPartsRequest{
 		NamespaceID: request.NamespaceID,
 		UploadID:    string(begin.DirectMultipart.UploadID),
 		Parts:       claims,
@@ -487,12 +487,12 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 			},
 		},
 	}
-	first, err := h.client.Uploads.CompleteUpload(context.Background(), completionRequest)
+	first, err := h.client.Uploads.Complete(context.Background(), completionRequest)
 	if err != nil {
 		t.Fatalf("complete multipart upload: %v", err)
 	}
 	firstStatus := requireCompletedStatus(t, first)
-	replayed, err := h.client.Uploads.CompleteUpload(context.Background(), completionRequest)
+	replayed, err := h.client.Uploads.Complete(context.Background(), completionRequest)
 	if err != nil {
 		t.Fatalf("replay multipart completion: %v", err)
 	}
@@ -568,7 +568,7 @@ func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[abortRequest, abortExpected](t, testCase)
 	createNamespace(t, h.client, request.NamespaceID)
-	begin, err := h.client.Uploads.CreateUpload(context.Background(), &loonfs.CreateUploadRequest{
+	begin, err := h.client.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
 		Body: &loonfs.BeginUploadRequest{
 			ServiceProxied: &loonfs.BeginUploadServiceProxied{},
@@ -587,11 +587,11 @@ func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: request.NamespaceID,
 		UploadID:    string(begin.ServiceProxied.UploadID),
 	}
-	first, err := h.client.Uploads.AbortUpload(context.Background(), abort)
+	first, err := h.client.Uploads.Abort(context.Background(), abort)
 	if err != nil {
 		t.Fatalf("abort upload: %v", err)
 	}
-	replayed, err := h.client.Uploads.AbortUpload(context.Background(), abort)
+	replayed, err := h.client.Uploads.Abort(context.Background(), abort)
 	if err != nil {
 		t.Fatalf("replay abort: %v", err)
 	}
@@ -643,7 +643,7 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	stat := statPath(t, h.client, request.NamespaceID, request.Path)
 	file := requireFileProjection(t, stat)
-	grant, err := h.client.Filesystem.CreateDownload(context.Background(), &loonfs.BeginDownloadRequest{
+	grant, err := h.client.Files.CreateDownload(context.Background(), &loonfs.BeginDownloadRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        loonfs.AbsolutePath(request.Path),
 	})
@@ -765,7 +765,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("moved listing does not contain %q", request.MovedPath)
 	}
 
-	revisions, err := h.client.Filesystem.ListFileRevisions(context.Background(), &loonfs.ListFileRevisionsRequest{
+	revisions, err := h.client.Files.ListRevisions(context.Background(), &loonfs.ListFileRevisionsRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        request.MovedPath,
 	})
@@ -820,7 +820,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 		}
 	}
 
-	trash, err := h.client.Filesystem.ListTrash(context.Background(), &loonfs.ListTrashRequest{
+	trash, err := h.client.Trash.List(context.Background(), &loonfs.ListTrashRequest{
 		NamespaceID: request.NamespaceID,
 	})
 	if err != nil {
@@ -908,7 +908,7 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 	var savedCursor *string
 	resumeOffset := -1
 	ctx := context.Background()
-	page, err := h.client.Inodes.ListInodeChildren(
+	page, err := h.client.Inodes.ListChildren(
 		ctx,
 		&loonfs.ListInodeChildrenRequest{
 			NamespaceID: request.NamespaceID,
@@ -996,7 +996,7 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	resumed := make([]string, 0, len(request.EntryNames)-resumeOffset)
-	page, err = h.client.Inodes.ListInodeChildren(
+	page, err = h.client.Inodes.ListChildren(
 		ctx,
 		&loonfs.ListInodeChildrenRequest{
 			NamespaceID: request.NamespaceID,
@@ -1223,7 +1223,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		}
 	}
 
-	_, err := h.client.Filesystem.CreateCommit(
+	_, err := h.client.Commits.Create(
 		context.Background(),
 		moveByInode("conf-inode-mutations-stale-move", staleGeneration),
 	)
@@ -1237,7 +1237,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	if conflict.Body == nil || conflict.Body.Code != expected.StaleBindingGeneration.Code {
 		t.Errorf("stale move body = %#v, want code %q", conflict.Body, expected.StaleBindingGeneration.Code)
 	}
-	_, err = h.client.Filesystem.CreateCommit(
+	_, err = h.client.Commits.Create(
 		context.Background(),
 		moveByInode("conf-inode-mutations-malformed-move", request.MalformedBindingGeneration),
 	)
@@ -1276,7 +1276,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	limit := 1
-	feed, err := h.client.Filesystem.ListChanges(context.Background(), &loonfs.ListChangesRequest{
+	feed, err := h.client.Changes.List(context.Background(), &loonfs.ListChangesRequest{
 		NamespaceID: request.NamespaceID,
 		AfterSeq:    loonfs.ChangeSeq(expected.MovedCommittedSeq - 1),
 		Limit:       &limit,
@@ -1323,7 +1323,7 @@ func stageContent(
 	payload []byte,
 ) (*loonfs.ContentRef, *loonfs.ContentToken) {
 	t.Helper()
-	begin, err := sdk.Uploads.CreateUpload(context.Background(), &loonfs.CreateUploadRequest{
+	begin, err := sdk.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: namespaceID,
 		Body: &loonfs.BeginUploadRequest{
 			ServiceProxied: &loonfs.BeginUploadServiceProxied{},
@@ -1336,7 +1336,7 @@ func stageContent(
 		t.Fatalf("begin upload mode = %q, want service_proxied", begin.Mode)
 	}
 	uploadID := string(begin.ServiceProxied.UploadID)
-	if _, err := sdk.Uploads.PutUploadContent(
+	if _, err := sdk.Uploads.PutContent(
 		context.Background(),
 		namespaceID,
 		uploadID,
@@ -1344,7 +1344,7 @@ func stageContent(
 	); err != nil {
 		t.Fatalf("stage upload content: %v", err)
 	}
-	completed, err := sdk.Uploads.CompleteUpload(context.Background(), &loonfs.CompleteUploadBody{
+	completed, err := sdk.Uploads.Complete(context.Background(), &loonfs.CompleteUploadBody{
 		NamespaceID: namespaceID,
 		UploadID:    uploadID,
 		Body: &loonfs.CompleteUploadRequest{
@@ -1434,7 +1434,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("create deleted snapshot file: %v", err)
 	}
 
-	snapshot, err := h.client.Namespaces.CreateSnapshot(ctx, &loonfs.CreateSnapshotRequest{
+	snapshot, err := h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
 		NamespaceID: request.NamespaceID,
 		Name:        request.SnapshotName,
 		TTLMs:       request.CreateTTLMs,
@@ -1493,7 +1493,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	})
 
 	snapshotID := snapshot.SnapshotID
-	capturedEntry, err := h.client.Filesystem.GetPathEntry(ctx, &loonfs.GetPathEntryRequest{
+	capturedEntry, err := h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
 		SnapshotID:  &snapshotID,
@@ -1509,7 +1509,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("current revision_no = %d, want %d", revision, expected.CurrentRevisionNo)
 	}
 
-	capturedListing, err := h.client.Filesystem.ListPathEntries(ctx, &loonfs.ListPathEntriesRequest{
+	capturedListing, err := h.client.Files.List(ctx, &loonfs.ListPathEntriesRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        request.Directory,
 		SnapshotID:  &snapshotID,
@@ -1548,7 +1548,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	limit := 100
-	feed, err := h.client.Filesystem.ListChanges(ctx, &loonfs.ListChangesRequest{
+	feed, err := h.client.Changes.List(ctx, &loonfs.ListChangesRequest{
 		NamespaceID: request.NamespaceID,
 		AfterSeq:    loonfs.ChangeSeq(0),
 		Limit:       &limit,
@@ -1571,7 +1571,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("snapshot change seqs = %v, want %v", changeSeqs, expected.SnapshotChangeSeqs)
 	}
 
-	extended, err := h.client.Namespaces.ExtendSnapshot(ctx, &loonfs.ExtendSnapshotRequest{
+	extended, err := h.client.Snapshots.Extend(ctx, &loonfs.ExtendSnapshotRequest{
 		NamespaceID: request.NamespaceID,
 		SnapshotID:  snapshotID,
 		TTLMs:       request.ExtendTTLMs,
@@ -1586,7 +1586,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("extended expires_at_ms = %d, want greater than %d", extended.ExpiresAtMs, snapshot.ExpiresAtMs)
 	}
 
-	listed, err := h.client.Namespaces.ListSnapshots(ctx, &loonfs.ListSnapshotsRequest{
+	listed, err := h.client.Snapshots.List(ctx, &loonfs.ListSnapshotsRequest{
 		NamespaceID: request.NamespaceID,
 	})
 	if err != nil {
@@ -1607,7 +1607,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		SnapshotID:  snapshotID,
 	}
 	for _, label := range []string{"release snapshot", "release snapshot again"} {
-		released, releaseErr := h.client.Namespaces.ReleaseSnapshot(ctx, releaseRequest)
+		released, releaseErr := h.client.Snapshots.Release(ctx, releaseRequest)
 		if releaseErr != nil {
 			t.Fatalf("%s: %v", label, releaseErr)
 		}
@@ -1616,13 +1616,13 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		}
 	}
 
-	_, err = h.client.Filesystem.GetPathEntry(ctx, &loonfs.GetPathEntryRequest{
+	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
 		SnapshotID:  &snapshotID,
 	})
 	assertGoneError(t, err, expected.SnapshotGone)
-	_, err = h.client.Namespaces.ExtendSnapshot(ctx, &loonfs.ExtendSnapshotRequest{
+	_, err = h.client.Snapshots.Extend(ctx, &loonfs.ExtendSnapshotRequest{
 		NamespaceID: request.NamespaceID,
 		SnapshotID:  snapshotID,
 		TTLMs:       request.ExtendTTLMs,
@@ -1630,7 +1630,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	assertGoneError(t, err, expected.SnapshotGone)
 
 	unknownSnapshotID := loonfs.CheckpointID(request.UnknownSnapshotID)
-	_, err = h.client.Filesystem.GetPathEntry(ctx, &loonfs.GetPathEntryRequest{
+	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
 		SnapshotID:  &unknownSnapshotID,
@@ -1644,14 +1644,14 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	revision := loonfs.RevisionNo(expected.CapturedRevisionNo)
-	_, err = h.client.Filesystem.GetFileBytes(ctx, &loonfs.GetFileBytesRequest{
+	_, err = h.client.Files.Content(ctx, &loonfs.GetFileBytesRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
 		RevisionNo:  &revision,
 		SnapshotID:  &snapshotID,
 	})
 	assertBadRequestError(t, err, expected.RevisionWithSnapshot)
-	_, err = h.client.Namespaces.CreateSnapshot(ctx, &loonfs.CreateSnapshotRequest{
+	_, err = h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
 		NamespaceID: request.NamespaceID,
 		Name:        request.SnapshotName,
 		TTLMs:       0,
@@ -1666,7 +1666,7 @@ func readSDKFileBytes(
 	label string,
 ) []byte {
 	t.Helper()
-	reader, err := sdk.Filesystem.GetFileBytes(context.Background(), request)
+	reader, err := sdk.Files.Content(context.Background(), request)
 	if err != nil {
 		t.Fatalf("%s: %v", label, err)
 	}
@@ -1739,7 +1739,7 @@ func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 	var savedCursor *string
 	resumeOffset := -1
 	ctx := context.Background()
-	page, err := h.client.Filesystem.ListPathEntries(
+	page, err := h.client.Files.List(
 		ctx,
 		&loonfs.ListPathEntriesRequest{
 			NamespaceID: request.NamespaceID,
@@ -1793,7 +1793,7 @@ func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	resumed := make([]string, 0, len(request.EntryNames)-resumeOffset)
-	page, err = h.client.Filesystem.ListPathEntries(
+	page, err = h.client.Files.List(
 		ctx,
 		&loonfs.ListPathEntriesRequest{
 			NamespaceID: request.NamespaceID,
@@ -2251,14 +2251,14 @@ func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 		request.Path,
 		nil,
 	)
-	committed, err := h.client.Filesystem.CreateCommit(context.Background(), commit)
+	committed, err := h.client.Commits.Create(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("commit change: %v", err)
 	}
 	if int64(committed.CommittedSeq) != expected.CommittedSeq {
 		t.Errorf("committed_seq = %d, want %d", committed.CommittedSeq, expected.CommittedSeq)
 	}
-	feed, err := h.client.Filesystem.ListChanges(
+	feed, err := h.client.Changes.List(
 		context.Background(),
 		&loonfs.ListChangesRequest{
 			NamespaceID: request.NamespaceID,
@@ -2568,7 +2568,7 @@ func commitCompletedFile(
 
 func applyCommit(t *testing.T, sdk *server.Client, request *loonfs.CommitRequest) *loonfs.CommitResponse {
 	t.Helper()
-	response, err := sdk.Filesystem.CreateCommit(context.Background(), request)
+	response, err := sdk.Commits.Create(context.Background(), request)
 	if err != nil {
 		t.Fatalf("apply commit %q: %v", request.CommitID, err)
 	}
@@ -2577,7 +2577,7 @@ func applyCommit(t *testing.T, sdk *server.Client, request *loonfs.CommitRequest
 
 func statPath(t *testing.T, sdk *server.Client, namespaceID, path string) *loonfs.PathEntry {
 	t.Helper()
-	entry, err := sdk.Filesystem.GetPathEntry(context.Background(), &loonfs.GetPathEntryRequest{
+	entry, err := sdk.Files.Retrieve(context.Background(), &loonfs.GetPathEntryRequest{
 		NamespaceID: namespaceID,
 		Path:        path,
 	})
@@ -2606,7 +2606,7 @@ func listPathEntries(
 	path string,
 ) []*loonfs.PathEntry {
 	t.Helper()
-	page, err := sdk.Filesystem.ListPathEntries(context.Background(), &loonfs.ListPathEntriesRequest{
+	page, err := sdk.Files.List(context.Background(), &loonfs.ListPathEntriesRequest{
 		NamespaceID: namespaceID,
 		Path:        path,
 	})
@@ -2627,7 +2627,7 @@ func listingContainsPath(entries []*loonfs.PathEntry, path string) bool {
 
 func listChanges(t *testing.T, sdk *server.Client, namespaceID string) *loonfs.ListChangesResponse {
 	t.Helper()
-	changes, err := sdk.Filesystem.ListChanges(context.Background(), &loonfs.ListChangesRequest{
+	changes, err := sdk.Changes.List(context.Background(), &loonfs.ListChangesRequest{
 		NamespaceID: namespaceID,
 		AfterSeq:    loonfs.ChangeSeq(0),
 	})
@@ -2646,7 +2646,7 @@ func actorsEqual(left, right *loonfs.ActorRef) bool {
 
 func createNamespace(t *testing.T, sdk *server.Client, namespaceID string) {
 	t.Helper()
-	_, err := sdk.Namespaces.CreateNamespace(
+	_, err := sdk.Namespaces.Create(
 		context.Background(),
 		&loonfs.CreateNamespaceRequest{NamespaceID: loonfs.NamespaceID(namespaceID)},
 	)
@@ -2664,7 +2664,7 @@ func applyCreateDirectory(
 	path string,
 ) {
 	t.Helper()
-	_, err := sdk.Filesystem.CreateCommit(
+	_, err := sdk.Commits.Create(
 		context.Background(),
 		createDirectoryCommit(namespaceID, commitID, actor, path, nil),
 	)

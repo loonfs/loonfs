@@ -31,7 +31,7 @@ func main() {
 		option.WithToken(os.Getenv("LOONFS_AUTH_TOKEN")),
 	)
 
-	capabilities, err := loon.System.GetCapabilities(context.Background())
+	capabilities, err := loon.Capabilities.Retrieve(context.Background())
 	if err != nil {
 		panic(err)
 	}

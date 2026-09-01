@@ -87,7 +87,7 @@ func PutFile(ctx context.Context, c *server.Client, in PutFileInput) (*PutFileRe
 		return nil, fmt.Errorf("transfers: actor is required")
 	}
 
-	capabilities, err := c.System.GetCapabilities(ctx)
+	capabilities, err := c.Capabilities.Retrieve(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("transfers: read capabilities: %w", err)
 	}
@@ -95,7 +95,7 @@ func PutFile(ctx context.Context, c *server.Client, in PutFileInput) (*PutFileRe
 	if err != nil {
 		return nil, err
 	}
-	begin, err := c.Uploads.CreateUpload(ctx, createRequest)
+	begin, err := c.Uploads.Create(ctx, createRequest)
 	if err != nil {
 		return nil, fmt.Errorf("transfers: begin upload: %w", err)
 	}
@@ -120,7 +120,7 @@ func PutFile(ctx context.Context, c *server.Client, in PutFileInput) (*PutFileRe
 	if status.ContentToken != nil {
 		contentTokens = []*loonfs.ContentToken{status.ContentToken}
 	}
-	committed, err := c.Filesystem.CreateCommit(ctx, &loonfs.CommitRequest{
+	committed, err := c.Commits.Create(ctx, &loonfs.CommitRequest{
 		NamespaceID:   string(in.NamespaceID),
 		Actor:         in.Actor,
 		CommitID:      in.CommitID,
@@ -154,14 +154,14 @@ func GetFile(ctx context.Context, c *server.Client, in GetFileInput) (*GetFileRe
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
-	capabilities, err := c.System.GetCapabilities(ctx)
+	capabilities, err := c.Capabilities.Retrieve(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("transfers: read capabilities: %w", err)
 	}
 	if capabilities == nil || !capabilities.Features[featureDirectGet] {
 		return getFileProxied(ctx, c, in)
 	}
-	grant, err := c.Filesystem.CreateDownload(ctx, &loonfs.BeginDownloadRequest{
+	grant, err := c.Files.CreateDownload(ctx, &loonfs.BeginDownloadRequest{
 		NamespaceID: string(in.NamespaceID),
 		Path:        in.Path,
 		RevisionNo:  in.RevisionNo,
@@ -204,7 +204,7 @@ func getFileProxied(ctx context.Context, c *server.Client, in GetFileInput) (*Ge
 	revisionNo := in.RevisionNo
 	var claim *loonfs.ContentRef
 	if revisionNo == nil {
-		entry, err := c.Filesystem.GetPathEntry(ctx, &loonfs.GetPathEntryRequest{
+		entry, err := c.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 			NamespaceID: string(in.NamespaceID),
 			Path:        string(in.Path),
 		})
@@ -219,7 +219,7 @@ func getFileProxied(ctx context.Context, c *server.Client, in GetFileInput) (*Ge
 		revisionNo = &headRevision
 		claim = file.ContentRef
 	} else {
-		page, err := c.Filesystem.ListFileRevisions(ctx, &loonfs.ListFileRevisionsRequest{
+		page, err := c.Files.ListRevisions(ctx, &loonfs.ListFileRevisionsRequest{
 			NamespaceID: string(in.NamespaceID),
 			Path:        string(in.Path),
 		})
@@ -242,7 +242,7 @@ func getFileProxied(ctx context.Context, c *server.Client, in GetFileInput) (*Ge
 		return nil, fmt.Errorf("transfers: revision has no content reference")
 	}
 
-	reader, err := c.Filesystem.GetFileBytes(ctx, &loonfs.GetFileBytesRequest{
+	reader, err := c.Files.Content(ctx, &loonfs.GetFileBytesRequest{
 		NamespaceID: string(in.NamespaceID),
 		Path:        string(in.Path),
 		RevisionNo:  revisionNo,
@@ -364,7 +364,7 @@ func transferDirectPut(
 		Checksum:  checksum,
 		SizeBytes: int64(len(payload)),
 	}
-	completed, err := c.Uploads.CompleteUpload(ctx, &loonfs.CompleteUploadBody{
+	completed, err := c.Uploads.Complete(ctx, &loonfs.CompleteUploadBody{
 		NamespaceID: string(namespaceID),
 		UploadID:    string(begin.UploadID),
 		Body: &loonfs.CompleteUploadRequest{
@@ -406,7 +406,7 @@ func transferDirectMultipart(
 			PartNumber: index + 1,
 		}
 	}
-	signed, err := c.Uploads.SignUploadParts(ctx, &loonfs.SignUploadPartsRequest{
+	signed, err := c.Uploads.SignParts(ctx, &loonfs.SignUploadPartsRequest{
 		NamespaceID: string(namespaceID),
 		UploadID:    string(begin.UploadID),
 		Parts:       claims,
@@ -452,7 +452,7 @@ func transferDirectMultipart(
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: checksum multipart payload: %w", err)
 	}
-	completed, err := c.Uploads.CompleteUpload(ctx, &loonfs.CompleteUploadBody{
+	completed, err := c.Uploads.Complete(ctx, &loonfs.CompleteUploadBody{
 		NamespaceID: string(namespaceID),
 		UploadID:    string(begin.UploadID),
 		Body: &loonfs.CompleteUploadRequest{
@@ -478,7 +478,7 @@ func transferServiceProxied(
 	payload []byte,
 	begin *loonfs.BeginUploadResponseServiceProxied,
 ) (*loonfs.UploadSession, error) {
-	if _, err := c.Uploads.PutUploadContent(
+	if _, err := c.Uploads.PutContent(
 		ctx,
 		string(namespaceID),
 		string(begin.UploadID),
@@ -488,7 +488,7 @@ func transferServiceProxied(
 		abortUpload(ctx, c, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: upload proxied content: %w", err)
 	}
-	completed, err := c.Uploads.CompleteUpload(ctx, &loonfs.CompleteUploadBody{
+	completed, err := c.Uploads.Complete(ctx, &loonfs.CompleteUploadBody{
 		NamespaceID: string(namespaceID),
 		UploadID:    string(begin.UploadID),
 		Body: &loonfs.CompleteUploadRequest{
@@ -502,7 +502,7 @@ func transferServiceProxied(
 }
 
 func abortUpload(ctx context.Context, c *server.Client, namespaceID loonfs.NamespaceID, uploadID loonfs.UploadID) {
-	_, _ = c.Uploads.AbortUpload(ctx, &loonfs.AbortUploadRequest{
+	_, _ = c.Uploads.Abort(ctx, &loonfs.AbortUploadRequest{
 		NamespaceID: string(namespaceID),
 		UploadID:    string(uploadID),
 	})

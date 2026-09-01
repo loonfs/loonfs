@@ -53,7 +53,11 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "capabilities"
+        ],
+        "x-fern-sdk-method-name": "retrieve"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/changes": {
@@ -171,7 +175,12 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "changes"
+        ],
+        "x-fern-sdk-method-name": "list",
+        "x-fern-request-name": "ListChangesRequest"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/commits": {
@@ -268,7 +277,11 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "replayable"
+        "x-loonfs-retry": "replayable",
+        "x-fern-sdk-group-name": [
+          "commits"
+        ],
+        "x-fern-sdk-method-name": "create"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/content": {
@@ -387,7 +400,12 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "files"
+        ],
+        "x-fern-sdk-method-name": "content",
+        "x-fern-request-name": "GetFileBytesRequest"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/downloads": {
@@ -493,7 +511,11 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "files"
+        ],
+        "x-fern-sdk-method-name": "createDownload"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/entries": {
@@ -621,6 +643,11 @@
           }
         },
         "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "files"
+        ],
+        "x-fern-sdk-method-name": "list",
+        "x-fern-request-name": "ListPathEntriesRequest",
         "x-fern-pagination": {
           "cursor": "$request.cursor",
           "next_cursor": "$response.next_cursor",
@@ -730,7 +757,12 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "files"
+        ],
+        "x-fern-sdk-method-name": "retrieve",
+        "x-fern-request-name": "GetPathEntryRequest"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/revisions": {
@@ -839,6 +871,11 @@
           }
         },
         "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "files"
+        ],
+        "x-fern-sdk-method-name": "listRevisions",
+        "x-fern-request-name": "ListFileRevisionsRequest",
         "x-fern-pagination": {
           "cursor": "$request.cursor",
           "next_cursor": "$response.next_cursor",
@@ -943,6 +980,11 @@
           }
         },
         "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "trash"
+        ],
+        "x-fern-sdk-method-name": "list",
+        "x-fern-request-name": "ListTrashRequest",
         "x-fern-pagination": {
           "cursor": "$request.cursor",
           "next_cursor": "$response.next_cursor",
@@ -1115,6 +1157,11 @@
           }
         },
         "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "files"
+        ],
+        "x-fern-sdk-method-name": "grep",
+        "x-fern-request-name": "GrepRequest",
         "x-fern-pagination": {
           "cursor": "$request.cursor",
           "next_cursor": "$response.next_cursor",
@@ -1209,6 +1256,11 @@
           }
         },
         "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "list",
+        "x-fern-request-name": "ListSnapshotsRequest",
         "x-fern-pagination": {
           "cursor": "$request.cursor",
           "next_cursor": "$response.next_cursor",
@@ -1311,7 +1363,11 @@
         "x-loonfs-retry": "not_idempotent",
         "x-fern-retries": {
           "disabled": true
-        }
+        },
+        "x-fern-sdk-group-name": [
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "create"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend": {
@@ -1407,7 +1463,11 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "extend"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/release": {
@@ -1473,7 +1533,12 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "release",
+        "x-fern-request-name": "ReleaseSnapshotRequest"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads": {
@@ -1583,7 +1648,12 @@
         "x-loonfs-retry": "not_idempotent",
         "x-fern-retries": {
           "disabled": true
-        }
+        },
+        "x-fern-sdk-group-name": [
+          "uploads"
+        ],
+        "x-fern-sdk-method-name": "create",
+        "x-fern-request-name": "CreateUploadRequest"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}": {
@@ -1669,7 +1739,12 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "uploads"
+        ],
+        "x-fern-sdk-method-name": "retrieve",
+        "x-fern-request-name": "GetUploadRequest"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort": {
@@ -1765,7 +1840,12 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "uploads"
+        ],
+        "x-fern-sdk-method-name": "abort",
+        "x-fern-request-name": "AbortUploadRequest"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/complete": {
@@ -1882,7 +1962,12 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "replayable"
+        "x-loonfs-retry": "replayable",
+        "x-fern-sdk-group-name": [
+          "uploads"
+        ],
+        "x-fern-sdk-method-name": "complete",
+        "x-fern-request-name": "CompleteUploadBody"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/content": {
@@ -2003,7 +2088,11 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "uploads"
+        ],
+        "x-fern-sdk-method-name": "putContent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/parts": {
@@ -2129,7 +2218,11 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "idempotent",
+        "x-fern-sdk-group-name": [
+          "uploads"
+        ],
+        "x-fern-sdk-method-name": "signParts"
       }
     }
   },

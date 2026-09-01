@@ -854,7 +854,7 @@ async function readProxied(
     snapshotId?: string,
     revisionNo?: number,
 ): Promise<Uint8Array> {
-    const response = await client.filesystem.getFileBytes({
+    const response = await client.files.content({
         namespace_id: namespaceId,
         path,
         snapshot_id: snapshotId,
@@ -898,13 +898,13 @@ async function stageContent(
     namespaceId: string,
     bytes: Uint8Array,
 ): Promise<CompletedUpload> {
-    const begin = await client.uploads.createUpload({
+    const begin = await client.uploads.create({
         namespace_id: namespaceId,
         body: { mode: "service_proxied" },
     });
-    await client.uploads.putUploadContent(arrayBuffer(bytes), namespaceId, begin.upload_id);
+    await client.uploads.putContent(arrayBuffer(bytes), namespaceId, begin.upload_id);
     return completedUpload(
-        await client.uploads.completeUpload({
+        await client.uploads.complete({
             namespace_id: namespaceId,
             upload_id: begin.upload_id,
             body: { mode: "service_proxied" },
@@ -1169,7 +1169,7 @@ conformanceTest("error_contract", async (activeHarness, testCase) => {
     const [request, expected] = decodeErrorContract(testCase);
     let caught: unknown;
     try {
-        await activeHarness.unauthenticated.namespaces.getNamespace({ namespace_id: request.namespace_id });
+        await activeHarness.unauthenticated.namespaces.retrieve({ namespace_id: request.namespace_id });
     } catch (error) {
         caught = error;
     }
@@ -1182,7 +1182,7 @@ conformanceTest("error_contract", async (activeHarness, testCase) => {
 
 conformanceTest("commit_replay", async (activeHarness, testCase) => {
     const [request, expected] = decodeCommitReplay(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
     const commit = directoryCommit(
         request.namespace_id,
         request.commit_id,
@@ -1190,8 +1190,8 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
         request.path,
         request.message,
     );
-    const first = await activeHarness.client.filesystem.createCommit(commit);
-    const replayed = await activeHarness.client.filesystem.createCommit(commit);
+    const first = await activeHarness.client.commits.create(commit);
+    const replayed = await activeHarness.client.commits.create(commit);
 
     assert.equal(first.committed_seq, expected.committed_seq);
     assert.equal(first.commit_id, request.commit_id);
@@ -1201,8 +1201,8 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
 
 conformanceTest("pagination", async (activeHarness, testCase) => {
     const [request, expected] = decodePagination(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
-    await activeHarness.client.filesystem.createCommit(
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.commits.create(
         directoryCommit(
             request.namespace_id,
             "conf-pagination-directory",
@@ -1211,7 +1211,7 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
         ),
     );
     for (const [index, name] of request.entry_names.entries()) {
-        await activeHarness.client.filesystem.createCommit(
+        await activeHarness.client.commits.create(
             directoryCommit(
                 request.namespace_id,
                 `conf-pagination-entry-${index.toString().padStart(2, "0")}`,
@@ -1225,7 +1225,7 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
     let pageCount = 0;
     let savedCursor: string | undefined;
     let resumeOffset: number | undefined;
-    let page = await activeHarness.client.filesystem.listPathEntries({
+    let page = await activeHarness.client.files.list({
         namespace_id: request.namespace_id,
         path: request.directory,
         limit: request.page_size,
@@ -1253,7 +1253,7 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
     assert.ok(resumeOffset !== undefined, "resume position was not recorded");
 
     const resumed: string[] = [];
-    page = await activeHarness.client.filesystem.listPathEntries({
+    page = await activeHarness.client.files.list({
         namespace_id: request.namespace_id,
         path: request.directory,
         limit: request.page_size,
@@ -1276,8 +1276,8 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
 
 conformanceTest("children_by_inode", async (activeHarness, testCase) => {
     const [request, expected] = decodeChildrenByInode(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
-    await activeHarness.client.filesystem.createCommit(
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.commits.create(
         directoryCommit(
             request.namespace_id,
             "conf-children-by-inode-directory",
@@ -1286,7 +1286,7 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
         ),
     );
     for (const [index, name] of [...request.entry_names].reverse().entries()) {
-        await activeHarness.client.filesystem.createCommit(
+        await activeHarness.client.commits.create(
             directoryCommit(
                 request.namespace_id,
                 `conf-children-by-inode-entry-${index.toString().padStart(2, "0")}`,
@@ -1296,7 +1296,7 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
         );
     }
 
-    const parent = await activeHarness.client.filesystem.getPathEntry({
+    const parent = await activeHarness.client.files.retrieve({
         namespace_id: request.namespace_id,
         path: request.directory,
     });
@@ -1305,7 +1305,7 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
     let pageCount = 0;
     let savedCursor: string | undefined;
     let resumeOffset: number | undefined;
-    let page = await activeHarness.client.inodes.listInodeChildren({
+    let page = await activeHarness.client.inodes.listChildren({
         namespace_id: request.namespace_id,
         inode_id: parentInodeId,
         limit: request.page_size,
@@ -1327,7 +1327,7 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
             resumeOffset = observed.length;
         }
         if (pageCount === request.rename_after_page) {
-            const renamed = await activeHarness.client.filesystem.createCommit(
+            const renamed = await activeHarness.client.commits.create(
                 moveCommit(
                     request.namespace_id,
                     request.rename_commit_id,
@@ -1337,7 +1337,7 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
                 ),
             );
             assert.equal(renamed.committed_seq, expected.renamed_head_seq);
-            const renamedParent = await activeHarness.client.filesystem.getPathEntry({
+            const renamedParent = await activeHarness.client.files.retrieve({
                 namespace_id: request.namespace_id,
                 path: request.renamed_directory,
             });
@@ -1355,7 +1355,7 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
     assert.ok(resumeOffset !== undefined, "resume position was not recorded");
 
     const resumed: string[] = [];
-    page = await activeHarness.client.inodes.listInodeChildren({
+    page = await activeHarness.client.inodes.listChildren({
         namespace_id: request.namespace_id,
         inode_id: parentInodeId,
         limit: request.page_size,
@@ -1388,8 +1388,8 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     const client = activeHarness.client;
     const namespaceId = request.namespace_id;
     const childPath = (name: string): string => `${request.directory}/${name}`;
-    await client.namespaces.createNamespace({ namespace_id: namespaceId });
-    await client.filesystem.createCommit(
+    await client.namespaces.create({ namespace_id: namespaceId });
+    await client.commits.create(
         directoryCommit(
             namespaceId,
             "conf-inode-mutations-directory",
@@ -1397,7 +1397,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
             request.directory,
         ),
     );
-    await client.filesystem.createCommit(
+    await client.commits.create(
         directoryCommit(
             namespaceId,
             "conf-inode-mutations-path-directory",
@@ -1413,11 +1413,11 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         commit_id: "conf-inode-mutations-path-file",
     });
 
-    const parent = await client.filesystem.getPathEntry({
+    const parent = await client.files.retrieve({
         namespace_id: namespaceId,
         path: request.directory,
     });
-    await client.filesystem.createCommit({
+    await client.commits.create({
         namespace_id: namespaceId,
         actor: request.actor,
         commit_id: "conf-inode-mutations-inode-directory",
@@ -1434,7 +1434,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         namespaceId,
         new TextEncoder().encode(request.content_utf8),
     );
-    await client.filesystem.createCommit(
+    await client.commits.create(
         stagedCommit(
             namespaceId,
             "conf-inode-mutations-inode-file",
@@ -1449,7 +1449,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         ),
     );
 
-    const listing = await client.filesystem.listPathEntries({
+    const listing = await client.files.list({
         namespace_id: namespaceId,
         path: request.directory,
     });
@@ -1480,7 +1480,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         namespaceId,
         new TextEncoder().encode(request.revised_content_utf8),
     );
-    await client.filesystem.createCommit(
+    await client.commits.create(
         stagedCommit(
             namespaceId,
             "conf-inode-mutations-revision",
@@ -1495,7 +1495,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         ),
     );
     const revised = fileEntry(
-        await client.filesystem.getPathEntry({
+        await client.files.retrieve({
             namespace_id: namespaceId,
             path: childPath(request.inode_file_name),
         }),
@@ -1506,7 +1506,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         new TextEncoder().encode(request.revised_content_utf8),
     );
 
-    await client.filesystem.createCommit(
+    await client.commits.create(
         moveCommit(
             namespaceId,
             "conf-inode-mutations-rename",
@@ -1533,7 +1533,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
 
     assert.ok(revised.binding_generation != null, "revised entry has no binding_generation");
     await assert.rejects(
-        client.filesystem.createCommit(
+        client.commits.create(
             moveByInode("conf-inode-mutations-stale-move", revised.binding_generation),
         ),
         (error: unknown) => {
@@ -1544,7 +1544,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         },
     );
     await assert.rejects(
-        client.filesystem.createCommit(
+        client.commits.create(
             moveByInode(
                 "conf-inode-mutations-malformed-move",
                 request.malformed_binding_generation,
@@ -1558,16 +1558,16 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         },
     );
 
-    const renamed = await client.filesystem.getPathEntry({
+    const renamed = await client.files.retrieve({
         namespace_id: namespaceId,
         path: childPath(request.renamed_file_name),
     });
     assert.ok(renamed.binding_generation != null, "renamed entry has no binding_generation");
-    const moved = await client.filesystem.createCommit(
+    const moved = await client.commits.create(
         moveByInode("conf-inode-mutations-move", renamed.binding_generation),
     );
     assert.equal(moved.committed_seq, expected.moved_committed_seq);
-    const movedEntry = await client.filesystem.getPathEntry({
+    const movedEntry = await client.files.retrieve({
         namespace_id: namespaceId,
         path: `${childPath(request.inode_directory_name)}/${request.moved_file_name}`,
     });
@@ -1575,7 +1575,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     assert.ok(movedEntry.binding_generation != null, "moved entry has no binding_generation");
     assert.notEqual(movedEntry.binding_generation, renamed.binding_generation);
 
-    const feed = await client.filesystem.listChanges({
+    const feed = await client.changes.list({
         namespace_id: namespaceId,
         after_seq: expected.moved_committed_seq - 1,
         limit: 1,
@@ -1587,7 +1587,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     assert.ok(movedEvent?.kind === "moved");
     assert.equal(movedEvent.binding_generation, movedEntry.binding_generation);
 
-    const deleted = await client.filesystem.createCommit({
+    const deleted = await client.commits.create({
         namespace_id: namespaceId,
         actor: request.actor,
         commit_id: "conf-inode-mutations-delete",
@@ -1611,8 +1611,8 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     const capturedBytes = new TextEncoder().encode(request.captured_content_utf8);
     const currentBytes = new TextEncoder().encode(request.current_content_utf8);
 
-    await client.namespaces.createNamespace({ namespace_id: namespaceId });
-    await client.filesystem.createCommit(
+    await client.namespaces.create({ namespace_id: namespaceId });
+    await client.commits.create(
         directoryCommit(
             namespaceId,
             "conf-snapshots-create-directory",
@@ -1635,7 +1635,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         commit_id: "conf-snapshots-create-deleted",
     });
 
-    const snapshot = await client.namespaces.createSnapshot({
+    const snapshot = await client.snapshots.create({
         namespace_id: namespaceId,
         name: request.snapshot_name,
         ttl_ms: request.create_ttl_ms,
@@ -1660,7 +1660,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         actor: request.actor,
         commit_id: "conf-snapshots-add-file",
     });
-    await client.filesystem.createCommit(
+    await client.commits.create(
         deleteCommit(
             namespaceId,
             "conf-snapshots-delete-file",
@@ -1670,7 +1670,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     );
 
     const capturedEntry = fileEntry(
-        await client.filesystem.getPathEntry({
+        await client.files.retrieve({
             namespace_id: namespaceId,
             path: childPath(request.replaced_file_name),
             snapshot_id: snapshot.snapshot_id,
@@ -1678,21 +1678,21 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     );
     assert.equal(capturedEntry.revision_no, expected.captured_revision_no);
     const currentEntry = fileEntry(
-        await client.filesystem.getPathEntry({
+        await client.files.retrieve({
             namespace_id: namespaceId,
             path: childPath(request.replaced_file_name),
         }),
     );
     assert.equal(currentEntry.revision_no, expected.current_revision_no);
 
-    const capturedListing = await client.filesystem.listPathEntries({
+    const capturedListing = await client.files.list({
         namespace_id: namespaceId,
         path: request.directory,
         snapshot_id: snapshot.snapshot_id,
     });
     assert.equal(capturedListing.response.head_seq, expected.snapshot_head_seq);
     assert.deepEqual(listedNames(capturedListing.data), expected.captured_entry_names);
-    const currentListing = await client.filesystem.listPathEntries({
+    const currentListing = await client.files.list({
         namespace_id: namespaceId,
         path: request.directory,
     });
@@ -1712,7 +1712,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         currentBytes,
     );
 
-    const feed = await client.filesystem.listChanges({
+    const feed = await client.changes.list({
         namespace_id: namespaceId,
         after_seq: 0,
         limit: 100,
@@ -1725,7 +1725,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         expected.snapshot_change_seqs,
     );
 
-    const extended = await client.namespaces.extendSnapshot({
+    const extended = await client.snapshots.extend({
         namespace_id: namespaceId,
         snapshot_id: snapshot.snapshot_id,
         ttl_ms: request.extend_ttl_ms,
@@ -1735,7 +1735,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     assert.equal(extended.name, request.snapshot_name);
     assert.ok(extended.expires_at_ms > snapshot.expires_at_ms);
 
-    const listed = await client.namespaces.listSnapshots({ namespace_id: namespaceId });
+    const listed = await client.snapshots.list({ namespace_id: namespaceId });
     assert.equal(listed.response.namespace_id, namespaceId);
     assert.equal(listed.response.next_cursor, undefined);
     assert.equal(listed.data.length, 1);
@@ -1745,15 +1745,15 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         namespace_id: namespaceId,
         snapshot_id: snapshot.snapshot_id,
     };
-    const firstRelease = await client.namespaces.releaseSnapshot(releaseRequest);
+    const firstRelease = await client.snapshots.release(releaseRequest);
     assert.equal(firstRelease.namespace_id, namespaceId);
     assert.equal(firstRelease.snapshot_id, snapshot.snapshot_id);
-    const secondRelease = await client.namespaces.releaseSnapshot(releaseRequest);
+    const secondRelease = await client.snapshots.release(releaseRequest);
     assert.equal(secondRelease.namespace_id, namespaceId);
     assert.equal(secondRelease.snapshot_id, snapshot.snapshot_id);
 
     await assert.rejects(
-        client.filesystem.getPathEntry({
+        client.files.retrieve({
             namespace_id: namespaceId,
             path: childPath(request.replaced_file_name),
             snapshot_id: snapshot.snapshot_id,
@@ -1766,7 +1766,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         },
     );
     await assert.rejects(
-        client.namespaces.extendSnapshot({
+        client.snapshots.extend({
             namespace_id: namespaceId,
             snapshot_id: snapshot.snapshot_id,
             ttl_ms: request.extend_ttl_ms,
@@ -1779,7 +1779,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         },
     );
     await assert.rejects(
-        client.filesystem.getPathEntry({
+        client.files.retrieve({
             namespace_id: namespaceId,
             path: childPath(request.replaced_file_name),
             snapshot_id: request.unknown_snapshot_id,
@@ -1807,7 +1807,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         },
     );
     await assert.rejects(
-        client.namespaces.createSnapshot({
+        client.snapshots.create({
             namespace_id: namespaceId,
             name: request.snapshot_name,
             ttl_ms: 0,
@@ -1845,7 +1845,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const proxy = await startProxyServer(handler);
     context.after(() => proxy.close());
 
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
     const namespaceAliasBase =
         `${proxy.baseUrl}/v0/namespace-aliases/` +
         encodeURIComponent(request.namespace_alias);
@@ -2009,7 +2009,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.deepEqual(beginModes, ["service_proxied"]);
 
-    const capabilities = await browserClient.system.getCapabilities();
+    const capabilities = await browserClient.capabilities.retrieve();
     const proxyUploadMaxBytes = capabilities.limits?.[PROXY_UPLOAD_MAX_BYTES];
     assert.ok(proxyUploadMaxBytes !== undefined, "browser proxy upload limit is not advertised");
     assert.ok(Number.isSafeInteger(proxyUploadMaxBytes) && proxyUploadMaxBytes >= 0);
@@ -2061,13 +2061,13 @@ test("proxy", { skip: environmentSkip }, async (context) => {
 
 conformanceTest("changes", async (activeHarness, testCase) => {
     const [request, expected] = decodeChanges(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
-    const committed = await activeHarness.client.filesystem.createCommit(
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    const committed = await activeHarness.client.commits.create(
         directoryCommit(request.namespace_id, request.commit_id, request.actor, request.path),
     );
     assert.equal(committed.committed_seq, expected.committed_seq);
 
-    const feed = await activeHarness.client.filesystem.listChanges({
+    const feed = await activeHarness.client.changes.list({
         namespace_id: request.namespace_id,
         after_seq: request.after_seq,
     });
@@ -2082,9 +2082,9 @@ conformanceTest("changes", async (activeHarness, testCase) => {
 
 conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
     const [request, expected] = decodeDirectPut(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
     const payload = new TextEncoder().encode(request.content_utf8);
-    const begin = await activeHarness.client.uploads.createUpload({
+    const begin = await activeHarness.client.uploads.create({
         namespace_id: request.namespace_id,
         body: { mode: "direct_put", size_bytes: payload.byteLength },
     });
@@ -2098,7 +2098,7 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
         checksum: checksum(directPut.checksum_algorithm, payload),
     };
     const completed = completedUpload(
-        await activeHarness.client.uploads.completeUpload({
+        await activeHarness.client.uploads.complete({
             namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
             body: { mode: "direct_put", content: claim },
@@ -2112,7 +2112,7 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
         checksum(completed.content_ref.checksum.algorithm, payload),
     );
 
-    const committed = await activeHarness.client.filesystem.createCommit(
+    const committed = await activeHarness.client.commits.create(
         fileCommit(
             request.namespace_id,
             request.commit_id,
@@ -2124,7 +2124,7 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
     );
     assert.equal(committed.committed_seq, expected.committed_seq);
     const stat = fileEntry(
-        await activeHarness.client.filesystem.getPathEntry({
+        await activeHarness.client.files.retrieve({
             namespace_id: request.namespace_id,
             path: request.path,
         }),
@@ -2138,9 +2138,9 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
 
 conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     const [request, expected] = decodeMultipart(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
     const payload = bytePattern(request.content_pattern);
-    const begin = await activeHarness.client.uploads.createUpload({
+    const begin = await activeHarness.client.uploads.create({
         namespace_id: request.namespace_id,
         body: {
             mode: "direct_multipart",
@@ -2158,7 +2158,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         part_number: index + 1,
         checksum: checksum(multipart.checksum_algorithm, chunk),
     }));
-    const signed = await activeHarness.client.uploads.signUploadParts({
+    const signed = await activeHarness.client.uploads.signParts({
         namespace_id: request.namespace_id,
         upload_id: begin.upload_id,
         parts: claims,
@@ -2196,14 +2196,14 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         parts: completedParts,
     };
     const first = completedUpload(
-        await activeHarness.client.uploads.completeUpload({
+        await activeHarness.client.uploads.complete({
             namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
             body: completion,
         }),
     );
     const replayed = completedUpload(
-        await activeHarness.client.uploads.completeUpload({
+        await activeHarness.client.uploads.complete({
             namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
             body: completion,
@@ -2218,7 +2218,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     assert.deepEqual(first.content_ref.checksum, wholeChecksum);
     assert.deepEqual(checksum(first.content_ref.checksum.algorithm, payload), wholeChecksum);
 
-    const committed = await activeHarness.client.filesystem.createCommit(
+    const committed = await activeHarness.client.commits.create(
         fileCommit(
             request.namespace_id,
             request.commit_id,
@@ -2257,19 +2257,19 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
 
 conformanceTest("upload_abort", async (activeHarness, testCase) => {
     const [request, expected] = decodeAbort(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
-    const begin = await activeHarness.client.uploads.createUpload({
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    const begin = await activeHarness.client.uploads.create({
         namespace_id: request.namespace_id,
         body: { mode: "service_proxied" },
     });
     const first = abortedUpload(
-        await activeHarness.client.uploads.abortUpload({
+        await activeHarness.client.uploads.abort({
             namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
         }),
     );
     const replayed = abortedUpload(
-        await activeHarness.client.uploads.abortUpload({
+        await activeHarness.client.uploads.abort({
             namespace_id: request.namespace_id,
             upload_id: begin.upload_id,
         }),
@@ -2282,7 +2282,7 @@ conformanceTest("upload_abort", async (activeHarness, testCase) => {
 
 conformanceTest("download", async (activeHarness, testCase) => {
     const [request, expected] = decodeDownload(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
     const payload = new TextEncoder().encode(request.content_utf8);
     const committed = await putFile(activeHarness.client, {
         namespace_id: request.namespace_id,
@@ -2293,7 +2293,7 @@ conformanceTest("download", async (activeHarness, testCase) => {
     });
     assert.equal(committed.committed_seq, expected.committed_seq);
     const stat = fileEntry(
-        await activeHarness.client.filesystem.getPathEntry({
+        await activeHarness.client.files.retrieve({
             namespace_id: request.namespace_id,
             path: request.path,
         }),
@@ -2315,8 +2315,8 @@ conformanceTest("download", async (activeHarness, testCase) => {
 
 conformanceTest("end_to_end", async (activeHarness, testCase) => {
     const [request, expected] = decodeEndToEnd(testCase);
-    await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespace_id });
-    const mkdir = await activeHarness.client.filesystem.createCommit(
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    const mkdir = await activeHarness.client.commits.create(
         directoryCommit(
             request.namespace_id,
             request.commit_ids.mkdir,
@@ -2336,7 +2336,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     });
     assert.equal(upload.committed_seq, expected.upload_committed_seq);
     const stat = fileEntry(
-        await activeHarness.client.filesystem.getPathEntry({
+        await activeHarness.client.files.retrieve({
             namespace_id: request.namespace_id,
             path: request.upload_path,
         }),
@@ -2344,7 +2344,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     assert.equal(stat.size_bytes, expected.size_bytes);
     const uploadedInode = stat.inode_id;
 
-    const initialListing = await activeHarness.client.filesystem.listPathEntries({
+    const initialListing = await activeHarness.client.files.list({
         namespace_id: request.namespace_id,
         path: request.directory,
     });
@@ -2356,7 +2356,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     });
     assert.deepEqual(downloaded.bytes, payload);
 
-    const moved = await activeHarness.client.filesystem.createCommit(
+    const moved = await activeHarness.client.commits.create(
         moveCommit(
             request.namespace_id,
             request.commit_ids.move,
@@ -2366,25 +2366,25 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         ),
     );
     assert.equal(moved.committed_seq, expected.move_committed_seq);
-    const movedListing = await activeHarness.client.filesystem.listPathEntries({
+    const movedListing = await activeHarness.client.files.list({
         namespace_id: request.namespace_id,
         path: request.directory,
     });
     assert.ok(movedListing.data.some((entry) => entry.path === request.moved_path));
 
-    const revisions = await activeHarness.client.filesystem.listFileRevisions({
+    const revisions = await activeHarness.client.files.listRevisions({
         namespace_id: request.namespace_id,
         path: request.moved_path,
     });
     assert.equal(revisions.data.length, expected.revision_count);
     assert.equal(revisions.data[0]?.commit_id, request.commit_ids.upload);
 
-    let changes = await activeHarness.client.filesystem.listChanges({
+    let changes = await activeHarness.client.changes.list({
         namespace_id: request.namespace_id,
         after_seq: 0,
     });
     assert.equal(changes.changes.length, expected.change_count - 1);
-    const removed = await activeHarness.client.filesystem.createCommit(
+    const removed = await activeHarness.client.commits.create(
         deleteCommit(
             request.namespace_id,
             request.commit_ids.remove,
@@ -2394,7 +2394,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     );
     assert.equal(removed.committed_seq, expected.remove_committed_seq);
 
-    changes = await activeHarness.client.filesystem.listChanges({
+    changes = await activeHarness.client.changes.list({
         namespace_id: request.namespace_id,
         after_seq: 0,
     });
@@ -2412,7 +2412,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         assert.deepEqual(change.committed_by, request.actor);
     }
 
-    const trash = await activeHarness.client.filesystem.listTrash({
+    const trash = await activeHarness.client.trash.list({
         namespace_id: request.namespace_id,
     });
     const removedEntry = trash.data.find((entry) => entry.inode_id === uploadedInode);
