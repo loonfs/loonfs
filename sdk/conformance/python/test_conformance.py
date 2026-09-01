@@ -58,7 +58,6 @@ from loonfs.server import (
     UploadSession_Completed,
 )
 from loonfs.proxy import LoonFSProxy
-from loonfs.transfers import get_file, put_file
 
 
 RUNNER_SKIP = "run scripts/run-sdk-conformance.sh python"
@@ -916,9 +915,8 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
             path=child_path(request.path_directory_name), parents=False
         ),
     )
-    put_file(
-        client,
-        namespace_id=namespace_id,
+    client.files.upload(
+        namespace_id,
         path=child_path(request.path_file_name),
         content=request.content_utf8.encode(),
         actor=request.actor,
@@ -1087,17 +1085,15 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         request.actor,
         FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
     )
-    put_file(
-        client,
-        namespace_id=namespace_id,
+    client.files.upload(
+        namespace_id,
         path=child_path(request.replaced_file_name),
         content=request.captured_content_utf8.encode(),
         actor=request.actor,
         commit_id="conf-snapshots-create-replaced",
     )
-    put_file(
-        client,
-        namespace_id=namespace_id,
+    client.files.upload(
+        namespace_id,
         path=child_path(request.deleted_file_name),
         content=request.deleted_content_utf8.encode(),
         actor=request.actor,
@@ -1114,18 +1110,16 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert snapshot.head_seq == expected.snapshot_head_seq
     assert snapshot.expires_at_ms > snapshot.created_at_ms
 
-    put_file(
-        client,
-        namespace_id=namespace_id,
+    client.files.upload(
+        namespace_id,
         path=child_path(request.replaced_file_name),
         content=request.current_content_utf8.encode(),
         actor=request.actor,
         commit_id="conf-snapshots-replace-file",
         behavior="replace",
     )
-    put_file(
-        client,
-        namespace_id=namespace_id,
+    client.files.upload(
+        namespace_id,
         path=child_path(request.added_file_name),
         content=request.added_content_utf8.encode(),
         actor=request.actor,
@@ -1610,20 +1604,18 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     assert _read_proxied(harness.client, request.namespace_id, request.path) == payload
 
     # The same content through the high-level helper: the payload exceeds the
-    # part size, so this exercises put_file's multipart branch.
+    # part size, so this exercises files.upload's multipart branch.
     helper_path = request.path + "-helper"
-    helper_commit = put_file(
-        harness.client,
-        namespace_id=request.namespace_id,
+    helper_commit = harness.client.files.upload(
+        request.namespace_id,
         path=helper_path,
         content=payload,
         actor=request.actor,
         commit_id=request.commit_id + "-helper",
     )
     assert helper_commit.committed_seq > 0
-    helper_read = get_file(
-        harness.client,
-        namespace_id=request.namespace_id,
+    helper_read = harness.client.files.download(
+        request.namespace_id,
         path=helper_path,
     )
     assert helper_read.content == payload
@@ -1658,9 +1650,8 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     )
     harness.client.namespaces.create(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
-    committed = put_file(
-        harness.client,
-        namespace_id=request.namespace_id,
+    committed = harness.client.files.upload(
+        request.namespace_id,
         path=request.path,
         content=payload,
         actor=request.actor,
@@ -1671,9 +1662,8 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     stat = _file_entry(
         harness.client.files.retrieve(request.namespace_id, path=request.path)
     )
-    downloaded = get_file(
-        harness.client,
-        namespace_id=request.namespace_id,
+    downloaded = harness.client.files.download(
+        request.namespace_id,
         path=request.path,
     )
     assert stat.content_ref == downloaded.content_ref
@@ -1702,9 +1692,8 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     assert mkdir.committed_seq == expected.mkdir_committed_seq
 
     payload = request.content_utf8.encode()
-    upload = put_file(
-        harness.client,
-        namespace_id=request.namespace_id,
+    upload = harness.client.files.upload(
+        request.namespace_id,
         path=request.upload_path,
         content=payload,
         actor=request.actor,
@@ -1723,9 +1712,8 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     )
     assert any(entry.path == request.upload_path for entry in initial_listing.entries)
 
-    downloaded = get_file(
-        harness.client,
-        namespace_id=request.namespace_id,
+    downloaded = harness.client.files.download(
+        request.namespace_id,
         path=request.upload_path,
     )
     assert downloaded.content == payload
