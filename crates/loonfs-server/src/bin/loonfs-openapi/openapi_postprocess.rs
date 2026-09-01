@@ -79,6 +79,10 @@ pub(crate) enum OpenapiPostprocessError {
     Json(#[from] serde_json::Error),
     #[error("OpenAPI operation `{operation_id}` has no retry classification")]
     MissingRetryClassification { operation_id: String },
+    #[error("OpenAPI operation `{operation_id}` has no SDK name")]
+    MissingSdkName { operation_id: String },
+    #[error("OpenAPI SDK-named operation `{operation_id}` does not appear in the document")]
+    MissingSdkNameOperation { operation_id: String },
     #[error("OpenAPI pagination operation `{operation_id}` does not appear in the document")]
     MissingPaginationOperation { operation_id: String },
     #[error("OpenAPI pagination operation `{operation_id}` has no `cursor` query parameter")]
@@ -178,6 +182,335 @@ pub(crate) const OPERATION_RETRY_CLASSES: &[(&str, RetryClass)] = &[
     ("sign_upload_parts", RetryClass::Idempotent),
 ];
 
+/// Names each operation takes in generated SDKs: the Fern group path, the
+/// method name, and the synthesized request type name for operations whose
+/// request is not a component schema. Keep this table sorted by operation ID.
+pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
+    (
+        "abort_upload",
+        SdkName {
+            group: &["uploads"],
+            method: "abort",
+            request: Some("AbortUploadRequest"),
+        },
+    ),
+    (
+        "complete_upload",
+        SdkName {
+            group: &["uploads"],
+            method: "complete",
+            request: Some("CompleteUploadBody"),
+        },
+    ),
+    (
+        "create_checkpoint",
+        SdkName {
+            group: &["admin", "checkpoints"],
+            method: "create",
+            request: None,
+        },
+    ),
+    (
+        "create_commit",
+        SdkName {
+            group: &["commits"],
+            method: "create",
+            request: None,
+        },
+    ),
+    (
+        "create_download",
+        SdkName {
+            group: &["files"],
+            method: "createDownload",
+            request: None,
+        },
+    ),
+    (
+        "create_download_by_inode",
+        SdkName {
+            group: &["inodes"],
+            method: "createDownload",
+            request: Some("CreateDownloadByInodeRequest"),
+        },
+    ),
+    (
+        "create_namespace",
+        SdkName {
+            group: &["namespaces"],
+            method: "create",
+            request: None,
+        },
+    ),
+    (
+        "create_snapshot",
+        SdkName {
+            group: &["snapshots"],
+            method: "create",
+            request: None,
+        },
+    ),
+    (
+        "create_upload",
+        SdkName {
+            group: &["uploads"],
+            method: "create",
+            request: Some("CreateUploadRequest"),
+        },
+    ),
+    (
+        "delete_namespace",
+        SdkName {
+            group: &["namespaces"],
+            method: "delete",
+            request: Some("DeleteNamespaceRequest"),
+        },
+    ),
+    (
+        "disable_grep_index",
+        SdkName {
+            group: &["admin", "grepIndex"],
+            method: "disable",
+            request: Some("DisableGrepIndexRequest"),
+        },
+    ),
+    (
+        "enable_grep_index",
+        SdkName {
+            group: &["admin", "grepIndex"],
+            method: "enable",
+            request: Some("EnableGrepIndexRequest"),
+        },
+    ),
+    (
+        "extend_snapshot",
+        SdkName {
+            group: &["snapshots"],
+            method: "extend",
+            request: None,
+        },
+    ),
+    (
+        "fork_namespace",
+        SdkName {
+            group: &["namespaces"],
+            method: "fork",
+            request: None,
+        },
+    ),
+    (
+        "gc_grep_index",
+        SdkName {
+            group: &["admin", "grepIndex"],
+            method: "gc",
+            request: None,
+        },
+    ),
+    (
+        "get_capabilities",
+        SdkName {
+            group: &["capabilities"],
+            method: "retrieve",
+            request: None,
+        },
+    ),
+    (
+        "get_file_bytes",
+        SdkName {
+            group: &["files"],
+            method: "content",
+            request: Some("GetFileBytesRequest"),
+        },
+    ),
+    (
+        "get_file_revision_bytes_by_inode",
+        SdkName {
+            group: &["inodes"],
+            method: "content",
+            request: Some("GetFileRevisionBytesByInodeRequest"),
+        },
+    ),
+    (
+        "get_grep_index",
+        SdkName {
+            group: &["admin", "grepIndex"],
+            method: "retrieve",
+            request: Some("GetGrepIndexRequest"),
+        },
+    ),
+    (
+        "get_inode",
+        SdkName {
+            group: &["inodes"],
+            method: "retrieve",
+            request: Some("GetInodeRequest"),
+        },
+    ),
+    (
+        "get_namespace",
+        SdkName {
+            group: &["namespaces"],
+            method: "retrieve",
+            request: Some("GetNamespaceRequest"),
+        },
+    ),
+    (
+        "get_namespace_diagnostics",
+        SdkName {
+            group: &["admin", "diagnostics"],
+            method: "retrieve",
+            request: Some("GetNamespaceDiagnosticsRequest"),
+        },
+    ),
+    (
+        "get_path_entry",
+        SdkName {
+            group: &["files"],
+            method: "retrieve",
+            request: Some("GetPathEntryRequest"),
+        },
+    ),
+    (
+        "get_upload",
+        SdkName {
+            group: &["uploads"],
+            method: "retrieve",
+            request: Some("GetUploadRequest"),
+        },
+    ),
+    (
+        "grep",
+        SdkName {
+            group: &["files"],
+            method: "grep",
+            request: Some("GrepRequest"),
+        },
+    ),
+    (
+        "list_changes",
+        SdkName {
+            group: &["changes"],
+            method: "list",
+            request: Some("ListChangesRequest"),
+        },
+    ),
+    (
+        "list_checkpoints",
+        SdkName {
+            group: &["admin", "checkpoints"],
+            method: "list",
+            request: Some("ListCheckpointsRequest"),
+        },
+    ),
+    (
+        "list_file_revisions",
+        SdkName {
+            group: &["files"],
+            method: "listRevisions",
+            request: Some("ListFileRevisionsRequest"),
+        },
+    ),
+    (
+        "list_file_revisions_by_inode",
+        SdkName {
+            group: &["inodes"],
+            method: "listRevisions",
+            request: Some("ListFileRevisionsByInodeRequest"),
+        },
+    ),
+    (
+        "list_inode_children",
+        SdkName {
+            group: &["inodes"],
+            method: "listChildren",
+            request: Some("ListInodeChildrenRequest"),
+        },
+    ),
+    (
+        "list_path_entries",
+        SdkName {
+            group: &["files"],
+            method: "list",
+            request: Some("ListPathEntriesRequest"),
+        },
+    ),
+    (
+        "list_snapshots",
+        SdkName {
+            group: &["snapshots"],
+            method: "list",
+            request: Some("ListSnapshotsRequest"),
+        },
+    ),
+    (
+        "list_trash",
+        SdkName {
+            group: &["trash"],
+            method: "list",
+            request: Some("ListTrashRequest"),
+        },
+    ),
+    (
+        "probe_store",
+        SdkName {
+            group: &["admin", "store"],
+            method: "probe",
+            request: None,
+        },
+    ),
+    (
+        "put_upload_content",
+        SdkName {
+            group: &["uploads"],
+            method: "putContent",
+            request: None,
+        },
+    ),
+    (
+        "release_checkpoint",
+        SdkName {
+            group: &["admin", "checkpoints"],
+            method: "release",
+            request: Some("ReleaseCheckpointRequest"),
+        },
+    ),
+    (
+        "release_snapshot",
+        SdkName {
+            group: &["snapshots"],
+            method: "release",
+            request: Some("ReleaseSnapshotRequest"),
+        },
+    ),
+    (
+        "run_maintenance",
+        SdkName {
+            group: &["admin", "maintenance"],
+            method: "run",
+            request: None,
+        },
+    ),
+    (
+        "sign_upload_parts",
+        SdkName {
+            group: &["uploads"],
+            method: "signParts",
+            request: None,
+        },
+    ),
+];
+
+/// Operations served over HTTP but left out of generated SDKs. Keep this table sorted.
+pub(crate) const SDK_EXCLUDED_OPERATIONS: &[&str] = &["get_health", "get_metrics", "get_readiness"];
+
+/// The SDK surface of one operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SdkName {
+    pub(crate) group: &'static [&'static str],
+    pub(crate) method: &'static str,
+    pub(crate) request: Option<&'static str>,
+}
+
 impl Value {
     fn get(&self, name: &str) -> Option<&Self> {
         self.as_object()?.get(name)
@@ -231,6 +564,7 @@ pub(crate) fn openapi_json_pretty(
     extract_union_variants(&mut document)?;
     merge_union_composites(&mut document)?;
     add_operation_retry_classes(&mut document)?;
+    add_sdk_names(&mut document)?;
     add_pagination_metadata(&mut document)?;
     Ok(serde_json::to_string_pretty(&document)?)
 }
@@ -564,6 +898,85 @@ fn add_operation_retry_classes(document: &mut Value) -> Result<(), OpenapiPostpr
             }
         }
     }
+    Ok(())
+}
+
+/// Adds the Fern naming extensions to every operation and hides the excluded ones.
+fn add_sdk_names(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+    let paths = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("paths"))
+        .and_then(Value::as_object_mut)
+        .expect("OpenAPI document has no paths object");
+    let mut seen_operations = BTreeSet::new();
+
+    for path_item in paths.values_mut() {
+        let path_item = path_item
+            .as_object_mut()
+            .expect("OpenAPI path item is not an object");
+        for &method in HTTP_METHODS {
+            let Some(operation) = path_item.get_mut(method) else {
+                continue;
+            };
+            let operation = operation
+                .as_object_mut()
+                .expect("OpenAPI operation is not an object");
+            let operation_id = operation
+                .get("operationId")
+                .and_then(Value::as_str)
+                .expect("OpenAPI operation has no operationId")
+                .to_owned();
+            seen_operations.insert(operation_id.clone());
+
+            if SDK_EXCLUDED_OPERATIONS.contains(&operation_id.as_str()) {
+                operation.insert("x-fern-ignore".to_owned(), Value::Bool(true));
+                continue;
+            }
+
+            let sdk_name = OPERATION_SDK_NAMES
+                .iter()
+                .find_map(|(candidate, sdk_name)| (*candidate == operation_id).then_some(*sdk_name))
+                .ok_or_else(|| OpenapiPostprocessError::MissingSdkName {
+                    operation_id: operation_id.clone(),
+                })?;
+            operation.insert(
+                "x-fern-sdk-group-name".to_owned(),
+                Value::Array(
+                    sdk_name
+                        .group
+                        .iter()
+                        .map(|segment| Value::String((*segment).to_owned()))
+                        .collect(),
+                ),
+            );
+            operation.insert(
+                "x-fern-sdk-method-name".to_owned(),
+                Value::String(sdk_name.method.to_owned()),
+            );
+            if let Some(request) = sdk_name.request {
+                operation.insert(
+                    "x-fern-request-name".to_owned(),
+                    Value::String(request.to_owned()),
+                );
+            }
+        }
+    }
+
+    for &(operation_id, _) in OPERATION_SDK_NAMES {
+        if !seen_operations.contains(operation_id) {
+            return Err(OpenapiPostprocessError::MissingSdkNameOperation {
+                operation_id: operation_id.to_owned(),
+            });
+        }
+    }
+    for &operation_id in SDK_EXCLUDED_OPERATIONS {
+        if !seen_operations.contains(operation_id) {
+            return Err(OpenapiPostprocessError::MissingSdkNameOperation {
+                operation_id: operation_id.to_owned(),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -1928,6 +2341,68 @@ mod tests {
             OpenapiPostprocessError::MissingRetryClassification { operation_id }
                 if operation_id == "future_operation"
         ));
+    }
+
+    #[test]
+    fn missing_sdk_name_returns_a_named_error() {
+        let mut document = ordered(serde_json::json!({
+            "paths": {
+                "/future": {
+                    "post": {"operationId": "future_operation"}
+                }
+            }
+        }));
+
+        let error =
+            add_sdk_names(&mut document).expect_err("unknown operation should fail generation");
+        assert!(matches!(
+            error,
+            OpenapiPostprocessError::MissingSdkName { operation_id }
+                if operation_id == "future_operation"
+        ));
+    }
+
+    #[test]
+    fn sdk_name_tables_partition_the_retry_registry() {
+        let named = OPERATION_SDK_NAMES
+            .iter()
+            .map(|(operation_id, _)| *operation_id)
+            .collect::<Vec<_>>();
+        let excluded = SDK_EXCLUDED_OPERATIONS.to_vec();
+
+        let mut sorted_named = named.clone();
+        sorted_named.sort_unstable();
+        assert_eq!(named, sorted_named, "SDK name table must stay sorted");
+
+        let mut sorted_excluded = excluded.clone();
+        sorted_excluded.sort_unstable();
+        assert_eq!(
+            excluded, sorted_excluded,
+            "SDK exclusion table must stay sorted"
+        );
+
+        let named_set = named.iter().copied().collect::<BTreeSet<_>>();
+        let excluded_set = excluded.iter().copied().collect::<BTreeSet<_>>();
+        assert!(named_set.is_disjoint(&excluded_set));
+
+        let mut sdk_operations = named;
+        sdk_operations.extend(excluded);
+        sdk_operations.sort_unstable();
+        let mut retry_operations = OPERATION_RETRY_CLASSES
+            .iter()
+            .map(|(operation_id, _)| *operation_id)
+            .collect::<Vec<_>>();
+        retry_operations.sort_unstable();
+        assert_eq!(sdk_operations, retry_operations);
+    }
+
+    #[test]
+    fn sdk_method_names_are_unique_within_each_group() {
+        let methods = OPERATION_SDK_NAMES
+            .iter()
+            .map(|(_, sdk_name)| (sdk_name.group, sdk_name.method))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(methods.len(), OPERATION_SDK_NAMES.len());
     }
 
     #[test]

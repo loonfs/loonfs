@@ -519,7 +519,7 @@ def _apply(
         extra["message"] = message
     if content_tokens is not None:
         extra["content_tokens"] = content_tokens
-    return client.filesystem.create_commit(
+    return client.commits.create(
         namespace_id,
         actor=actor,
         commit_id=commit_id,
@@ -572,13 +572,13 @@ def _completed_upload(response: UploadSession) -> UploadSession_Completed:
 def _stage_content(
     client: LoonFS, namespace_id: str, payload: bytes
 ) -> UploadSession_Completed:
-    begin = client.uploads.create_upload(
+    begin = client.uploads.create(
         namespace_id, request=BeginUploadRequest_ServiceProxied()
     )
     assert isinstance(begin, BeginUploadResponse_ServiceProxied)
-    client.uploads.put_upload_content(namespace_id, begin.upload_id, request=payload)
+    client.uploads.put_content(namespace_id, begin.upload_id, request=payload)
     return _completed_upload(
-        client.uploads.complete_upload(
+        client.uploads.complete(
             namespace_id,
             begin.upload_id,
             request=CompleteUploadRequest_ServiceProxied(),
@@ -606,7 +606,7 @@ def _wire(model: pydantic.BaseModel) -> JsonObject:
 
 
 def _read_proxied(client: LoonFS, namespace_id: str, path: str) -> bytes:
-    return b"".join(client.filesystem.get_file_bytes(namespace_id, path=path))
+    return b"".join(client.files.content(namespace_id, path=path))
 
 
 def _proxy_response_json(response: httpx.Response, label: str) -> JsonObject:
@@ -654,12 +654,12 @@ def _list_path_entries(
     cursor: str | None,
 ) -> Any:
     if cursor is None:
-        return client.filesystem.list_path_entries(
+        return client.files.list(
             request.namespace_id,
             path=request.directory,
             limit=request.page_size,
         )
-    return client.filesystem.list_path_entries(
+    return client.files.list(
         request.namespace_id,
         path=request.directory,
         limit=request.page_size,
@@ -674,12 +674,12 @@ def _list_inode_children(
     cursor: str | None,
 ) -> Any:
     if cursor is None:
-        return client.inodes.list_inode_children(
+        return client.inodes.list_children(
             request.namespace_id,
             parent_inode_id,
             limit=request.page_size,
         )
-    return client.inodes.list_inode_children(
+    return client.inodes.list_children(
         request.namespace_id,
         parent_inode_id,
         limit=request.page_size,
@@ -692,7 +692,7 @@ def test_error_contract(cases: dict[str, ConformanceCase], harness: Harness) -> 
         cases["error_contract"], ErrorContractRequest, ErrorContractExpected
     )
     with pytest.raises(UnauthorizedError) as captured:
-        harness.unauthenticated.namespaces.get_namespace(request.namespace_id)
+        harness.unauthenticated.namespaces.retrieve(request.namespace_id)
 
     error = captured.value
     assert error.status_code == expected.unauthenticated.status
@@ -704,7 +704,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
     request, expected = _decode(
         cases["commit_replay"], CommitReplayRequest, CommitReplayExpected
     )
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
     first = _apply(
         harness.client,
         request.namespace_id,
@@ -733,7 +733,7 @@ def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None
     request, expected = _decode(
         cases["pagination"], PaginationRequest, PaginationExpected
     )
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
     _apply(
         harness.client,
         request.namespace_id,
@@ -798,7 +798,7 @@ def test_children_by_inode(
     request, expected = _decode(
         cases["children_by_inode"], ChildrenByInodeRequest, ChildrenByInodeExpected
     )
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
     _apply(
         harness.client,
         request.namespace_id,
@@ -817,7 +817,7 @@ def test_children_by_inode(
             ),
         )
 
-    parent_inode_id = harness.client.filesystem.get_path_entry(
+    parent_inode_id = harness.client.files.retrieve(
         request.namespace_id, path=request.directory
     ).inode_id
     observed: list[str] = []
@@ -855,7 +855,7 @@ def test_children_by_inode(
                 ),
             )
             assert renamed.committed_seq == expected.renamed_head_seq
-            renamed_inode_id = harness.client.filesystem.get_path_entry(
+            renamed_inode_id = harness.client.files.retrieve(
                 request.namespace_id, path=request.renamed_directory
             ).inode_id
             assert renamed_inode_id == parent_inode_id
@@ -899,7 +899,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
     def child_path(name: str) -> str:
         return f"{request.directory}/{name}"
 
-    client.namespaces.create_namespace(namespace_id=namespace_id)
+    client.namespaces.create(namespace_id=namespace_id)
     _apply(
         client,
         namespace_id,
@@ -925,7 +925,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         commit_id="conf-inode-mutations-path-file",
     )
 
-    parent_inode_id = client.filesystem.get_path_entry(
+    parent_inode_id = client.files.retrieve(
         namespace_id, path=request.directory
     ).inode_id
     _apply(
@@ -952,7 +952,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         content_tokens=[staged.content_token] if staged.content_token else None,
     )
 
-    entries = client.filesystem.list_path_entries(
+    entries = client.files.list(
         namespace_id, path=request.directory
     ).entries
     assert _listed_names(entries) == expected.entry_names
@@ -987,7 +987,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         content_tokens=[staged.content_token] if staged.content_token else None,
     )
     revised = _file_entry(
-        client.filesystem.get_path_entry(
+        client.files.retrieve(
             namespace_id, path=child_path(request.inode_file_name)
         )
     )
@@ -1035,19 +1035,19 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
     assert malformed.value.status_code == expected.malformed_binding_generation.status
     assert malformed.value.body.code == expected.malformed_binding_generation.code
 
-    fresh_generation = client.filesystem.get_path_entry(
+    fresh_generation = client.files.retrieve(
         namespace_id, path=child_path(request.renamed_file_name)
     ).binding_generation
     moved = move_by_inode("conf-inode-mutations-move", fresh_generation)
     assert moved.committed_seq == expected.moved_committed_seq
-    moved_entry = client.filesystem.get_path_entry(
+    moved_entry = client.files.retrieve(
         namespace_id,
         path=f"{child_path(request.inode_directory_name)}/{request.moved_file_name}",
     )
     assert moved_entry.inode_id == inode_file.inode_id
     assert moved_entry.binding_generation != fresh_generation
 
-    feed = client.filesystem.list_changes(
+    feed = client.changes.list(
         namespace_id, after_seq=expected.moved_committed_seq - 1, limit=1
     )
     assert len(feed.changes) == 1
@@ -1079,7 +1079,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     def child_path(name: str) -> str:
         return f"{request.directory}/{name}"
 
-    client.namespaces.create_namespace(namespace_id=namespace_id)
+    client.namespaces.create(namespace_id=namespace_id)
     _apply(
         client,
         namespace_id,
@@ -1104,7 +1104,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         commit_id="conf-snapshots-create-deleted",
     )
 
-    snapshot = client.namespaces.create_snapshot(
+    snapshot = client.snapshots.create(
         namespace_id,
         name=request.snapshot_name,
         ttl_ms=request.create_ttl_ms,
@@ -1140,7 +1140,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     )
 
     captured_entry = _file_entry(
-        client.filesystem.get_path_entry(
+        client.files.retrieve(
             namespace_id,
             path=child_path(request.replaced_file_name),
             snapshot_id=snapshot.snapshot_id,
@@ -1148,28 +1148,28 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     )
     assert captured_entry.revision_no == expected.captured_revision_no
     current_entry = _file_entry(
-        client.filesystem.get_path_entry(
+        client.files.retrieve(
             namespace_id,
             path=child_path(request.replaced_file_name),
         )
     )
     assert current_entry.revision_no == expected.current_revision_no
 
-    captured_listing = client.filesystem.list_path_entries(
+    captured_listing = client.files.list(
         namespace_id,
         path=request.directory,
         snapshot_id=snapshot.snapshot_id,
     )
     assert captured_listing.head_seq == expected.snapshot_head_seq
     assert _listed_names(captured_listing.entries) == expected.captured_entry_names
-    current_listing = client.filesystem.list_path_entries(
+    current_listing = client.files.list(
         namespace_id,
         path=request.directory,
     )
     assert _listed_names(current_listing.entries) == expected.current_entry_names
 
     captured_content = b"".join(
-        client.filesystem.get_file_bytes(
+        client.files.content(
             namespace_id,
             path=child_path(request.replaced_file_name),
             snapshot_id=snapshot.snapshot_id,
@@ -1177,14 +1177,14 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     )
     assert captured_content == request.captured_content_utf8.encode()
     current_content = b"".join(
-        client.filesystem.get_file_bytes(
+        client.files.content(
             namespace_id,
             path=child_path(request.replaced_file_name),
         )
     )
     assert current_content == request.current_content_utf8.encode()
 
-    feed = client.filesystem.list_changes(
+    feed = client.changes.list(
         namespace_id,
         after_seq=0,
         limit=100,
@@ -1196,7 +1196,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         expected.snapshot_change_seqs
     )
 
-    extended = client.namespaces.extend_snapshot(
+    extended = client.snapshots.extend(
         namespace_id,
         snapshot.snapshot_id,
         ttl_ms=request.extend_ttl_ms,
@@ -1206,25 +1206,25 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert extended.name == request.snapshot_name
     assert extended.expires_at_ms > snapshot.expires_at_ms
 
-    listed = client.namespaces.list_snapshots(namespace_id)
+    listed = client.snapshots.list(namespace_id)
     assert listed.namespace_id == namespace_id
     assert listed.next_cursor is None
     assert len(listed.snapshots) == 1
     assert listed.snapshots[0].snapshot_id == snapshot.snapshot_id
 
-    first_release = client.namespaces.release_snapshot(
+    first_release = client.snapshots.release(
         namespace_id, snapshot.snapshot_id
     )
     assert first_release.namespace_id == namespace_id
     assert first_release.snapshot_id == snapshot.snapshot_id
-    second_release = client.namespaces.release_snapshot(
+    second_release = client.snapshots.release(
         namespace_id, snapshot.snapshot_id
     )
     assert second_release.namespace_id == namespace_id
     assert second_release.snapshot_id == snapshot.snapshot_id
 
     with pytest.raises(GoneError) as released_read:
-        client.filesystem.get_path_entry(
+        client.files.retrieve(
             namespace_id,
             path=child_path(request.replaced_file_name),
             snapshot_id=snapshot.snapshot_id,
@@ -1232,7 +1232,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert released_read.value.status_code == expected.snapshot_gone.status
     assert released_read.value.body.code == expected.snapshot_gone.code
     with pytest.raises(GoneError) as released_extend:
-        client.namespaces.extend_snapshot(
+        client.snapshots.extend(
             namespace_id,
             snapshot.snapshot_id,
             ttl_ms=request.extend_ttl_ms,
@@ -1241,7 +1241,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert released_extend.value.body.code == expected.snapshot_gone.code
 
     with pytest.raises(NotFoundError) as unknown_read:
-        client.filesystem.get_path_entry(
+        client.files.retrieve(
             namespace_id,
             path=child_path(request.replaced_file_name),
             snapshot_id=request.unknown_snapshot_id,
@@ -1250,7 +1250,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert unknown_read.value.body.code == expected.snapshot_not_found.code
     with pytest.raises(BadRequestError) as revision_with_snapshot:
         b"".join(
-            client.filesystem.get_file_bytes(
+            client.files.content(
                 namespace_id,
                 path=child_path(request.replaced_file_name),
                 revision_no=expected.captured_revision_no,
@@ -1265,7 +1265,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         revision_with_snapshot.value.body.code == expected.revision_with_snapshot.code
     )
     with pytest.raises(BadRequestError) as zero_ttl:
-        client.namespaces.create_snapshot(
+        client.snapshots.create(
             namespace_id,
             name=request.snapshot_name,
             ttl_ms=0,
@@ -1280,7 +1280,7 @@ def test_proxy(
     proxy_harness: str,
 ) -> None:
     request, expected = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
     namespace_alias_base = f"/v0/namespace-aliases/{request.namespace_alias}"
 
@@ -1435,7 +1435,7 @@ def test_proxy(
 
 def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(cases["changes"], ChangesRequest, ChangesExpected)
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
     committed = _apply(
         harness.client,
         request.namespace_id,
@@ -1445,7 +1445,7 @@ def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     )
     assert committed.committed_seq == expected.committed_seq
 
-    feed = harness.client.filesystem.list_changes(
+    feed = harness.client.changes.list(
         request.namespace_id,
         after_seq=request.after_seq,
     )
@@ -1463,9 +1463,9 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     request, expected = _decode(
         cases["upload_direct_put"], DirectPutRequest, DirectPutExpected
     )
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
-    begin = harness.client.uploads.create_upload(
+    begin = harness.client.uploads.create(
         request.namespace_id,
         request=BeginUploadRequest_DirectPut(size_bytes=len(payload)),
     )
@@ -1478,7 +1478,7 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
         size_bytes=len(payload),
         checksum=_checksum(begin.checksum_algorithm, payload),
     )
-    completed = harness.client.uploads.complete_upload(
+    completed = harness.client.uploads.complete(
         request.namespace_id,
         begin.upload_id,
         request=CompleteUploadRequest_DirectPut(content=claim),
@@ -1501,7 +1501,7 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     )
     assert committed.committed_seq == expected.committed_seq
     stat = _file_entry(
-        harness.client.filesystem.get_path_entry(request.namespace_id, path=request.path)
+        harness.client.files.retrieve(request.namespace_id, path=request.path)
     )
     assert stat.content_ref == content_ref
     assert _read_proxied(harness.client, request.namespace_id, request.path) == payload
@@ -1511,9 +1511,9 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     request, expected = _decode(
         cases["upload_multipart"], MultipartRequest, MultipartExpected
     )
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
     payload = _byte_pattern(request.content_pattern)
-    begin = harness.client.uploads.create_upload(
+    begin = harness.client.uploads.create(
         request.namespace_id,
         request=BeginUploadRequest_DirectMultipart(
             part_size_bytes=request.part_size_bytes,
@@ -1537,7 +1537,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         )
         for index, chunk in enumerate(chunks, start=1)
     ]
-    signed = harness.client.uploads.sign_upload_parts(
+    signed = harness.client.uploads.sign_parts(
         request.namespace_id,
         begin.upload_id,
         parts=claims,
@@ -1568,14 +1568,14 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         ),
         parts=completed_parts,
     )
-    first = harness.client.uploads.complete_upload(
+    first = harness.client.uploads.complete(
         request.namespace_id,
         begin.upload_id,
         request=completion_request,
     )
     first_completed = _completed_upload(first)
     first_content_ref = first_completed.content_ref
-    replayed = harness.client.uploads.complete_upload(
+    replayed = harness.client.uploads.complete(
         request.namespace_id,
         begin.upload_id,
         request=completion_request,
@@ -1634,16 +1634,16 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
 
 def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(cases["upload_abort"], AbortRequest, AbortExpected)
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
-    begin = harness.client.uploads.create_upload(
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    begin = harness.client.uploads.create(
         request.namespace_id,
         request=BeginUploadRequest_ServiceProxied(),
     )
     first = _aborted_upload(
-        harness.client.uploads.abort_upload(request.namespace_id, begin.upload_id)
+        harness.client.uploads.abort(request.namespace_id, begin.upload_id)
     )
     replayed = _aborted_upload(
-        harness.client.uploads.abort_upload(request.namespace_id, begin.upload_id)
+        harness.client.uploads.abort(request.namespace_id, begin.upload_id)
     )
 
     assert first.mode == expected.mode
@@ -1656,7 +1656,7 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(
         cases["download"], DownloadRequest, DownloadExpected
     )
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
     committed = put_file(
         harness.client,
@@ -1669,7 +1669,7 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert committed.committed_seq == expected.committed_seq
 
     stat = _file_entry(
-        harness.client.filesystem.get_path_entry(request.namespace_id, path=request.path)
+        harness.client.files.retrieve(request.namespace_id, path=request.path)
     )
     downloaded = get_file(
         harness.client,
@@ -1691,7 +1691,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     request, expected = _decode(
         cases["end_to_end"], EndToEndRequest, EndToEndExpected
     )
-    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id)
     mkdir = _apply(
         harness.client,
         request.namespace_id,
@@ -1711,13 +1711,13 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         commit_id=request.commit_ids.upload,
     )
     assert upload.committed_seq == expected.upload_committed_seq
-    stat = harness.client.filesystem.get_path_entry(
+    stat = harness.client.files.retrieve(
         request.namespace_id, path=request.upload_path
     )
     assert stat.size_bytes == expected.size_bytes
     uploaded_inode = stat.inode_id
 
-    initial_listing = harness.client.filesystem.list_path_entries(
+    initial_listing = harness.client.files.list(
         request.namespace_id,
         path=request.directory,
     )
@@ -1741,20 +1741,20 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         ),
     )
     assert moved.committed_seq == expected.move_committed_seq
-    moved_listing = harness.client.filesystem.list_path_entries(
+    moved_listing = harness.client.files.list(
         request.namespace_id,
         path=request.directory,
     )
     assert any(entry.path == request.moved_path for entry in moved_listing.entries)
 
-    revisions = harness.client.filesystem.list_file_revisions(
+    revisions = harness.client.files.list_revisions(
         request.namespace_id,
         path=request.moved_path,
     )
     assert len(revisions.revisions) == expected.revision_count
     assert revisions.revisions[0].commit_id == request.commit_ids.upload
 
-    changes_before_remove = harness.client.filesystem.list_changes(
+    changes_before_remove = harness.client.changes.list(
         request.namespace_id,
         after_seq=0,
     )
@@ -1769,7 +1769,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     )
     assert removed.committed_seq == expected.remove_committed_seq
 
-    changes = harness.client.filesystem.list_changes(
+    changes = harness.client.changes.list(
         request.namespace_id,
         after_seq=0,
     )
@@ -1786,7 +1786,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         for change in changes.changes
     )
 
-    trash = harness.client.filesystem.list_trash(request.namespace_id)
+    trash = harness.client.trash.list(request.namespace_id)
     removed_entry = next(
         entry for entry in trash.entries if entry.inode_id == uploaded_inode
     )

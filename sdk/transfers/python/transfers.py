@@ -127,7 +127,7 @@ def put_file(
     }
     if message is not None:
         commit_arguments["message"] = message
-    committed = client.filesystem.create_commit(namespace_id, **commit_arguments)
+    committed = client.commits.create(namespace_id, **commit_arguments)
     return PutFileResult(
         namespace_id=committed.namespace_id,
         commit_id=committed.commit_id,
@@ -145,15 +145,15 @@ def get_file(
 ) -> GetFileResult:
     """Download one file revision into memory and verify its checksum."""
 
-    capabilities = client.system.get_capabilities()
+    capabilities = client.capabilities.retrieve()
     if not capabilities.features.get(_DIRECT_GET_FEATURE, False):
         return _get_file_proxied(
             client, namespace_id=namespace_id, path=path, revision_no=revision_no
         )
     if revision_no is None:
-        grant = client.filesystem.create_download(namespace_id, path=path)
+        grant = client.files.create_download(namespace_id, path=path)
     else:
-        grant = client.filesystem.create_download(
+        grant = client.files.create_download(
             namespace_id,
             path=path,
             revision_no=revision_no,
@@ -195,7 +195,7 @@ def _get_file_proxied(
     reference and returned bytes describe the same file version.
     """
     if revision_no is None:
-        entry = client.filesystem.get_path_entry(namespace_id, path=path)
+        entry = client.files.retrieve(namespace_id, path=path)
         if entry.inode_kind != "file":
             raise RuntimeError(f"path {path!r} is a {entry.inode_kind}, not a file")
         claim = entry.content_ref
@@ -204,7 +204,7 @@ def _get_file_proxied(
         claim = None
         cursor = None
         while True:
-            page = client.filesystem.list_file_revisions(
+            page = client.files.list_revisions(
                 namespace_id, path=path, cursor=cursor
             )
             for revision in page.revisions:
@@ -217,7 +217,7 @@ def _get_file_proxied(
         if claim is None:
             raise RuntimeError(f"revision {revision_no} not found for {path!r}")
     content = b"".join(
-        client.filesystem.get_file_bytes(namespace_id, path=path, revision_no=revision_no)
+        client.files.content(namespace_id, path=path, revision_no=revision_no)
     )
     if len(content) != claim.size_bytes:
         raise RuntimeError(
@@ -235,7 +235,7 @@ def _get_file_proxied(
 
 
 def _create_upload(client: LoonFS, namespace_id: str, content: bytes):
-    capabilities = client.system.get_capabilities()
+    capabilities = client.capabilities.retrieve()
     features = capabilities.features or {}
     limits = capabilities.limits or {}
     size_bytes = len(content)
@@ -261,7 +261,7 @@ def _create_upload(client: LoonFS, namespace_id: str, content: bytes):
                 f"{size_bytes} bytes exceed the advertised proxy and direct PUT limits, "
                 "and direct multipart is unavailable"
             )
-    return client.uploads.create_upload(namespace_id, request=request)
+    return client.uploads.create(namespace_id, request=request)
 
 
 def _stage_upload(
@@ -273,8 +273,8 @@ def _stage_upload(
 ) -> _StagedContent:
     if begin.mode == "service_proxied":
         try:
-            client.uploads.put_upload_content(namespace_id, begin.upload_id, request=content)
-            completion = client.uploads.complete_upload(
+            client.uploads.put_content(namespace_id, begin.upload_id, request=content)
+            completion = client.uploads.complete(
                 namespace_id,
                 begin.upload_id,
                 request=CompleteUploadRequest_ServiceProxied(),
@@ -294,7 +294,7 @@ def _stage_upload(
         except Exception:
             _abort_quietly(client, namespace_id, begin.upload_id)
             raise
-        completion = client.uploads.complete_upload(
+        completion = client.uploads.complete(
             namespace_id,
             begin.upload_id,
             request=CompleteUploadRequest_DirectPut(
@@ -341,7 +341,7 @@ def _stage_multipart(
         for index, part in enumerate(parts, start=1)
     ]
     try:
-        signed = client.uploads.sign_upload_parts(
+        signed = client.uploads.sign_parts(
             namespace_id,
             upload_id,
             parts=claims,
@@ -375,7 +375,7 @@ def _stage_multipart(
     except Exception:
         _abort_quietly(client, namespace_id, upload_id)
         raise
-    completion = client.uploads.complete_upload(
+    completion = client.uploads.complete(
         namespace_id,
         upload_id,
         request=CompleteUploadRequest_DirectMultipart(
@@ -425,7 +425,7 @@ def _completed_content(response: UploadSession) -> _StagedContent:
 
 def _abort_quietly(client: LoonFS, namespace_id: str, upload_id: str) -> None:
     try:
-        client.uploads.abort_upload(namespace_id, upload_id)
+        client.uploads.abort(namespace_id, upload_id)
     except Exception:
         pass
 

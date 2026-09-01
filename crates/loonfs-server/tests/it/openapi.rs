@@ -1,6 +1,6 @@
 #![allow(clippy::panic)]
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "../../src/bin/loonfs-openapi/openapi_postprocess.rs"]
@@ -460,7 +460,7 @@ fn openapi_documents_current_server_paths() {
 
 #[test]
 fn openapi_operation_ids_match_the_public_registry() {
-    const REGISTRY_MESSAGE: &str = "operation IDs define generated SDK method names; update OPERATION_RETRY_CLASSES only when renaming a public method";
+    const REGISTRY_MESSAGE: &str = "operation IDs are the wire registry; add or rename an operation in OPERATION_RETRY_CLASSES and OPERATION_SDK_NAMES together";
 
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -728,6 +728,89 @@ fn every_registered_operation_publishes_its_retry_class() {
         .map(|(operation_id, retry_class)| (*operation_id, retry_class.as_str()))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(published, expected);
+}
+
+#[test]
+fn every_registered_operation_publishes_its_sdk_name() {
+    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
+        .expect("generate openapi json");
+    let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
+
+    for (operation_id, operation) in operations_by_id(&spec) {
+        if openapi_postprocess::SDK_EXCLUDED_OPERATIONS.contains(&operation_id) {
+            assert_eq!(operation.get("x-fern-ignore"), Some(&json!(true)));
+            for extension in [
+                "x-fern-sdk-group-name",
+                "x-fern-sdk-method-name",
+                "x-fern-request-name",
+            ] {
+                assert!(
+                    operation.get(extension).is_none(),
+                    "excluded operation `{operation_id}` has `{extension}`"
+                );
+            }
+            continue;
+        }
+
+        let sdk_name = openapi_postprocess::OPERATION_SDK_NAMES
+            .iter()
+            .find_map(|(candidate, sdk_name)| (*candidate == operation_id).then_some(sdk_name))
+            .unwrap_or_else(|| panic!("operation `{operation_id}` has no SDK name"));
+        assert_eq!(
+            operation.get("x-fern-sdk-group-name"),
+            Some(&json!(sdk_name.group)),
+            "unexpected SDK group for `{operation_id}`"
+        );
+        assert_eq!(
+            operation.get("x-fern-sdk-method-name"),
+            Some(&json!(sdk_name.method)),
+            "unexpected SDK method for `{operation_id}`"
+        );
+        let expected_request = sdk_name.request.map(|request| json!(request));
+        assert_eq!(
+            operation.get("x-fern-request-name"),
+            expected_request.as_ref(),
+            "unexpected SDK request name for `{operation_id}`"
+        );
+        assert!(
+            operation.get("x-fern-ignore").is_none(),
+            "named operation `{operation_id}` is ignored"
+        );
+    }
+}
+
+#[test]
+fn proxy_operations_keep_their_sdk_names() {
+    let proxy: Value = serde_json::from_str(
+        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
+    )
+    .expect("parse proxy openapi json");
+    let full: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let full_operations = operations_by_id(&full);
+
+    for (operation_id, proxy_operation) in operations_by_id(&proxy) {
+        let full_operation = full_operations.get(operation_id).unwrap_or_else(|| {
+            panic!("proxy operation `{operation_id}` is missing from full spec")
+        });
+        for extension in [
+            "x-fern-sdk-group-name",
+            "x-fern-sdk-method-name",
+            "x-fern-request-name",
+        ] {
+            assert_eq!(
+                proxy_operation.get(extension),
+                full_operation.get(extension),
+                "proxy operation `{operation_id}` changed `{extension}`"
+            );
+        }
+        assert!(
+            proxy_operation.get("x-fern-ignore").is_none(),
+            "proxy operation `{operation_id}` is ignored"
+        );
+    }
 }
 
 #[test]

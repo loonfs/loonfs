@@ -82,7 +82,7 @@ export async function putFile(client: LoonFSClient, input: PutFileInput): Promis
     if (input.message !== undefined) {
         request.message = input.message;
     }
-    return client.filesystem.createCommit(request);
+    return client.commits.create(request);
 }
 
 /**
@@ -90,11 +90,11 @@ export async function putFile(client: LoonFSClient, input: PutFileInput): Promis
  * Streaming and resume are follow-ups.
  */
 export async function getFile(client: LoonFSClient, input: GetFileInput): Promise<GetFileResult> {
-    const capabilities = await client.system.getCapabilities();
+    const capabilities = await client.capabilities.retrieve();
     if ((capabilities.features ?? {})[DIRECT_GET_FEATURE] !== true) {
         return getFileProxied(client, input);
     }
-    const grant = await client.filesystem.createDownload(input);
+    const grant = await client.files.createDownload(input);
     requirePresignedMethod(grant.access, "GET", "download");
     const response = await fetch(grant.access.url, {
         redirect: "error",
@@ -128,7 +128,7 @@ async function getFileProxied(client: LoonFSClient, input: GetFileInput): Promis
     let revisionNo = input.revision_no;
     let claim: LoonFS.ContentRef | undefined;
     if (revisionNo === undefined) {
-        const entry = await client.filesystem.getPathEntry({
+        const entry = await client.files.retrieve({
             namespace_alias: input.namespace_alias,
             path: input.path,
         });
@@ -138,7 +138,7 @@ async function getFileProxied(client: LoonFSClient, input: GetFileInput): Promis
         claim = entry.content_ref;
         revisionNo = entry.revision_no;
     } else {
-        const page = await client.filesystem.listFileRevisions({
+        const page = await client.files.listRevisions({
             namespace_alias: input.namespace_alias,
             path: input.path,
         });
@@ -152,7 +152,7 @@ async function getFileProxied(client: LoonFSClient, input: GetFileInput): Promis
             throw new Error(`revision ${revisionNo} not found for ${input.path}`);
         }
     }
-    const body = await client.filesystem.getFileBytes({
+    const body = await client.files.content({
         namespace_alias: input.namespace_alias,
         path: input.path,
         revision_no: revisionNo,
@@ -173,9 +173,9 @@ async function stageBytes(
     namespaceAlias: string,
     bytes: Uint8Array,
 ): Promise<StagedContent> {
-    const capabilities = await client.system.getCapabilities();
+    const capabilities = await client.capabilities.retrieve();
     const beginRequest = selectBeginRequest(capabilities, bytes);
-    const begin = await client.uploads.createUpload({
+    const begin = await client.uploads.create({
         namespace_alias: namespaceAlias,
         body: beginRequest,
     });
@@ -229,9 +229,9 @@ async function stageServiceProxied(
     begin: LoonFS.BeginUploadResponse.ServiceProxied,
 ): Promise<StagedContent> {
     try {
-        await client.uploads.putUploadContent(arrayBuffer(bytes), namespaceAlias, begin.upload_id);
+        await client.uploads.putContent(arrayBuffer(bytes), namespaceAlias, begin.upload_id);
         return stagedContent(
-            await client.uploads.completeUpload({
+            await client.uploads.complete({
                 namespace_alias: namespaceAlias,
                 upload_id: begin.upload_id,
                 body: { mode: "service_proxied" },
@@ -265,7 +265,7 @@ async function stageDirectPut(
         throw error;
     }
     return stagedContent(
-        await client.uploads.completeUpload({
+        await client.uploads.complete({
             namespace_alias: namespaceAlias,
             upload_id: begin.upload_id,
             body: { mode: "direct_put", content: upload.content },
@@ -297,7 +297,7 @@ async function stageMultipart(
     }
     const completedParts: LoonFS.CompletedUploadPart[] = [];
     try {
-        const signed = await client.uploads.signUploadParts({
+        const signed = await client.uploads.signParts({
             namespace_alias: namespaceAlias,
             upload_id: begin.upload_id,
             parts: claims,
@@ -332,7 +332,7 @@ async function stageMultipart(
     }
 
     return stagedContent(
-        await client.uploads.completeUpload({
+        await client.uploads.complete({
             namespace_alias: namespaceAlias,
             upload_id: begin.upload_id,
             body: {
@@ -371,7 +371,7 @@ async function abortQuietly(
     uploadId: LoonFS.UploadId,
 ): Promise<void> {
     try {
-        await client.uploads.abortUpload({
+        await client.uploads.abort({
             namespace_alias: namespaceAlias,
             upload_id: uploadId,
         });

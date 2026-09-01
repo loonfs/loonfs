@@ -364,9 +364,16 @@ opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
   `not_supported` error with its `feature` name, so gating logic — check the
   capability document, fall back on `not_supported` — is identical against
   either backend.
-- As optional planes gain ops, SDKs should group them the way the planes are
-  grouped (`core`, `admin`, and later), so the surface a deployment does not
-  support is visibly absent instead of failing call by call.
+- Generated SDKs group operations by resource, not by plane. `capabilities`,
+  `namespaces`, `snapshots`, `commits`, `changes`, `files`, `inodes`, `trash`,
+  and `uploads` sit at the client root. The `admin` plane keeps its prefix as
+  a nested group, as in `admin.checkpoints.create`, because a hosted
+  deployment may hide the whole plane. A method on a group's own resource is
+  a bare verb: `create`, `retrieve`, `list`, `delete`, or the action, as in
+  `fork` and `grep`. A sub-resource of one file or inode is verb plus noun on
+  the parent, as in `files.listRevisions` and `inodes.listChildren`. The
+  `/health`, `/readiness`, and `/metrics` probes are HTTP-only and have no
+  SDK method.
 
 ### 4.2 Checksums
 
@@ -676,7 +683,7 @@ underlying semantics.
 
 GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `run`, `release`, `enable`, `disable`, `gc`, `abort`, `complete`, and `probe`. `/v0/admin/` is the only plane prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
 
-Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `release_checkpoint`. Generated SDK method names come from these IDs, so changing an ID also changes the generated method name.
+Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `release_checkpoint`. Operation IDs are the wire registry only. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, which every operation must appear in or be explicitly excluded from.
 
 ### Authentication and transport
 
