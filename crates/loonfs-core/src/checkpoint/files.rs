@@ -104,15 +104,13 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
                 ))),
             })
             .collect::<Result<Vec<_>>>()?;
-        let inode_ids = inode_rows
+        let file_inode_ids = inode_rows
             .iter()
+            .filter(|(_, inode_kind)| *inode_kind == InodeKind::File)
             .map(|(inode_id, _)| *inode_id)
             .collect::<Vec<_>>();
-        session.preload_visibility(&inode_ids).await?;
-        for (inode_id, inode_kind) in inode_rows {
-            if inode_kind != InodeKind::File {
-                continue;
-            }
+        session.preload_visibility(&file_inode_ids).await?;
+        for inode_id in file_inode_ids {
             if session.visible_inode(inode_id).await?.is_none() {
                 continue;
             }
