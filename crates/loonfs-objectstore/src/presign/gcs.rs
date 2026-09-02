@@ -4,17 +4,14 @@
 //! enforce write preconditions in live tests. The native API supports object
 //! generation checks and stores CRC-32C checksums.
 //!
-//! [`GcpGcsStore`]: crate::gcs::GcpGcsStore
-
 use super::{
     DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest, PresignedUrl,
-    MAX_PRESIGN_EXPIRY,
 };
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
-    canonical_query_string, hex_lower, normalize_header_value, percent_encode_path,
-    percent_encode_segment, signing_dates, unix_ms,
+    hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
+    V4RequestParts, V4Scheme,
 };
 use crate::ObjectStoreError;
 use async_trait::async_trait;
@@ -23,10 +20,8 @@ use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::{Checksum, ChecksumAlgorithm};
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fmt::Write as _;
 use std::time::{Duration, SystemTime};
 
 /// Host used for every GCS signed URL.
@@ -102,24 +97,10 @@ impl GcsV4Presigner {
     /// the store's own reads, listings, and collection never look — an
     /// object committed, invisible, and unreclaimable.
     ///
-    /// Construction fails for a blank bucket or key path, an unusable key
-    /// prefix, an unreadable or malformed key file, or a private key that is
-    /// not an RSA key in PKCS#8 form. Failing here is deliberate: a GCS
-    /// deployment whose key cannot sign also cannot authenticate its
-    /// provider client, so the fault belongs at startup rather than at the
-    /// first transfer.
+    /// Construction fails for an unusable key prefix, an unreadable or
+    /// malformed key file, or a private key that is not an RSA key in PKCS#8
+    /// form.
     pub fn new(config: GcsPresignerConfig) -> Result<Self> {
-        if config.bucket.trim().is_empty() {
-            return Err(ObjectStoreError::Configuration(
-                "bucket must not be empty".to_owned(),
-            ));
-        }
-        if config.service_account_key_path.trim().is_empty() {
-            return Err(ObjectStoreError::Configuration(
-                "service account key path must not be empty".to_owned(),
-            ));
-        }
-
         let raw = std::fs::read(&config.service_account_key_path).map_err(|err| {
             ObjectStoreError::Configuration(format!("service account key is unreadable: {err}"))
         })?;
@@ -174,19 +155,6 @@ impl GcsV4Presigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        // Expiry comes from deployment configuration, not the transport: a
-        // bad value is a config bug and must not look like network weather.
-        if expires_in.is_zero() {
-            return Err(ObjectStoreError::Configuration(
-                "presigned URL expiry must be greater than zero".to_owned(),
-            ));
-        }
-        if expires_in.as_secs() > MAX_PRESIGN_EXPIRY {
-            return Err(ObjectStoreError::Configuration(format!(
-                "presigned URL expiry must not exceed {MAX_PRESIGN_EXPIRY} seconds"
-            )));
-        }
-
         let scoped_key = scope_object_key(self.key_prefix.as_deref(), object_key)?;
         let canonical_uri = format!(
             "/{}/{}",
@@ -195,59 +163,30 @@ impl GcsV4Presigner {
         );
         let dates = signing_dates(object_key, now)?;
         let credential_scope = format!("{}/{GCS_CREDENTIAL_SCOPE_SUFFIX}", dates.short_date);
-
-        let mut headers_to_sign = BTreeMap::from([("host".to_owned(), GCS_HOST.to_owned())]);
-        for (name, value) in &required_headers {
-            headers_to_sign.insert(name.to_ascii_lowercase(), normalize_header_value(value));
-        }
-        let signed_headers = headers_to_sign
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(";");
-        let mut canonical_headers = String::new();
-        for (name, value) in &headers_to_sign {
-            writeln!(&mut canonical_headers, "{name}:{value}")
-                .expect("writing to a String should not fail");
-        }
-
-        let query = BTreeMap::from([
-            (
-                "X-Goog-Algorithm".to_owned(),
-                GCS_SIGNING_ALGORITHM.to_owned(),
-            ),
-            (
-                "X-Goog-Credential".to_owned(),
-                format!("{}/{credential_scope}", self.client_email),
-            ),
-            ("X-Goog-Date".to_owned(), dates.timestamp.clone()),
-            (
-                "X-Goog-Expires".to_owned(),
-                expires_in.as_secs().to_string(),
-            ),
-            ("X-Goog-SignedHeaders".to_owned(), signed_headers.clone()),
-        ]);
-        let canonical_query = canonical_query_string(&query);
-        let canonical_request = format!(
-            "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\nUNSIGNED-PAYLOAD"
-        );
-        let string_to_sign = format!(
-            "{GCS_SIGNING_ALGORITHM}\n{}\n{credential_scope}\n{}",
-            dates.timestamp,
-            hex_lower(&Sha256::digest(canonical_request.as_bytes()))
-        );
-        let signature = self.sign(object_key, string_to_sign.as_bytes())?;
-        let url = format!(
-            "https://{GCS_HOST}{canonical_uri}?{canonical_query}&X-Goog-Signature={signature}"
-        );
-        let expires_at_ms = unix_ms(object_key, now)? + expires_in.as_millis() as u64;
-
-        Ok(PresignedUrl {
-            method: method.to_owned(),
-            url,
-            headers: required_headers,
-            expires_at_ms,
-        })
+        presign_v4(
+            V4Scheme {
+                algorithm: GCS_SIGNING_ALGORITHM,
+                query_prefix: "X-Goog",
+                credential: format!("{}/{credential_scope}", self.client_email),
+                credential_scope,
+                extra_query: BTreeMap::new(),
+                signing_dates: dates,
+            },
+            V4Endpoint {
+                scheme: "https".to_owned(),
+                host: GCS_HOST.to_owned(),
+                canonical_uri,
+            },
+            method,
+            V4RequestParts {
+                object_key,
+                operation_query: BTreeMap::new(),
+                required_headers,
+            },
+            expires_in,
+            now,
+            |message| self.sign(object_key, message),
+        )
     }
 
     /// Produces the hex-encoded RSASSA-PKCS1-v1_5 SHA-256 signature GCS

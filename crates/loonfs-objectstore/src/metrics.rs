@@ -6,7 +6,7 @@ use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::{
     ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ObjectStore, ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -56,6 +56,32 @@ pub struct ObjectStoreMetricSample {
     pub put_mode: Option<PutModeClass>,
     /// Deployment-supplied provider label, or `None` when the wrapper was left unlabeled.
     pub store_kind: Option<String>,
+}
+
+impl ObjectStoreMetricSample {
+    /// Builds a sample with the fields shared by every object-store operation.
+    pub fn new(
+        operation: ObjectStoreOperation,
+        key: &str,
+        elapsed: Duration,
+        attempts: u32,
+        result: ObjectStoreResultClass,
+        store_kind: Option<String>,
+    ) -> Self {
+        Self {
+            operation,
+            elapsed_micros: elapsed.as_micros(),
+            attempts,
+            result,
+            bytes_in: None,
+            bytes_out: None,
+            item_count: None,
+            key_class: classify_key(key),
+            range_class: None,
+            put_mode: None,
+            store_kind,
+        }
+    }
 }
 
 /// Classifies the method measured by one object-store sample.
@@ -116,20 +142,22 @@ pub enum ObjectStoreResultClass {
     NotFound,
     /// Indicates key or prefix validation failed before provider IO.
     InvalidKey,
-    /// Indicates a content reference could not resolve to an immutable key.
-    InvalidContentRef,
-    /// Indicates requested byte-range bounds were invalid for the object.
-    InvalidRange,
+    /// Indicates a content reference or byte range was invalid.
+    InvalidRequest,
     /// Indicates a create-if-absent or compare-and-swap condition did not hold.
     PreconditionFailed,
     /// Indicates the provider rejected identity or authorization.
     PermissionDenied,
     /// Indicates the configured store lacks a required capability.
     Unsupported,
-    /// Indicates configuration, IO, timeout, protocol, or provider transport failure.
-    Transport,
-    /// Reserves a forward-compatible bucket for errors outside the current registry.
-    OtherError,
+    /// Indicates an object lacks required stored checksum metadata.
+    StoredChecksumMissing,
+    /// Indicates store construction or configuration failed.
+    Configuration,
+    /// Indicates a transient transport failure may succeed when repeated.
+    RetryableTransport,
+    /// Indicates a non-retryable transport or provider protocol failure.
+    Other,
 }
 
 impl ObjectStoreResultClass {
@@ -140,13 +168,31 @@ impl ObjectStoreResultClass {
             Self::Ok => "ok",
             Self::NotFound => "not_found",
             Self::InvalidKey => "invalid_key",
-            Self::InvalidContentRef => "invalid_content_ref",
-            Self::InvalidRange => "invalid_range",
+            Self::InvalidRequest => "invalid_request",
             Self::PreconditionFailed => "precondition_failed",
             Self::PermissionDenied => "permission_denied",
             Self::Unsupported => "unsupported",
-            Self::Transport => "transport",
-            Self::OtherError => "other_error",
+            Self::StoredChecksumMissing => "stored_checksum_missing",
+            Self::Configuration => "configuration",
+            Self::RetryableTransport => "retryable_transport",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl From<ObjectStoreErrorClass> for ObjectStoreResultClass {
+    fn from(class: ObjectStoreErrorClass) -> Self {
+        match class {
+            ObjectStoreErrorClass::NotFound => Self::NotFound,
+            ObjectStoreErrorClass::InvalidRequest => Self::InvalidRequest,
+            ObjectStoreErrorClass::InvalidKey => Self::InvalidKey,
+            ObjectStoreErrorClass::PreconditionFailed => Self::PreconditionFailed,
+            ObjectStoreErrorClass::PermissionDenied => Self::PermissionDenied,
+            ObjectStoreErrorClass::StoredChecksumMissing => Self::StoredChecksumMissing,
+            ObjectStoreErrorClass::Unsupported => Self::Unsupported,
+            ObjectStoreErrorClass::Configuration => Self::Configuration,
+            ObjectStoreErrorClass::RetryableTransport => Self::RetryableTransport,
+            ObjectStoreErrorClass::Other => Self::Other,
         }
     }
 }
@@ -446,19 +492,17 @@ where
         let start = sample_clock();
         let (result, attempts) =
             counting_attempts(self.inner.put_streamed(key, body, mode.clone())).await;
-        self.record(ObjectStoreMetricSample {
-            operation: ObjectStoreOperation::PutStreamed,
-            elapsed_micros: start.elapsed().as_micros(),
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::PutStreamed,
+            key,
+            start.elapsed(),
             attempts,
-            result: classify_result(&result),
-            bytes_in: result.as_ref().ok().copied(),
-            bytes_out: None,
-            item_count: None,
-            key_class: classify_key(key),
-            range_class: None,
-            put_mode: Some(classify_put_mode(&mode)),
-            store_kind: self.store_kind.clone(),
-        });
+            classify_result(&result),
+            self.store_kind.clone(),
+        );
+        sample.bytes_in = result.as_ref().ok().copied();
+        sample.put_mode = Some(classify_put_mode(&mode));
+        self.record(sample);
         result
     }
 
@@ -488,7 +532,7 @@ where
             inner: self.inner.list_prefix_from_stream(prefix, start_after),
             recorder: Arc::clone(&self.recorder),
             store_kind: self.store_kind.clone(),
-            key_class: classify_key(prefix),
+            prefix: prefix.to_owned(),
             started: sample_clock(),
             items: 0,
             first_error: None,
@@ -522,19 +566,14 @@ impl<S> InstrumentedObjectStore<S> {
         attempts: u32,
         result: &Result<Option<T>>,
     ) {
-        self.record(ObjectStoreMetricSample {
+        self.record(ObjectStoreMetricSample::new(
             operation,
-            elapsed_micros: elapsed.as_micros(),
+            key,
+            elapsed,
             attempts,
-            result: classify_optional_result(result),
-            bytes_in: None,
-            bytes_out: None,
-            item_count: None,
-            key_class: classify_key(key),
-            range_class: None,
-            put_mode: None,
-            store_kind: self.store_kind.clone(),
-        });
+            classify_optional_result(result),
+            self.store_kind.clone(),
+        ));
     }
 
     fn record_get(
@@ -545,22 +584,20 @@ impl<S> InstrumentedObjectStore<S> {
         attempts: u32,
         result: &Result<Option<Bytes>>,
     ) {
-        self.record(ObjectStoreMetricSample {
-            operation: ObjectStoreOperation::Get,
-            elapsed_micros: elapsed.as_micros(),
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::Get,
+            key,
+            elapsed,
             attempts,
-            result: classify_optional_result(result),
-            bytes_in: None,
-            bytes_out: result
-                .as_ref()
-                .ok()
-                .and_then(|bytes| bytes.as_ref().map(|bytes| bytes.len() as u64)),
-            item_count: None,
-            key_class: classify_key(key),
-            range_class: Some(classify_range(range)),
-            put_mode: None,
-            store_kind: self.store_kind.clone(),
-        });
+            classify_optional_result(result),
+            self.store_kind.clone(),
+        );
+        sample.bytes_out = result
+            .as_ref()
+            .ok()
+            .and_then(|bytes| bytes.as_ref().map(|bytes| bytes.len() as u64));
+        sample.range_class = Some(classify_range(range));
+        self.record(sample);
     }
 
     fn record_get_with_metadata(
@@ -570,22 +607,20 @@ impl<S> InstrumentedObjectStore<S> {
         attempts: u32,
         result: &Result<Option<ObjectBody>>,
     ) {
-        self.record(ObjectStoreMetricSample {
-            operation: ObjectStoreOperation::GetWithMetadata,
-            elapsed_micros: elapsed.as_micros(),
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::GetWithMetadata,
+            key,
+            elapsed,
             attempts,
-            result: classify_optional_result(result),
-            bytes_in: None,
-            bytes_out: result
-                .as_ref()
-                .ok()
-                .and_then(|body| body.as_ref().map(|body| body.bytes.len() as u64)),
-            item_count: None,
-            key_class: classify_key(key),
-            range_class: Some(RangeClass::FullObject),
-            put_mode: None,
-            store_kind: self.store_kind.clone(),
-        });
+            classify_optional_result(result),
+            self.store_kind.clone(),
+        );
+        sample.bytes_out = result
+            .as_ref()
+            .ok()
+            .and_then(|body| body.as_ref().map(|body| body.bytes.len() as u64));
+        sample.range_class = Some(RangeClass::FullObject);
+        self.record(sample);
     }
 
     fn record_put(
@@ -597,19 +632,17 @@ impl<S> InstrumentedObjectStore<S> {
         attempts: u32,
         result: &Result<ObjectMetadata>,
     ) {
-        self.record(ObjectStoreMetricSample {
-            operation: ObjectStoreOperation::Put,
-            elapsed_micros: elapsed.as_micros(),
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::Put,
+            key,
+            elapsed,
             attempts,
-            result: classify_result(result),
-            bytes_in: Some(bytes_in),
-            bytes_out: None,
-            item_count: None,
-            key_class: classify_key(key),
-            range_class: None,
-            put_mode: Some(classify_put_mode(mode)),
-            store_kind: self.store_kind.clone(),
-        });
+            classify_result(result),
+            self.store_kind.clone(),
+        );
+        sample.bytes_in = Some(bytes_in);
+        sample.put_mode = Some(classify_put_mode(mode));
+        self.record(sample);
     }
 
     fn record_unit<T>(
@@ -620,19 +653,14 @@ impl<S> InstrumentedObjectStore<S> {
         attempts: u32,
         result: &Result<T>,
     ) {
-        self.record(ObjectStoreMetricSample {
+        self.record(ObjectStoreMetricSample::new(
             operation,
-            elapsed_micros: elapsed.as_micros(),
+            key,
+            elapsed,
             attempts,
-            result: classify_result(result),
-            bytes_in: None,
-            bytes_out: None,
-            item_count: None,
-            key_class: classify_key(key),
-            range_class: None,
-            put_mode: None,
-            store_kind: self.store_kind.clone(),
-        });
+            classify_result(result),
+            self.store_kind.clone(),
+        ));
     }
 
     fn record_list(
@@ -642,19 +670,17 @@ impl<S> InstrumentedObjectStore<S> {
         attempts: u32,
         result: &Result<Vec<String>>,
     ) {
-        self.record(ObjectStoreMetricSample {
-            operation: ObjectStoreOperation::ListPrefix,
-            elapsed_micros: elapsed.as_micros(),
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::ListPrefix,
+            prefix,
+            elapsed,
             attempts,
-            result: classify_result(result),
-            bytes_in: None,
-            bytes_out: None,
-            item_count: result.as_ref().ok().map(|items| items.len() as u64),
-            key_class: classify_key(prefix),
-            range_class: Some(RangeClass::Prefix),
-            put_mode: None,
-            store_kind: self.store_kind.clone(),
-        });
+            classify_result(result),
+            self.store_kind.clone(),
+        );
+        sample.item_count = result.as_ref().ok().map(|items| items.len() as u64);
+        sample.range_class = Some(RangeClass::Prefix);
+        self.record(sample);
     }
 
     fn record(&self, sample: ObjectStoreMetricSample) {
@@ -666,7 +692,7 @@ struct RecordedListStream {
     inner: BoxStream<'static, Result<String>>,
     recorder: Arc<dyn ObjectStoreMetricsRecorder>,
     store_kind: Option<String>,
-    key_class: KeyClass,
+    prefix: String,
     started: Instant,
     items: u64,
     first_error: Option<ObjectStoreResultClass>,
@@ -685,7 +711,7 @@ impl futures::Stream for RecordedListStream {
                 Ok(_) => self.items += 1,
                 Err(error) => {
                     if self.first_error.is_none() {
-                        self.first_error = Some(classify_error(error));
+                        self.first_error = Some(error.class().into());
                     }
                 }
             }
@@ -696,23 +722,16 @@ impl futures::Stream for RecordedListStream {
 
 impl Drop for RecordedListStream {
     fn drop(&mut self) {
-        self.recorder.record(ObjectStoreMetricSample {
-            operation: ObjectStoreOperation::ListPrefixStream,
-            elapsed_micros: self.started.elapsed().as_micros(),
-            // A listing stream is polled by whoever holds it, across tasks a
-            // tally cannot follow, and no LoonFS-owned retry gate sits on
-            // the listing path: what retries a provider client does there
-            // are its own and were never countable from here.
-            attempts: 1,
-            result: self.first_error.unwrap_or(ObjectStoreResultClass::Ok),
-            bytes_in: None,
-            bytes_out: None,
-            item_count: Some(self.items),
-            key_class: self.key_class,
-            range_class: None,
-            put_mode: None,
-            store_kind: self.store_kind.clone(),
-        });
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::ListPrefixStream,
+            &self.prefix,
+            self.started.elapsed(),
+            1,
+            self.first_error.unwrap_or(ObjectStoreResultClass::Ok),
+            self.store_kind.clone(),
+        );
+        sample.item_count = Some(self.items);
+        self.recorder.record(sample);
     }
 }
 
@@ -742,31 +761,14 @@ fn classify_optional_result<T>(result: &Result<Option<T>>) -> ObjectStoreResultC
     match result {
         Ok(Some(_)) => ObjectStoreResultClass::Ok,
         Ok(None) => ObjectStoreResultClass::NotFound,
-        Err(error) => classify_error(error),
+        Err(error) => error.class().into(),
     }
 }
 
 fn classify_result<T>(result: &Result<T>) -> ObjectStoreResultClass {
     match result {
         Ok(_) => ObjectStoreResultClass::Ok,
-        Err(error) => classify_error(error),
-    }
-}
-
-fn classify_error(error: &ObjectStoreError) -> ObjectStoreResultClass {
-    match error {
-        ObjectStoreError::NotFound { .. } => ObjectStoreResultClass::NotFound,
-        ObjectStoreError::InvalidKey { .. } => ObjectStoreResultClass::InvalidKey,
-        ObjectStoreError::InvalidContentRef(_) => ObjectStoreResultClass::InvalidContentRef,
-        ObjectStoreError::InvalidRange { .. } => ObjectStoreResultClass::InvalidRange,
-        ObjectStoreError::PreconditionFailed { .. } => ObjectStoreResultClass::PreconditionFailed,
-        ObjectStoreError::PermissionDenied { .. } => ObjectStoreResultClass::PermissionDenied,
-        ObjectStoreError::StoredChecksumMissing { .. } => ObjectStoreResultClass::Unsupported,
-        ObjectStoreError::Unsupported(_) => ObjectStoreResultClass::Unsupported,
-        // Configuration failures happen at store construction, before any
-        // metered operation; classify defensively as transport.
-        ObjectStoreError::Configuration(_) => ObjectStoreResultClass::Transport,
-        ObjectStoreError::Transport { .. } => ObjectStoreResultClass::Transport,
+        Err(error) => error.class().into(),
     }
 }
 

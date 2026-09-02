@@ -54,7 +54,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
         .put_immutable_verified(&manifest_key, manifest_bytes)
         .await
     {
-        Ok(()) => Ok(()),
+        Ok(_) => Ok(()),
         Err(ImmutableWriteError::DifferentObject { .. }) => Err(
             MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestObjectConflict {
                 object_key: manifest_key,

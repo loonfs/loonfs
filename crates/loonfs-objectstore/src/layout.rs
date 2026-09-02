@@ -1,13 +1,4 @@
-//! The durable key grammar: object families, their path shapes, and
-//! parsing keys back into classified families.
-
-use loonfs_api::{
-    CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-    MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
-};
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ObjectLayout;
+//! The durable key grammar: object families and key classification.
 
 /// One family in the [durable object key grammar].
 ///
@@ -15,60 +6,35 @@ pub(crate) struct ObjectLayout;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurableObjectFamily {
     /// Classifies the mutable visibility and fencing head.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     WalHead,
     /// Classifies the mutable retained-history floor.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     WalFloor,
     /// Classifies an immutable segment in a namespace's WAL chain.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     WalSegment,
     /// Classifies the mutable materialized metadata pointer.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     MetadataRoot,
     /// Classifies an immutable namespace-manifest candidate.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     MetadataManifest,
     /// Classifies an immutable metadata segment.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     MetadataSegment,
-    /// Classifies an immutable metadata segment a streaming compaction
-    /// wrote before any manifest referenced it.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+    /// Classifies an immutable metadata segment written by a streaming compaction.
     MetadataCompactionStaging,
-    /// Classifies the mutable lease one streaming compaction holds over its
-    /// own staged output.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+    /// Classifies the mutable lease for one streaming compaction.
     MetadataCompactionLease,
     /// Classifies a mutable checkpoint lifecycle record.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     CheckpointRecord,
     /// Classifies a mutable upload-session lifecycle record.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     UploadSession,
     /// Classifies immutable whole-file content bytes.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     ContentBlob,
 }
 
-/// Reports the durable family and namespace ownership recoverable from a recognized key.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+/// Reports the durable family and identifiers recoverable from a recognized key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedObjectKey<'a> {
     family: DurableObjectFamily,
     owner_namespace_id: Option<&'a str>,
+    identifier: Option<&'a str>,
 }
 
 impl<'a> ParsedObjectKey<'a> {
@@ -81,167 +47,10 @@ impl<'a> ParsedObjectKey<'a> {
     pub fn owner_namespace_id(&self) -> Option<&'a str> {
         self.owner_namespace_id
     }
-}
 
-impl ObjectLayout {
-    pub(crate) fn new() -> Self {
-        Self
-    }
-
-    pub(crate) fn namespace_root_prefix(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/")
-    }
-
-    /// Hot head of the semantic commit stream: the only object whose CAS
-    /// gates user-write throughput.
-    pub(crate) fn wal_head(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/wal/head.json")
-    }
-
-    /// Cold lower bound of retained WAL/change history.
-    pub(crate) fn wal_floor(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/wal/floor.json")
-    }
-
-    pub(crate) fn wal_segment(
-        &self,
-        namespace_id: &NamespaceId,
-        wal_segment_id: &WalSegmentId,
-    ) -> String {
-        format!("namespaces/{namespace_id}/wal/segments/{wal_segment_id}.wal.zst")
-    }
-
-    /// Listing prefix that contains every WAL segment of `namespace` and
-    /// nothing else: `wal/head.json` and `wal/floor.json` live outside it,
-    /// so a GC listing yields only segment keys.
-    ///
-    /// Every segment file name starts with `wal_` and the segment's 20-digit
-    /// `start_seq`, so a listing comes back in history order as an
-    /// operator/GC convenience; no protocol depends on listing order.
-    pub(crate) fn wal_segment_prefix(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/wal/segments/")
-    }
-
-    /// Extracts the WAL segment id from a listed object key.
-    ///
-    /// Returns `None` for keys that are not current-format WAL segments, so
-    /// listings can skip foreign objects.
-    pub(crate) fn wal_segment_id_from_key<'a>(&self, key: &'a str) -> Option<&'a str> {
-        let (_, file_name) = key.rsplit_once('/')?;
-        file_name.strip_suffix(".wal.zst")
-    }
-
-    /// Cold pointer to the best known materialized metadata root.
-    pub(crate) fn metadata_root(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/metadata/root.json")
-    }
-
-    pub(crate) fn metadata_manifest_object(
-        &self,
-        namespace_id: &NamespaceId,
-        manifest_object_id: &ManifestObjectId,
-    ) -> String {
-        format!("namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json")
-    }
-
-    pub(crate) fn metadata_manifest_prefix(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/metadata/manifests/")
-    }
-
-    pub(crate) fn metadata_segment(
-        &self,
-        namespace_id: &NamespaceId,
-        metadata_segment_id: &MetadataSegmentId,
-    ) -> String {
-        format!("namespaces/{namespace_id}/metadata/segments/{metadata_segment_id}.sst.zst")
-    }
-
-    pub(crate) fn metadata_segment_prefix(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/metadata/segments/")
-    }
-
-    /// Returns the staging key for a compaction output segment. Each job has a
-    /// separate prefix so garbage collection can protect its output with one
-    /// lease.
-    pub(crate) fn metadata_compaction_segment(
-        &self,
-        namespace_id: &NamespaceId,
-        metadata_compaction_id: &MetadataCompactionId,
-        metadata_segment_id: &MetadataSegmentId,
-    ) -> String {
-        format!(
-            "namespaces/{namespace_id}/metadata/compactions/{metadata_compaction_id}/segments/{metadata_segment_id}.sst.zst"
-        )
-    }
-
-    /// Returns the lease key for a compaction job. It sorts before the job's
-    /// staged segments.
-    pub(crate) fn metadata_compaction_lease(
-        &self,
-        namespace_id: &NamespaceId,
-        metadata_compaction_id: &MetadataCompactionId,
-    ) -> String {
-        format!(
-            "namespaces/{namespace_id}/metadata/compactions/{metadata_compaction_id}/lease.json"
-        )
-    }
-
-    pub(crate) fn metadata_compaction_prefix(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/metadata/compactions/")
-    }
-
-    /// Extracts a compaction job id from a recognized lease or segment key.
-    /// Returns `None` for other keys.
-    pub(crate) fn metadata_compaction_job_id_from_key<'a>(&self, key: &'a str) -> Option<&'a str> {
-        match key.split('/').collect::<Vec<_>>().as_slice() {
-            ["namespaces", _, "metadata", "compactions", job_id, "lease.json"] => Some(job_id),
-            ["namespaces", _, "metadata", "compactions", job_id, "segments", segment]
-                if segment.ends_with(".sst.zst") =>
-            {
-                Some(job_id)
-            }
-            _ => None,
-        }
-    }
-
-    /// Durable stable-view pin to a metadata manifest.
-    pub(crate) fn checkpoint_record(
-        &self,
-        namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
-    ) -> String {
-        format!("namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json")
-    }
-
-    pub(crate) fn checkpoint_prefix(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/checkpoints/")
-    }
-
-    pub(crate) fn upload_session(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-    ) -> String {
-        format!("namespaces/{namespace_id}/uploads/{upload_id}.json")
-    }
-
-    pub(crate) fn upload_session_prefix(&self, namespace_id: &NamespaceId) -> String {
-        format!("namespaces/{namespace_id}/uploads/")
-    }
-
-    /// Content objects shard across two directory levels selected by the
-    /// content id's leading characters. Those characters are random, so
-    /// ingest spreads evenly and filesystem-backed stores keep bounded
-    /// directory fanout.
-    pub(crate) fn content_blob(
-        &self,
-        content_store_id: &ContentStoreId,
-        content_id: &ContentId,
-    ) -> String {
-        let [first_shard, second_shard] = content_id.shard_prefixes();
-        format!(
-            "content-stores/{content_store_id}/objects/{first_shard}/{second_shard}/{content_id}"
-        )
+    /// Returns the family-specific identifier when the key carries one.
+    pub fn identifier(&self) -> Option<&'a str> {
+        self.identifier
     }
 }
 
@@ -252,394 +61,245 @@ impl ObjectLayout {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        ["content-stores", _, "objects", _, _, _] => parsed(DurableObjectFamily::ContentBlob, None),
+        ["content-stores", _, "objects", _, _, content_id] => Some(parsed(
+            DurableObjectFamily::ContentBlob,
+            None,
+            Some(content_id),
+        )),
         ["namespaces", namespace, "wal", "head.json"] => {
-            parsed(DurableObjectFamily::WalHead, Some(namespace))
+            Some(parsed(DurableObjectFamily::WalHead, Some(namespace), None))
         }
         ["namespaces", namespace, "wal", "floor.json"] => {
-            parsed(DurableObjectFamily::WalFloor, Some(namespace))
+            Some(parsed(DurableObjectFamily::WalFloor, Some(namespace), None))
         }
-        ["namespaces", namespace, "wal", "segments", segment] if segment.ends_with(".wal.zst") => {
-            parsed(DurableObjectFamily::WalSegment, Some(namespace))
+        ["namespaces", namespace, "wal", "segments", segment] => {
+            segment.strip_suffix(".wal.zst").map(|identifier| {
+                parsed(
+                    DurableObjectFamily::WalSegment,
+                    Some(namespace),
+                    Some(identifier),
+                )
+            })
         }
-        ["namespaces", namespace, "metadata", "root.json"] => {
-            parsed(DurableObjectFamily::MetadataRoot, Some(namespace))
+        ["namespaces", namespace, "metadata", "root.json"] => Some(parsed(
+            DurableObjectFamily::MetadataRoot,
+            Some(namespace),
+            None,
+        )),
+        ["namespaces", namespace, "metadata", "manifests", manifest] => {
+            manifest.strip_suffix(".manifest.json").map(|identifier| {
+                parsed(
+                    DurableObjectFamily::MetadataManifest,
+                    Some(namespace),
+                    Some(identifier),
+                )
+            })
         }
-        ["namespaces", namespace, "metadata", "manifests", manifest]
-            if manifest.ends_with(".json") =>
-        {
-            parsed(DurableObjectFamily::MetadataManifest, Some(namespace))
+        ["namespaces", namespace, "metadata", "segments", segment] => {
+            segment.strip_suffix(".sst.zst").map(|identifier| {
+                parsed(
+                    DurableObjectFamily::MetadataSegment,
+                    Some(namespace),
+                    Some(identifier),
+                )
+            })
         }
-        ["namespaces", namespace, "metadata", "segments", segment]
+        ["namespaces", namespace, "metadata", "compactions", job_id, "segments", segment]
             if segment.ends_with(".sst.zst") =>
         {
-            parsed(DurableObjectFamily::MetadataSegment, Some(namespace))
-        }
-        ["namespaces", namespace, "metadata", "compactions", _job_id, "segments", segment]
-            if segment.ends_with(".sst.zst") =>
-        {
-            parsed(
+            Some(parsed(
                 DurableObjectFamily::MetadataCompactionStaging,
                 Some(namespace),
-            )
+                Some(job_id),
+            ))
         }
-        ["namespaces", namespace, "metadata", "compactions", _job_id, "lease.json"] => parsed(
+        ["namespaces", namespace, "metadata", "compactions", job_id, "lease.json"] => Some(parsed(
             DurableObjectFamily::MetadataCompactionLease,
             Some(namespace),
-        ),
-        ["namespaces", namespace, "checkpoints", checkpoint] if checkpoint.ends_with(".json") => {
-            parsed(DurableObjectFamily::CheckpointRecord, Some(namespace))
+            Some(job_id),
+        )),
+        ["namespaces", namespace, "checkpoints", checkpoint] => {
+            checkpoint.strip_suffix(".json").map(|identifier| {
+                parsed(
+                    DurableObjectFamily::CheckpointRecord,
+                    Some(namespace),
+                    Some(identifier),
+                )
+            })
         }
-        ["namespaces", namespace, "uploads", upload] if upload.ends_with(".json") => {
-            parsed(DurableObjectFamily::UploadSession, Some(namespace))
+        ["namespaces", namespace, "uploads", upload] => {
+            upload.strip_suffix(".json").map(|identifier| {
+                parsed(
+                    DurableObjectFamily::UploadSession,
+                    Some(namespace),
+                    Some(identifier),
+                )
+            })
         }
         _ => None,
     }
 }
 
-fn parsed(
+pub(crate) fn wal_segment_id_from_key(key: &str) -> Option<&str> {
+    parse_object_key(key)
+        .filter(|parsed| parsed.family() == DurableObjectFamily::WalSegment)
+        .and_then(|parsed| parsed.identifier())
+}
+
+pub(crate) fn metadata_compaction_job_id_from_key(key: &str) -> Option<&str> {
+    parse_object_key(key)
+        .filter(|parsed| {
+            matches!(
+                parsed.family(),
+                DurableObjectFamily::MetadataCompactionStaging
+                    | DurableObjectFamily::MetadataCompactionLease
+            )
+        })
+        .and_then(|parsed| parsed.identifier())
+}
+
+fn parsed<'a>(
     family: DurableObjectFamily,
-    owner_namespace_id: Option<&str>,
-) -> Option<ParsedObjectKey<'_>> {
-    Some(ParsedObjectKey {
+    owner_namespace_id: Option<&'a str>,
+    identifier: Option<&'a str>,
+) -> ParsedObjectKey<'a> {
+    ParsedObjectKey {
         family,
         owner_namespace_id,
-    })
+        identifier,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_object_key, DurableObjectFamily, ObjectLayout};
+    use super::{parse_object_key, DurableObjectFamily};
+    use crate::keys::{
+        checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_segment,
+        metadata_manifest_object, metadata_root, metadata_segment, metadata_segment_prefix,
+        upload_session, wal_floor, wal_head, wal_segment, wal_segment_prefix,
+    };
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
         MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
     };
 
-    fn content_id() -> ContentId {
-        ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("valid content id")
-    }
-
-    fn namespace_id() -> NamespaceId {
-        NamespaceId::parse("ns-1").expect("valid namespace id")
-    }
-
-    fn content_store_id() -> ContentStoreId {
-        ContentStoreId::parse("cs_00000000000000000000000000000001")
-            .expect("valid content store id")
-    }
-
-    fn checkpoint_id() -> CheckpointId {
-        CheckpointId::parse("chk_00000000000000000000000000000001").expect("valid checkpoint id")
-    }
-
-    fn metadata_compaction_id(value: u128) -> MetadataCompactionId {
-        MetadataCompactionId::parse(format!("cmp_{value:032x}"))
-            .expect("valid metadata compaction id")
-    }
-
-    fn metadata_segment_id() -> MetadataSegmentId {
-        MetadataSegmentId::parse("seg_00000000000000000000000000000001")
-            .expect("valid metadata segment id")
-    }
-
-    fn upload_id() -> UploadId {
-        UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id")
-    }
-
-    fn wal_segment_id(value: &str) -> WalSegmentId {
-        WalSegmentId::parse(value).expect("valid WAL segment id")
-    }
-
     #[test]
-    fn layout_golden_tree_matches_target_paths() {
-        let layout = ObjectLayout::new();
-
-        assert_eq!(
-            layout.namespace_root_prefix(&namespace_id()),
-            "namespaces/ns-1/"
-        );
-        assert_eq!(
-            layout.wal_head(&namespace_id()),
-            "namespaces/ns-1/wal/head.json"
-        );
-        assert_eq!(
-            layout.wal_floor(&namespace_id()),
-            "namespaces/ns-1/wal/floor.json"
-        );
-        assert_eq!(
-            layout.wal_segment(
-                &namespace_id(),
-                &wal_segment_id("wal_00000000000000000001-0123456789abcdef")
-            ),
-            "namespaces/ns-1/wal/segments/wal_00000000000000000001-0123456789abcdef.wal.zst"
-        );
-        assert_eq!(
-            layout.metadata_root(&namespace_id()),
-            "namespaces/ns-1/metadata/root.json"
-        );
+    fn built_keys_parse_to_their_family_owner_and_identifier() {
+        let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
+        let wal_segment_id = WalSegmentId::parse("wal_00000000000000000001-0123456789abcdef")
+            .expect("WAL segment id");
         let manifest_object_id =
             ManifestObjectId::parse("man_00000000000000000400-0123456789abcdef")
-                .expect("valid manifest object id");
-        assert_eq!(
-            layout
-                .metadata_manifest_object(&namespace_id(), &manifest_object_id),
-            "namespaces/ns-1/metadata/manifests/man_00000000000000000400-0123456789abcdef.manifest.json"
-        );
-        assert_eq!(
-            layout.metadata_segment(&namespace_id(), &metadata_segment_id()),
-            "namespaces/ns-1/metadata/segments/seg_00000000000000000000000000000001.sst.zst"
-        );
-        assert_eq!(
-            layout
-                .metadata_compaction_segment(
-                    &namespace_id(),
-                    &metadata_compaction_id(1),
-                    &metadata_segment_id()
-                ),
-            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/segments/seg_00000000000000000000000000000001.sst.zst"
-        );
-        assert_eq!(
-            layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1)),
-            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/lease.json"
-        );
-        assert_eq!(
-            layout.checkpoint_record(&namespace_id(), &checkpoint_id()),
-            "namespaces/ns-1/checkpoints/chk_00000000000000000000000000000001.json"
-        );
-        assert_eq!(
-            layout.upload_session(&namespace_id(), &upload_id()),
-            "namespaces/ns-1/uploads/upl_00000000000000000000000000000001.json"
-        );
-        assert_eq!(
-            layout
-                .content_blob(&content_store_id(), &content_id()),
-            "content-stores/cs_00000000000000000000000000000001/objects/ab/cd/con_abcdef0123456789abcdef0123456789"
-        );
-    }
-
-    #[test]
-    fn control_objects_live_outside_the_segment_listing_prefix() {
-        let layout = ObjectLayout::new();
-        let prefix = layout.wal_segment_prefix(&namespace_id());
-        assert_eq!(prefix, "namespaces/ns-1/wal/segments/");
-        assert!(!layout
-            .wal_head(&namespace_id())
-            .as_str()
-            .starts_with(&prefix));
-        assert!(!layout
-            .wal_floor(&namespace_id())
-            .as_str()
-            .starts_with(&prefix));
-        assert!(layout
-            .wal_segment(
-                &namespace_id(),
-                &wal_segment_id("wal_00000000000000000002-0123456789abcdef")
-            )
-            .as_str()
-            .starts_with(&prefix));
-    }
-
-    #[test]
-    fn staged_compaction_segments_live_outside_the_segment_listing_prefix() {
-        let layout = ObjectLayout::new();
-        let segments = layout.metadata_segment_prefix(&namespace_id());
-        let staging = layout.metadata_compaction_prefix(&namespace_id());
-
-        assert!(!staging.starts_with(&segments));
-        assert!(!layout
-            .metadata_compaction_segment(
-                &namespace_id(),
-                &metadata_compaction_id(1),
-                &metadata_segment_id()
-            )
-            .starts_with(&segments));
-        assert!(layout
-            .metadata_compaction_segment(
-                &namespace_id(),
-                &metadata_compaction_id(1),
-                &metadata_segment_id()
-            )
-            .starts_with(&staging));
-        assert!(layout
-            .metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1))
-            .starts_with(&staging));
-        assert!(!layout
-            .metadata_segment(&namespace_id(), &metadata_segment_id())
-            .starts_with(&staging));
-    }
-
-    #[test]
-    fn a_jobs_lease_sorts_before_its_staged_segments() {
-        let layout = ObjectLayout::new();
-        let lease = layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1));
-        let segment_key = layout.metadata_compaction_segment(
-            &namespace_id(),
-            &metadata_compaction_id(1),
-            &metadata_segment_id(),
-        );
-        assert!(lease < segment_key);
-        // Each job occupies one contiguous key range.
-        assert!(
-            segment_key
-                < layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(2))
-        );
-    }
-
-    #[test]
-    fn compaction_keys_report_the_job_that_owns_them() {
-        let layout = ObjectLayout::new();
-        assert_eq!(
-            layout.metadata_compaction_job_id_from_key(
-                &layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1))
-            ),
-            Some("cmp_00000000000000000000000000000001")
-        );
-        assert_eq!(
-            layout.metadata_compaction_job_id_from_key(&layout.metadata_compaction_segment(
-                &namespace_id(),
-                &metadata_compaction_id(1),
-                &metadata_segment_id()
-            )),
-            Some("cmp_00000000000000000000000000000001")
-        );
-        for foreign in [
-            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/segments/seg_00000000000000000000000000000001.tmp",
-            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/notes.json",
-            "namespaces/ns-1/metadata/compactions/stray.json",
-            "namespaces/ns-1/metadata/segments/seg_00000000000000000000000000000001.sst.zst",
-        ] {
-            assert_eq!(layout.metadata_compaction_job_id_from_key(foreign), None);
-        }
-    }
-
-    #[test]
-    fn parse_build_round_trips_for_namespace_key_families() {
-        let layout = ObjectLayout::new();
+                .expect("manifest object id");
+        let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+            .expect("metadata segment id");
+        let compaction_id = MetadataCompactionId::parse("cmp_00000000000000000000000000000001")
+            .expect("compaction id");
+        let checkpoint_id =
+            CheckpointId::parse("chk_00000000000000000000000000000001").expect("checkpoint id");
+        let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
+        let content_store_id =
+            ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id");
+        let content_id =
+            ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("content id");
         let cases = [
+            (wal_head(&namespace_id), DurableObjectFamily::WalHead, None),
             (
-                layout.wal_head(&namespace_id()),
-                DurableObjectFamily::WalHead,
-            ),
-            (
-                layout.wal_floor(&namespace_id()),
+                wal_floor(&namespace_id),
                 DurableObjectFamily::WalFloor,
+                None,
             ),
             (
-                layout.wal_segment(
-                    &namespace_id(),
-                    &wal_segment_id("wal_00000000000000000001-0123456789abcdef"),
-                ),
+                wal_segment(&namespace_id, &wal_segment_id),
                 DurableObjectFamily::WalSegment,
+                Some(wal_segment_id.as_str()),
             ),
             (
-                layout.metadata_root(&namespace_id()),
+                metadata_root(&namespace_id),
                 DurableObjectFamily::MetadataRoot,
+                None,
             ),
             (
-                layout.metadata_manifest_object(
-                    &namespace_id(),
-                    &ManifestObjectId::parse("man_00000000000000000001-0123456789abcdef")
-                        .expect("valid manifest object id"),
-                ),
+                metadata_manifest_object(&namespace_id, &manifest_object_id),
                 DurableObjectFamily::MetadataManifest,
+                Some(manifest_object_id.as_str()),
             ),
             (
-                layout.metadata_segment(&namespace_id(), &metadata_segment_id()),
+                metadata_segment(&namespace_id, &metadata_segment_id),
                 DurableObjectFamily::MetadataSegment,
+                Some(metadata_segment_id.as_str()),
             ),
             (
-                layout.metadata_compaction_segment(
-                    &namespace_id(),
-                    &metadata_compaction_id(1),
-                    &metadata_segment_id(),
-                ),
+                metadata_compaction_segment(&namespace_id, &compaction_id, &metadata_segment_id),
                 DurableObjectFamily::MetadataCompactionStaging,
+                Some(compaction_id.as_str()),
             ),
             (
-                layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1)),
+                metadata_compaction_lease(&namespace_id, &compaction_id),
                 DurableObjectFamily::MetadataCompactionLease,
+                Some(compaction_id.as_str()),
             ),
             (
-                layout.checkpoint_record(&namespace_id(), &checkpoint_id()),
+                checkpoint_record(&namespace_id, &checkpoint_id),
                 DurableObjectFamily::CheckpointRecord,
+                Some(checkpoint_id.as_str()),
             ),
             (
-                layout.upload_session(&namespace_id(), &upload_id()),
+                upload_session(&namespace_id, &upload_id),
                 DurableObjectFamily::UploadSession,
+                Some(upload_id.as_str()),
+            ),
+            (
+                content_blob(&content_store_id, &content_id),
+                DurableObjectFamily::ContentBlob,
+                Some(content_id.as_str()),
             ),
         ];
 
-        for (key, family) in cases {
-            let parsed = parse_object_key(&key).expect("known namespace key parses");
+        for (key, family, identifier) in cases {
+            let parsed = parse_object_key(&key).expect("built key should parse");
             assert_eq!(parsed.family(), family);
-            assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
+            assert_eq!(
+                parsed.owner_namespace_id(),
+                (family != DurableObjectFamily::ContentBlob).then_some("ns-1")
+            );
+            assert_eq!(parsed.identifier(), identifier);
         }
     }
 
     #[test]
-    fn parser_rejects_retired_layout_paths() {
-        for old in [
+    fn listing_prefixes_hold_only_their_family_and_a_lease_sorts_first() {
+        let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
+        let job = MetadataCompactionId::parse("cmp_00000000000000000000000000000001")
+            .expect("compaction id");
+        let next_job = MetadataCompactionId::parse("cmp_00000000000000000000000000000002")
+            .expect("compaction id");
+        let segment_id =
+            MetadataSegmentId::parse("seg_00000000000000000000000000000001").expect("segment id");
+        let lease = metadata_compaction_lease(&namespace_id, &job);
+        let staged = metadata_compaction_segment(&namespace_id, &job, &segment_id);
+
+        assert!(lease < staged);
+        assert!(staged < metadata_compaction_lease(&namespace_id, &next_job));
+        assert!(!staged.starts_with(&metadata_segment_prefix(&namespace_id)));
+        let wal_segments = wal_segment_prefix(&namespace_id);
+        assert!(!wal_head(&namespace_id).starts_with(&wal_segments));
+        assert!(!wal_floor(&namespace_id).starts_with(&wal_segments));
+    }
+
+    #[test]
+    fn parser_rejects_retired_and_malformed_paths() {
+        for key in [
             "namespaces/ns-1/descriptor.json",
             "namespaces/ns-1/control/head.json",
-            "namespaces/ns-1/control/lease.json",
             "namespaces/ns-1/wal/wal_00000000000000000001-0123456789abcdef.wal.zst",
-            "namespaces/ns-1/manifest/00000000000000000400.manifest.json",
-            "namespaces/ns-1/segments/metadata/seg_00000000000000000000000000000001.sst.zst",
-            "namespaces/ns-1/gc/manifest.boundary.json",
-            "namespaces/ns-1/gc/pins/pin_00000000000000000000000000000001.json",
-            "namespaces/ns-1/pins/pin_00000000000000000000000000000001.json",
-            "namespaces/ns-1/metadata/compaction-staging/seg_00000000000000000000000000000001.sst.zst",
-        ] {
-            assert!(
-                parse_object_key(old).is_none(),
-                "retired path parsed: {old}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_wal_segment_requires_current_wal_suffix() {
-        let parsed = parse_object_key(
-            "namespaces/ns-1/wal/segments/wal_00000000000000000001-0123456789abcdef.wal.zst",
-        )
-        .expect("current WAL key parses");
-        assert_eq!(parsed.family(), DurableObjectFamily::WalSegment);
-        assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
-
-        assert!(parse_object_key(
-            "namespaces/ns-1/wal/segments/wal_00000000000000000001-0123456789abcdef.sst"
-        )
-        .is_none());
-        assert!(parse_object_key("namespaces/ns-1/wal/segments/random.tmp").is_none());
-    }
-
-    #[test]
-    fn parse_build_round_trips_for_global_key_families() {
-        let layout = ObjectLayout::new();
-        let content_key = layout.content_blob(&content_store_id(), &content_id());
-        let cases = [(content_key, DurableObjectFamily::ContentBlob)];
-
-        for (key, family) in cases {
-            let parsed = parse_object_key(&key).expect("known global key parses");
-            assert_eq!(parsed.family(), family);
-            assert_eq!(parsed.owner_namespace_id(), None);
-        }
-
-        assert!(parse_object_key("namespaces/ns-1/unknown/file").is_none());
-    }
-
-    #[test]
-    fn parser_admits_exactly_one_content_layout() {
-        for foreign in [
-            "content-stores/cs-1/blobs/ab/cd/deadbeef",
+            "namespaces/ns-1/wal/segments/random.tmp",
+            "namespaces/ns-1/metadata/compactions/cmp_1/segments/seg_1.tmp",
             "content-stores/cs-1/objects/ab/deadbeef",
-            "content-stores/cs-1/objects/ab/cd/ef/deadbeef",
-            "content-stores/cs-1/objects/deadbeef",
-            "content-stores/cs-1/objects/",
         ] {
             assert!(
-                parse_object_key(foreign).is_none(),
-                "foreign content path parsed: {foreign}"
+                parse_object_key(key).is_none(),
+                "unexpected key parsed: {key}"
             );
         }
     }

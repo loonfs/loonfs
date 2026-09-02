@@ -136,29 +136,3 @@ pub struct DirectTransferIssuers {
     /// one.
     pub multipart: Option<Arc<dyn DirectMultipartIssuer>>,
 }
-
-impl DirectTransferIssuers {
-    /// Builds a read-only bundle: reads are signed, neither write direction
-    /// is offered.
-    pub fn read_only(get: Arc<dyn DirectGetIssuer>) -> Self {
-        Self {
-            get,
-            put: None,
-            multipart: None,
-        }
-    }
-
-    /// Adds whole-object write signing to this bundle.
-    #[must_use]
-    pub fn with_put(mut self, put: Arc<dyn DirectPutIssuer>) -> Self {
-        self.put = Some(put);
-        self
-    }
-
-    /// Adds multipart part signing to this bundle.
-    #[must_use]
-    pub fn with_multipart(mut self, multipart: Arc<dyn DirectMultipartIssuer>) -> Self {
-        self.multipart = Some(multipart);
-        self
-    }
-}

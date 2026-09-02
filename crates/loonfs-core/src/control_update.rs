@@ -62,10 +62,7 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
         Ok(metadata) => Ok(metadata),
         Err(ObjectStoreError::PreconditionFailed { .. }) => Err(collision()),
         Err(ObjectStoreError::Transport { .. }) => {
-            match store
-                .put_immutable_verified_with_metadata(object_key, encoded)
-                .await
-            {
+            match store.put_immutable_verified(object_key, encoded).await {
                 Ok(metadata) => Ok(metadata),
                 Err(ImmutableWriteError::DifferentObject { .. }) => Err(collision()),
                 Err(ImmutableWriteError::Transport { source, .. }) => {

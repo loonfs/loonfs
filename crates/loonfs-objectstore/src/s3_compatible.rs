@@ -1,4 +1,4 @@
-//! [`S3CompatibleStore`]: the S3-API store, constructed per provider.
+//! S3-compatible provider constructors.
 //!
 //! AWS S3 and Cloudflare R2 differ by addressing, credentials, and whether
 //! uploads carry a client-computed checksum -- not by behaviour worth a type
@@ -8,30 +8,28 @@ use crate::aws_credentials::{
     aws_credentials_source, static_aws_credentials_source, ObjectStoreAwsCredentialProvider,
     SharedAwsCredentialsSource,
 };
-use crate::keyspace::{parse_endpoint_url, virtual_hosted_authority};
+use crate::configured::ConfiguredObjectStoreKind;
+use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
 use crate::object_store::Result;
 use crate::presign::{
-    base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
-    CHECKSUM_HEAD_TTL, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+    base64_crc64nvme, DirectTransferIssuers, S3CompatiblePresigner, S3PresignerConfig,
+    AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
 };
+use crate::provider_object_store::{CompareToken, MultipartController, StoredChecksumReader};
 use crate::signed_request::{
-    execute_signed, execute_signed_with_body, stored_checksum_from_signed_head, SignedResponse,
+    classify_signed_response, send_signed, stored_checksum_from_signed_head, SignedResponse,
 };
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
-    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
-    StoredObjectChecksum,
+    MultipartCompletion, MultipartPart, ObjectStoreError, ProviderObjectStore,
+    ProviderObjectStoreConfig, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use base64::Engine as _;
-use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs_api::{wire::hex::hex_encode_bytes, SecretString};
 use loonfs_api::{Checksum, ChecksumAlgorithm};
 use object_store::aws::{AmazonS3Builder, Checksum as ProviderChecksum};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
-use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -83,7 +81,7 @@ pub struct CloudflareR2StoreConfig {
 
 #[derive(Debug, Clone)]
 struct S3CompatibleConfig {
-    provider_name: &'static str,
+    kind: ConfiguredObjectStoreKind,
     bucket: String,
     region: String,
     endpoint_url: Option<String>,
@@ -93,195 +91,162 @@ struct S3CompatibleConfig {
     /// Attach a client-computed SHA-256 to every upload so the provider
     /// verifies the bytes on PUT (`x-amz-checksum-sha256`). Enabling it also
     /// gives the provider a stored full-object checksum that
-    /// [`ObjectStore::head_stored_checksum`] can read back.
+    /// [`crate::ObjectStore::head_stored_checksum`] can read back.
     sha256_upload_checksum: bool,
     /// This provider's documented maximum for a single PUT, carried through
     /// to the signer so a direct-put issuer can advertise it.
     direct_put_max_content_bytes: u64,
 }
 
-/// Implements the LoonFS storage contract on an S3-API endpoint.
-#[derive(Clone)]
-pub struct S3CompatibleStore {
-    provider_name: &'static str,
-    inner: ProviderObjectStore,
-    /// Signs the requests the provider client cannot express: the
-    /// `HeadObject` that reads a stored checksum back, and the multipart
-    /// control calls that have to carry checksum headers. The SigV4 signer
-    /// this crate already owns for direct-put URLs can express all of them.
-    request_signer: S3CompatiblePresigner,
-    /// Sends those signed requests over the store's own IO runtime and
-    /// timeout scheme, exactly like every provider-client request.
+struct S3RequestSigner {
+    request_signer: Arc<S3CompatiblePresigner>,
     http: HttpClient,
-    /// Keeps the HTTP IO runtime alive for the provider client's lifetime;
-    /// the connector inside the client holds only a handle onto it.
-    _io_runtime: StoreIoRuntime,
 }
 
-impl fmt::Debug for S3CompatibleStore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("S3CompatibleStore")
-            .field("provider_name", &self.provider_name)
-            .finish_non_exhaustive()
-    }
+/// Builds an AWS S3 store with bounded retries and SHA-256 upload checksums.
+pub fn aws_s3(config: AwsS3StoreConfig) -> Result<ProviderObjectStore> {
+    let credentials = aws_credentials_source(&config.credentials, &config.region)?;
+    aws_s3_with_credentials(config, credentials).map(|(store, _)| store)
 }
 
-impl S3CompatibleStore {
-    /// Builds an AWS S3 store with bounded retries and SHA-256 upload checksums.
-    ///
-    /// Construction fails for invalid static credentials, bucket, region,
-    /// endpoint, key prefix, runtime initialization, or provider-client
-    /// configuration. Ambient credential resolution remains lazy.
-    pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self> {
-        let credentials = aws_credentials_source(&config.credentials, &config.region)?;
-        Self::aws_s3_with_credentials(config, credentials)
-    }
+/// Returns the store and the issuers that sign direct transfers against it.
+pub(crate) fn aws_s3_with_credentials(
+    config: AwsS3StoreConfig,
+    credentials: SharedAwsCredentialsSource,
+) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
+    new(S3CompatibleConfig {
+        kind: ConfiguredObjectStoreKind::AwsS3,
+        bucket: config.bucket,
+        region: config.region,
+        endpoint_url: config.endpoint_url,
+        credentials,
+        key_prefix: config.key_prefix,
+        force_path_style: config.force_path_style,
+        sha256_upload_checksum: true,
+        direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
+    })
+}
 
-    pub(crate) fn aws_s3_with_credentials(
-        config: AwsS3StoreConfig,
-        credentials: SharedAwsCredentialsSource,
-    ) -> Result<Self> {
-        Self::new(S3CompatibleConfig {
-            provider_name: "aws-s3",
-            bucket: config.bucket,
-            region: config.region,
-            endpoint_url: config.endpoint_url,
-            credentials,
-            key_prefix: config.key_prefix,
+/// Builds a Cloudflare R2 store with path-style addressing.
+pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<ProviderObjectStore> {
+    let credentials = static_aws_credentials_source(
+        config.access_key_id.clone(),
+        config.secret_access_key.clone(),
+        None,
+    );
+    cloudflare_r2_with_credentials(config, credentials).map(|(store, _)| store)
+}
+
+/// Returns the store and the issuers that sign direct transfers against it.
+pub(crate) fn cloudflare_r2_with_credentials(
+    config: CloudflareR2StoreConfig,
+    credentials: SharedAwsCredentialsSource,
+) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
+    new(S3CompatibleConfig {
+        kind: ConfiguredObjectStoreKind::CloudflareR2,
+        bucket: config.bucket,
+        region: "auto".to_owned(),
+        endpoint_url: Some(config.endpoint_url),
+        credentials,
+        key_prefix: config.key_prefix,
+        // The configured endpoint is the bucket-less account host; path
+        // style makes the client append the bucket. Virtual hosting would
+        // use the endpoint verbatim and address keys as buckets.
+        force_path_style: true,
+        // Measured live 2026-07-31: must stay off. With a checksum
+        // algorithm configured, the provider client signs multipart part
+        // uploads with the aws-chunked streaming-trailer encoding, and R2
+        // answers 501 Not Implemented to every part PUT. Plain PUTs with
+        // the header succeed (the first nine conformance assertions pass;
+        // the multipart-overwrite and streamed-write assertions fail), but
+        // one upstream knob configures both shapes, so it stays off
+        // wholesale. Nothing is lost: R2 stores its self-computed
+        // CRC-64/NVME, which `head_stored_checksum` reads back, and the
+        // presigned direct paths carry their own enforced checksum
+        // headers independent of this flag.
+        sha256_upload_checksum: false,
+        direct_put_max_content_bytes: CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+    })
+}
+
+fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
+    let endpoint_url = config
+        .endpoint_url
+        .as_deref()
+        .map(|endpoint| {
+            object_store_endpoint_url(&config.bucket, endpoint, config.force_path_style)
+        })
+        .transpose()?;
+    let request_signer = Arc::new(S3CompatiblePresigner::with_credentials(
+        S3PresignerConfig {
+            bucket: config.bucket.clone(),
+            region: config.region.clone(),
+            endpoint_url: config.endpoint_url.clone(),
+            key_prefix: config.key_prefix.clone(),
             force_path_style: config.force_path_style,
-            sha256_upload_checksum: true,
-            direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
-        })
+            direct_put_max_content_bytes: config.direct_put_max_content_bytes,
+        },
+        Arc::clone(&config.credentials),
+    )?);
+
+    let io_runtime = StoreIoRuntime::new()?;
+    let http = io_runtime
+        .connector()
+        .connect(&crate::provider_object_store::provider_client_options())
+        .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
+    let mut builder = AmazonS3Builder::new()
+        .with_http_connector(io_runtime.connector())
+        .with_client_options(crate::provider_object_store::provider_client_options())
+        .with_retry(crate::provider_object_store::provider_retry_config())
+        .with_bucket_name(config.bucket)
+        .with_region(config.region)
+        .with_credentials(Arc::new(ObjectStoreAwsCredentialProvider::new(
+            config.credentials,
+        )))
+        .with_virtual_hosted_style_request(!config.force_path_style);
+
+    if let Some(endpoint_url) = endpoint_url {
+        let allow_http = endpoint_url.starts_with("http://");
+        builder = builder
+            .with_endpoint(endpoint_url)
+            .with_allow_http(allow_http);
+    }
+    if config.sha256_upload_checksum {
+        builder = builder.with_checksum_algorithm(ProviderChecksum::SHA256);
     }
 
-    /// Builds a Cloudflare R2 store with path-style addressing.
-    ///
-    /// Construction fails for a blank account id or any invalid shared
-    /// configuration, including credentials, endpoint, and key prefix.
-    pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self> {
-        let credentials = static_aws_credentials_source(
-            config.access_key_id.clone(),
-            config.secret_access_key.clone(),
-            None,
-        );
-        Self::cloudflare_r2_with_credentials(config, credentials)
-    }
-
-    pub(crate) fn cloudflare_r2_with_credentials(
-        config: CloudflareR2StoreConfig,
-        credentials: SharedAwsCredentialsSource,
-    ) -> Result<Self> {
-        if config.account_id.trim().is_empty() {
-            return Err(ObjectStoreError::Configuration(
-                "account id must not be empty".to_owned(),
-            ));
-        }
-        if config.access_key_id.expose().trim().is_empty() {
-            return Err(ObjectStoreError::Configuration(
-                "access key id must not be empty".to_owned(),
-            ));
-        }
-        if config.secret_access_key.expose().trim().is_empty() {
-            return Err(ObjectStoreError::Configuration(
-                "secret access key must not be empty".to_owned(),
-            ));
-        }
-        Self::new(S3CompatibleConfig {
-            provider_name: "cloudflare-r2",
-            bucket: config.bucket,
-            region: "auto".to_owned(),
-            endpoint_url: Some(config.endpoint_url),
-            credentials,
+    let provider = Arc::new(
+        builder
+            .build()
+            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?,
+    );
+    let store = ProviderObjectStore::new(
+        Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
+        provider,
+        ProviderObjectStoreConfig {
             key_prefix: config.key_prefix,
-            // The configured endpoint is the bucket-less account host; path
-            // style makes the client append the bucket. Virtual hosting would
-            // use the endpoint verbatim and address keys as buckets.
-            force_path_style: true,
-            // Measured live 2026-07-31: must stay off. With a checksum
-            // algorithm configured, the provider client signs multipart part
-            // uploads with the aws-chunked streaming-trailer encoding, and R2
-            // answers 501 Not Implemented to every part PUT. Plain PUTs with
-            // the header succeed (the first nine conformance assertions pass;
-            // the multipart-overwrite and streamed-write assertions fail), but
-            // one upstream knob configures both shapes, so it stays off
-            // wholesale. Nothing is lost: R2 stores its self-computed
-            // CRC-64/NVME, which `head_stored_checksum` reads back, and the
-            // presigned direct paths carry their own enforced checksum
-            // headers independent of this flag.
-            sha256_upload_checksum: false,
-            direct_put_max_content_bytes: CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
-        })
-    }
+        },
+        config.kind,
+        io_runtime,
+    )?;
+    let signer = Arc::new(S3RequestSigner {
+        request_signer: Arc::clone(&request_signer),
+        http,
+    });
+    let direct_transfers = DirectTransferIssuers {
+        get: request_signer.clone(),
+        put: Some(request_signer.clone()),
+        multipart: Some(request_signer),
+    };
 
-    fn new(config: S3CompatibleConfig) -> Result<Self> {
-        validate_config(&config)?;
-        let endpoint_url = config
-            .endpoint_url
-            .as_deref()
-            .map(|endpoint| {
-                object_store_endpoint_url(&config.bucket, endpoint, config.force_path_style)
-            })
-            .transpose()?;
-        let request_signer = S3CompatiblePresigner::with_credentials(
-            S3PresignerConfig {
-                bucket: config.bucket.clone(),
-                region: config.region.clone(),
-                endpoint_url: config.endpoint_url.clone(),
-                key_prefix: config.key_prefix.clone(),
-                force_path_style: config.force_path_style,
-                direct_put_max_content_bytes: config.direct_put_max_content_bytes,
-            },
-            Arc::clone(&config.credentials),
-        )?;
+    let store = store
+        .compare_token(CompareToken::Etag)
+        .checksum_reader(signer.clone())
+        .multipart_controller(signer);
+    Ok((store, direct_transfers))
+}
 
-        let io_runtime = StoreIoRuntime::new()?;
-        let http = io_runtime
-            .connector()
-            .connect(&crate::provider_object_store::provider_client_options())
-            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
-        let mut builder = AmazonS3Builder::new()
-            .with_http_connector(io_runtime.connector())
-            .with_client_options(crate::provider_object_store::provider_client_options())
-            .with_retry(crate::provider_object_store::provider_retry_config())
-            .with_bucket_name(config.bucket)
-            .with_region(config.region)
-            .with_credentials(Arc::new(ObjectStoreAwsCredentialProvider::new(
-                config.credentials,
-            )))
-            .with_virtual_hosted_style_request(!config.force_path_style);
-
-        if let Some(endpoint_url) = endpoint_url {
-            let allow_http = endpoint_url.starts_with("http://");
-            builder = builder
-                .with_endpoint(endpoint_url)
-                .with_allow_http(allow_http);
-        }
-        if config.sha256_upload_checksum {
-            builder = builder.with_checksum_algorithm(ProviderChecksum::SHA256);
-        }
-
-        let provider = Arc::new(
-            builder
-                .build()
-                .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?,
-        );
-        let inner = ProviderObjectStore::new(
-            Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
-            Some(provider),
-            ProviderObjectStoreConfig {
-                key_prefix: config.key_prefix,
-            },
-        )?;
-
-        Ok(Self {
-            provider_name: config.provider_name,
-            inner,
-            request_signer,
-            http,
-            _io_runtime: io_runtime,
-        })
-    }
-
+impl S3RequestSigner {
     #[allow(clippy::disallowed_methods)]
     fn signing_time() -> SystemTime {
         // A SigV4 signature is dated, so these internally issued requests
@@ -322,29 +287,28 @@ impl SignedResponse {
 }
 
 #[async_trait]
-impl ObjectStore for S3CompatibleStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        self.inner.head(key).await
-    }
-
+impl StoredChecksumReader for S3RequestSigner {
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         let signed = self
             .request_signer
             .presign_head_stored_checksum(key, CHECKSUM_HEAD_TTL, Self::signing_time())
             .await?;
-        let response = execute_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         stored_checksum_from_signed_head(key, &response, s3_stored_checksum)
     }
+}
 
+#[async_trait]
+impl MultipartController for S3RequestSigner {
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
         let signed = self
             .request_signer
             .presign_create_multipart(key, MULTIPART_CONTROL_TTL, Self::signing_time())
             .await?;
-        let response =
-            execute_signed_with_body(&self.http, key, signed, HttpRequestBody::empty()).await?;
-        if let Some(code) = response.provider_error_code() {
-            return Err(multipart_error(key, "create", &code));
+        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        let code = response.provider_error_code();
+        if let Some(error) = classify_signed_response(key, response.status, code.as_deref()) {
+            return Err(error);
         }
         xml_element(&response.text(), "UploadId").ok_or_else(|| {
             ObjectStoreError::transport(key, "multipart create returned no upload id")
@@ -368,20 +332,20 @@ impl ObjectStore for S3CompatibleStore {
                 Self::signing_time(),
             )
             .await?;
-        let response = execute_signed_with_body(
+        let response = send_signed(
             &self.http,
             key,
             signed,
             complete_multipart_body(parts)?.into(),
         )
         .await?;
-        match response.provider_error_code().as_deref() {
+        let code = response.provider_error_code();
+        if code.as_deref() == Some("NoSuchUpload") {
+            return Ok(MultipartCompletion::UnknownUpload);
+        }
+        match classify_signed_response(key, response.status, code.as_deref()) {
+            Some(error) => Err(error),
             None => Ok(MultipartCompletion::Assembled),
-            // The upload is gone, which says nothing about the object: an
-            // earlier completion may have consumed it and assembled exactly
-            // what was asked for. The caller decides from the object.
-            Some("NoSuchUpload") => Ok(MultipartCompletion::UnknownUpload),
-            Some(code) => Err(multipart_error(key, "complete", code)),
         }
     }
 
@@ -395,41 +359,15 @@ impl ObjectStore for S3CompatibleStore {
                 Self::signing_time(),
             )
             .await?;
-        let response =
-            execute_signed_with_body(&self.http, key, signed, HttpRequestBody::empty()).await?;
-        match response.provider_error_code().as_deref() {
-            // Nothing to abandon is the state an abort is trying to reach.
-            None | Some("NoSuchUpload") => Ok(()),
-            Some(code) => Err(multipart_error(key, "abort", code)),
+        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        let code = response.provider_error_code();
+        if code.as_deref() == Some("NoSuchUpload") {
+            return Ok(());
         }
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
-        self.inner.put_streamed(key, body, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<()> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
+        match classify_signed_response(key, response.status, code.as_deref()) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -510,46 +448,6 @@ fn complete_multipart_body(parts: &[MultipartPart]) -> Result<String> {
     Ok(body)
 }
 
-fn multipart_error(key: &str, operation: &str, code: &str) -> ObjectStoreError {
-    match code {
-        "AccessDenied" | "InvalidAccessKeyId" | "SignatureDoesNotMatch" => {
-            ObjectStoreError::PermissionDenied {
-                object_key: key.to_owned(),
-                message: format!("provider refused multipart {operation}: {code}"),
-            }
-        }
-        "NoSuchBucket" | "NoSuchKey" => ObjectStoreError::NotFound {
-            object_key: key.to_owned(),
-        },
-        "ConditionalRequestConflict" | "PreconditionFailed" => {
-            ObjectStoreError::PreconditionFailed {
-                object_key: key.to_owned(),
-            }
-        }
-        "InternalError" | "RequestTimeout" | "ServiceUnavailable" | "SlowDown" => {
-            ObjectStoreError::retryable_transport(
-                key,
-                format!("multipart {operation} failed: {code}"),
-            )
-        }
-        code => ObjectStoreError::transport(key, format!("multipart {operation} failed: {code}")),
-    }
-}
-
-fn validate_config(config: &S3CompatibleConfig) -> Result<()> {
-    if config.bucket.trim().is_empty() {
-        return Err(ObjectStoreError::Configuration(
-            "bucket must not be empty".to_owned(),
-        ));
-    }
-    if config.region.trim().is_empty() {
-        return Err(ObjectStoreError::Configuration(
-            "region must not be empty".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 fn object_store_endpoint_url(
     bucket: &str,
     endpoint_url: &str,
@@ -572,7 +470,8 @@ fn object_store_endpoint_url(
 
 #[cfg(test)]
 mod tests {
-    use super::{multipart_error, object_store_endpoint_url, AwsS3StoreConfig, S3CompatibleStore};
+    use super::{aws_s3, object_store_endpoint_url, AwsS3StoreConfig};
+    use crate::signed_request::classify_signed_response;
     use crate::test_support::{aws_environment_lock, isolated_aws_environment};
     use crate::{AwsS3Credentials, ObjectStoreErrorClass};
 
@@ -582,7 +481,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("create temporary AWS config directory");
         let _environment = isolated_aws_environment(&tempdir, None);
 
-        S3CompatibleStore::aws_s3(AwsS3StoreConfig {
+        aws_s3(AwsS3StoreConfig {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
@@ -606,7 +505,9 @@ mod tests {
             ("MalformedXML", ObjectStoreErrorClass::Other),
         ] {
             assert_eq!(
-                multipart_error("private-key", "complete", code).class(),
+                classify_signed_response("private-key", http::StatusCode::BAD_REQUEST, Some(code),)
+                    .expect("provider error should classify")
+                    .class(),
                 expected,
                 "wrong class for {code}"
             );

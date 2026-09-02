@@ -76,9 +76,11 @@ pub async fn start_server() -> Result<ConformanceServer, Box<dyn std::error::Err
     let issuer = Arc::new(LoopbackIssuer {
         base_url: format!("http://{provider_address}"),
     });
-    let transfers = DirectTransferIssuers::read_only(issuer.clone())
-        .with_put(issuer.clone())
-        .with_multipart(issuer);
+    let transfers = DirectTransferIssuers {
+        get: issuer.clone(),
+        put: Some(issuer.clone()),
+        multipart: Some(issuer),
+    };
 
     let config_path = temp_dir.path().join("loonfs-server.toml");
     write_server_config(&config_path, &store_root)?;

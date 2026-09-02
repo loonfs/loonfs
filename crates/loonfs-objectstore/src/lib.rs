@@ -16,6 +16,7 @@ mod attempts;
 mod aws_credentials;
 mod configured;
 pub mod crypto;
+mod endpoint;
 pub mod gcs;
 mod immutable_write;
 pub mod keys;

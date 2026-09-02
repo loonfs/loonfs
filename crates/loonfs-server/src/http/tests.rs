@@ -4018,7 +4018,11 @@ mod direct_download {
     async fn a_file_past_the_proxy_cap_round_trips_through_a_download_grant() {
         let temp_dir = tempdir().expect("tempdir");
         let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
-        let transfers = DirectTransferIssuers::read_only(LoopbackIssuer::at(object_base_url));
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at(object_base_url),
+            put: None,
+            multipart: None,
+        };
         let client = start(temp_dir.path(), "direct-download", Some(transfers)).await;
 
         let namespace = namespace_id("direct-download");
@@ -4093,7 +4097,11 @@ mod direct_download {
     async fn a_grant_keeps_reading_the_revision_it_was_issued_for() {
         let temp_dir = tempdir().expect("tempdir");
         let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
-        let transfers = DirectTransferIssuers::read_only(LoopbackIssuer::at(object_base_url));
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at(object_base_url),
+            put: None,
+            multipart: None,
+        };
         let client = start(temp_dir.path(), "grant-pins", Some(transfers)).await;
 
         let namespace = namespace_id("grant-pins");
@@ -4207,7 +4215,11 @@ mod direct_download {
     async fn a_provider_without_multipart_advertises_put_and_get_and_denies_multipart() {
         let temp_dir = tempdir().expect("tempdir");
         let issuer = LoopbackIssuer::at("http://object.invalid");
-        let transfers = DirectTransferIssuers::read_only(issuer.clone()).with_put(issuer);
+        let transfers = DirectTransferIssuers {
+            get: issuer.clone(),
+            put: Some(issuer),
+            multipart: None,
+        };
         let advertised = start(temp_dir.path(), "put-without-multipart", Some(transfers))
             .await
             .get_capabilities()
@@ -4238,7 +4250,11 @@ mod direct_download {
     async fn a_direct_put_session_rejects_multipart_completion_fields_precisely() {
         let temp_dir = tempdir().expect("tempdir");
         let issuer = LoopbackIssuer::at("http://object.invalid");
-        let transfers = DirectTransferIssuers::read_only(issuer.clone()).with_put(issuer);
+        let transfers = DirectTransferIssuers {
+            get: issuer.clone(),
+            put: Some(issuer),
+            multipart: None,
+        };
         let client = start(
             temp_dir.path(),
             "direct-put-completion-shape",
@@ -4294,7 +4310,11 @@ mod direct_download {
         let temp_dir = tempdir().expect("tempdir");
         let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
         let issuer = LoopbackIssuer::crc32c_at(object_base_url);
-        let transfers = DirectTransferIssuers::read_only(issuer.clone()).with_put(issuer);
+        let transfers = DirectTransferIssuers {
+            get: issuer.clone(),
+            put: Some(issuer),
+            multipart: None,
+        };
         let store: SharedObjectStore = Arc::new(Crc32cReadbackStore {
             inner: LocalFsStore::new(temp_dir.path()).expect("construct local store"),
         });
@@ -4349,7 +4369,11 @@ mod direct_download {
         let temp_dir = tempdir().expect("tempdir");
         let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
         let issuer = LoopbackIssuer::at(object_base_url);
-        let transfers = DirectTransferIssuers::read_only(issuer.clone()).with_put(issuer);
+        let transfers = DirectTransferIssuers {
+            get: issuer.clone(),
+            put: Some(issuer),
+            multipart: None,
+        };
         let client = start_with_upload_cap(
             temp_dir.path(),
             "ladder-direct-put",
@@ -4396,7 +4420,11 @@ mod direct_download {
         let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
         // Reads only: neither write direction is on offer, which is the
         // shape that used to push an oversized payload into the proxy.
-        let transfers = DirectTransferIssuers::read_only(LoopbackIssuer::at(object_base_url));
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at(object_base_url),
+            put: None,
+            multipart: None,
+        };
         let client = start_with_upload_cap(
             temp_dir.path(),
             "ladder-too-large",

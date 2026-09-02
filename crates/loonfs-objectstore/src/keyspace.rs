@@ -1,4 +1,4 @@
-//! Shared key and endpoint helpers for provider stores.
+//! Shared key helpers for provider stores.
 
 use crate::object_store::Result;
 use crate::ObjectStoreError;
@@ -77,45 +77,6 @@ pub(crate) fn unscope_listed_key(key_prefix: Option<&str>, scoped_key: &str) -> 
     let key_prefix = key_prefix.filter(|value| !value.is_empty())?;
     let prefix = format!("{key_prefix}/");
     scoped_key.strip_prefix(&prefix).map(str::to_owned)
-}
-
-/// A parsed `http(s)://authority[/base-path]` endpoint, shared by the
-/// provider client and the presigner so the two cannot drift.
-pub(crate) struct ParsedEndpoint<'a> {
-    pub(crate) scheme: &'a str,
-    pub(crate) authority: &'a str,
-    pub(crate) path: &'a str,
-}
-
-pub(crate) fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint<'_>> {
-    let (scheme, rest) = value
-        .strip_prefix("https://")
-        .map(|rest| ("https", rest))
-        .or_else(|| value.strip_prefix("http://").map(|rest| ("http", rest)))
-        .ok_or_else(|| {
-            ObjectStoreError::Configuration(
-                "endpoint url must start with http:// or https://".to_owned(),
-            )
-        })?;
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    if authority.is_empty() {
-        return Err(ObjectStoreError::Configuration(
-            "endpoint url must include authority".to_owned(),
-        ));
-    }
-    Ok(ParsedEndpoint {
-        scheme,
-        authority,
-        path: path.trim_end_matches('/'),
-    })
-}
-
-pub(crate) fn virtual_hosted_authority(bucket: &str, authority: &str) -> String {
-    let bucket = bucket.trim();
-    if authority.starts_with(&format!("{bucket}.")) {
-        return authority.to_owned();
-    }
-    format!("{bucket}.{authority}")
 }
 
 #[cfg(test)]

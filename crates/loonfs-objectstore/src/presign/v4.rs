@@ -9,9 +9,12 @@
 //! primitive stay in its own presigner.
 
 use crate::object_store::Result;
+use crate::presign::{PresignedUrl, MAX_PRESIGN_EXPIRY};
 use crate::ObjectStoreError;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
+use std::fmt::Write as _;
+use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 
 /// The two date spellings a V4 signature carries: the credential scope's day
 /// and the request's full timestamp, which must agree.
@@ -19,6 +22,118 @@ use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 pub(crate) struct SigningDates {
     pub(crate) short_date: String,
     pub(crate) timestamp: String,
+}
+
+pub(crate) struct V4Scheme {
+    pub(crate) algorithm: &'static str,
+    pub(crate) query_prefix: &'static str,
+    pub(crate) credential: String,
+    pub(crate) credential_scope: String,
+    pub(crate) extra_query: BTreeMap<String, String>,
+    pub(crate) signing_dates: SigningDates,
+}
+
+pub(crate) struct V4Endpoint {
+    pub(crate) scheme: String,
+    pub(crate) host: String,
+    pub(crate) canonical_uri: String,
+}
+
+pub(crate) struct V4RequestParts<'a> {
+    pub(crate) object_key: &'a str,
+    pub(crate) operation_query: BTreeMap<String, String>,
+    pub(crate) required_headers: BTreeMap<String, String>,
+}
+
+pub(crate) fn presign_v4(
+    scheme: V4Scheme,
+    endpoint: V4Endpoint,
+    method: &str,
+    request_parts: V4RequestParts<'_>,
+    expires_in: Duration,
+    now: SystemTime,
+    sign: impl FnOnce(&[u8]) -> Result<String>,
+) -> Result<PresignedUrl> {
+    if expires_in.is_zero() {
+        return Err(ObjectStoreError::Configuration(
+            "presigned URL expiry must be greater than zero".to_owned(),
+        ));
+    }
+    if expires_in.as_secs() > MAX_PRESIGN_EXPIRY {
+        return Err(ObjectStoreError::Configuration(format!(
+            "presigned URL expiry must not exceed {MAX_PRESIGN_EXPIRY} seconds"
+        )));
+    }
+
+    let mut headers_to_sign = BTreeMap::from([("host".to_owned(), endpoint.host.clone())]);
+    for (name, value) in &request_parts.required_headers {
+        headers_to_sign.insert(name.to_ascii_lowercase(), normalize_header_value(value));
+    }
+    let signed_headers = headers_to_sign
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(";");
+    let mut canonical_headers = String::new();
+    for (name, value) in &headers_to_sign {
+        writeln!(&mut canonical_headers, "{name}:{value}")
+            .expect("writing to a String should not fail");
+    }
+
+    let mut query = request_parts.operation_query;
+    query.extend(scheme.extra_query);
+    query.extend([
+        (
+            format!("{}-Algorithm", scheme.query_prefix),
+            scheme.algorithm.to_owned(),
+        ),
+        (
+            format!("{}-Credential", scheme.query_prefix),
+            scheme.credential,
+        ),
+        (
+            format!("{}-Date", scheme.query_prefix),
+            scheme.signing_dates.timestamp.clone(),
+        ),
+        (
+            format!("{}-Expires", scheme.query_prefix),
+            expires_in.as_secs().to_string(),
+        ),
+        (
+            format!("{}-SignedHeaders", scheme.query_prefix),
+            signed_headers.clone(),
+        ),
+    ]);
+    let canonical_query = canonical_query_string(&query);
+    let canonical_request = format!(
+        "{method}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\nUNSIGNED-PAYLOAD",
+        endpoint.canonical_uri
+    );
+    let string_to_sign = format!(
+        "{}\n{}\n{}\n{}",
+        scheme.algorithm,
+        scheme.signing_dates.timestamp,
+        scheme.credential_scope,
+        hex_lower(&Sha256::digest(canonical_request.as_bytes()))
+    );
+    let signature = sign(string_to_sign.as_bytes())?;
+    let url = format!(
+        "{}://{}{}?{}&{}-Signature={}",
+        endpoint.scheme,
+        endpoint.host,
+        endpoint.canonical_uri,
+        canonical_query,
+        scheme.query_prefix,
+        signature
+    );
+    let expires_at_ms = unix_ms(request_parts.object_key, now)? + expires_in.as_millis() as u64;
+
+    Ok(PresignedUrl {
+        method: method.to_owned(),
+        url,
+        headers: request_parts.required_headers,
+        expires_at_ms,
+    })
 }
 
 pub(crate) fn signing_dates(object_key: &str, time: SystemTime) -> Result<SigningDates> {

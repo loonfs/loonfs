@@ -226,6 +226,8 @@ impl StoreConfig {
     /// [`ConfiguredObjectStore::direct_transfers`](crate::ConfiguredObjectStore::direct_transfers)
     /// from the constructed store instead of checking this config again.
     pub fn configured_object_store(&self) -> crate::object_store::Result<ConfiguredObjectStore> {
+        self.validate()
+            .map_err(|error| ObjectStoreError::Configuration(error.to_string()))?;
         match self {
             StoreConfig::LocalFs { root, key_prefix } => {
                 ConfiguredObjectStore::local_fs(root, key_prefix.as_deref())

@@ -530,19 +530,8 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// because every writer allowed to name this immutable key must supply
     /// identical bytes. Mutable keys must use [`Self::put`] and own their
     /// protocol-specific ambiguity resolution.
+    /// Returns metadata from the confirmed write or exact read-back.
     async fn put_immutable_verified(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> std::result::Result<(), crate::ImmutableWriteError> {
-        self.put_immutable_verified_with_metadata(key, bytes)
-            .await
-            .map(|_| ())
-    }
-
-    /// Performs [`Self::put_immutable_verified`] and returns metadata from the
-    /// confirmed write or exact read-back.
-    async fn put_immutable_verified_with_metadata(
         &self,
         key: &str,
         bytes: Bytes,
@@ -652,18 +641,8 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         &self,
         key: &str,
         bytes: Bytes,
-    ) -> std::result::Result<(), crate::ImmutableWriteError> {
-        self.as_ref().put_immutable_verified(key, bytes).await
-    }
-
-    async fn put_immutable_verified_with_metadata(
-        &self,
-        key: &str,
-        bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        self.as_ref()
-            .put_immutable_verified_with_metadata(key, bytes)
-            .await
+        self.as_ref().put_immutable_verified(key, bytes).await
     }
 
     async fn compare_and_swap(
@@ -758,18 +737,8 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         &self,
         key: &str,
         bytes: Bytes,
-    ) -> std::result::Result<(), crate::ImmutableWriteError> {
-        (*self).put_immutable_verified(key, bytes).await
-    }
-
-    async fn put_immutable_verified_with_metadata(
-        &self,
-        key: &str,
-        bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        (*self)
-            .put_immutable_verified_with_metadata(key, bytes)
-            .await
+        (*self).put_immutable_verified(key, bytes).await
     }
 
     async fn compare_and_swap(
