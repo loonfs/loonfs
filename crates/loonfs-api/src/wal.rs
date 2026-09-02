@@ -4,7 +4,7 @@
 use crate::control::{validate_wal_segment_start_seq, WalSegmentPointer};
 use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
-use crate::manifest::{required_option, DeletedDirentry, TombstoneGeneration};
+use crate::manifest::{DeletedDirentry, TombstoneGeneration};
 use crate::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
     InodeKind, NameKey, NamespaceId, RevisionNo, WalSegmentId, WriterEpoch,
@@ -100,13 +100,9 @@ pub enum WalDelta {
         delta_index: u32,
         /// Inode at the root of the newly hidden subtree.
         root_inode_id: InodeId,
-        /// The binding a path delete removed, carried so the deleted name
-        /// survives on the immortal tombstone row after unbind rows age
-        /// out; `null` for a delete addressed by inode. Stated either way
-        /// and never defaulted, so the pre-grouping layout — which spelled
-        /// the binding as three optional delta fields — does not decode.
-        #[serde(deserialize_with = "required_option")]
-        deleted_direntry: Option<DeletedDirentry>,
+        /// The binding the delete removed, carried so the deleted name
+        /// survives on the immortal tombstone row after unbind rows age out.
+        deleted_direntry: DeletedDirentry,
     },
     /// Revokes exactly one subtree tombstone — the one recorded at `target`
     /// — making the subtree eligible for visibility again once re-bound. An

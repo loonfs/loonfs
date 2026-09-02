@@ -829,19 +829,10 @@ pub(crate) async fn run_filesystem_trash(
     }
     let response = response.expect("trash loop should fetch at least one page");
     let hint = UndeleteHint::new(&context, location, args.target.profile.profile.is_some());
-    // An entry that recorded its binding restores in place with no
-    // destination in the command; only a legacy entry that recorded none
-    // still needs the caller to supply one.
     let recovery_commands = response
         .entries
         .iter()
-        .map(|entry| {
-            hint.command(
-                entry.deleted_binding.is_some(),
-                entry.inode_id,
-                entry.deletion_seq,
-            )
-        })
+        .map(|entry| hint.command(entry.inode_id, entry.deletion_seq))
         .collect();
     Ok(CommandOutput {
         kind,
@@ -1271,12 +1262,9 @@ pub(crate) async fn run_filesystem_rm(
     // printed command restores in place with no destination — and keeps
     // working even if the enclosing directories are renamed before the
     // paste.
-    let recovery_command = UndeleteHint::new(
-        &context,
-        location,
-        args.target.profile.profile.is_some(),
-    )
-    .command(true, deleted_inode, result.committed_seq);
+    let recovery_command =
+        UndeleteHint::new(&context, location, args.target.profile.profile.is_some())
+            .command(deleted_inode, result.committed_seq);
 
     Ok(CommandOutput {
         kind,

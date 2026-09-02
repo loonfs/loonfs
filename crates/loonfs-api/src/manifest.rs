@@ -306,20 +306,6 @@ pub struct DeletedDirentry {
     pub display_name: DisplayName,
 }
 
-/// Reads an optional field that must still be written.
-///
-/// Serde reads a missing `Option` field as `None`, which would make an
-/// encoding that never had the field indistinguishable from one that stated
-/// its absence. A durable optional that distinguishes those two reads
-/// through here instead.
-pub(crate) fn required_option<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    Option::deserialize(deserializer)
-}
-
 /// Tombstone-row event vocabulary (format spec, "Tombstones and deletion").
 ///
 /// This type appears only in immutable rows, so it accepts unknown fields.
@@ -328,13 +314,8 @@ where
 pub enum TombstoneRowAction {
     /// The subtree rooted at the row's inode is deleted.
     Set {
-        /// The binding the delete removed, or `null` for a delete addressed
-        /// by inode, which had no name to record. Stated either way and
-        /// never defaulted, so bytes without the field are the pre-grouping
-        /// layout — which spelled the binding as three optional row fields —
-        /// rather than a deletion that recorded no name.
-        #[serde(deserialize_with = "required_option")]
-        deleted_direntry: Option<DeletedDirentry>,
+        /// The binding the delete removed.
+        deleted_direntry: DeletedDirentry,
     },
     /// The deletion recorded at `target` is revoked. Only a `set` carries a
     /// binding, so the revoke has no place to put one.
@@ -362,10 +343,8 @@ pub enum ActiveDeletionRowAction {
         /// Actor responsible for the deletion.
         deleted_by: crate::ActorRef,
         /// The binding the deletion removed, copied from the tombstone event
-        /// this row derives from, or `null` when it recorded none. Stated
-        /// either way, like the event's own.
-        #[serde(deserialize_with = "required_option")]
-        deleted_direntry: Option<DeletedDirentry>,
+        /// this row derives from.
+        deleted_direntry: DeletedDirentry,
     },
     /// The deletion was cancelled by an undelete at `revocation_seq`.
     Removed {
@@ -984,6 +963,14 @@ mod tests {
         CommitId::parse("c_metadata_row").expect("commit id")
     }
 
+    fn deleted_direntry() -> super::DeletedDirentry {
+        super::DeletedDirentry {
+            parent_inode_id: InodeId(9),
+            name_key: NameKey::parse("report.txt").expect("valid name key"),
+            display_name: crate::DisplayName::parse("report.txt").expect("valid display name"),
+        }
+    }
+
     #[test]
     fn inode_row_keys_sort_by_ascending_inode_id() {
         // The inode family's durable order IS ascending inode id, which is
@@ -1336,7 +1323,7 @@ mod tests {
                     },
                     commit_id: row_commit_id(),
                     action: super::TombstoneRowAction::Set {
-                        deleted_direntry: None,
+                        deleted_direntry: deleted_direntry(),
                     },
                     deleted_at_ms: 12_000,
                     deleted_by: crate::ActorRef::loonfs_system(),
@@ -1435,7 +1422,7 @@ mod tests {
                         },
                         commit_id: row_commit_id(),
                         action: super::TombstoneRowAction::Set {
-                            deleted_direntry: None,
+                            deleted_direntry: deleted_direntry(),
                         },
                         deleted_at_ms: 12_000,
                         deleted_by: actor.clone(),
@@ -1449,7 +1436,7 @@ mod tests {
                         action: super::ActiveDeletionRowAction::Listed {
                             deleted_at_ms: 12_000,
                             deleted_by: actor.clone(),
-                            deleted_direntry: None,
+                            deleted_direntry: deleted_direntry(),
                         },
                     },
                 ),

@@ -2,6 +2,7 @@
 //! index maintenance, and seq-gated queries.
 
 use super::*;
+use loonfs_api::wire::manifest::DeletedDirentry;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::ContentId;
 use loonfs_api::{
@@ -19,6 +20,14 @@ fn commit_id(seq: u64) -> CommitId {
 
 fn name_key(value: &str) -> NameKey {
     NameKey::parse(value).expect("valid name key")
+}
+
+fn deleted_direntry(parent_inode_id: InodeId, display_name: &str) -> DeletedDirentry {
+    DeletedDirentry {
+        parent_inode_id,
+        name_key: name_key(display_name),
+        display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
+    }
 }
 
 #[test]
@@ -39,7 +48,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         WalDelta::TombstoneSubtree {
             delta_index: 2,
             root_inode_id: InodeId(7),
-            deleted_direntry: None,
+            deleted_direntry: deleted_direntry(InodeId(1), "deleted"),
         },
         WalDelta::AppendAttributesRevision {
             delta_index: 3,
@@ -267,7 +276,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         &[WalDelta::TombstoneSubtree {
             delta_index: 0,
             root_inode_id: InodeId(2),
-            deleted_direntry: None,
+            deleted_direntry: deleted_direntry(InodeId(1), "renamed"),
         }],
     );
     assert!(metadata_state

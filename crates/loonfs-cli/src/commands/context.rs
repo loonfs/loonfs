@@ -308,36 +308,14 @@ impl UndeleteHint {
     }
 
     /// The complete `loonfs undelete` invocation that recovers one deletion.
-    ///
-    /// A deletion that recorded its binding restores in place — the entry
-    /// re-binds under the parent and name the delete recorded — so the
-    /// pasted command names no destination at all. One that recorded no
-    /// binding needs the caller to supply where it should land.
-    pub(crate) fn command(
-        &self,
-        recorded_binding: bool,
-        inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-    ) -> String {
-        // The placeholder is deliberately left unquoted: pasted unedited, a
-        // shell rejects it instead of recovering the entry to a file
-        // literally named `<path>`.
-        let destination = if recorded_binding {
-            String::new()
-        } else {
-            format!("{PATH_PLACEHOLDER} ")
-        };
+    pub(crate) fn command(&self, inode_id: InodeId, deletion_seq: ChangeSeq) -> String {
         let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         format!(
-            "loonfs undelete {destination}--inode {inode_id} --deletion-seq {}{}",
+            "loonfs undelete --inode {inode_id} --deletion-seq {}{}",
             deletion_seq.0, self.context_flags
         )
     }
 }
-
-/// Stands in for the destination of a deletion that recorded no name, which
-/// the caller has to supply before the command will run.
-const PATH_PLACEHOLDER: &str = "<path>";
 
 /// Quotes an argument for a POSIX shell, leaving it alone when it needs no
 /// quoting.

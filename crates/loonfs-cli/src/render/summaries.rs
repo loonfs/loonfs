@@ -334,12 +334,8 @@ pub(super) fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> Stri
             ..
         } => format!("move '{from_display_name}' -> '{to_display_name}'"),
         FilesystemChange::Deleted {
-            inode_id,
-            deleted_binding,
-        } => match deleted_binding {
-            Some(binding) => format!("delete '{}'", binding.display_name),
-            None => format!("delete inode {}", public_inode_id(*inode_id)),
-        },
+            deleted_binding, ..
+        } => format!("delete '{}'", deleted_binding.display_name),
         FilesystemChange::Undeleted { display_name, .. } => {
             format!("undelete '{display_name}'")
         }

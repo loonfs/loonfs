@@ -502,11 +502,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 deletion_seq: deletion.deletion_seq,
                 deleted_at_ms: deletion.deleted_at_ms,
                 deleted_by: deletion.deleted_by,
-                deleted_binding: deletion.deleted_direntry.map(|direntry| DirectoryBinding {
-                    parent_inode_id: direntry.parent_inode_id,
-                    name_key: direntry.name_key,
-                    display_name: direntry.display_name,
-                }),
+                deleted_binding: DirectoryBinding {
+                    parent_inode_id: deletion.deleted_direntry.parent_inode_id,
+                    name_key: deletion.deleted_direntry.name_key,
+                    display_name: deletion.deleted_direntry.display_name,
+                },
             })
             .collect();
         Ok(Page {

@@ -271,7 +271,12 @@ mod tests {
             },
             commit_id: CommitId::parse("c_foreign_tombstone").expect("commit id"),
             action: TombstoneRowAction::Set {
-                deleted_direntry: None,
+                deleted_direntry: loonfs_api::wire::manifest::DeletedDirentry {
+                    parent_inode_id: InodeId(1),
+                    name_key: loonfs_api::NameKey::parse("foreign").expect("valid name key"),
+                    display_name: loonfs_api::DisplayName::parse("foreign")
+                        .expect("valid display name"),
+                },
             },
             deleted_at_ms: 4_000,
             deleted_by: loonfs_api::ActorRef::loonfs_system(),

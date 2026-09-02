@@ -244,16 +244,11 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             // The commands were built one per entry, in this order.
             for (entry, recovery_command) in response.entries.iter().zip(&listing.recovery_commands)
             {
-                let name = entry
-                    .deleted_binding
-                    .as_ref()
-                    .map(|binding| binding.display_name.as_str().to_owned())
-                    .unwrap_or_else(|| "-".to_owned());
                 lines.push(format!(
                     "{}\t{}\t{}\t{}\t{}\t{recovery_command}",
                     format_utc_ms(entry.deleted_at_ms),
                     render_actor(&entry.deleted_by),
-                    name,
+                    entry.deleted_binding.display_name,
                     public_inode_id(entry.inode_id),
                     entry.deletion_seq.0,
                 ));

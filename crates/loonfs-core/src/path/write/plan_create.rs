@@ -121,18 +121,8 @@ pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
             else {
                 return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
             };
-            // The name key is re-derived at validation from the spelling,
-            // so only the parent and the spelling are read here.
-            match deletion.deleted_direntry {
-                Some(direntry) => (direntry.parent_inode_id, direntry.display_name),
-                None => {
-                    return Err(CoreError::InvalidCommitRequest(
-                        "the deletion recorded no binding to restore into; \
-                         pass a destination path"
-                            .to_owned(),
-                    ));
-                }
-            }
+            let direntry = deletion.deleted_direntry;
+            (direntry.parent_inode_id, direntry.display_name)
         }
     };
     Ok(CompiledFilesystemOperation::new(

@@ -61,7 +61,7 @@ struct NormalizedTombstone {
 #[derive(Debug, PartialEq, Eq)]
 enum NormalizedTombstoneAction {
     Set {
-        deleted_binding: Option<NormalizedBinding>,
+        deleted_binding: NormalizedBinding,
     },
     Revoke {
         target_seq: u64,
@@ -173,21 +173,12 @@ fn tombstone(
     vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode_id,
-        deleted_direntry: Some(DeletedDirentry {
+        deleted_direntry: DeletedDirentry {
             parent_inode_id,
             name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
                 .expect("derived name key"),
             display_name: DisplayName::parse(display_name).expect("valid display name"),
-        }),
-    }]
-}
-
-/// A delete addressed by inode, which had no name to record.
-fn tombstone_without_binding(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
-    vec![WalDelta::TombstoneSubtree {
-        delta_index,
-        root_inode_id,
-        deleted_direntry: None,
+        },
     }]
 }
 
@@ -328,21 +319,6 @@ fn metadata_apply_matches_model_for_delete_subtree() {
         create_directory(0, InodeId(2), InodeId(1), "Docs"),
         create_directory(0, InodeId(3), InodeId(2), "nested"),
         tombstone(0, InodeId(2), InodeId(1), "Docs"),
-    ]);
-}
-
-#[test]
-fn metadata_apply_matches_model_for_delete_addressed_by_inode() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt",
-            content_ref("content-1"),
-        ),
-        tombstone_without_binding(0, InodeId(3)),
     ]);
 }
 
@@ -579,13 +555,11 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 action: match &tombstone.action {
                     CoreTombstoneAction::Set { deleted_direntry } => {
                         NormalizedTombstoneAction::Set {
-                            deleted_binding: deleted_direntry.as_ref().map(|direntry| {
-                                NormalizedBinding {
-                                    parent_inode_id: direntry.parent_inode_id.0,
-                                    name_key: direntry.name_key.as_str().to_owned(),
-                                    display_name: direntry.display_name.as_str().to_owned(),
-                                }
-                            }),
+                            deleted_binding: NormalizedBinding {
+                                parent_inode_id: deleted_direntry.parent_inode_id.0,
+                                name_key: deleted_direntry.name_key.as_str().to_owned(),
+                                display_name: deleted_direntry.display_name.as_str().to_owned(),
+                            },
                         }
                     }
                     CoreTombstoneAction::Revoke { target } => NormalizedTombstoneAction::Revoke {
@@ -678,13 +652,11 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 action: match &tombstone.action {
                     ModelTombstoneAction::Set { deleted_binding } => {
                         NormalizedTombstoneAction::Set {
-                            deleted_binding: deleted_binding.as_ref().map(|binding| {
-                                NormalizedBinding {
-                                    parent_inode_id: binding.parent_inode_id.0,
-                                    name_key: binding.name_key.clone(),
-                                    display_name: binding.display_name.clone(),
-                                }
-                            }),
+                            deleted_binding: NormalizedBinding {
+                                parent_inode_id: deleted_binding.parent_inode_id.0,
+                                name_key: deleted_binding.name_key.clone(),
+                                display_name: deleted_binding.display_name.clone(),
+                            },
                         }
                     }
                     ModelTombstoneAction::Revoke { target } => NormalizedTombstoneAction::Revoke {
