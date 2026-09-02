@@ -461,15 +461,11 @@ async fn build_handles(
         // The admin honors the configured cache sizing and shares the
         // writer's decoded-block cache instance, so explicit maintenance
         // reuses blocks reader traffic already decoded instead of
-        // populating a second, default-sized cache.
+        // populating a second, default-sized cache. It also shares the
+        // publisher and background compactions so maintenance invalidates
+        // writer projections and uses the writer's runner.
         .runtime_cache(config.runtime_cache_config())
-        .shared_metadata_segment_cache(&writer)
-        // A maintenance step this server runs on request may plan a
-        // background streaming compaction. Sharing the writer's runner is
-        // what lets it start one, makes the operator's step and the writer's
-        // own steps agree that a namespace runs one job at a time, and puts
-        // the job under the shutdown that settles the writer.
-        .background_maintenance(&writer)
+        .over_writer(&writer)
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());

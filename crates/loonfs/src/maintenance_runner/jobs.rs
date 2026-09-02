@@ -16,6 +16,7 @@ use crate::{
     MetadataMaintenanceResponse, NamespaceId, ReorganizeStepOutcome, Result, RuntimeError,
     WalFlushStepOutcome,
 };
+use loonfs_core::cache::load_namespace_diagnostics;
 use loonfs_core::limits::{
     CONTENT_RECLAMATION_GRACE_MS, GC_SAFETY_MARGIN_MS, UPLOAD_SESSION_LEASE_MS,
 };
@@ -154,21 +155,31 @@ impl MaintenanceJob for MetadataJob {
     }
 
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
-        let Some((_writer, admin)) = self.context.admin() else {
+        let Some(_writer) = self.context.bits.upgrade() else {
             return Ok(MaintenanceProbe::Idle);
         };
-        // One head summary, the same read the step opens with. Reorganize
-        // debt has no comparably cheap question, and it needs none: a
-        // publishing unit concludes `Progressed`, so a backlog is folded by
-        // the run that found it rather than left for a sweep.
-        match admin.get_namespace_diagnostics(namespace_id).await {
-            Ok(status) => Ok(if self.options.flush_is_due(status.wal_tail_segments) {
-                MaintenanceProbe::Due
-            } else {
-                MaintenanceProbe::Idle
-            }),
-            Err(error) if metadata_has_nothing_to_maintain(&error) => Ok(MaintenanceProbe::Idle),
-            Err(error) => Err(error),
+        // The same durable read the step opens with: control objects plus
+        // the WAL tail count, without listing checkpoints. Reorganize debt
+        // has no comparably cheap question, and it needs none: a publishing
+        // unit concludes `Progressed`, so a backlog is folded by the run that
+        // found it rather than left for a sweep.
+        match load_namespace_diagnostics(self.context.core.store(), namespace_id).await {
+            Ok(diagnostics) => Ok(
+                if self.options.flush_is_due(diagnostics.wal_tail_segments) {
+                    MaintenanceProbe::Due
+                } else {
+                    MaintenanceProbe::Idle
+                },
+            ),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted
+                ) =>
+            {
+                Ok(MaintenanceProbe::Idle)
+            }
+            Err(error) => Err(error.into()),
         }
     }
 }
