@@ -218,11 +218,12 @@ request_options_path.write_text(source)
 
 http_client_path = pathlib.Path("generated/python/core/http_client.py")
 source = http_client_path.read_text()
-source = replace_once(
+source = remove_exact(
     source,
     '            else request_options.get("timeout_in_seconds")\n'
     '            if request_options is not None and request_options.get("timeout_in_seconds") is not None\n',
-    "",
+    4,
+    "http client timeout_in_seconds fallbacks",
 )
 http_client_path.write_text(source)
 
