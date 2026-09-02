@@ -94,10 +94,16 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     .await?
     {
         ForkCheckpointReachability::Reclaimable => {}
-        ForkCheckpointReachability::ReferencedByLiveTarget
-        | ForkCheckpointReachability::MayHaveLiveDescendant
-        | ForkCheckpointReachability::InFlight
-        | ForkCheckpointReachability::Ambiguous => return Ok(ForkCheckpointSweep::Retained),
+        ForkCheckpointReachability::Retained { reason } => {
+            tracing::debug!(
+                namespace_id = %loaded.state.namespace_id,
+                target_namespace_id = %target_namespace_id,
+                checkpoint_id = %loaded.state.checkpoint_id,
+                reason,
+                "retaining a fork checkpoint its target may still need"
+            );
+            return Ok(ForkCheckpointSweep::Retained);
+        }
     }
     if loaded.state.status != (CheckpointStatus::Active {}) {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
@@ -112,11 +118,8 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
 
 /// Whether a fork checkpoint is still needed.
 pub(super) enum ForkCheckpointReachability {
-    ReferencedByLiveTarget,
-    MayHaveLiveDescendant,
-    InFlight,
     Reclaimable,
-    Ambiguous,
+    Retained { reason: &'static str },
 }
 
 /// Compares a fork checkpoint with the target head that may reference it.
@@ -134,7 +137,9 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
             return Ok(if lease_expires_at_ms <= context.now_ms {
                 ForkCheckpointReachability::Reclaimable
             } else {
-                ForkCheckpointReachability::InFlight
+                ForkCheckpointReachability::Retained {
+                    reason: "target_creation_in_flight",
+                }
             })
         }
         Err(error) => match &error {
@@ -145,7 +150,9 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
                     error = %error,
                     "the fork target head did not read; retaining its source checkpoint"
                 );
-                return Ok(ForkCheckpointReachability::Ambiguous);
+                return Ok(ForkCheckpointReachability::Retained {
+                    reason: "target_head_unreadable",
+                });
             }
             _ => {
                 return Err(CoreError::NamespaceCorrupt(format!(
@@ -166,7 +173,9 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
             .map_err(CoreError::ControlObjectLoad)?
             .is_some()
         {
-            return Ok(ForkCheckpointReachability::MayHaveLiveDescendant);
+            return Ok(ForkCheckpointReachability::Retained {
+                reason: "target_may_have_live_descendant",
+            });
         }
         return Ok(ForkCheckpointReachability::Reclaimable);
     }
@@ -185,5 +194,7 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
             record.checkpoint_id
         )));
     }
-    Ok(ForkCheckpointReachability::ReferencedByLiveTarget)
+    Ok(ForkCheckpointReachability::Retained {
+        reason: "referenced_by_live_target",
+    })
 }

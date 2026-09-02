@@ -443,14 +443,15 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     };
     // The lease is written before the first output object, so no object under
     // the job's prefix is ever unclaimed.
-    let mut lease = CompactionLease::new(
+    let mut lease = CompactionLease::create(
+        store,
         namespace_id,
         spec.job_id(),
         &context.writer_id,
         context.now_ms,
         &timer,
-    );
-    lease.create(store).await?;
+    )
+    .await?;
     tracing::info!(
         namespace_id = namespace_id.as_str(),
         job_id = spec.job_id().as_str(),

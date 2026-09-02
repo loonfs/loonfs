@@ -2,7 +2,7 @@
 //! and the bounded, resumable sweep.
 
 use super::budget::PassBudget;
-use super::compaction_staging::{CompactionLeases, StagedObject};
+use super::compaction_staging::CompactionLeases;
 use super::config::{GcConfig, GcPolicy};
 use super::cursor::{CandidateFamily, GcCursor};
 use super::fork_checkpoints::{
@@ -12,24 +12,32 @@ use super::live_set::{collect_live_set, LiveSet, LiveSetCollection, SweepStep, S
 use super::reap::{
     grace_age, manifest_object_id_of, sweep_checkpoint_record, CheckpointSweep, GraceAge,
 };
-use super::uploads::{sweep_upload_session, ContentReferences, UploadSessionSweep};
+use super::uploads::{
+    sweep_upload_session, ContentReferences, UploadSessionSweep, UploadSweepContext,
+};
+use crate::checkpoint::CompactionPrefixOwner;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_STAGING_GRACE_MS;
 use crate::namespace::control_snapshot::load_control_snapshot;
 use futures::StreamExt;
-use loonfs_api::{ContentStoreId, GcResponse, NamespaceId, RetainedReason, UploadId};
+use loonfs_api::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason, UploadId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SweepCandidateFamily {
-    WalSegments,
-    MetadataSegments,
-    CompactionStaging,
-    Manifests,
-    Checkpoints,
+fn is_live(live: &LiveSet, family: CandidateFamily, key: &str) -> bool {
+    match family {
+        CandidateFamily::WalSegments => live.protects_wal_segment(key),
+        CandidateFamily::MetadataSegments | CandidateFamily::CompactionStaging => {
+            live.segments.contains(key)
+        }
+        CandidateFamily::Manifests => manifest_object_id_of(key)
+            .and_then(std::result::Result::ok)
+            .is_some_and(|manifest_object_id| live.manifests.contains(&manifest_object_id)),
+        CandidateFamily::Checkpoints => live.checkpoint_keys.contains(key),
+        CandidateFamily::UploadSessions => false,
+    }
 }
 
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
@@ -101,15 +109,22 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // A pass exists only after root collection succeeds. From here on it is
     // the one owner of every mutable sweep concern, including cleanup owed by
     // an early budget stop or error.
-    GcPass {
+    let upload_sweep = UploadSweepContext::new(
         store,
         namespace_id,
         content_store_id,
+        policy.grace_window_ms,
+        context,
+    );
+    GcPass {
+        store,
+        namespace_id,
         policy,
         mutation: context,
         initial_live: Arc::clone(&initial_live),
         sweep: SweepVerifier::seeded(Arc::clone(&initial_live), reverify_chunk),
         references: ContentReferences::over(initial_live),
+        upload_sweep,
         leases: CompactionLeases::default(),
         budget,
         report,
@@ -128,7 +143,6 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
 struct GcPass<'a, S: ?Sized> {
     store: &'a S,
     namespace_id: &'a NamespaceId,
-    content_store_id: ContentStoreId,
     policy: GcPolicy,
     mutation: &'a MutationContext,
     /// The root snapshot used to select candidates and collect content
@@ -136,6 +150,7 @@ struct GcPass<'a, S: ?Sized> {
     initial_live: Arc<LiveSet>,
     sweep: SweepVerifier,
     references: ContentReferences,
+    upload_sweep: UploadSweepContext<'a, S>,
     leases: CompactionLeases,
     budget: PassBudget,
     report: GcResponse,
@@ -208,7 +223,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             self.report.retain(RetainedReason::UnrecognizedKey);
             return Ok(SweepStep::Continue);
         }
-        let family = match family {
+        match family {
             CandidateFamily::UploadSessions => {
                 self.process_upload_session(key).await?;
                 return Ok(SweepStep::Continue);
@@ -219,17 +234,17 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                 self.process_missing_basis_checkpoint(key).await?;
                 return Ok(SweepStep::Continue);
             }
-            CandidateFamily::WalSegments => SweepCandidateFamily::WalSegments,
-            CandidateFamily::MetadataSegments => SweepCandidateFamily::MetadataSegments,
-            CandidateFamily::CompactionStaging => SweepCandidateFamily::CompactionStaging,
-            CandidateFamily::Manifests => SweepCandidateFamily::Manifests,
-            CandidateFamily::Checkpoints => SweepCandidateFamily::Checkpoints,
+            CandidateFamily::WalSegments
+            | CandidateFamily::MetadataSegments
+            | CandidateFamily::CompactionStaging
+            | CandidateFamily::Manifests
+            | CandidateFamily::Checkpoints => {}
         };
 
         // Objects reachable from the invocation's root snapshot — either
         // anchor's — are skipped, while every selected candidate is
         // re-verified immediately before its decision.
-        if !self.is_selected(family, key) {
+        if is_live(&self.initial_live, family, key) {
             return Ok(SweepStep::Continue);
         }
         if self
@@ -248,51 +263,47 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         }
 
         match family {
-            SweepCandidateFamily::WalSegments => self.process_wal_segment(key).await?,
-            SweepCandidateFamily::MetadataSegments => self.process_metadata_segment(key).await?,
-            SweepCandidateFamily::CompactionStaging => self.process_compaction_staging(key).await?,
-            SweepCandidateFamily::Manifests => self.process_manifest(key).await?,
-            SweepCandidateFamily::Checkpoints => self.process_checkpoint(key).await?,
+            CandidateFamily::WalSegments => {
+                self.process_aged_family(family, key, |deleted| &mut deleted.wal_segments)
+                    .await?
+            }
+            CandidateFamily::MetadataSegments => {
+                self.process_aged_family(family, key, |deleted| &mut deleted.metadata_segments)
+                    .await?
+            }
+            CandidateFamily::Manifests => {
+                self.process_aged_family(family, key, |deleted| &mut deleted.manifests)
+                    .await?
+            }
+            CandidateFamily::CompactionStaging => self.process_compaction_staging(key).await?,
+            CandidateFamily::Checkpoints => self.process_checkpoint(key).await?,
+            CandidateFamily::UploadSessions => self.process_upload_session(key).await?,
         }
         Ok(SweepStep::Continue)
     }
 
-    fn is_selected(&self, family: SweepCandidateFamily, key: &str) -> bool {
-        match family {
-            SweepCandidateFamily::WalSegments => !self.initial_live.protects_wal_segment(key),
-            // A staged segment a publication landed is named by the manifest
-            // like any other segment, so the same root set answers for both
-            // families.
-            SweepCandidateFamily::MetadataSegments | SweepCandidateFamily::CompactionStaging => {
-                !self.initial_live.segments.contains(key)
-            }
-            SweepCandidateFamily::Manifests => match manifest_object_id_of(key) {
-                Some(Ok(id)) => !self.initial_live.manifests.contains(&id),
-                // A key that names no readable manifest is reachable from no
-                // root. The family decision retains unrecognized names.
-                None | Some(Err(_)) => true,
-            },
-            SweepCandidateFamily::Checkpoints => !self.initial_live.checkpoint_keys.contains(key),
-        }
-    }
-
-    async fn process_wal_segment(&mut self, key: &str) -> Result<()> {
-        if self.sweep.live.protects_wal_segment(key) {
-            self.report.retain(RetainedReason::Referenced);
-        } else if self.sweep_aged(key, self.policy.grace_window_ms).await? {
-            self.report.deleted.wal_segments += 1;
-        }
-        Ok(())
-    }
-
-    async fn process_metadata_segment(&mut self, key: &str) -> Result<()> {
+    async fn process_aged_family(
+        &mut self,
+        family: CandidateFamily,
+        key: &str,
+        deleted: fn(&mut DeletedObjectCounts) -> &mut u64,
+    ) -> Result<()> {
         // Rule 5 is sticky across every re-collection in this pass.
-        if self.sweep.degraded {
+        if self.sweep.degraded
+            && matches!(
+                family,
+                CandidateFamily::MetadataSegments | CandidateFamily::Manifests
+            )
+        {
             self.report.retain(RetainedReason::DegradedRoots);
-        } else if self.sweep.live.segments.contains(key) {
+            return Ok(());
+        }
+        if is_live(&self.sweep.live, family, key) {
             self.report.retain(RetainedReason::Referenced);
-        } else if self.sweep_aged(key, self.policy.grace_window_ms).await? {
-            self.report.deleted.metadata_segments += 1;
+            return Ok(());
+        }
+        if self.sweep_aged(key, self.policy.grace_window_ms).await? {
+            *deleted(&mut self.report.deleted) += 1;
         }
         Ok(())
     }
@@ -302,7 +313,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             self.report.retain(RetainedReason::DegradedRoots);
             return Ok(());
         }
-        if self.sweep.live.segments.contains(key) {
+        if is_live(&self.sweep.live, CandidateFamily::CompactionStaging, key) {
             self.report.retain(RetainedReason::Referenced);
             return Ok(());
         }
@@ -315,12 +326,15 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             .owner_of(self.store, self.namespace_id, key, self.mutation.now_ms)
             .await?
         {
-            StagedObject::OwnedByALiveJob => self.report.retain(RetainedReason::WithinGraceWindow),
-            StagedObject::UnrecognizedKey => {
+            Some(CompactionPrefixOwner::LiveJob) => {
+                self.report.retain(RetainedReason::WithinGraceWindow);
+            }
+            None => {
                 self.report.retain(RetainedReason::UnrecognizedKey);
             }
-            StagedObject::ClaimedLease => {}
-            StagedObject::Orphaned => {
+            // The claimed lease is deleted once its prefix is processed.
+            Some(CompactionPrefixOwner::ThisCollector) if self.leases.is_claimed_lease(key) => {}
+            Some(CompactionPrefixOwner::ThisCollector | CompactionPrefixOwner::NoOne) => {
                 if key.ends_with(".sst.zst")
                     && self
                         .sweep_aged(key, METADATA_COMPACTION_STAGING_GRACE_MS)
@@ -329,27 +343,6 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                     self.report.deleted.metadata_segments += 1;
                 }
             }
-        }
-        Ok(())
-    }
-
-    async fn process_manifest(&mut self, key: &str) -> Result<()> {
-        if self.sweep.degraded {
-            self.report.retain(RetainedReason::DegradedRoots);
-            return Ok(());
-        }
-        match manifest_object_id_of(key) {
-            Some(Ok(id)) if self.sweep.live.manifests.contains(&id) => {
-                self.report.retain(RetainedReason::Referenced);
-            }
-            Some(Ok(_)) => {
-                if self.sweep_aged(key, self.policy.grace_window_ms).await? {
-                    self.report.deleted.manifests += 1;
-                }
-            }
-            // A key under the manifest prefix that does not name a manifest
-            // is never deleted because this pass cannot tell what wrote it.
-            None | Some(Err(_)) => self.report.retain(RetainedReason::UnrecognizedKey),
         }
         Ok(())
     }
@@ -372,7 +365,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
     }
 
     async fn process_checkpoint(&mut self, key: &str) -> Result<()> {
-        if self.sweep.live.checkpoint_keys.contains(key) {
+        if is_live(&self.sweep.live, CandidateFamily::Checkpoints, key) {
             self.report.retain(RetainedReason::Referenced);
             return Ok(());
         }
@@ -414,14 +407,10 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             return Ok(());
         };
         match sweep_upload_session(
-            self.store,
-            self.namespace_id,
-            &self.content_store_id,
+            &self.upload_sweep,
             &upload_id,
-            self.policy.grace_window_ms,
             &mut self.references,
             &mut self.budget,
-            self.mutation,
         )
         .await?
         {

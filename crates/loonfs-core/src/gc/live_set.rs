@@ -18,7 +18,7 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    manifest_object_id_manifest_no, wal_segment_id_start_seq, ChangeSeq, ContentId,
+    manifest_object_id_manifest_no, wal_segment_id_start_seq, ChangeSeq, ContentId, ManifestNo,
     ManifestObjectId, NamespaceId,
 };
 use loonfs_objectstore::keys::{
@@ -588,20 +588,52 @@ async fn collect_retained_wal<S: ObjectStore + ?Sized>(
 /// timestamp, so a manifest with no timestamp reads as young here exactly as
 /// a candidate without one does there.
 ///
-pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
+#[derive(Default)]
+struct GenerationScan {
+    candidate_seen: bool,
+    current_no: Option<ManifestNo>,
+    current: Vec<(ManifestObjectId, String)>,
+    aged: Vec<(ManifestObjectId, String)>,
+    found_young: bool,
+}
+
+impl GenerationScan {
+    fn begin_candidate(&mut self, manifest_no: ManifestNo) {
+        if self.current_no != Some(manifest_no) {
+            if !self.current.is_empty() {
+                self.aged = std::mem::take(&mut self.current);
+            }
+            self.current_no = Some(manifest_no);
+        }
+        self.candidate_seen = true;
+    }
+
+    fn finish(mut self) -> AgedGeneration {
+        if !self.found_young && !self.current.is_empty() {
+            self.aged = self.current;
+        }
+        AgedGeneration {
+            candidate_seen: self.candidate_seen,
+            candidates: self.aged,
+        }
+    }
+}
+
+struct AgedGeneration {
+    candidate_seen: bool,
+    candidates: Vec<(ManifestObjectId, String)>,
+}
+
+async fn newest_fully_aged_generation<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     grace_window_ms: u64,
     budget: &mut PassBudget,
     context: &MutationContext,
-) -> CollectResult<ReferenceAnchor> {
+) -> CollectResult<AgedGeneration> {
     let prefix = metadata_manifest_prefix(namespace_id);
     let mut keys = store.list_prefix_stream(&prefix);
-    let mut manifest_candidate_seen = false;
-    let mut current_generation_no = None;
-    let mut current_generation = Vec::new();
-    let mut aged_generation = Vec::new();
-    let mut found_young = false;
+    let mut scan = GenerationScan::default();
     while let Some(item) = keys.next().await {
         let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
         // Keys this collector does not recognize are never manifests of
@@ -611,15 +643,7 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
         };
         let manifest_no = manifest_object_id_manifest_no(manifest_object_id.as_str())
             .expect("a parsed manifest object id carries its manifest number");
-        if current_generation_no.is_some_and(|current| current != manifest_no) {
-            if !current_generation.is_empty() {
-                aged_generation = std::mem::take(&mut current_generation);
-            }
-            current_generation_no = Some(manifest_no);
-        } else if current_generation_no.is_none() {
-            current_generation_no = Some(manifest_no);
-        }
-        manifest_candidate_seen = true;
+        scan.begin_candidate(manifest_no);
         charge(budget)?;
         let Some(metadata) = store
             .head(&key)
@@ -632,20 +656,29 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
             context.now_ms.saturating_sub(written_at_ms) >= grace_window_ms
         });
         if !aged_out {
-            found_young = true;
+            scan.found_young = true;
             break;
         }
-        current_generation.push((manifest_object_id, key));
+        scan.current.push((manifest_object_id, key));
     }
-    if !found_young && !current_generation.is_empty() {
-        aged_generation = current_generation;
-    }
+    Ok(scan.finish())
+}
 
-    if aged_generation.is_empty() {
+pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    grace_window_ms: u64,
+    budget: &mut PassBudget,
+    context: &MutationContext,
+) -> CollectResult<ReferenceAnchor> {
+    let aged_generation =
+        newest_fully_aged_generation(store, namespace_id, grace_window_ms, budget, context).await?;
+
+    if aged_generation.candidates.is_empty() {
         // Nothing published, nothing unreferenced: a namespace with no
         // manifest of its own has never taken an object out of a file set,
         // and its floor cannot have advanced past its birth without a root.
-        return Ok(match manifest_candidate_seen {
+        return Ok(match aged_generation.candidate_seen {
             true => ReferenceAnchor::Missing,
             false => ReferenceAnchor::NotNeeded,
         });
@@ -654,7 +687,7 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
     let mut manifest_object_ids = BTreeSet::new();
     let mut head_seq = None;
     let mut segments = BTreeSet::new();
-    for (manifest_object_id, key) in aged_generation {
+    for (manifest_object_id, key) in aged_generation.candidates {
         charge(budget)?;
         let manifest = match load_namespace_manifest_envelope_if_present(
             store,

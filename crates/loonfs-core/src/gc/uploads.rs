@@ -55,29 +55,47 @@ pub(super) enum UploadSessionSweep {
     ContentReclamationDeferred,
 }
 
+pub(super) struct UploadSweepContext<'a, S: ?Sized> {
+    store: &'a S,
+    namespace_id: &'a NamespaceId,
+    content_store_id: ContentStoreId,
+    grace_window_ms: u64,
+    context: &'a MutationContext,
+}
+
+impl<'a, S: ?Sized> UploadSweepContext<'a, S> {
+    pub(super) fn new(
+        store: &'a S,
+        namespace_id: &'a NamespaceId,
+        content_store_id: ContentStoreId,
+        grace_window_ms: u64,
+        context: &'a MutationContext,
+    ) -> Self {
+        Self {
+            store,
+            namespace_id,
+            content_store_id,
+            grace_window_ms,
+            context,
+        }
+    }
+}
+
 /// Advances one upload session and reclaims content it no longer owns.
 ///
 /// State transitions use a CAS against the ETag that was read with the
 /// session. A CAS conflict keeps the session for a later pass. Provider
 /// cleanup runs only after the durable state transition, so a crash may leave
 /// extra data to clean up but cannot delete data from an open session.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the sweep decision needs session state, policy, budget, and context together"
-)]
 pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    content_store_id: &ContentStoreId,
+    sweep: &UploadSweepContext<'_, S>,
     upload_id: &UploadId,
-    grace_window_ms: u64,
     references: &mut ContentReferences,
     budget: &mut PassBudget,
-    context: &MutationContext,
 ) -> Result<UploadSessionSweep> {
     // This read selects the lifecycle branch only. Any state change is applied
     // through a later CAS using a fresh ETag.
-    let state = match load_upload_session_state(store, namespace_id, upload_id).await {
+    let state = match load_upload_session_state(sweep.store, sweep.namespace_id, upload_id).await {
         Ok(state) => state,
         Err(CoreError::UploadNotFound { .. }) => return Ok(retain_undated()),
         Err(error) => return Err(error),
@@ -85,25 +103,18 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
 
     match state.status {
         UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
-            abort_expired_session(
-                store,
-                namespace_id,
-                content_store_id,
-                upload_id,
-                expires_at_ms,
-                grace_window_ms,
-                context,
-            )
-            .await
+            abort_expired_session(sweep, upload_id, expires_at_ms).await
         }
         UploadSessionRecordStatus::Aborted { aborted_at_ms } => {
-            if context.now_ms.saturating_sub(aborted_at_ms) < grace_window_ms {
-                return Ok(retain_until(aborted_at_ms.saturating_add(grace_window_ms)));
+            if sweep.context.now_ms.saturating_sub(aborted_at_ms) < sweep.grace_window_ms {
+                return Ok(retain_until(
+                    aborted_at_ms.saturating_add(sweep.grace_window_ms),
+                ));
             }
             // Repeat provider cleanup so a later pass completes work left by a crash
             // after the abort CAS.
             if !AbandonedUpload::of(&state)
-                .release(store, content_store_id)
+                .release(sweep.store, &sweep.content_store_id)
                 .await
             {
                 return Ok(retain_undated());
@@ -119,13 +130,18 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             completed_at_ms,
             content_ref,
         } => {
-            if context.now_ms.saturating_sub(completed_at_ms) < CONTENT_RECLAMATION_GRACE_MS {
+            if sweep.context.now_ms.saturating_sub(completed_at_ms) < CONTENT_RECLAMATION_GRACE_MS {
                 return Ok(retain_until(
                     completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_MS),
                 ));
             }
             match references
-                .lookup(store, namespace_id, &content_ref.content_id, budget)
+                .lookup(
+                    sweep.store,
+                    sweep.namespace_id,
+                    &content_ref.content_id,
+                    budget,
+                )
                 .await?
             {
                 ContentReference::Unknown => Ok(retain_undated()),
@@ -137,8 +153,8 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                 }),
                 ContentReference::Absent => {
                     if !delete_unpublished_content_object(
-                        store,
-                        content_store_id,
+                        sweep.store,
+                        &sweep.content_store_id,
                         &content_ref.content_id,
                     )
                     .await
@@ -174,20 +190,18 @@ fn retain_undated() -> UploadSessionSweep {
 /// The CAS provides safety. The additional grace period only reduces races
 /// with completions that arrive shortly after lease expiry.
 async fn abort_expired_session<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    content_store_id: &ContentStoreId,
+    sweep: &UploadSweepContext<'_, S>,
     upload_id: &UploadId,
     expires_at_ms: u64,
-    grace_window_ms: u64,
-    context: &MutationContext,
 ) -> Result<UploadSessionSweep> {
-    if context.now_ms.saturating_sub(expires_at_ms) < grace_window_ms {
-        return Ok(retain_until(expires_at_ms.saturating_add(grace_window_ms)));
+    if sweep.context.now_ms.saturating_sub(expires_at_ms) < sweep.grace_window_ms {
+        return Ok(retain_until(
+            expires_at_ms.saturating_add(sweep.grace_window_ms),
+        ));
     }
     let aborted = try_update_upload_session(
-        store,
-        namespace_id,
+        sweep.store,
+        sweep.namespace_id,
         upload_id,
         |mut state: UploadSessionState| async move {
             if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
@@ -195,7 +209,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
             }
             let abandoned = AbandonedUpload::of(&state);
             state.status = UploadSessionRecordStatus::Aborted {
-                aborted_at_ms: context.now_ms,
+                aborted_at_ms: sweep.context.now_ms,
             };
             Ok(UploadSessionUpdate::Replace {
                 next: Box::new(state),
@@ -207,13 +221,17 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     match aborted {
         // Keep the newly aborted record until its post-abort grace period expires.
         Ok(CasAttempt::Settled(Some(abandoned))) => {
-            let _ = abandoned.release(store, content_store_id).await;
-            Ok(retain_until(context.now_ms.saturating_add(grace_window_ms)))
+            let _ = abandoned
+                .release(sweep.store, &sweep.content_store_id)
+                .await;
+            Ok(retain_until(
+                sweep.context.now_ms.saturating_add(sweep.grace_window_ms),
+            ))
         }
         Ok(CasAttempt::Settled(None)) => Ok(retain_undated()),
         Ok(CasAttempt::Contended) => {
             tracing::debug!(
-                namespace_id = %namespace_id,
+                namespace_id = %sweep.namespace_id,
                 upload_id = %upload_id,
                 "upload-session abort lost its inspected etag; retaining"
             );
@@ -241,8 +259,6 @@ enum ContentReference {
 /// What the reference scan has produced for this invocation.
 #[derive(Debug)]
 pub(super) enum CollectedReferences {
-    /// The scan has not run yet. Only the memo starts here.
-    NotYet,
     /// A root could not be read, so this pass has no reference set at all
     /// (format spec, "Garbage collection", rule 5).
     Unavailable,
@@ -262,14 +278,14 @@ pub(super) enum CollectedReferences {
 /// delete. A resumed invocation performs a new budgeted scan.
 pub(super) struct ContentReferences {
     live: Arc<LiveSet>,
-    collected: CollectedReferences,
+    collected: Option<CollectedReferences>,
 }
 
 impl ContentReferences {
     pub(super) fn over(live: Arc<LiveSet>) -> Self {
         Self {
             live,
-            collected: CollectedReferences::NotYet,
+            collected: None,
         }
     }
 
@@ -280,19 +296,17 @@ impl ContentReferences {
         content_id: &ContentId,
         budget: &mut PassBudget,
     ) -> Result<ContentReference> {
-        if matches!(self.collected, CollectedReferences::NotYet) {
-            self.collected = if self.live.degraded {
+        if self.collected.is_none() {
+            self.collected = Some(if self.live.degraded {
                 CollectedReferences::Unavailable
             } else {
                 collect_referenced_content(store, namespace_id, &self.live, budget).await?
-            };
+            });
         }
         Ok(match &self.collected {
-            CollectedReferences::NotYet | CollectedReferences::Unavailable => {
-                ContentReference::Unknown
-            }
-            CollectedReferences::Deferred => ContentReference::Deferred,
-            CollectedReferences::Referenced(referenced) => {
+            None | Some(CollectedReferences::Unavailable) => ContentReference::Unknown,
+            Some(CollectedReferences::Deferred) => ContentReference::Deferred,
+            Some(CollectedReferences::Referenced(referenced)) => {
                 if referenced.contains(content_id) {
                     ContentReference::Referenced
                 } else {

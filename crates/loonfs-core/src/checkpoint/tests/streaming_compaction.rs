@@ -619,18 +619,16 @@ async fn test_lease<'a, S: ObjectStore + ?Sized>(
     timer: &'a dyn MonotonicTimer,
 ) -> CompactionLease<'a> {
     let context = test_context();
-    let mut lease = CompactionLease::new(
+    CompactionLease::open_for_test(
+        store,
         namespace_id,
         spec.job_id(),
         &context.writer_id,
         context.now_ms,
         timer,
-    );
-    lease
-        .open_for_test(store)
-        .await
-        .expect("open the job's lease");
-    lease
+    )
+    .await
+    .expect("open the job's lease")
 }
 
 async fn run_compaction<S: ObjectStore + ?Sized>(
@@ -2351,7 +2349,7 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
     );
     assert_eq!(
         claimed.expect("claim the prefix"),
-        CompactionPrefixOwner::ALiveJob,
+        CompactionPrefixOwner::LiveJob,
         "and the claim behind it is refused, so exactly one of the two won"
     );
 

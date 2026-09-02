@@ -15,46 +15,36 @@ use loonfs_objectstore::ObjectStore;
 /// that must be deleted after that prefix is processed.
 #[derive(Debug, Default)]
 pub(super) struct CompactionLeases {
-    /// The most recently checked job and the confirmed owner of its prefix.
-    last_read: Option<(String, CompactionPrefixOwner)>,
+    last_read: Option<LastPrefixRead>,
     /// A successfully claimed lease, retained until all earlier staged objects
     /// in the same job prefix have been processed.
     claimed_lease: Option<String>,
 }
 
-/// What the sweep should do with one key under the compaction prefix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StagedObject {
-    /// The job has a current lease, so the object must be retained.
-    OwnedByALiveJob,
-    /// No active job can publish the object. Apply the normal grace period for
-    /// unreferenced objects.
-    Orphaned,
-    /// The collector claimed this lease. Delete it after processing the
-    /// remaining objects in the job prefix.
-    ClaimedLease,
-    /// The key is neither a recognized lease nor a staged segment, so the
-    /// collector retains it.
-    UnrecognizedKey,
+#[derive(Debug)]
+struct LastPrefixRead {
+    job_id: MetadataCompactionId,
+    owner: CompactionPrefixOwner,
 }
 
 impl CompactionLeases {
-    /// Returns the collection state for `key`, reusing the current job's
-    /// confirmed lease state when possible.
+    /// Returns the confirmed owner of `key`'s job prefix, or `None` when the
+    /// key names no job. One claim per job prefix is reused for every key
+    /// under it.
     pub(super) async fn owner_of<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         namespace_id: &NamespaceId,
         key: &str,
         now_ms: u64,
-    ) -> Result<StagedObject> {
+    ) -> Result<Option<CompactionPrefixOwner>> {
         let Some(metadata_compaction_id) = metadata_compaction_job_id_from_key(key)
             .and_then(|job_id| MetadataCompactionId::parse(job_id).ok())
         else {
-            return Ok(StagedObject::UnrecognizedKey);
+            return Ok(None);
         };
         let owner = match &self.last_read {
-            Some((read_job_id, owner)) if read_job_id == metadata_compaction_id.as_str() => *owner,
+            Some(read) if read.job_id == metadata_compaction_id => read.owner,
             _ => {
                 // A different job prefix has started, so the previously
                 // claimed lease can now be deleted.
@@ -62,25 +52,25 @@ impl CompactionLeases {
                 let owner =
                     claim_compaction_prefix(store, namespace_id, &metadata_compaction_id, now_ms)
                         .await?;
-                self.last_read = Some((metadata_compaction_id.to_string(), owner));
                 if owner == CompactionPrefixOwner::ThisCollector {
                     self.claimed_lease = Some(metadata_compaction_lease(
                         namespace_id,
                         &metadata_compaction_id,
                     ));
                 }
+                self.last_read = Some(LastPrefixRead {
+                    job_id: metadata_compaction_id,
+                    owner,
+                });
                 owner
             }
         };
-        Ok(match owner {
-            CompactionPrefixOwner::ALiveJob => StagedObject::OwnedByALiveJob,
-            CompactionPrefixOwner::ThisCollector if self.claimed_lease.as_deref() == Some(key) => {
-                StagedObject::ClaimedLease
-            }
-            CompactionPrefixOwner::ThisCollector | CompactionPrefixOwner::NoOne => {
-                StagedObject::Orphaned
-            }
-        })
+        Ok(Some(owner))
+    }
+
+    /// Whether `key` is the lease this collector claimed for the current job.
+    pub(super) fn is_claimed_lease(&self, key: &str) -> bool {
+        self.claimed_lease.as_deref() == Some(key)
     }
 
     /// Deletes a claimed lease after its job prefix has been processed.
