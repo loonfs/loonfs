@@ -672,7 +672,7 @@ async fn a_guarded_put_reports_missing_content_before_the_stale_revision_without
     assert!(matches!(
         error,
         CoreError::ContentPreparation(
-            loonfs_core::ContentPreparationError::ContentNotPrepared { ref content_id }
+            loonfs_core::publish::ContentPreparationError::ContentNotPrepared { ref content_id }
         ) if *content_id == missing_content.content_id
     ));
     assert_eq!(guarded_store.content_store_access_count(), 0);
