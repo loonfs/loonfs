@@ -1,17 +1,18 @@
 //! Publish plans that move or copy visible paths.
 
+use super::ensure_expected_inode;
 use super::publish_path_planning::ReplaceDestination;
 use super::publish_path_planning::{
     reject_tombstoned_path_ancestor, resolve_parent_directory, resolve_replace_destination,
     source_binding, CompiledFilesystemOperation, PublishPathPlanningView,
 };
-use super::{ensure_expected_inode, ExpectedFileState};
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{
-    AbsolutePath, AttributeRevisionNo, DestinationBehavior, DisplayName, InodeId, InodeKind,
+    AbsolutePath, AttributeRevisionNo, DestinationBehavior, DisplayName, ExpectedFileState,
+    InodeId, InodeKind,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -121,7 +122,7 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     let source = view.view.resolve_visible_path(from_path).await?;
     if source.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
-            path: from_path.as_str().to_owned(),
+            target: from_path.as_str().to_owned(),
             kind: source.inode_kind,
         });
     }

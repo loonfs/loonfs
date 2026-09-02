@@ -135,7 +135,6 @@ fn map_object_store_error(object_key: &str, err: ObjectStoreError) -> CommitHead
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitFingerprint;
     use loonfs_api::wire::control::{encode_control_object, HeadStateEnvelope};
 
     #[test]
@@ -188,7 +187,7 @@ mod tests {
                 .expect("commit id"),
             writer_epoch: WriterEpoch(1),
             writer: Some(WriterBlock {
-                writer_id: "writer-a".to_owned(),
+                writer_id: loonfs_api::WriterId::parse("writer-a").expect("writer id"),
                 acquired_at_ms: 1_000,
             }),
             next_inode_id: InodeId(10),
@@ -205,9 +204,8 @@ mod tests {
             actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             message: None,
-            semantic_identity: CommitFingerprint::new_unchecked(
-                "v1:sha256:publish-plan".to_owned(),
-            ),
+            semantic_identity: serde_json::from_str(r#""v1:sha256:publish-plan""#)
+                .expect("fingerprint"),
             apply_after_seq: ChangeSeq(assigned_seq.0.saturating_sub(1)),
             assigned_seq,
             validated_ops: Vec::new(),
@@ -231,7 +229,10 @@ mod tests {
                     commit_id: CommitId::parse(format!("publish-record-{index}"))
                         .expect("valid commit id"),
                     committed_by: loonfs_test_support::test_actor(),
-                    semantic_commit_fingerprint: format!("fingerprint-{index}"),
+                    semantic_commit_fingerprint: serde_json::from_value(
+                        format!("fingerprint-{index}").into(),
+                    )
+                    .expect("fingerprint"),
                     committed_at_ms: 4_200,
                     message: None,
                     deltas: Vec::new(),

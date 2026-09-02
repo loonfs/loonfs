@@ -1,8 +1,8 @@
 //! Commit responses and change-feed shapes for the v0 HTTP API.
 
 use crate::{
-    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    NameKey, NamespaceId, RevisionNo,
+    AttributeRevisionNo, Attributes, BindingGeneration, ChangeSeq, CommitId, ContentRef,
+    DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -81,7 +81,7 @@ pub enum FilesystemChange {
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
         /// Opaque identifier for the binding created by this event.
-        binding_generation: String,
+        binding_generation: BindingGeneration,
     },
     /// A file and its first revision were created.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeFileCreated"))]
@@ -95,7 +95,7 @@ pub enum FilesystemChange {
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
         /// Opaque identifier for the binding created by this event.
-        binding_generation: String,
+        binding_generation: BindingGeneration,
         /// First revision number.
         revision_no: RevisionNo,
         /// Content of the first revision.
@@ -129,7 +129,7 @@ pub enum FilesystemChange {
         /// Spelling of the new binding.
         to_display_name: DisplayName,
         /// Opaque identifier for the binding created by this event.
-        binding_generation: String,
+        binding_generation: BindingGeneration,
     },
     /// A file or directory subtree was deleted.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
@@ -152,7 +152,7 @@ pub enum FilesystemChange {
         /// Spelling of the recovered binding.
         display_name: DisplayName,
         /// Opaque identifier for the binding created by this event.
-        binding_generation: String,
+        binding_generation: BindingGeneration,
     },
     /// An inode's attributes changed.
     #[cfg_attr(
@@ -213,8 +213,8 @@ mod tests {
     use super::{CommitResponse, CommittedChange, FilesystemChange};
     use crate::InodeId;
 
-    fn binding_generation() -> String {
-        "generation".to_owned()
+    fn binding_generation() -> crate::BindingGeneration {
+        crate::BindingGeneration::parse("abcdef").expect("binding generation")
     }
 
     #[test]

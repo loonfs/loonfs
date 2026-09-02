@@ -19,7 +19,7 @@ pub(super) async fn plan_restore_revision<S: ObjectStore + ?Sized>(
     let target = view.view.resolve_visible_path(absolute_path).await?;
     if target.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
-            path: absolute_path.as_str().to_owned(),
+            target: absolute_path.as_str().to_owned(),
             kind: target.inode_kind,
         });
     }

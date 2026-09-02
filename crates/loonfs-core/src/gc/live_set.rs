@@ -4,7 +4,7 @@
 
 use super::budget::PassBudget;
 use super::fork_checkpoints::{classify_fork_checkpoint, ForkCheckpointReachability};
-use super::reap::{lease_expired, manifest_object_id_of};
+use super::reap::lease_expired;
 use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::checkpoint::{load_namespace_manifest_envelope_if_present, ManifestLoadFailureClass};
 use crate::context::MutationContext;
@@ -14,7 +14,7 @@ use crate::namespace::control_snapshot::{load_control_snapshot, NamespaceControl
 use crate::wal::{load_wal_chain, WalChainLoad, WalChainLoadRequest};
 use futures::StreamExt;
 use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordState, CheckpointStatus, HeadState, NamespaceStatus,
+    CheckpointOwner, CheckpointRecordState, CheckpointStatus, HeadState,
 };
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
@@ -25,6 +25,7 @@ use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix,
     metadata_segment_object_key, wal_segment_id_from_key,
 };
+use loonfs_objectstore::layout::manifest_object_id_of;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -285,7 +286,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             .manifest_object_id
             .clone()
     });
-    let namespace_deleted = head.status == NamespaceStatus::Deleted {};
+    let namespace_deleted = head.status.is_deleted();
     let collected: CollectResult<LiveSet> = async {
         let floor_seq = snapshot.retention_floor_seq;
         let mut live = LiveSet::collecting(namespace_deleted);

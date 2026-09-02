@@ -1,7 +1,7 @@
-//! Runtime limits, cache sizing, and writer identity validation.
+//! Runtime limits and cache sizing.
 
 use crate::trace::{TraceMode, TraceStoreKind};
-use crate::{MetadataSegmentCacheConfig, Result, RuntimeError};
+use crate::MetadataSegmentCacheConfig;
 
 /// Default maximum namespaces retained in runtime caches.
 pub(crate) const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
@@ -89,17 +89,4 @@ impl Default for RuntimeCacheConfig {
             metadata_segment_cache: MetadataSegmentCacheConfig::default(),
         }
     }
-}
-
-/// Checks the actor identity a write-capable handle will publish under.
-///
-/// Only the writer and admin builders call this; a reader has no identity to
-/// check.
-pub(crate) fn validate_writer_id(writer_id: &str) -> Result<()> {
-    if writer_id.trim().is_empty() {
-        return Err(RuntimeError::Config(
-            "writer_id must not be empty".to_owned(),
-        ));
-    }
-    Ok(())
 }

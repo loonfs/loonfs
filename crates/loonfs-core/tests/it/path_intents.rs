@@ -93,9 +93,11 @@ async fn move_path<S: ObjectStore + ?Sized>(
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         context,
     )
@@ -117,9 +119,11 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         context,
     )
@@ -1081,7 +1085,7 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     assert_eq!(segment.payload.records.len(), 1);
     assert_eq!(
         segment.payload.records[0].semantic_commit_fingerprint,
-        expected_fingerprint.as_str()
+        expected_fingerprint
     );
     assert!(segment.payload.records[0]
         .deltas
@@ -1133,9 +1137,11 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
                 FilesystemOperation::MovePath {
                     from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_destination_inode_id: None,
-                    expected_destination_revision_no: None,
+                    guard: loonfs_api::DestinationGuard {
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
                 },
             )),
         ],
@@ -1881,9 +1887,11 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -1900,9 +1908,11 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -1951,9 +1961,11 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/dir").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -1969,9 +1981,11 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -2023,9 +2037,11 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -2101,9 +2117,11 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/inode-source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/inode-destination.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(inode_destination.inode_id),
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(inode_destination.inode_id),
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -2117,9 +2135,11 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: Some(RevisionNo(1)),
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
+                expected_revision_no: Some(RevisionNo(1)),
+            },
         },
         &context,
     )
@@ -2134,9 +2154,11 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: Some(destination.inode_id),
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: Some(destination.inode_id),
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -2165,9 +2187,11 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(destination.inode_id),
-            expected_destination_revision_no: Some(RevisionNo(2)),
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(destination.inode_id),
+                expected_revision_no: Some(RevisionNo(2)),
+            },
         },
         &context,
     )
@@ -2182,9 +2206,11 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(destination.inode_id),
-            expected_destination_revision_no: Some(RevisionNo(1)),
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(destination.inode_id),
+                expected_revision_no: Some(RevisionNo(1)),
+            },
         },
         &context,
     )
@@ -2262,9 +2288,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(old.inode_id),
-            expected_destination_revision_no: Some(RevisionNo(1)),
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(old.inode_id),
+                expected_revision_no: Some(RevisionNo(1)),
+            },
         },
         &context,
     )
@@ -2287,9 +2315,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: Some(RevisionNo(1)),
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
+                expected_revision_no: Some(RevisionNo(1)),
+            },
         },
         &context,
     )
@@ -2304,9 +2334,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: Some(recreated.inode_id),
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: Some(recreated.inode_id),
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -2328,9 +2360,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(recreated.inode_id),
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(recreated.inode_id),
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -2343,9 +2377,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(recreated.inode_id),
-            expected_destination_revision_no: Some(RevisionNo(2)),
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(recreated.inode_id),
+                expected_revision_no: Some(RevisionNo(2)),
+            },
         },
         &context,
     )
@@ -2436,9 +2472,11 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(source.inode_id),
-            expected_destination_revision_no: Some(RevisionNo(1)),
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(source.inode_id),
+                expected_revision_no: Some(RevisionNo(1)),
+            },
         },
         &context,
     )
@@ -2456,9 +2494,11 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: Some(RevisionNo(1)),
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
+                expected_revision_no: Some(RevisionNo(1)),
+            },
         },
         &context,
     )
@@ -2476,9 +2516,11 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: Some(destination.inode_id),
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: Some(destination.inode_id),
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -2510,9 +2552,11 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(destination.inode_id),
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(destination.inode_id),
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -2528,9 +2572,11 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination-two.txt")
                 .expect("display name"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(destination_two.inode_id),
-            expected_destination_revision_no: Some(RevisionNo(1)),
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(destination_two.inode_id),
+                expected_revision_no: Some(RevisionNo(1)),
+            },
         },
         &context,
     )

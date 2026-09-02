@@ -1,15 +1,17 @@
 //! Publish plans that create, recover, or replace path content.
 
+use super::ensure_expected_inode;
 use super::publish_path_planning::{
     ensure_parent_directories, is_missing_visible_path, reject_tombstoned_path_ancestor,
     require_vacant_path, resolve_parent_directory, CompiledFilesystemOperation,
     PublishPathPlanningView,
 };
-use super::{ensure_expected_inode, ExpectedFileState};
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
-use loonfs_api::{AbsolutePath, ChangeSeq, ContentRef, DestinationBehavior, InodeId, InodeKind};
+use loonfs_api::{
+    AbsolutePath, ChangeSeq, ContentRef, DestinationBehavior, ExpectedFileState, InodeId, InodeKind,
+};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
@@ -111,7 +113,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
             )?;
             if existing.inode_kind != InodeKind::File {
                 return Err(CoreError::ExpectedFile {
-                    path: absolute_path.as_str().to_owned(),
+                    target: absolute_path.as_str().to_owned(),
                     kind: existing.inode_kind,
                 });
             }

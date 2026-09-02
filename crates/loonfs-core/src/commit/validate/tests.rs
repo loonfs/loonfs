@@ -68,7 +68,7 @@ fn planned(ops: Vec<CommitOp>) -> Vec<CommitOp> {
 }
 
 fn test_fingerprint() -> CommitFingerprint {
-    CommitFingerprint::new_unchecked("v1:sha256:test".to_owned())
+    serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint")
 }
 
 fn wal_create_directory(
@@ -197,7 +197,7 @@ fn validation_context(
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         writer_epoch: WriterEpoch(1),
         writer: Some(WriterBlock {
-            writer_id: "writer-a".to_owned(),
+            writer_id: loonfs_api::WriterId::parse("writer-a").expect("writer id"),
             acquired_at_ms: 1_000,
         }),
         next_inode_id,

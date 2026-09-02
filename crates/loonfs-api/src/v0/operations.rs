@@ -2,8 +2,9 @@
 
 use super::ContentToken;
 use crate::{
-    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CheckpointId,
-    CommitId, ContentRef, DisplayName, InodeId, ManifestNo, NamespaceId, RevisionNo, WriterEpoch,
+    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, BindingGeneration, ChangeSeq,
+    CheckpointId, CommitId, ContentRef, DisplayName, InodeId, ManifestNo, NamespaceId, RevisionNo,
+    WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -201,6 +202,111 @@ pub enum DestinationBehavior {
     Replace,
 }
 
+/// Fields that guard replacement of a move or copy destination.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DestinationGuard {
+    /// Whether an existing destination file may be replaced.
+    #[serde(default)]
+    pub behavior: DestinationBehavior,
+    /// With `replace` behavior, the destination inode required by the request.
+    #[serde(
+        rename = "expected_destination_inode_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::public_inode_id::option"
+    )]
+    pub expected_inode_id: Option<InodeId>,
+    /// With `replace` behavior and an inode guard, the required content revision.
+    #[serde(
+        rename = "expected_destination_revision_no",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub expected_revision_no: Option<RevisionNo>,
+}
+
+/// Field-name family used when validating replacement guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardFields {
+    /// Fields on a file put operation.
+    Put,
+    /// Destination fields on a move or copy operation.
+    Destination,
+}
+
+impl GuardFields {
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Put => ("expected_revision_no", "expected_inode_id"),
+            Self::Destination => (
+                "expected_destination_revision_no",
+                "expected_destination_inode_id",
+            ),
+        }
+    }
+}
+
+/// Validated file state required before replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpectedFileState {
+    /// Destination inode required by the request.
+    pub inode_id: InodeId,
+    /// Destination content revision required by the request.
+    pub revision_no: Option<RevisionNo>,
+}
+
+/// Why a destination guard is not a valid request.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DestinationGuardError {
+    /// A create-only operation supplied a replacement guard.
+    #[error("write guards require replace behavior")]
+    GuardsRequireReplace,
+    /// A revision guard did not name the inode whose revision it checks.
+    #[error(
+        "{revision_field} asserts a revision of a specific file; pair it with {inode_field} so the assertion names which file"
+    )]
+    RevisionRequiresInode {
+        /// Revision field supplied by the request.
+        revision_field: &'static str,
+        /// Inode field required beside the revision.
+        inode_field: &'static str,
+    },
+}
+
+impl DestinationGuard {
+    /// Validates the guard and returns the required destination state.
+    pub fn resolve(
+        &self,
+        fields: GuardFields,
+    ) -> Result<Option<ExpectedFileState>, DestinationGuardError> {
+        if self.behavior == DestinationBehavior::NoReplace
+            && !matches!(
+                (self.expected_inode_id, self.expected_revision_no),
+                (None, None)
+            )
+        {
+            return Err(DestinationGuardError::GuardsRequireReplace);
+        }
+        let Some(inode_id) = self.expected_inode_id else {
+            if self.expected_revision_no.is_some() {
+                let (revision_field, inode_field) = fields.names();
+                return Err(DestinationGuardError::RevisionRequiresInode {
+                    revision_field,
+                    inode_field,
+                });
+            }
+            return Ok(None);
+        };
+        Ok(Some(ExpectedFileState {
+            inode_id,
+            revision_no: self.expected_revision_no,
+        }))
+    }
+}
+
 /// Directory delete behavior for path-oriented deletes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -321,7 +427,7 @@ pub enum FilesystemOperation {
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
         /// Binding generation required for the delete.
-        expected_binding_generation: String,
+        expected_binding_generation: BindingGeneration,
         /// Whether a non-empty directory may be tombstoned recursively.
         #[serde(default)]
         behavior: DeleteDirectoryBehavior,
@@ -333,20 +439,9 @@ pub enum FilesystemOperation {
         from_path: AbsolutePath,
         /// Absolute destination whose parent must be visible and writable.
         to_path: AbsolutePath,
-        /// Whether an existing destination file may be replaced.
-        #[serde(default)]
-        behavior: DestinationBehavior,
-        /// With `replace` behavior, the request requires the destination to contain this inode.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "crate::public_inode_id::option"
-        )]
-        expected_destination_inode_id: Option<InodeId>,
-        /// With `replace` behavior and an inode guard, the request requires this content revision.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        expected_destination_revision_no: Option<RevisionNo>,
+        /// Replacement behavior and optional destination state.
+        #[serde(flatten)]
+        guard: DestinationGuard,
     },
     /// Move an inode if its current binding matches.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMoveByInode"))]
@@ -355,26 +450,15 @@ pub enum FilesystemOperation {
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
         /// Binding generation required for the move.
-        expected_binding_generation: String,
+        expected_binding_generation: BindingGeneration,
         /// Destination directory.
         #[serde(with = "crate::public_inode_id")]
         to_parent_inode_id: InodeId,
         /// New name.
         to_display_name: DisplayName,
-        /// Whether an existing destination file may be replaced.
-        #[serde(default)]
-        behavior: DestinationBehavior,
-        /// With `replace` behavior, the request requires the destination to contain this inode.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "crate::public_inode_id::option"
-        )]
-        expected_destination_inode_id: Option<InodeId>,
-        /// With `replace` behavior and an inode guard, the request requires this content revision.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        expected_destination_revision_no: Option<RevisionNo>,
+        /// Replacement behavior and optional destination state.
+        #[serde(flatten)]
+        guard: DestinationGuard,
     },
     /// Copy one file path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationCopyPath"))]
@@ -383,20 +467,9 @@ pub enum FilesystemOperation {
         from_path: AbsolutePath,
         /// Absolute destination whose parent must be visible and writable.
         to_path: AbsolutePath,
-        /// Whether an existing destination file may receive a copied revision.
-        #[serde(default)]
-        behavior: DestinationBehavior,
-        /// With `replace` behavior, the request requires the destination to contain this inode.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "crate::public_inode_id::option"
-        )]
-        expected_destination_inode_id: Option<InodeId>,
-        /// With `replace` behavior and an inode guard, the request requires this content revision.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        expected_destination_revision_no: Option<RevisionNo>,
+        /// Replacement behavior and optional destination state.
+        #[serde(flatten)]
+        guard: DestinationGuard,
     },
     /// Restore the deletion identified by `inode_id` and `deletion_seq`.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUndelete"))]
@@ -1357,9 +1430,11 @@ mod tests {
         let move_path = FilesystemOperation::MovePath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(InodeId(7)),
-            expected_destination_revision_no: Some(RevisionNo(3)),
+            guard: crate::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(InodeId(7)),
+                expected_revision_no: Some(RevisionNo(3)),
+            },
         };
         assert_eq!(
             serde_json::to_value(&move_path).expect("move op json"),
@@ -1376,9 +1451,11 @@ mod tests {
         let copy_path = FilesystemOperation::CopyPath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: Some(InodeId(7)),
-            expected_destination_revision_no: Some(RevisionNo(3)),
+            guard: crate::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: Some(InodeId(7)),
+                expected_revision_no: Some(RevisionNo(3)),
+            },
         };
         assert_eq!(
             serde_json::to_value(&copy_path).expect("copy op json"),
@@ -1530,9 +1607,11 @@ mod tests {
             FilesystemOperation::MovePath {
                 from_path: path("/docs/a.txt"),
                 to_path: path("/docs/b.txt"),
-                behavior: DestinationBehavior::NoReplace,
-                expected_destination_inode_id: None,
-                expected_destination_revision_no: None,
+                guard: crate::DestinationGuard {
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
             }
         );
 
@@ -1547,9 +1626,11 @@ mod tests {
             FilesystemOperation::CopyPath {
                 from_path: path("/docs/a.txt"),
                 to_path: path("/docs/b.txt"),
-                behavior: DestinationBehavior::NoReplace,
-                expected_destination_inode_id: None,
-                expected_destination_revision_no: None,
+                guard: crate::DestinationGuard {
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
             }
         );
     }

@@ -1,13 +1,12 @@
 //! Verified writes for objects whose keys name immutable bytes.
 
-use crate::retry::{
-    next_retry_backoff, transport_retry_pause, OperationDeadline, TransportRetryPolicy,
-};
+use crate::retry::{next_retry_backoff, transport_retry_pause, DEFAULT};
 use crate::timing::StdMonotonicTimer;
 use crate::{
     ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use bytes::Bytes;
+use loonfs_api::OperationDeadline;
 use thiserror::Error;
 
 /// Failure to verify that an immutable key contains the requested bytes.
@@ -49,7 +48,7 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
     bytes: Bytes,
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
     let timer = StdMonotonicTimer::default();
-    let retry_policy = TransportRetryPolicy::DEFAULT;
+    let retry_policy = DEFAULT;
     let mode = if bytes.len() as u64 >= PROVIDER_MULTIPART_THRESHOLD_BYTES {
         PutMode::Overwrite
     } else {

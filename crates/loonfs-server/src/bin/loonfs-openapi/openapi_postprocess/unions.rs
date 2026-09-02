@@ -18,6 +18,7 @@ pub(super) fn extract_union_variants(document: &mut Value) -> Result<(), Openapi
     let schemas = component_schemas(document)?;
     let mut extracted = Map::new();
     let mut rewrites = Vec::new();
+    let mut flattened = BTreeSet::new();
 
     for (union_name, union) in schemas {
         let Some(variants) = union.get("oneOf").and_then(Value::as_array) else {
@@ -60,7 +61,12 @@ pub(super) fn extract_union_variants(document: &mut Value) -> Result<(), Openapi
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("{union_name}{}", pascal_case(&tag)));
             let reference = component_schema_reference(&schema_name);
-            let mut schema = variant.clone();
+            let mut schema = flatten_inline_all_of_variant(
+                schemas,
+                &schema_name,
+                variant.clone(),
+                &mut flattened,
+            )?;
             schema
                 .as_object_mut()
                 .ok_or_else(|| invalid_document(format!("components.schemas.{union_name}.oneOf")))?
@@ -99,7 +105,40 @@ pub(super) fn extract_union_variants(document: &mut Value) -> Result<(), Openapi
             .insert("mapping".to_owned(), Value::Object(rewrite.mapping));
     }
     schemas.extend(extracted);
+    // A component that only ever appeared as a flattened member has no
+    // remaining reference and is not part of the document.
+    remove_unreferenced_components(document, &flattened)?;
     Ok(())
+}
+
+/// Folds a variant's `allOf` members into one object so the extracted
+/// variant carries every property itself.
+fn flatten_inline_all_of_variant(
+    schemas: &Map<String, Value>,
+    schema_name: &str,
+    mut schema: Value,
+    flattened: &mut BTreeSet<String>,
+) -> Result<Value, OpenapiPostprocessError> {
+    let Some(members) = schema.get("allOf").and_then(Value::as_array).cloned() else {
+        return Ok(schema);
+    };
+    let mut fields = UnionEnvelope::default();
+    for member in &members {
+        let reference = member.get("$ref").and_then(Value::as_str);
+        if let Some(name) = reference.and_then(component_schema_name) {
+            flattened.insert(name);
+        }
+        let resolved =
+            reference.and_then(|reference| component_schema_for_reference(schemas, reference));
+        fields.extend(schema_name, resolved.unwrap_or(member))?;
+    }
+    let schema_object = schema
+        .as_object_mut()
+        .ok_or_else(|| invalid_document(format!("components.schemas.{schema_name}")))?;
+    schema_object.remove("allOf");
+    schema_object.insert("type".to_owned(), Value::String("object".to_owned()));
+    merge_envelope(schema_name, &mut schema, &fields)?;
+    Ok(schema)
 }
 
 fn register_extracted_schema(
@@ -513,18 +552,36 @@ fn discriminator_for(object: &Map<String, Value>, path: &[String]) -> Option<Val
 
 fn fixed_required_properties(variant: &Value) -> Option<Vec<(String, String)>> {
     let variant = variant.as_object()?;
-    let required = variant.get("required")?.as_array()?;
-    let properties = variant.get("properties")?.as_object()?;
+    let mut fixed = Vec::new();
+    let mut has_object_shape = false;
 
-    Some(
-        required
-            .iter()
-            .filter_map(Value::as_str)
-            .filter_map(|name| {
-                fixed_string(properties.get(name)?).map(|value| (name.to_owned(), value.to_owned()))
-            })
-            .collect(),
-    )
+    if let (Some(required), Some(properties)) = (
+        variant.get("required").and_then(Value::as_array),
+        variant.get("properties").and_then(Value::as_object),
+    ) {
+        has_object_shape = true;
+        fixed.extend(
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(|name| {
+                    fixed_string(properties.get(name)?)
+                        .map(|value| (name.to_owned(), value.to_owned()))
+                }),
+        );
+    }
+
+    if let Some(members) = variant.get("allOf").and_then(Value::as_array) {
+        has_object_shape = true;
+        fixed.extend(
+            members
+                .iter()
+                .filter_map(fixed_required_properties)
+                .flatten(),
+        );
+    }
+
+    has_object_shape.then_some(fixed)
 }
 
 fn fixed_string(schema: &Value) -> Option<&str> {

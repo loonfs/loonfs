@@ -72,7 +72,7 @@ where
             CommitReceiptRecord {
                 commit_id: record.commit_id.clone(),
                 committed_by: record.committed_by.clone(),
-                semantic_commit_fingerprint: record.semantic_commit_fingerprint.to_owned(),
+                semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
                 committed_seq: record.seq,
                 committed_at_ms: record.committed_at_ms,
                 message: record.message.map(str::to_owned),

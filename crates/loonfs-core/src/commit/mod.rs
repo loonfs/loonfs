@@ -6,7 +6,6 @@
 //! to compare reused commit IDs, and `ops` defines the inode-level operations
 //! produced by path planning.
 
-mod identity;
 mod inode_allocator;
 mod materialize;
 mod ops;
@@ -16,7 +15,6 @@ mod publish_error;
 mod validate;
 mod wal_payload;
 
-pub use self::identity::CommitFingerprint;
 pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation, InodeAllocator};
 pub use self::materialize::MaterializedCommitDelta;
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
@@ -30,3 +28,4 @@ pub use self::publish_error::CommitHeadPublishError;
 pub(crate) use self::validate::{validate_ops, CommitNumbering, PublishValidationView};
 pub use self::validate::{CommitOperand, CommitValidationError};
 pub(crate) use self::wal_payload::wal_payload_from_materialized_commit;
+pub use loonfs_api::CommitFingerprint;

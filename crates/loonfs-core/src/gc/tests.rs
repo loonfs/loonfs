@@ -49,9 +49,10 @@ use crate::commit_engine::delete_namespace;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::fork::fork_namespace;
 use crate::options::DeleteNamespaceOptions;
-use crate::path::read::{load_current_metadata_view, AttributeInclusion};
+use crate::path::read::load_current_metadata_view;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs_api::AttributeInclusion;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{

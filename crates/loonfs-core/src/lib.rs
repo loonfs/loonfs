@@ -17,20 +17,21 @@
 //!     PublishTailOptions,
 //! };
 //! use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
+//! use loonfs_api::WriterId;
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
 //!
 //! let store = LocalFsStore::new(std::env::temp_dir())
 //!     .expect("a temporary-directory-backed store should initialize");
 //! let namespace = NamespaceId::parse("docs").expect("valid namespace id");
 //!
-//! let engine = NamespaceEngine::writer(store, namespace.clone(), "example-writer")
-//!     .expect("a writer engine with a non-empty identity should build");
+//! let writer_id = WriterId::parse("example-writer").expect("valid writer id");
+//! let engine = NamespaceEngine::writer(store, namespace.clone(), writer_id.clone());
 //! let _ = engine.bootstrap_namespace(BootstrapOptions::default());
 //!
 //! let publish_store = LocalFsStore::new(std::env::temp_dir())
 //!     .expect("a temporary-directory-backed store should initialize");
 //! let context = MutationContext {
-//!     writer_id: "example-writer".to_owned(),
+//!     writer_id,
 //!     now_ms: 0,
 //! };
 //! let mut publisher = NamespaceCommitEngine::new(namespace);
@@ -162,8 +163,7 @@ pub use checkpoint::{
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{
-    NamespaceEngine, NamespaceEngineBuildError, NamespaceReaderEngine, NamespaceWriterEngine,
-    ReadOnly, Writable,
+    NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, Writable,
 };
 pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,

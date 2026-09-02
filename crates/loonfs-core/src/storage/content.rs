@@ -13,8 +13,8 @@ use futures::StreamExt;
 #[cfg(any(test, feature = "test-support"))]
 use loonfs_api::NamespaceId;
 use loonfs_api::{
-    Checksum, ContentId, ContentRef, ContentRefValidationError, ContentStoreId, PathEntry, Sha256,
-    StreamingChecksum,
+    Checksum, ContentId, ContentRef, ContentRefValidationError, ContentStoreId, ErrorCode,
+    PathEntry, Sha256, StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteRange, ByteStream, ObjectStore, ObjectStoreError, PutMode};
@@ -86,6 +86,20 @@ pub enum DurableContentValidationError {
     },
     #[error("object store error for `{object_key}`: {message}")]
     Store { object_key: String, message: String },
+}
+
+impl DurableContentValidationError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::InvalidContentRef(_)
+            | Self::MissingContentObject { .. }
+            | Self::ContentLengthMismatch { .. }
+            | Self::ContentChecksumMismatch { .. } => ErrorCode::NamespaceCorrupt,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::ContentStoreMismatch { .. } => ErrorCode::NamespaceCorrupt,
+            Self::Store { .. } => ErrorCode::ServerError,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1232,7 +1246,8 @@ mod tests {
                 Ok(Some(_)) => continue,
                 // A verified end is the only thing that reports `None`, so
                 // this arm would mean bad bytes had been accepted.
-                #[allow(clippy::panic, reason = "the failure this test exists to catch")]
+                // This is the failure this test exists to catch.
+                #[allow(clippy::panic)]
                 Ok(None) => panic!("a prefix that is not the object's verified"),
                 Err(error) => break error,
             }
@@ -1392,7 +1407,8 @@ mod tests {
         let verdict = loop {
             match stream.next_chunk().await {
                 Ok(Some(_)) => continue,
-                #[allow(clippy::panic, reason = "the failure this test exists to catch")]
+                // This is the failure this test exists to catch.
+                #[allow(clippy::panic)]
                 Ok(None) => panic!("an object that is not the reference's verified"),
                 Err(error) => break error,
             }
@@ -1460,7 +1476,8 @@ mod tests {
         let verdict = loop {
             match wrong.next_chunk().await {
                 Ok(Some(_)) => continue,
-                #[allow(clippy::panic, reason = "the failure this test exists to catch")]
+                // This is the failure this test exists to catch.
+                #[allow(clippy::panic)]
                 Ok(None) => panic!("a prefix that is not the object's verified"),
                 Err(error) => break error,
             }

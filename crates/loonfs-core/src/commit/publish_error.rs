@@ -1,6 +1,7 @@
 //! [`CommitHeadPublishError`]: failures of the segment PUT and head
 //! compare-and-swap.
 
+use loonfs_api::ErrorCode;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -34,4 +35,19 @@ pub enum CommitHeadPublishError {
     Codec { object_key: String, message: String },
     #[error("head object store error for `{object_key}`: {message}")]
     Store { object_key: String, message: String },
+}
+
+impl CommitHeadPublishError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::StaleHead | Self::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
+            Self::OutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
+            Self::EmptyExpectedHeadEtag
+            | Self::SegmentDoesNotConnect { .. }
+            | Self::EmptyWalSegment
+            | Self::SeqOverflow
+            | Self::Codec { .. }
+            | Self::Store { .. } => ErrorCode::ServerError,
+        }
+    }
 }

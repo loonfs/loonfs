@@ -4,7 +4,7 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control_snapshot::{load_control_snapshot, load_head_and_retention_floor};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
-use loonfs_api::wire::control::{HeadState, NamespaceStatus};
+use loonfs_api::wire::control::HeadState;
 use loonfs_api::{ChangeSeq, ManifestNo, Namespace, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
@@ -45,11 +45,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     let basis = snapshot.basis();
     let retention_floor_seq = snapshot.retention_floor_seq;
     let head = snapshot.head.state;
-    if head.status == (NamespaceStatus::Deleted {}) {
-        return Err(CoreError::NamespaceDeleted {
-            namespace_id: expected_namespace_id.clone(),
-        });
-    }
+    super::control::ensure_namespace_live(&head)?;
     // An unflushed fork measures its WAL tail from the fork point.
     let (current_manifest_no, basis_head_seq) = match basis.manifest() {
         Some(manifest) => (
@@ -77,11 +73,7 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     let head = head.state;
-    if head.status == (NamespaceStatus::Deleted {}) {
-        return Err(CoreError::NamespaceDeleted {
-            namespace_id: expected_namespace_id.clone(),
-        });
-    }
+    super::control::ensure_namespace_live(&head)?;
     Ok(Namespace {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
@@ -148,7 +140,7 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     let head = head.state;
-    if head.status != (NamespaceStatus::Deleted {}) {
+    if !head.status.is_deleted() {
         return Err(CoreError::Internal(format!(
             "namespace `{expected_namespace_id}` is live; deleted diagnostics require a deleted namespace"
         )));

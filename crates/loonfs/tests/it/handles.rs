@@ -513,7 +513,7 @@ fn standalone_reader_builds_without_writer_identity() {
             .expect("load head")
             .state;
         let writer_block = head.writer.expect("head records the writer that published");
-        assert_eq!(writer_block.writer_id, "handle-test-writer");
+        assert_eq!(writer_block.writer_id.as_str(), "handle-test-writer");
         assert_ne!(
             writer_block.acquired_at_ms, 0,
             "the acquisition stamp is what tells two runs of one writer apart"

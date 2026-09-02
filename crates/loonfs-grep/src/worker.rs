@@ -27,7 +27,7 @@ use loonfs::{
     select_next_iterator, write_segments_in_waves, CheckpointFilesPageCursor, CoreError,
     CreateCheckpointOptions, FsAdmin, FsReader, GcCursorKeyspace, GraceAge, NamespaceGcCursor,
     PassBudget, RuntimeError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
-    DEFAULT_GC_MAX_OBJECTS, GC_MIN_GRACE_WINDOW_MS,
+    DEFAULT_GC_MAX_OBJECTS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
@@ -57,7 +57,7 @@ pub const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 ///
 /// The period must exceed the maximum publication window so an in-progress
 /// root update cannot lose an object it has written but not yet referenced.
-pub const GREP_GC_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
+pub const GREP_GC_GRACE_WINDOW_MS: u64 = GC_DEFAULT_GRACE_WINDOW_MS;
 
 const GREP_REVERIFY_CHUNK: usize = 1024;
 

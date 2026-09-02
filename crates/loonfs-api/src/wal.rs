@@ -6,8 +6,8 @@ use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::manifest::{DeletedDirentry, TombstoneGeneration};
 use crate::{
-    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    InodeKind, NameKey, NamespaceId, RevisionNo, WalSegmentId, WriterEpoch,
+    AttributeRevisionNo, Attributes, ChangeSeq, CommitFingerprint, CommitId, ContentRef,
+    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalSegmentId, WriterEpoch,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -158,7 +158,7 @@ pub struct WalCommitPayload {
     /// Actor that committed the change, as supplied by the application.
     pub committed_by: crate::ActorRef,
     /// Digest of semantic request content used to reject conflicting `commit_id` reuse.
-    pub semantic_commit_fingerprint: String,
+    pub semantic_commit_fingerprint: CommitFingerprint,
     /// Wall-clock stamp from the publishing writer's request context, in
     /// Unix milliseconds. Observational only: never a validity or ordering
     /// input — `seq` is the order — and excluded from the semantic commit

@@ -5,10 +5,8 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
 use crate::error::{CoreError, StoreFailureClass, WriterFence};
-use loonfs_api::wire::control::{
-    AcquiredWriter, HeadIdentityDrift, HeadState, NamespaceStatus, WriterBlock,
-};
-use loonfs_api::{next_public_ordinal, NamespaceId, WriterEpoch};
+use loonfs_api::wire::control::{AcquiredWriter, HeadIdentityDrift, HeadState, WriterBlock};
+use loonfs_api::{next_public_ordinal, ErrorCode, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,8 +18,6 @@ pub enum WriterEpochAcquireError {
     LoadHead(ControlObjectLoadError),
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
-    #[error("empty writer id")]
-    EmptyWriterId,
     #[error(
         "writer epoch `{active}` cannot be incremented because the maximum is 9007199254740991"
     )]
@@ -35,8 +31,21 @@ pub enum WriterEpochAcquireError {
     #[error("{}", crate::error::contention_message(object_key))]
     RetryExhausted { object_key: String },
     /// The successor head changed immutable namespace identity.
-    #[error("{0}")]
+    #[error(transparent)]
     HeadIdentityDrift(HeadIdentityDrift),
+}
+
+impl WriterEpochAcquireError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::LoadHead(error) => error.code(),
+            Self::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+            Self::WriterEpochOverflow { .. }
+            | Self::RetryExhausted { .. }
+            | Self::HeadIdentityDrift(_) => ErrorCode::ServerError,
+            Self::HeadWrite { class, .. } => crate::error::classify_store_failure(*class),
+        }
+    }
 }
 
 /// Acquires the namespace writer epoch for one writer session.
@@ -58,15 +67,11 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<AcquiredWriter, WriterEpochAcquireError> {
-    if context.writer_id.trim().is_empty() {
-        return Err(WriterEpochAcquireError::EmptyWriterId);
-    }
-
     update_head(store, namespace_id, |loaded_head| {
         let head = &loaded_head.state;
         // A deleted namespace cannot grant another writer epoch, even to the
         // writer recorded in its tombstone.
-        if head.status == (NamespaceStatus::Deleted {}) {
+        if head.status.is_deleted() {
             return Err(WriterEpochAcquireError::NamespaceDeleted {
                 namespace_id: head.namespace_id.clone(),
             });
@@ -76,7 +81,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         Ok(HeadReplacement {
             next: Box::new(head_with_writer(head, next_epoch, context)?),
             outcome: AcquiredWriter {
-                writer_id: context.writer_id.clone(),
+                writer_id: context.writer_id.to_string(),
                 writer_epoch: next_epoch,
             },
         })
@@ -95,7 +100,10 @@ pub(crate) fn ensure_writer_not_fenced(
     Err(CoreError::WriterFenced(WriterFence {
         fenced_epoch: acquired_writer.writer_epoch,
         active_epoch: head.writer_epoch,
-        active_writer: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
+        active_writer: head
+            .writer
+            .as_ref()
+            .map(|writer| writer.writer_id.to_string()),
         active_acquired_at_ms: head.writer.as_ref().map(|writer| writer.acquired_at_ms),
     }))
 }
@@ -200,7 +208,7 @@ mod tests {
 
     fn context(writer_id: &str, now_ms: u64) -> MutationContext {
         MutationContext {
-            writer_id: writer_id.to_owned(),
+            writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
             now_ms,
         }
     }
@@ -217,7 +225,7 @@ mod tests {
         );
         head.writer_epoch = writer_epoch;
         head.writer = Some(WriterBlock {
-            writer_id: writer_id.to_owned(),
+            writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
             acquired_at_ms: 500,
         });
         head
@@ -288,7 +296,7 @@ mod tests {
             .state;
         assert_eq!(head.writer_epoch, WriterEpoch(9));
         let writer = head.writer.expect("writer block");
-        assert_eq!(writer.writer_id, "writer");
+        assert_eq!(writer.writer_id.as_str(), "writer");
         assert_eq!(writer.acquired_at_ms, 2_000);
     }
 
@@ -419,7 +427,7 @@ mod tests {
             .expect("read head")
             .state;
         let writer = head.writer.expect("writer block");
-        assert_eq!(writer.writer_id, "writer-b");
+        assert_eq!(writer.writer_id.as_str(), "writer-b");
         assert_eq!(writer.acquired_at_ms, 2_000);
     }
 
@@ -487,7 +495,10 @@ mod tests {
             .expect("read head")
             .state;
         assert_eq!(head.seq, ChangeSeq(3));
-        assert_eq!(head.writer.expect("writer block").writer_id, "writer-a");
+        assert_eq!(
+            head.writer.expect("writer block").writer_id.as_str(),
+            "writer-a"
+        );
     }
 
     #[tokio::test]
@@ -533,7 +544,7 @@ mod tests {
                 let mut head = envelope.state;
                 head.writer_epoch = WriterEpoch(head.writer_epoch.0 + 1);
                 head.writer = Some(WriterBlock {
-                    writer_id: "writer-b".to_owned(),
+                    writer_id: loonfs_api::WriterId::parse("writer-b").expect("writer id"),
                     acquired_at_ms: 1_500,
                 });
                 let next = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
@@ -570,7 +581,7 @@ mod tests {
             .state;
         assert_eq!(head.status, NamespaceStatus::Active {});
         let writer = head.writer.expect("writer block");
-        assert_eq!(writer.writer_id, "writer-b");
+        assert_eq!(writer.writer_id.as_str(), "writer-b");
     }
 
     #[tokio::test]
@@ -627,6 +638,9 @@ mod tests {
             .expect("read head")
             .state;
         assert_eq!(head.writer_epoch, WriterEpoch(9));
-        assert_eq!(head.writer.expect("writer block").writer_id, "writer-c");
+        assert_eq!(
+            head.writer.expect("writer block").writer_id.as_str(),
+            "writer-c"
+        );
     }
 }

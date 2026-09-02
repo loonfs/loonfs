@@ -223,7 +223,10 @@ async fn fenced_session_cannot_delete_namespace() {
     let head = head_state(&store, &namespace_id).await;
     assert_eq!(head.status, NamespaceStatus::Active {});
     assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
-    assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
+    assert_eq!(
+        head.writer.expect("writer block").writer_id.as_str(),
+        "writer-b"
+    );
     writer_b
         .put_file_bytes(
             &namespace_id,

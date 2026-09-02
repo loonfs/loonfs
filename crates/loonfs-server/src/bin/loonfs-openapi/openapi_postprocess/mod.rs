@@ -190,6 +190,59 @@ mod tests {
     }
 
     #[test]
+    fn extracts_a_flattened_tagged_variant() {
+        let mut document = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Choice": {
+                        "oneOf": [{
+                            "allOf": [
+                                {"$ref": "#/components/schemas/Guard"},
+                                {
+                                    "required": ["kind", "value"],
+                                    "properties": {
+                                        "kind": {"enum": ["first"]},
+                                        "value": {"type": "string"}
+                                    }
+                                }
+                            ]
+                        }]
+                    },
+                    "Guard": {
+                        "type": "object",
+                        "properties": {"behavior": {"type": "string"}}
+                    }
+                }
+            }
+        });
+
+        add_union_discriminators(&mut document, &mut Vec::new());
+        extract_union_variants(&mut document).expect("extract flattened union variant");
+        let actual = &document;
+        assert_eq!(
+            actual.pointer("/components/schemas/Choice/oneOf/0/$ref"),
+            Some(&serde_json::json!("#/components/schemas/ChoiceFirst"))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/Choice/discriminator/mapping/first"),
+            Some(&serde_json::json!("#/components/schemas/ChoiceFirst"))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/ChoiceFirst/properties/kind/enum/0"),
+            Some(&serde_json::json!("first"))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/ChoiceFirst/properties/behavior/type"),
+            Some(&serde_json::json!("string"))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/Guard"),
+            None,
+            "a schema that only appeared as a flattened member is not a component"
+        );
+    }
+
+    #[test]
     fn rejects_a_different_schema_under_the_variant_name() {
         let mut document = serde_json::json!({
             "components": {

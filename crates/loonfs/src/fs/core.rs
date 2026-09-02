@@ -1,7 +1,7 @@
 //! Shared read state and additional state used by writers.
 
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
-use crate::config::{validate_writer_id, ReadConfig};
+use crate::config::ReadConfig;
 use crate::maintenance_runner::{MaintenanceRunner, NamespacePublication};
 use crate::metrics::RuntimeInstruments;
 use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
@@ -12,9 +12,9 @@ use crate::{
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page, PageCursor,
-    PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
-    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
+    PaginationPolicy, WriterId, FEATURE_ATTRIBUTES, FEATURE_INODES_LIST_CHILDREN,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_SNAPSHOTS, LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
     PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
@@ -47,7 +47,7 @@ pub(crate) struct ReadCoreInner {
 /// Actor identity used by a writer.
 #[derive(Clone)]
 pub(crate) struct WriterIdentity {
-    pub(crate) writer_id: String,
+    pub(crate) writer_id: WriterId,
 }
 
 /// Writer state shared weakly with the publisher worker.
@@ -94,9 +94,10 @@ impl WriterBits {
 }
 
 impl WriterIdentity {
-    /// Mints an identity, rejecting an empty actor id.
+    /// Mints an identity, rejecting a blank writer id.
     pub(crate) fn new(writer_id: String) -> Result<Self> {
-        validate_writer_id(&writer_id)?;
+        let writer_id =
+            WriterId::parse(writer_id).map_err(|error| RuntimeError::Config(error.to_string()))?;
         Ok(Self { writer_id })
     }
 
@@ -283,7 +284,6 @@ impl ReadCore {
             namespace_id.clone(),
             actor.writer_id.clone(),
         )
-        .expect("a validated actor identity should build a namespace engine")
     }
 }
 

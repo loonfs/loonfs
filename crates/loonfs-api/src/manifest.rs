@@ -291,7 +291,7 @@ pub struct CommitReceiptRecord {
     /// Actor that committed the change, as supplied by the application.
     pub committed_by: crate::ActorRef,
     /// Digest used to distinguish a safe retry from conflicting ID reuse.
-    pub semantic_commit_fingerprint: String,
+    pub semantic_commit_fingerprint: crate::CommitFingerprint,
     /// Namespace sequence assigned to the accepted commit.
     pub committed_seq: ChangeSeq,
     /// The commit's observational wall-clock stamp.
@@ -1399,7 +1399,8 @@ mod tests {
                     commit_id: CommitId::parse("c_00000000000000000000000000000001")
                         .expect("commit id"),
                     committed_by: crate::ActorRef::loonfs_system(),
-                    semantic_commit_fingerprint: "sha256:unused".to_owned(),
+                    semantic_commit_fingerprint: serde_json::from_str(r#""sha256:unused""#)
+                        .expect("fingerprint"),
                     committed_seq: ChangeSeq(12),
                     committed_at_ms: 12_000,
                     message: None,

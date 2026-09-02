@@ -791,9 +791,9 @@ fn is_scratch_name(name: &str) -> bool {
     name == STORE_LOCK_FILE_NAME || (name.starts_with('.') && name.contains(".tmp-"))
 }
 
+// Local atomic writes need a unique sibling name. This timestamp is not durable state.
 #[allow(clippy::disallowed_methods)]
 fn temp_path(path: &Path) -> PathBuf {
-    // Local atomic writes need a unique sibling name; this timestamp is not durable state.
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())

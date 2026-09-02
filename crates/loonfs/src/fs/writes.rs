@@ -639,9 +639,11 @@ impl FsWriter {
             FilesystemOperation::MovePath {
                 from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                 to_path: loonfs_core::path::parse_mutation_path(to_path)?,
-                behavior: options.behavior,
-                expected_destination_inode_id: options.expected_destination_inode_id,
-                expected_destination_revision_no: options.expected_destination_revision_no,
+                guard: loonfs_api::DestinationGuard {
+                    behavior: options.behavior,
+                    expected_inode_id: options.expected_destination_inode_id,
+                    expected_revision_no: options.expected_destination_revision_no,
+                },
             },
         )
         .await
@@ -676,9 +678,11 @@ impl FsWriter {
             FilesystemOperation::CopyPath {
                 from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                 to_path: loonfs_core::path::parse_mutation_path(to_path)?,
-                behavior: options.behavior,
-                expected_destination_inode_id: options.expected_destination_inode_id,
-                expected_destination_revision_no: options.expected_destination_revision_no,
+                guard: loonfs_api::DestinationGuard {
+                    behavior: options.behavior,
+                    expected_inode_id: options.expected_destination_inode_id,
+                    expected_revision_no: options.expected_destination_revision_no,
+                },
             },
         )
         .await

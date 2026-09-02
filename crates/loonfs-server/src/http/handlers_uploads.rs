@@ -363,10 +363,10 @@ pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError 
     }
 }
 
+// Issuing a short-lived transfer capability enters wall time at this HTTP
+// boundary so core replay stays deterministic.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn presign_time() -> SystemTime {
-    // Issuing a short-lived transfer capability enters wall time at this HTTP
-    // boundary so core replay stays deterministic.
     SystemTime::now()
 }
 
@@ -464,10 +464,10 @@ fn with_content_token(
     Ok(response)
 }
 
+// Request timestamps enter wall time at this HTTP API boundary so core replay
+// stays deterministic.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
-    // Request timestamps enter wall time at this HTTP API boundary so core
-    // replay stays deterministic.
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {

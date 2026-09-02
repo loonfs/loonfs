@@ -142,7 +142,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
 
 pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {
     MutationContext {
-        writer_id: writer_id.to_owned(),
+        writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
         now_ms,
     }
 }

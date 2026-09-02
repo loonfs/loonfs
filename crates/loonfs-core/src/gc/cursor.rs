@@ -1,6 +1,5 @@
 //! Opaque, namespace-bound cursors for bounded GC enumeration.
 
-use super::reap::manifest_object_id_of;
 use crate::error::{CoreError, Result};
 use loonfs_api::{
     decode_namespace_cursor, encode_cursor, NamespaceCursor, NamespaceCursorError, NamespaceId,
@@ -10,6 +9,7 @@ use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_compaction_prefix, metadata_manifest_prefix,
     metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
 };
+use loonfs_objectstore::layout::manifest_object_id_of;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use serde::{Deserialize, Serialize};
 

@@ -12,9 +12,7 @@ use crate::error::{CoreError, StoreFailureClass};
 use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::control::load_head_object;
 use bytes::Bytes;
-use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, HeadState, NamespaceStatus, WriterBlock,
-};
+use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HeadState, WriterBlock};
 use loonfs_api::{
     ChangeSeq, ContentStoreId, ErrorCode, InodeKind, Namespace, NamespaceId, ROOT_INODE_ID,
 };
@@ -24,8 +22,6 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
 pub enum BootstrapNamespaceError {
-    #[error("holder id must not be empty")]
-    EmptyHolderId,
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceAlreadyExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted and its id is retired")]
@@ -49,14 +45,13 @@ impl BootstrapNamespaceError {
     /// [`CoreError::code`](crate::Error::code).
     pub fn code(&self) -> ErrorCode {
         match self {
-            BootstrapNamespaceError::EmptyHolderId => ErrorCode::InvalidRequest,
             BootstrapNamespaceError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
             BootstrapNamespaceError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             BootstrapNamespaceError::Head(ControlObjectLoadError::Store {
                 class: StoreFailureClass::PermissionDenied,
                 ..
             }) => ErrorCode::StoragePermissionDenied,
-            BootstrapNamespaceError::Head(_) => ErrorCode::ServerError,
+            BootstrapNamespaceError::Head(error) => error.code(),
             BootstrapNamespaceError::Core(error) => error.code(),
         }
     }
@@ -67,8 +62,7 @@ impl BootstrapNamespaceError {
     pub fn details(&self) -> Option<loonfs_api::ErrorDetails> {
         match self {
             BootstrapNamespaceError::Core(error) => error.details(),
-            BootstrapNamespaceError::EmptyHolderId
-            | BootstrapNamespaceError::NamespaceAlreadyExists { .. }
+            BootstrapNamespaceError::NamespaceAlreadyExists { .. }
             | BootstrapNamespaceError::NamespaceDeleted { .. }
             | BootstrapNamespaceError::Head(_) => None,
         }
@@ -92,10 +86,6 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     allow_existing: bool,
 ) -> Result<Namespace, BootstrapNamespaceError> {
-    if context.writer_id.trim().is_empty() {
-        return Err(BootstrapNamespaceError::EmptyHolderId);
-    }
-
     // A fresh content-store id per namespace. Nothing claims it durably:
     // uniqueness rests on the generated id's randomness, exactly as it does
     // for every other generated id in the format.
@@ -181,7 +171,7 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
                         .await
                         .map_err(CoreError::ControlObjectLoad)?
                         .state;
-                    let outcome = if existing.status == (NamespaceStatus::Deleted {}) {
+                    let outcome = if existing.status.is_deleted() {
                         NamespaceHeadInstall::Deleted
                     } else {
                         NamespaceHeadInstall::Exists
@@ -222,7 +212,7 @@ fn classify_ambiguous_namespace_install(
     proposed: &HeadState,
     existing: &HeadState,
 ) -> NamespaceHeadInstall {
-    if existing.status == (NamespaceStatus::Deleted {}) {
+    if existing.status.is_deleted() {
         return NamespaceHeadInstall::Deleted;
     }
     if proposed.ensure_successor_identity(existing).is_ok() {
@@ -259,6 +249,7 @@ pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_api::wire::control::NamespaceStatus;
     use loonfs_api::{CommitId, WriterEpoch};
 
     fn namespace(value: &str) -> NamespaceId {

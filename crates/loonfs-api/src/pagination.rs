@@ -414,22 +414,40 @@ pub trait PageCursor: Serialize + serde::de::DeserializeOwned {
 }
 
 #[derive(Serialize, Deserialize)]
-struct CursorEnvelope<C> {
+struct OpaqueTokenEnvelope<T> {
     format_version: u8,
     kind: String,
     #[serde(flatten)]
-    cursor: C,
+    token: T,
+}
+
+/// A serializable value with a frozen opaque-token discriminator.
+pub trait OpaqueToken: Serialize + serde::de::DeserializeOwned {
+    /// Frozen discriminator written into the encoded token.
+    const KIND: &'static str;
+}
+
+impl<C: PageCursor> OpaqueToken for C {
+    const KIND: &'static str = C::KIND;
+}
+
+/// Encodes a value as lowercase hexadecimal JSON with a version and kind.
+pub fn encode_token<T: OpaqueToken>(
+    token: &T,
+    format_version: u8,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_vec(&OpaqueTokenEnvelope {
+        format_version,
+        kind: T::KIND.to_owned(),
+        token,
+    })
+    .map(|bytes| crate::hex::hex_encode_bytes(&bytes))
 }
 
 /// Encodes a cursor as the opaque string clients round-trip.
 pub fn encode_cursor<C: PageCursor>(cursor: &C) -> Result<String, PageCursorError> {
-    let bytes = serde_json::to_vec(&CursorEnvelope {
-        format_version: PAGE_CURSOR_FORMAT_VERSION,
-        kind: C::KIND.to_owned(),
-        cursor,
-    })
-    .map_err(|error| PageCursorError::InvalidJson(error.to_string()))?;
-    Ok(crate::hex::hex_encode_bytes(&bytes))
+    encode_token(cursor, PAGE_CURSOR_FORMAT_VERSION)
+        .map_err(|error| PageCursorError::InvalidJson(error.to_string()))
 }
 
 /// Version and endpoint, read before the body so a cursor from another
@@ -440,27 +458,35 @@ struct CursorHeader {
     kind: String,
 }
 
-/// Decodes a cursor issued by [`encode_cursor`] for the same endpoint.
-pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, PageCursorError> {
+/// Decodes a lowercase hexadecimal JSON token with the expected version and kind.
+pub fn decode_token<T: OpaqueToken>(
+    value: &str,
+    supported_version: u8,
+) -> Result<T, OpaqueTokenError> {
     let bytes =
-        crate::hex::hex_decode_bytes(value).map_err(|_| PageCursorError::InvalidEncoding)?;
+        crate::hex::hex_decode_bytes(value).map_err(|_| OpaqueTokenError::InvalidEncoding)?;
     let header: CursorHeader = serde_json::from_slice(&bytes)
-        .map_err(|error| PageCursorError::InvalidJson(error.to_string()))?;
-    if header.format_version != PAGE_CURSOR_FORMAT_VERSION {
-        return Err(PageCursorError::UnsupportedVersion {
-            expected: PAGE_CURSOR_FORMAT_VERSION,
+        .map_err(|error| OpaqueTokenError::InvalidJson(error.to_string()))?;
+    if header.format_version != supported_version {
+        return Err(OpaqueTokenError::UnsupportedVersion {
+            expected: supported_version,
             actual: header.format_version,
         });
     }
-    if header.kind != C::KIND {
-        return Err(PageCursorError::WrongKind {
-            expected: C::KIND,
+    if header.kind != T::KIND {
+        return Err(OpaqueTokenError::WrongKind {
+            expected: T::KIND,
             actual: header.kind,
         });
     }
-    let envelope: CursorEnvelope<C> = serde_json::from_slice(&bytes)
-        .map_err(|error| PageCursorError::InvalidJson(error.to_string()))?;
-    Ok(envelope.cursor)
+    let envelope: OpaqueTokenEnvelope<T> = serde_json::from_slice(&bytes)
+        .map_err(|error| OpaqueTokenError::InvalidJson(error.to_string()))?;
+    Ok(envelope.token)
+}
+
+/// Decodes a cursor issued by [`encode_cursor`] for the same endpoint.
+pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, PageCursorError> {
+    decode_token(value, PAGE_CURSOR_FORMAT_VERSION).map_err(PageCursorError::from)
 }
 
 /// A cursor bound to one namespace keyspace.
@@ -535,6 +561,49 @@ pub enum PageCursorError {
         /// Version embedded in the caller's opaque token.
         actual: u8,
     },
+}
+
+/// Invalid opaque token encoding, version, kind, or body.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum OpaqueTokenError {
+    /// The token was not lowercase hexadecimal JSON.
+    #[error("invalid opaque token encoding")]
+    InvalidEncoding,
+    /// The token JSON did not match the expected shape.
+    #[error("invalid opaque token JSON: {0}")]
+    InvalidJson(String),
+    /// The token belongs to another family.
+    #[error("opaque token kind `{actual}` cannot be used as `{expected}` token")]
+    WrongKind {
+        /// Token kind accepted by the decoder.
+        expected: &'static str,
+        /// Token kind recovered from the encoded value.
+        actual: String,
+    },
+    /// The token format version is not supported by this build.
+    #[error("unsupported opaque token version `{actual}`; expected `{expected}`")]
+    UnsupportedVersion {
+        /// Token version this build can decode.
+        expected: u8,
+        /// Version embedded in the encoded value.
+        actual: u8,
+    },
+}
+
+impl From<OpaqueTokenError> for PageCursorError {
+    fn from(error: OpaqueTokenError) -> Self {
+        match error {
+            OpaqueTokenError::InvalidEncoding => Self::InvalidEncoding,
+            OpaqueTokenError::InvalidJson(message) => Self::InvalidJson(message),
+            OpaqueTokenError::WrongKind { expected, actual } => {
+                Self::WrongKind { expected, actual }
+            }
+            OpaqueTokenError::UnsupportedVersion { expected, actual } => {
+                Self::UnsupportedVersion { expected, actual }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -691,10 +760,10 @@ mod tests {
 
     #[test]
     fn unsupported_cursor_version_is_rejected() {
-        let bytes = serde_json::to_vec(&CursorEnvelope {
+        let bytes = serde_json::to_vec(&OpaqueTokenEnvelope {
             format_version: PAGE_CURSOR_FORMAT_VERSION + 1,
-            kind: DirectoryPageCursor::KIND.to_owned(),
-            cursor: DirectoryPageCursor {
+            kind: <DirectoryPageCursor as PageCursor>::KIND.to_owned(),
+            token: DirectoryPageCursor {
                 head_seq: ChangeSeq(11),
                 snapshot_id: None,
                 directory_inode_id: InodeId(7),

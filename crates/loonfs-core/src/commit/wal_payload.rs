@@ -11,7 +11,7 @@ pub(crate) fn wal_payload_from_materialized_commit(
         seq: prepared.assigned_seq,
         commit_id: prepared.commit_id.clone(),
         committed_by: prepared.actor.clone(),
-        semantic_commit_fingerprint: prepared.semantic_identity.as_str().to_owned(),
+        semantic_commit_fingerprint: prepared.semantic_identity.clone(),
         committed_at_ms: commit.committed_at_ms,
         message: prepared.message.clone(),
         deltas: commit
@@ -32,7 +32,7 @@ mod tests {
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WriterEpoch};
 
     fn test_fingerprint() -> CommitFingerprint {
-        CommitFingerprint::new_unchecked("v1:sha256:test".to_owned())
+        serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint")
     }
 
     #[test]

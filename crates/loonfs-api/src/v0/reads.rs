@@ -2,8 +2,8 @@
 
 use super::DirectoryBinding;
 use crate::{
-    AbsolutePath, ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName,
-    InodeId, InodeKind, NamespaceId, RevisionNo,
+    AbsolutePath, ActorRef, AttributeRevisionNo, Attributes, BindingGeneration, ChangeSeq,
+    ContentRef, DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ pub struct PathEntry {
     /// The opaque ID for the current parent and name binding, or `None` for the namespace root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub binding_generation: Option<String>,
+    pub binding_generation: Option<BindingGeneration>,
     /// The inode's attribute projection, when requested.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -243,8 +243,8 @@ mod tests {
     use super::*;
     use crate::NameKey;
 
-    fn binding_generation() -> String {
-        "generation".to_owned()
+    fn binding_generation() -> crate::BindingGeneration {
+        crate::BindingGeneration::parse("abcdef").expect("binding generation")
     }
 
     fn entry(
@@ -366,7 +366,10 @@ mod tests {
             .expect("serialize named entry");
         assert_eq!(named_json["parent_inode_id"], "ino_1");
         assert_eq!(named_json["display_name"], "docs");
-        assert_eq!(named_json["binding_generation"], binding_generation());
+        assert_eq!(
+            named_json["binding_generation"],
+            binding_generation().as_str()
+        );
     }
 
     #[test]

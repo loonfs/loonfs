@@ -190,7 +190,7 @@ impl PinnedNamespaceReads<'_> {
             .get_path_entry(
                 absolute_path.as_str(),
                 StatPathOptions {
-                    include_attributes: false,
+                    include_attributes: loonfs_api::AttributeInclusion::Omit,
                     snapshot_id: None,
                 },
             )

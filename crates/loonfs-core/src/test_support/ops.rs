@@ -180,9 +180,11 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
         FilesystemOperation::MovePath {
             from_path: parse_mutation_path(from_path)?,
             to_path: parse_mutation_path(to_path)?,
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         Vec::new(),
         context,

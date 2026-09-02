@@ -82,3 +82,24 @@ pub enum ControlObjectLoadError {
         class: StoreFailureClass,
     },
 }
+
+impl ControlObjectLoadError {
+    pub fn code(&self) -> loonfs_api::ErrorCode {
+        use loonfs_api::ErrorCode;
+
+        match self {
+            Self::MissingObject { .. } => ErrorCode::NamespaceNotFound,
+            Self::RootAheadOfHead { .. }
+            | Self::FloorAheadOfHead { .. }
+            | Self::FloorAheadOfRoot { .. } => ErrorCode::StaleHead,
+            Self::MissingRootAfterFloor { .. }
+            | Self::NamespaceMismatch { .. }
+            | Self::IdentityMismatch { .. }
+            | Self::ForkBasisOwnerIsSelf { .. }
+            | Self::KeyLayout { .. }
+            | Self::ChecksumMismatch { .. }
+            | Self::Codec { .. } => ErrorCode::NamespaceCorrupt,
+            Self::Store { class, .. } => crate::error::classify_store_failure(*class),
+        }
+    }
+}

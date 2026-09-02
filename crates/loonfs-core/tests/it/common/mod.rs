@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {
     MutationContext {
-        writer_id: writer_id.to_owned(),
+        writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
         now_ms,
     }
 }
@@ -26,7 +26,6 @@ pub(crate) fn namespace_engine<'a, S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> NamespaceWriterEngine<&'a S> {
     NamespaceWriterEngine::writer(store, namespace_id.clone(), context.writer_id.clone())
-        .expect("build namespace engine")
 }
 
 pub(crate) async fn read_context<S: ObjectStore + ?Sized>(

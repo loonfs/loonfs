@@ -24,6 +24,7 @@ pub mod options;
 mod pagination;
 mod path;
 pub mod public_inode_id;
+mod retry;
 mod secret;
 mod sst_blocks;
 pub mod v0;
@@ -94,7 +95,8 @@ pub use capability::{
 };
 pub use commit_identity::{
     put_retry_fingerprint, reconcile_put_commit_id_reuse, semantic_commit_fingerprint,
-    PutRetryAttempt, PutRetryErrorClassification, PutRetryReceipt, SemanticFingerprintError,
+    CommitFingerprint, PutRetryAttempt, PutRetryErrorClassification, PutRetryReceipt,
+    SemanticFingerprintError,
 };
 pub use content::{
     Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentEvidence, ContentRef,
@@ -104,23 +106,30 @@ pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, manifest_object_id_manifest_no, next_public_ordinal, wal_segment_id_start_seq,
-    ChangeSeq, CheckpointId, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
-    GeneratedIdValidationError, GrepManifestObjectId, IndexSegmentId, InodeId, InodeKind,
-    ManifestNo, ManifestObjectId, MetadataCompactionId, MetadataSegmentId, NameKey,
-    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PublicOrdinalRangeError,
-    RevisionNo, RunNo, UploadId, WalSegmentId, WriterEpoch, FIRST_ALLOCATABLE_INODE_ID,
-    MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
+    BindingGeneration, BindingGenerationValidationError, ChangeSeq, CheckpointId, CommitId,
+    CommitIdValidationError, ContentId, ContentStoreId, GeneratedIdValidationError,
+    GrepManifestObjectId, IndexSegmentId, InodeId, InodeKind, ManifestNo, ManifestObjectId,
+    MetadataCompactionId, MetadataSegmentId, NameKey, NameKeyValidationError, NamespaceId,
+    NamespaceIdValidationError, PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalSegmentId,
+    WriterEpoch, WriterId, WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES,
+    MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
 };
 pub use name_policy::name_key_for_display_name;
+pub use options::AttributeInclusion;
 pub use pagination::{
-    decode_cursor, decode_namespace_cursor, encode_cursor, DirectoryPageCursor, EffectiveLimit,
-    FileRevisionsPageCursor, GrepPageCursor, LimitError, NamespaceCursor, NamespaceCursorError,
-    Page, PageCursor, PageCursorError, PageRequest, PagedResponse, Pager, PaginationPolicy,
-    TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
+    decode_cursor, decode_namespace_cursor, decode_token, encode_cursor, encode_token,
+    DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, GrepPageCursor, LimitError,
+    NamespaceCursor, NamespaceCursorError, OpaqueToken, OpaqueTokenError, Page, PageCursor,
+    PageCursorError, PageRequest, PagedResponse, Pager, PaginationPolicy, TrashPageCursor,
+    DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES, MAX_PATH_BYTES,
     MAX_PATH_DEPTH,
+};
+pub use retry::{
+    transport_retry_backoff, MonotonicTimer, OperationDeadline, StdMonotonicTimer,
+    TransportRetryPolicy,
 };
 pub use secret::SecretString;
 
@@ -130,10 +139,11 @@ pub use v0::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, AttributesProjection, Checkpoint,
     CheckpointOwnerSummary, CommitRequest, CommitResponse, CreateCheckpointRequest,
     CreateNamespaceRequest, CreateSnapshotRequest, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DeletedObjectCounts, DestinationBehavior, ErrorDetails,
-    ExtendSnapshotRequest, FileBytes, FileRevision, FilesystemOperation, FlushWalOutcome,
-    FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest,
-    GrepResponse, ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    DeleteNamespaceResponse, DeletedObjectCounts, DestinationBehavior, DestinationGuard,
+    DestinationGuardError, ErrorDetails, ExpectedFileState, ExtendSnapshotRequest, FileBytes,
+    FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
+    GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse, GuardFields,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace,
     NamespaceDiagnostics, PathEntry, PathEntryKind, ReleaseCheckpointResponse,

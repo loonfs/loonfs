@@ -237,7 +237,7 @@ impl ResolvedTarget {
         self.get_path_entry_projected(
             spec,
             &StatPathOptions {
-                include_attributes: false,
+                include_attributes: loonfs_api::AttributeInclusion::Omit,
                 snapshot_id: snapshot_id.cloned(),
             },
         )

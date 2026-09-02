@@ -17,8 +17,8 @@ pub(super) fn validate_cursor_head(
         return Ok(());
     };
     if cursor.head_seq > current_head_seq {
-        return Err(MetadataViewError::SnapshotUnavailable {
-            requested_seq: cursor.head_seq,
+        return Err(MetadataViewError::CursorAheadOfHead {
+            cursor_seq: cursor.head_seq,
             head_seq: current_head_seq,
         }
         .into());

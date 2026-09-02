@@ -330,9 +330,11 @@ impl Client {
                 FilesystemOperation::MovePath {
                     from_path: from.absolute_path().clone(),
                     to_path: to.absolute_path().clone(),
-                    behavior: options.behavior,
-                    expected_destination_inode_id: options.expected_destination_inode_id,
-                    expected_destination_revision_no: options.expected_destination_revision_no,
+                    guard: loonfs_api::DestinationGuard {
+                        behavior: options.behavior,
+                        expected_inode_id: options.expected_destination_inode_id,
+                        expected_revision_no: options.expected_destination_revision_no,
+                    },
                 },
             ),
         )
@@ -362,9 +364,11 @@ impl Client {
                 FilesystemOperation::CopyPath {
                     from_path: from.absolute_path().clone(),
                     to_path: to.absolute_path().clone(),
-                    behavior: options.behavior,
-                    expected_destination_inode_id: options.expected_destination_inode_id,
-                    expected_destination_revision_no: options.expected_destination_revision_no,
+                    guard: loonfs_api::DestinationGuard {
+                        behavior: options.behavior,
+                        expected_inode_id: options.expected_destination_inode_id,
+                        expected_revision_no: options.expected_destination_revision_no,
+                    },
                 },
             ),
         )
@@ -425,7 +429,7 @@ impl Client {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
-    use crate::transport::{retryable_transport_failure, TransportRetryPolicy};
+    use crate::transport::{retryable_transport_failure, DEFAULT};
     use loonfs_api::{ContentId, ErrorCode};
     use std::fs;
     use tempfile::tempdir;
@@ -565,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn transport_failures_resend_up_to_the_attempt_cap() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let max_attempts = TransportRetryPolicy::DEFAULT.max_retries as usize + 1;
+        let max_attempts = DEFAULT.max_retries as usize + 1;
         let transport = crate::transport::test_transport::failures(max_attempts);
         let retrying = Client::new(ClientConfig {
             server_url: "http://example.invalid".to_owned(),

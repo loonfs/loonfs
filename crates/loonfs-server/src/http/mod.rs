@@ -53,7 +53,6 @@ use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, get_grep_index, grep,
     grep_index_not_maintained, grep_queries_not_served,
 };
-use self::handlers_store::probe_store as probe_store_handler;
 use self::handlers_uploads::{
     abort_upload, complete_upload, create_upload, get_upload, put_upload_content, sign_upload_parts,
 };
@@ -420,7 +419,7 @@ fn router(state: AppState) -> Router {
         )
         // The one admin route whose subject is the store rather than a
         // namespace, so it sits beside them rather than under one.
-        .route("/v0/admin/store/probe", post(probe_store_handler))
+        .route("/v0/admin/store/probe", post(handlers_store::probe_store))
         .route_layer(middleware::from_fn(move |request: Request, next: Next| {
             with_request_deadline(request_deadline_ms, request, next)
         }))

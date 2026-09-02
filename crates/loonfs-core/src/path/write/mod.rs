@@ -15,17 +15,11 @@ mod session;
 
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
-use loonfs_api::{DestinationBehavior, DisplayName, InodeId, NameKey, RevisionNo, ROOT_INODE_ID};
+use loonfs_api::{DisplayName, InodeId, NameKey, ROOT_INODE_ID};
 
 pub use intent::{CommitRequest, FilesystemOperation};
 pub(crate) use planner::commit_fingerprint;
 pub(crate) use session::PublishPlanningSession;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ExpectedFileState {
-    pub(super) inode_id: InodeId,
-    pub(super) revision_no: Option<RevisionNo>,
-}
 
 pub(super) fn ensure_expected_inode(
     resolved: &ResolvedVisiblePath,
@@ -48,30 +42,8 @@ pub(super) fn ensure_expected_inode(
     Ok(())
 }
 
-pub(super) fn validate_expected_file_state(
-    behavior: DestinationBehavior,
-    expected_inode_id: Option<InodeId>,
-    expected_revision_no: Option<RevisionNo>,
-    revision_field: &str,
-    inode_field: &str,
-) -> Result<Option<ExpectedFileState>> {
-    if behavior == DestinationBehavior::NoReplace
-        && !matches!((expected_inode_id, expected_revision_no), (None, None))
-    {
-        return Err(CoreError::InvalidCommitRequest(
-            "write guards require replace behavior".to_owned(),
-        ));
+impl From<loonfs_api::DestinationGuardError> for CoreError {
+    fn from(error: loonfs_api::DestinationGuardError) -> Self {
+        Self::InvalidCommitRequest(error.to_string())
     }
-    let Some(inode_id) = expected_inode_id else {
-        if expected_revision_no.is_some() {
-            return Err(CoreError::InvalidCommitRequest(format!(
-                "{revision_field} asserts a revision of a specific file; pair it with {inode_field} so the assertion names which file"
-            )));
-        }
-        return Ok(None);
-    };
-    Ok(Some(ExpectedFileState {
-        inode_id,
-        revision_no: expected_revision_no,
-    }))
 }

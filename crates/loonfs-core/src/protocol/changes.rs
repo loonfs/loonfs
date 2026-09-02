@@ -6,7 +6,6 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::load_head_and_retention_floor;
 use crate::wal::{load_wal_chain, WalChainLoadRequest};
 use loonfs_api::v0::{CommittedChange, FilesystemChange, ListChangesResponse};
-use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -22,11 +21,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     let head = head.state;
-    if head.status == (NamespaceStatus::Deleted {}) {
-        return Err(CoreError::NamespaceDeleted {
-            namespace_id: namespace_id.clone(),
-        });
-    }
+    crate::namespace::control::ensure_namespace_live(&head)?;
 
     if after_seq < retention_floor_seq {
         return Err(CoreError::RebootstrapRequired {
@@ -306,7 +301,7 @@ fn binding_generation(
     namespace_id: &NamespaceId,
     bind_seq: ChangeSeq,
     bind_delta_index: u32,
-) -> Result<String> {
+) -> Result<loonfs_api::BindingGeneration> {
     BindingGeneration {
         bind_seq,
         bind_delta_index,
@@ -361,7 +356,7 @@ mod tests {
             &store,
             &namespace_id,
             &MutationContext {
-                writer_id: "writer".to_owned(),
+                writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
                 now_ms: 1,
             },
             false,

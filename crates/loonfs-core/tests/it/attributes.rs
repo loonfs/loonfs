@@ -892,9 +892,11 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
         FilesystemOperation::MovePath {
             from_path: path("/docs/a.txt"),
             to_path: path("/moved.txt"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -1048,9 +1050,11 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
         FilesystemOperation::CopyPath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -1108,9 +1112,11 @@ async fn a_copy_of_a_file_without_attributes_publishes_no_attribute_event() {
         FilesystemOperation::CopyPath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -1169,9 +1175,11 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
         FilesystemOperation::CopyPath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            behavior: DestinationBehavior::Replace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )

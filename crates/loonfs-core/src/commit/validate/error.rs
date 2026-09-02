@@ -1,7 +1,10 @@
 //! [`CommitValidationError`]: every way a commit request can fail
 //! validation.
 
-use loonfs_api::{AttributeRevisionNo, ChangeSeq, InodeId, InodeKind, NameKey, RevisionNo};
+use loonfs_api::{
+    AttributeRevisionNo, ChangeSeq, ErrorCode, ErrorDetails, InodeId, InodeKind, NameKey,
+    RevisionNo,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
@@ -160,6 +163,100 @@ pub enum CommitValidationError {
     OpIndexOverflow,
     #[error("delta index overflow")]
     DeltaIndexOverflow,
+}
+
+impl CommitValidationError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::BaseRevisionMismatch { .. } => ErrorCode::StaleRevision,
+            Self::RestoreRevisionSourceRevisionMissing { .. } => ErrorCode::RevisionNotFound,
+            Self::TargetUnderSubtreeTombstone { .. } => ErrorCode::NamespaceCorrupt,
+            Self::UpdateAttributesBaseRevisionMismatch { .. } => ErrorCode::StaleAttributes,
+            Self::UpdateAttributesRevisionOverflow { .. } => ErrorCode::ServerError,
+            Self::NameTaken { .. }
+            | Self::InodeWrongKind { .. }
+            | Self::BindingPreconditionMissing { .. }
+            | Self::BindingPreconditionMismatch { .. } => ErrorCode::PathConflict,
+            Self::DirectoryNotEmpty { .. } => ErrorCode::DirectoryNotEmpty,
+            Self::InodeMissing { .. } => ErrorCode::PathNotFound,
+            Self::UndeleteTargetNotDeleted { .. }
+            | Self::UndeleteTargetsCurrentCommit { .. }
+            | Self::UndeleteGenerationMismatch { .. } => ErrorCode::NotDeleted,
+            Self::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
+            Self::RestoreRevisionOverflow { .. }
+            | Self::ReplaceFileRevisionOverflow { .. }
+            | Self::OpIndexOverflow
+            | Self::DeltaIndexOverflow => ErrorCode::ServerError,
+        }
+    }
+
+    pub fn details(&self) -> Option<ErrorDetails> {
+        match self {
+            Self::BindingPreconditionMismatch {
+                expected_child_inode_id,
+                actual_child_inode_id,
+                ..
+            } => Some(ErrorDetails {
+                expected_inode_id: Some(*expected_child_inode_id),
+                actual_inode_id: Some(*actual_child_inode_id),
+                ..ErrorDetails::default()
+            }),
+            Self::BaseRevisionMismatch {
+                inode_id,
+                expected,
+                actual,
+            } => Some(ErrorDetails {
+                inode_id: Some(*inode_id),
+                expected_revision_no: Some(*expected),
+                actual_revision_no: *actual,
+                ..ErrorDetails::default()
+            }),
+            Self::InodeMissing {
+                operand: CommitOperand::UndeleteTarget,
+                inode_id,
+            }
+            | Self::UndeleteTargetNotDeleted { inode_id } => Some(ErrorDetails {
+                inode_id: Some(*inode_id),
+                ..ErrorDetails::default()
+            }),
+            Self::UndeleteTargetsCurrentCommit {
+                inode_id,
+                requested_seq,
+            } => Some(ErrorDetails {
+                inode_id: Some(*inode_id),
+                expected_deletion_seq: Some(*requested_seq),
+                ..ErrorDetails::default()
+            }),
+            Self::UndeleteGenerationMismatch {
+                inode_id,
+                requested_seq,
+                active_seq,
+            } => Some(ErrorDetails {
+                inode_id: Some(*inode_id),
+                expected_deletion_seq: Some(*requested_seq),
+                actual_deletion_seq: Some(*active_seq),
+                ..ErrorDetails::default()
+            }),
+            Self::UpdateAttributesBaseRevisionMismatch {
+                inode_id,
+                expected,
+                actual,
+            } => Some(ErrorDetails {
+                inode_id: Some(*inode_id),
+                expected_attributes_revision_no: Some(*expected),
+                actual_attributes_revision_no: Some(*actual),
+                ..ErrorDetails::default()
+            }),
+            Self::InodeMissing {
+                operand: CommitOperand::AttributeTarget,
+                inode_id,
+            } => Some(ErrorDetails {
+                inode_id: Some(*inode_id),
+                ..ErrorDetails::default()
+            }),
+            _ => None,
+        }
+    }
 }
 
 fn revision_mismatch(expected: &RevisionNo, actual: &Option<RevisionNo>) -> String {

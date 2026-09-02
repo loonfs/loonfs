@@ -1390,10 +1390,9 @@ mod tests {
     }
 
     #[test]
-    fn map_core_error_does_not_rewrite_invalid_id_codes() {
-        let invalid_id = NamespaceId::parse("bad/name").expect_err("invalid namespace id");
-        let error = map_runtime_error(RuntimeError::Core(CoreError::InvalidNamespaceId(
-            invalid_id,
+    fn map_core_error_preserves_invalid_request_codes() {
+        let error = map_runtime_error(RuntimeError::Core(CoreError::InvalidPath(
+            "bad/path".to_owned(),
         )));
 
         assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
