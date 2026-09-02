@@ -150,15 +150,16 @@ pub(super) fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {
         .count()
 }
 
-/// Newest run first: delta runs before base runs, later sequences before
-/// earlier ones. A read takes the first row it finds for a key, so this
-/// order is what makes the newest write win.
+/// Orders runs for reorganization planning: delta runs before base runs,
+/// later sequences before earlier ones, and later run numbers first.
 ///
 /// Two runs may carry the same sequence and level, because a reorganization
 /// writes its output beside the runs it did not consume. They hold different
-/// families in that case, so no read compares them, and the later-allocated
-/// run number breaks the tie to keep the order total.
-pub(super) fn runs_in_scan_order(payload: &NamespaceManifestPayload) -> Vec<MetadataRunManifest> {
+/// families in that case, and the later-allocated run number keeps the order
+/// total.
+pub(super) fn runs_in_reorganization_order(
+    payload: &NamespaceManifestPayload,
+) -> Vec<MetadataRunManifest> {
     let mut runs = runs_from_segments(payload);
     runs.sort_by(|left, right| {
         left.level
@@ -170,7 +171,7 @@ pub(super) fn runs_in_scan_order(payload: &NamespaceManifestPayload) -> Vec<Meta
 }
 
 /// Oldest run first, which is the order a materialization applies rows in.
-/// It is the reverse of the scan order, down to the same tiebreak.
+/// It is the reverse of the reorganization order, down to the same tiebreak.
 pub(super) fn runs_in_materialization_order(
     payload: &NamespaceManifestPayload,
 ) -> Vec<MetadataRunManifest> {

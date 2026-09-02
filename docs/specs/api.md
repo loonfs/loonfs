@@ -2211,6 +2211,9 @@ Representative complete-upload response:
 {
   "namespace_id": "demo",
   "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
+  "mode": "service_proxied",
+  "status": "completed",
+  "completed_at_ms": 1730000001000,
   "content_ref": {
     "kind": "blob_v1",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",

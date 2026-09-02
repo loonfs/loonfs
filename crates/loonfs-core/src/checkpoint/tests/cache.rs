@@ -267,8 +267,8 @@ async fn cached_manifest_carries_its_scan_order_runs() {
     );
     assert_eq!(
         *first.scan_runs,
-        runs_in_scan_order(&first.manifest().payload),
-        "the cached run list must equal the manifest's scan-order grouping"
+        runs_in_reorganization_order(&first.manifest().payload),
+        "the cached run list must equal the manifest's reorganization-order grouping"
     );
     assert!(
         Arc::ptr_eq(&first.scan_runs, &second.scan_runs),

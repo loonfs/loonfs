@@ -1164,10 +1164,10 @@ while the session is open, so the session's lease bounds it and a request
 cancelled while holding it costs that session the rest of its lease.
 
 **Direct upload** hands the transfer to the client instead of proxying it. The
-client declares the size and SHA-256 of bytes it already holds; the server
-mints the identity, signs both the digest and a create-only precondition into
-a short-lived write capability, and returns the resulting `content_ref`. A
-client can never name the object it writes to.
+client declares the size and the checksum in the algorithm the begin response
+named; the server mints the identity, signs both the digest and a create-only
+precondition into a short-lived write capability, and returns the resulting
+`content_ref`. A client can never name the object it writes to.
 
 Completion **verifies rather than trusts**. The server issues one
 `HeadObject` with checksum mode enabled and compares the provider's stored
@@ -1480,10 +1480,10 @@ writers.
 A commit request contains an ordered list of operations. Eight use paths:
 
 - `create_directory(path, parents)`
-- `put_file(path, content_ref, behavior, expected_revision_no?)`
+- `put_file(path, content_ref, behavior, expected_inode_id?, expected_revision_no?)`
 - `delete_path(path, behavior, expected_inode_id?)`
-- `move_path(from_path, to_path, behavior)`
-- `copy_path(from_path, to_path, behavior)`
+- `move_path(from_path, to_path, behavior, expected_destination_inode_id?, expected_destination_revision_no?)`
+- `copy_path(from_path, to_path, behavior, expected_destination_inode_id?, expected_destination_revision_no?)`
 - `undelete(inode_id, deletion_seq, path?)`
 - `restore_revision(path, source_revision_no)`
 - `update_attributes(path, set, remove, expected_inode_id?, expected_attributes_revision_no?)`
@@ -1493,12 +1493,12 @@ Five use inode IDs:
 - `create_directory_by_inode(parent_inode_id, display_name)`
 - `put_file_by_inode(parent_inode_id, display_name, content_ref)`
 - `put_file_revision_by_inode(inode_id, content_ref, expected_revision_no)`
-- `move_by_inode(inode_id, expected_binding_generation, to_parent_inode_id, to_display_name, behavior)`
+- `move_by_inode(inode_id, expected_binding_generation, to_parent_inode_id, to_display_name, behavior, expected_destination_inode_id?, expected_destination_revision_no?)`
 - `delete_by_inode(inode_id, expected_binding_generation, behavior)`
 
 Every `path`, `from_path`, and `to_path` is a canonical absolute path (section 2.3). Every `display_name` and `to_display_name` is one path component under the same grammar.
 
-Parameters marked `?` are optional and have no default. The optional `expected_*` parameters prevent races; omitting one disables that check. Inode revision writes require `expected_revision_no`, while inode moves and deletes require `expected_binding_generation`. `undelete.path` overrides the original parent and name and is required when the deletion did not record a binding.
+Parameters marked `?` are optional and have no default. The optional `expected_*` parameters prevent races; omitting one disables that check. A revision guard requires its matching inode guard. Inode revision writes require `expected_revision_no`, while inode moves and deletes require `expected_binding_generation`. `undelete.path` overrides the original parent and name and is required when the deletion did not record a binding.
 
 `parents`, `behavior`, `set`, and `remove` have defaults. `parents` defaults to false. `behavior` defaults to `no_replace` for puts, moves, and copies, and to `non_recursive` for deletes. `set` and `remove` default to empty collections.
 
@@ -1545,9 +1545,8 @@ commit's sequence and its `delta_index`, like every other delta's.
 
 ### 3.6 Preconditions
 
-A commit may include explicit preconditions. Preconditions are how clients
-say, "apply this only if the namespace still looks like the state I planned
-against."
+The server derives each commit precondition from its operation. Callers state
+additional guards through the `expected_*` parameters in section 3.5.
 
 The core kinds of precondition are:
 
@@ -1559,9 +1558,6 @@ The core kinds of precondition are:
 | **Attribute-revision based** | "Write these attributes only if the inode is still at the attribute revision I saw." |
 | **Ancestor-visibility based** | "Apply this only if no ancestor was tombstoned." |
 | **Directory-contents based** | "Delete this directory non-recursively only if it is still empty." |
-
-The exact wire shape of preconditions may vary by transport binding, but the
-semantics must match these checks.
 
 The exact binding precondition is
 `binding_is(parent_inode_id, name_key, child_inode_id, bind_seq, bind_delta_index)`.
@@ -1580,10 +1576,9 @@ consumers.
 The change feed is ordered by logical commit, not by physical WAL segment. A
 segment containing N logical commits produces N ordered change events.
 
-Each change event exposes the commit identity, optional message, and
-materialized WAL deltas keyed by `semantic_op_index` and `delta_index`. These
-deltas are the authoritative metadata facts that replay/projectors should
-apply.
+The feed exposes semantic filesystem events in request order; one request
+operation can produce several events, and their kinds appear in the event
+table in [API spec section 6.11](api.md#611-get-changes).
 
 ### 3.8 Retention floor
 
@@ -1718,15 +1713,13 @@ write the same object under the same conditions.
 The loser reads the head back. An active head means the id is taken and the
 answer is `namespace_exists`; a deleted head answers `namespace_deleted`; a
 head that cannot be decoded is corruption and is reported as such — never
-overwritten, and never taken as an empty slot. There is no fourth answer,
-because there is no state between absent and complete.
+overwritten, and never taken as an empty slot. A confirmed precondition failure
+remains a plain conflict.
 
 The loser is not told whether the winner was its own earlier attempt.
-Nothing durable can say so: the head's writer block names a writer label,
-not an attempt, and a server publishes every caller's work under one label,
-so "written by my writer" does not mean "written by this attempt" — two
-callers of one server would otherwise both be told they created the same
-namespace. An embedded caller that wants a retry after a lost
+Only an unacknowledged write compares the head's immutable `namespace_id`,
+`content_store_id`, `created_at_ms`, and `fork_basis`; matching fields mean this
+attempt's write landed. An embedded caller that wants a retry after a lost
 acknowledgment to succeed asks for that explicitly, with its
 create-if-not-exists option.
 
@@ -1935,10 +1928,7 @@ above the manifest's `next_run_no`, one `run_no` carrying two sequences or two
 levels, a family's `segment_index` values inside one run that are not
 zero-based and dense, and key ranges that descend or overlap.
 
-A read consults the runs holding the family it wants, newest first: delta runs
-before base runs, and within one level, the higher `run_seq` first. The higher
-`run_no` breaks a tie, which keeps the order total. The first row a read finds
-for a key is the answer.
+Every metadata row key identifies exactly one row, so a read merges runs by key and never has to choose between two rows for one key.
 
 ##### Row-key grammar
 
@@ -1996,7 +1986,7 @@ starts without grep state until grep is enabled for the target.
   `manifest_payload_checksum`, which must equal the named manifest envelope's
   own `payload_checksum`.
 
-This is not the namespace manifest reference from section 1.7. A grep manifest has no logical position or head sequence, so the pointer contains only the two fields above.
+This is not the namespace manifest reference from section 1.7. A grep manifest has no logical position or head sequence, so the pointer names its manifest without them.
 
 Each immutable manifest has the same envelope grammar with
 `kind = "grep_manifest"` and `format_version = 1`. Its payload is the full

@@ -12,7 +12,7 @@ use super::cache::{
 };
 use super::error::ManifestLoadError;
 use super::runs::{
-    runs_in_materialization_order, runs_in_scan_order, MetadataRunManifest,
+    runs_in_materialization_order, runs_in_reorganization_order, MetadataRunManifest,
     CHECKPOINT_DELTA_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
 };
 use super::scan::{ordered_manifest_segments, VerifiedMetadataSegments};
@@ -278,7 +278,7 @@ pub(crate) async fn load_verified_manifest_segments_with_cache<'a, S: ObjectStor
         validate_manifest_run_identity(&manifest_key, &manifest.payload)?;
         validate_manifest_materialization_ranges(&manifest_key, &manifest.payload)?;
         validate_manifest_segment_descriptors(&manifest_key, &manifest)?;
-        let scan_runs = Arc::new(runs_in_scan_order(&manifest.payload));
+        let scan_runs = Arc::new(runs_in_reorganization_order(&manifest.payload));
         Ok(DecodedMetadataSegmentBlock::Manifest {
             manifest: Arc::new(manifest),
             scan_runs,

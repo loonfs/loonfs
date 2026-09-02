@@ -65,15 +65,15 @@ a filter fetch pulls the adjacent index block in the same ranged GET,
 and a segment whose whole object costs less to transfer than a second
 round trip is fetched once and decoded section by section.
 
-## Checkpoints and reorganization
+## Flushes and reorganization
 
 The mutation log (WAL) is absorbed into the tree by two separate
 operations, each with its own cost bound.
 
-**Checkpoints append.** A checkpoint folds the WAL tail into one new
+**Flushes append.** A flush folds the WAL tail into one new
 delta run and publishes a manifest referencing every prior run
 unchanged. Its cost is proportional to what changed since the last
-checkpoint, never to namespace size.
+flush, never to namespace size.
 
 **Reorganization folds.** As delta runs accumulate, maintenance merges an
 oldest-first subset of complete runs for one family group, each fold ending
@@ -90,7 +90,7 @@ rows they would need — and the step says so in a warning naming the group,
 the base run's size, and the budget it crossed.
 
 ```
-checkpoints append:          reorganization folds, one group per step:
+flushes append:              reorganization folds, one group per step:
 
   delta run 3 (newest)         bindings:  oldest bounded subset -> base
   delta run 2                  revisions: oldest bounded subset -> base
