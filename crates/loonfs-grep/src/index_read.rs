@@ -2,6 +2,7 @@
 
 use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind};
 use crate::codec::IndexRow;
+use crate::root::GrepSegmentRef;
 use crate::{GrepError, Result};
 use loonfs::StoreFailureClass;
 use loonfs_api::wire::sst_blocks::{
@@ -10,6 +11,8 @@ use loonfs_api::wire::sst_blocks::{
 };
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::sync::Arc;
+
+const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 128 * 1024;
 
 pub(crate) fn index_segment_corrupt(
     object_key: &str,
@@ -77,16 +80,112 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
     Ok(bytes.to_vec())
 }
 
+struct WholeSegment {
+    filter: Arc<SegmentFilter>,
+    entries: Arc<Vec<SegmentIndexEntry>>,
+}
+
+fn segment_object_len(object_key: &str, descriptor: &GrepSegmentRef) -> Result<u64> {
+    descriptor
+        .index_block
+        .offset
+        .checked_add(u64::from(descriptor.index_block.stored_len))
+        .ok_or_else(|| GrepError::CorruptIndex {
+            message: format!(
+                "index segment `{object_key}` descriptor names bytes past the address space"
+            ),
+        })
+}
+
+async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
+    store: &S,
+    cache: &GrepBlockCache,
+    object_key: &str,
+    descriptor: &GrepSegmentRef,
+    object_len: u64,
+) -> Result<WholeSegment> {
+    let whole_handle = BlockHandle {
+        offset: 0,
+        stored_len: object_len as u32,
+        decoded_len: 0,
+        crc32c: 0,
+    };
+    let bytes = load_index_section_bytes(store, object_key, &whole_handle).await?;
+    let section = |handle: &BlockHandle| -> Option<&[u8]> {
+        let start = usize::try_from(handle.offset).ok()?;
+        let end = start.checked_add(handle.stored_len as usize)?;
+        bytes.get(start..end)
+    };
+    let index_bytes = section(&descriptor.index_block).ok_or_else(|| GrepError::CorruptIndex {
+        message: format!("index segment `{object_key}` index block exceeds the object bounds"),
+    })?;
+    let entries = Arc::new(
+        decode_index_block(index_bytes, &descriptor.index_block)
+            .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
+    );
+    let filter_bytes =
+        section(&descriptor.filter_block).ok_or_else(|| GrepError::CorruptIndex {
+            message: format!("index segment `{object_key}` filter block exceeds the object bounds"),
+        })?;
+    let filter = Arc::new(
+        decode_filter_block(filter_bytes, &descriptor.filter_block)
+            .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
+    );
+    for entry in entries.iter() {
+        let stored = section(&entry.block).ok_or_else(|| GrepError::CorruptIndex {
+            message: format!("index segment `{object_key}` data block exceeds the object bounds"),
+        })?;
+        let block = Arc::new(
+            decode_data_block_rows::<IndexRow>(stored, &entry.block)
+                .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?,
+        );
+        cache.insert(
+            cache_key(
+                &descriptor.object_checksum,
+                GrepBlockKind::Data,
+                &entry.block,
+            ),
+            DecodedGrepBlock::Data {
+                block,
+                decoded_bytes: entry.block.decoded_len as usize,
+            },
+        );
+    }
+    Ok(WholeSegment { filter, entries })
+}
+
 pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: &GrepBlockCache,
     object_key: &str,
-    object_checksum: &str,
-    handle: &BlockHandle,
+    descriptor: &GrepSegmentRef,
 ) -> Result<Arc<SegmentFilter>> {
-    let key = cache_key(object_checksum, GrepBlockKind::Filter, handle);
+    let handle = &descriptor.filter_block;
+    let key = cache_key(&descriptor.object_checksum, GrepBlockKind::Filter, handle);
     let decoded = cache
         .get_or_load(&key, || async {
+            let object_len = segment_object_len(object_key, descriptor)?;
+            if object_len <= WHOLE_SEGMENT_LOAD_MAX_BYTES {
+                let whole = load_and_publish_segment_sections(
+                    store, cache, object_key, descriptor, object_len,
+                )
+                .await?;
+                cache.insert(
+                    cache_key(
+                        &descriptor.object_checksum,
+                        GrepBlockKind::Index,
+                        &descriptor.index_block,
+                    ),
+                    DecodedGrepBlock::Index {
+                        entries: whole.entries,
+                        decoded_bytes: descriptor.index_block.decoded_len as usize,
+                    },
+                );
+                return Ok(DecodedGrepBlock::Filter {
+                    filter: whole.filter,
+                    decoded_bytes: handle.decoded_len as usize,
+                });
+            }
             let bytes = load_index_section_bytes(store, object_key, handle).await?;
             let filter = Arc::new(
                 decode_filter_block(&bytes, handle)
@@ -108,12 +207,34 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: &GrepBlockCache,
     object_key: &str,
-    object_checksum: &str,
-    handle: &BlockHandle,
+    descriptor: &GrepSegmentRef,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
-    let key = cache_key(object_checksum, GrepBlockKind::Index, handle);
+    let handle = &descriptor.index_block;
+    let key = cache_key(&descriptor.object_checksum, GrepBlockKind::Index, handle);
     let decoded = cache
         .get_or_load(&key, || async {
+            let object_len = segment_object_len(object_key, descriptor)?;
+            if object_len <= WHOLE_SEGMENT_LOAD_MAX_BYTES {
+                let whole = load_and_publish_segment_sections(
+                    store, cache, object_key, descriptor, object_len,
+                )
+                .await?;
+                cache.insert(
+                    cache_key(
+                        &descriptor.object_checksum,
+                        GrepBlockKind::Filter,
+                        &descriptor.filter_block,
+                    ),
+                    DecodedGrepBlock::Filter {
+                        filter: whole.filter,
+                        decoded_bytes: descriptor.filter_block.decoded_len as usize,
+                    },
+                );
+                return Ok(DecodedGrepBlock::Index {
+                    entries: whole.entries,
+                    decoded_bytes: handle.decoded_len as usize,
+                });
+            }
             let bytes = load_index_section_bytes(store, object_key, handle).await?;
             let entries = Arc::new(
                 decode_index_block(&bytes, handle)

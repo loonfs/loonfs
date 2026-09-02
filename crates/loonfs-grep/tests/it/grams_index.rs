@@ -688,9 +688,10 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         .expect("first grep");
     assert_eq!(first.matches.len(), 1);
     let after_first = raw_store.count(OperationClass::Read);
-    assert!(
-        after_first > before_first,
-        "the first grep must read posting blocks from the store"
+    assert_eq!(
+        after_first - before_first,
+        1,
+        "the first grep must load the small segment in one read"
     );
 
     let second = host

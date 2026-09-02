@@ -60,6 +60,8 @@ pub const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 /// root update cannot lose an object it has written but not yet referenced.
 pub const GREP_GC_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
 
+const GREP_REVERIFY_CHUNK: usize = 1024;
+
 // The floor is derived from publication budgets and provider bounds rather
 // than chosen, so a window that stopped clearing it is a compile error here
 // instead of an unreproducible delete of an object a publication was about
@@ -278,6 +280,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Enables grep by pinning a checkpoint and CAS-publishing a fresh
     /// backfilling root. Enabling an active root is idempotent.
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
+        ensure_live_namespace(&self.reads(namespace_id)).await?;
         if let Some(current) = load_grep_root(&self.store, namespace_id).await? {
             if !matches!(
                 current.manifest_state().status(),
@@ -1309,8 +1312,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// `max_objects` reads are spent, answering the position it stopped at
     /// so the next call resumes there. Like core garbage collection, that
     /// cursor is an enumeration shortcut and nothing else: every resumed
-    /// pass re-reads liveness and the grep root before it deletes anything,
-    /// so losing the cursor costs a repeated walk and never a wrong delete.
+    /// pass re-reads the required liveness or grep root state before it
+    /// deletes anything, so losing the cursor costs a repeated walk and
+    /// never a wrong delete.
     ///
     /// A pass always examines at least one key, whatever the budget. The
     /// budget bounds how much work one call does; it may not stop a caller
@@ -1333,9 +1337,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let mut budget =
             PassBudget::new(Some(request.max_objects.unwrap_or(DEFAULT_GC_MAX_OBJECTS)));
         let reads = self.reads(namespace_id);
-        // Liveness is decided once per pass — and re-decided per candidate
-        // below, which is what authorizes a delete. This first read is
-        // charged like any other.
+        // Liveness is decided once per pass and refreshed in bounded chunks
+        // below. This first read is charged like any other.
         budget.charge();
         let liveness = namespace_liveness(&reads).await;
         if liveness == NamespaceLiveness::Unknown {
@@ -1343,15 +1346,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         }
 
         let prefix = grep_prefix(namespace_id);
-        let mut keys = self.store.list_prefix_stream(&prefix);
+        let mut keys = self
+            .store
+            .list_prefix_from_stream(&prefix, resume.last_key());
         let mut position = resume.clone();
+        let mut live_set = GrepLiveSet::new();
         let mut deleted_any = false;
         let mut examined = 0_u64;
         while let Some(key) = keys.next().await {
             let key = key.map_err(|error| core_store_error(&prefix, &error))?;
-            if resume.covers(&key) {
-                continue;
-            }
             // The first key of a pass is examined whatever the budget: the
             // cursor must advance, or a caller looping it never finishes.
             if examined > 0 && budget.exhausted() {
@@ -1367,6 +1370,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     namespace_id,
                     &reads,
                     liveness,
+                    &mut live_set,
                     &key,
                     now_ms,
                     &mut budget,
@@ -1380,14 +1384,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         if deleted_any && liveness == NamespaceLiveness::Gone {
             report.namespace_reaped = true;
         }
+        report.namespace_degraded |= live_set.degraded;
         Ok(report)
     }
 
-    /// Decides one candidate key against freshly re-read state.
+    /// Decides one candidate key against chunk-refreshed state.
     ///
-    /// Answers whether the key was deleted. Selection may be stale — the
-    /// listing is a snapshot — but every decision here re-reads what
-    /// authorizes it, which is what makes resuming from a cursor safe.
+    /// Answers whether the key was deleted. Selection may be stale because
+    /// the listing is a snapshot. The grace window covers the bounded state
+    /// refresh interval.
     #[allow(
         clippy::too_many_arguments,
         reason = "one collection decision needs liveness, budget, and report state together"
@@ -1397,22 +1402,25 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         reads: &NamespaceReads<'_>,
         liveness: NamespaceLiveness,
+        live_set: &mut GrepLiveSet,
         key: &str,
         now_ms: u64,
         budget: &mut PassBudget,
         report: &mut GrepGcReport,
     ) -> Result<bool> {
+        if !live_set
+            .refresh_if_due(&self.store, namespace_id, reads, liveness, budget)
+            .await
+        {
+            report.retained_candidates += 1;
+            return Ok(false);
+        }
         match liveness {
             // A verified deleted namespace head is already the absorbing
             // gate for this pointer: `enable` refuses that tombstone, so no
             // legal writer can re-reference grep state after this liveness
             // check. Pointer deletion needs no second state.
             NamespaceLiveness::Gone => {
-                budget.charge();
-                if namespace_liveness(reads).await != NamespaceLiveness::Gone {
-                    report.retained_candidates += 1;
-                    return Ok(false);
-                }
                 budget.charge();
                 Ok(self.delete_if_unreferenced(key, now_ms, report).await?)
             }
@@ -1424,20 +1432,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             // aged unreachable objects need no condemned state before
             // deletion.
             NamespaceLiveness::Live => {
-                budget.charge();
-                let root = match load_grep_root(&self.store, namespace_id).await {
-                    Ok(root) => root,
-                    Err(_) => {
-                        report.namespace_degraded = true;
-                        report.retained_candidates += 1;
-                        return Ok(false);
-                    }
-                };
-                let live = root
-                    .as_ref()
-                    .map(live_grep_keys)
-                    .unwrap_or_else(|| BTreeSet::from([root_key(namespace_id)]));
-                if live.contains(key) {
+                if live_set.live.contains(key) {
                     return Ok(false);
                 }
                 budget.charge();
@@ -1514,13 +1509,6 @@ impl GrepGcCursor {
             namespace_id: namespace_id.clone(),
             last_key: Some(key),
         }
-    }
-
-    /// Whether an earlier pass already examined this key.
-    fn covers(&self, key: &str) -> bool {
-        self.last_key
-            .as_deref()
-            .is_some_and(|last_key| key <= last_key)
     }
 
     fn decode(token: &str, namespace_id: &NamespaceId) -> Result<Self> {
@@ -1685,14 +1673,7 @@ impl SegmentRangeReader {
         cursor: &str,
     ) -> Result<Self> {
         let object_key = segment_key(namespace_id, &segment.segment_id);
-        let entries = load_index_block(
-            store,
-            block_cache,
-            &object_key,
-            &segment.object_checksum,
-            &segment.index_block,
-        )
-        .await?;
+        let entries = load_index_block(store, block_cache, &object_key, segment).await?;
         let start = if cursor.is_empty() {
             GRAM_ROW_PREFIX
         } else {
@@ -1754,6 +1735,64 @@ impl SegmentRangeReader {
             }
         }
         Ok(())
+    }
+}
+
+struct GrepLiveSet {
+    live: BTreeSet<String>,
+    decided_since_load: usize,
+    verified: bool,
+    degraded: bool,
+}
+
+impl GrepLiveSet {
+    fn new() -> Self {
+        Self {
+            live: BTreeSet::new(),
+            decided_since_load: GREP_REVERIFY_CHUNK,
+            verified: false,
+            degraded: false,
+        }
+    }
+
+    async fn refresh_if_due<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        namespace_id: &NamespaceId,
+        reads: &NamespaceReads<'_>,
+        liveness: NamespaceLiveness,
+        budget: &mut PassBudget,
+    ) -> bool {
+        if self.decided_since_load >= GREP_REVERIFY_CHUNK {
+            self.live.clear();
+            self.verified = match liveness {
+                NamespaceLiveness::Gone => {
+                    budget.charge();
+                    namespace_liveness(reads).await == NamespaceLiveness::Gone
+                }
+                NamespaceLiveness::Live => {
+                    budget.charge();
+                    match load_grep_root(store, namespace_id).await {
+                        Ok(Some(root)) => {
+                            self.live = live_grep_keys(&root);
+                            true
+                        }
+                        Ok(None) => {
+                            self.live.insert(root_key(namespace_id));
+                            true
+                        }
+                        Err(_) => {
+                            self.degraded = true;
+                            false
+                        }
+                    }
+                }
+                NamespaceLiveness::Unknown => false,
+            };
+            self.decided_since_load = 0;
+        }
+        self.decided_since_load += 1;
+        self.verified
     }
 }
 

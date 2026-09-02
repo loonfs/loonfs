@@ -13,7 +13,7 @@ use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, PinnedNamespaceReads};
 use crate::root::{
     load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepIndexStatus,
-    GrepManifestState,
+    GrepManifestState, GrepSegmentRef,
 };
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
@@ -21,7 +21,7 @@ use loonfs::{CoreError, CurrentFileState, MetadataViewError};
 use loonfs_api::v0::FilesystemChange;
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{
-    decode_filter_block, index_blocks_for_key_range, string_prefix_upper_bound, BlockHandle,
+    decode_filter_block, index_blocks_for_key_range, string_prefix_upper_bound,
 };
 use loonfs_api::{
     decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EffectiveLimit, ErrorCode, GrepMatch,
@@ -73,18 +73,7 @@ pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
 struct MaterializedGrepIndexSnapshot {
     built_through_seq: ChangeSeq,
     next_event_index: u32,
-    segments: Vec<GrepQuerySegment>,
-}
-
-#[derive(Debug, Clone)]
-struct GrepQuerySegment {
-    object_key: String,
-    min_row_key: String,
-    max_row_key: String,
-    index_block: BlockHandle,
-    filter_block: BlockHandle,
-    filter_inline: Option<String>,
-    object_checksum: String,
+    state: Arc<GrepManifestState>,
 }
 
 impl GrepService {
@@ -160,16 +149,16 @@ impl GrepService {
                 ),
             });
         }
-        materialized_snapshot_from_state(&state)
+        materialized_snapshot_from_state(state)
     }
 }
 
 fn materialized_snapshot_from_state(
-    root: &GrepManifestState,
+    state: Arc<GrepManifestState>,
 ) -> Result<MaterializedGrepIndexSnapshot> {
     // Queries require an active index and its watermark. Disabled and
     // backfilling indexes return their corresponding errors.
-    let (built_through_seq, next_event_index) = match root.status() {
+    let (built_through_seq, next_event_index) = match state.status() {
         GrepIndexStatus::Disabled {} => return Err(GrepError::NotEnabled),
         GrepIndexStatus::Backfilling { .. } => return Err(GrepError::Backfilling),
         GrepIndexStatus::Active {
@@ -177,23 +166,10 @@ fn materialized_snapshot_from_state(
             next_event_index,
         } => (*built_through_seq, *next_event_index),
     };
-    let segments = root
-        .segments()
-        .iter()
-        .map(|segment| GrepQuerySegment {
-            object_key: segment_key(root.namespace_id(), &segment.segment_id),
-            min_row_key: segment.min_row_key.clone(),
-            max_row_key: segment.max_row_key.clone(),
-            index_block: segment.index_block,
-            filter_block: segment.filter_block,
-            filter_inline: segment.filter_inline.clone(),
-            object_checksum: segment.object_checksum.clone(),
-        })
-        .collect();
     Ok(MaterializedGrepIndexSnapshot {
         built_through_seq,
         next_event_index,
-        segments,
+        state,
     })
 }
 
@@ -264,7 +240,8 @@ impl GrepCandidates {
 async fn indexed_candidates<S: ObjectStore + ?Sized>(
     store: &S,
     block_cache: &GrepBlockCache,
-    segments: &[GrepQuerySegment],
+    namespace_id: &NamespaceId,
+    segments: &[GrepSegmentRef],
     plan: &GramQueryPlan,
 ) -> Result<BTreeMap<InodeId, BTreeSet<RevisionNo>>> {
     let mut intersection: Option<BTreeSet<(InodeId, RevisionNo)>> = None;
@@ -272,7 +249,7 @@ async fn indexed_candidates<S: ObjectStore + ?Sized>(
         // Lookup keys derive once per gram; the key-range prune is free
         // (already in the descriptor), so only surviving probes fan out.
         let lookups: Vec<GramLookup> = or_set.iter().map(|gram| GramLookup::new(*gram)).collect();
-        let mut probes: Vec<(&GramLookup, &GrepQuerySegment)> = Vec::new();
+        let mut probes: Vec<(&GramLookup, &GrepSegmentRef)> = Vec::new();
         for gram_lookup in &lookups {
             for descriptor in segments {
                 if descriptor.max_row_key.as_str() < gram_lookup.probe.as_str()
@@ -293,7 +270,7 @@ async fn indexed_candidates<S: ObjectStore + ?Sized>(
         let mut set_postings = BTreeSet::new();
         for chunk in probes.chunks(MAX_GREP_READ_IO) {
             let batches = try_join_all(chunk.iter().map(|(gram_lookup, descriptor)| {
-                segment_postings_for_gram(store, block_cache, descriptor, gram_lookup)
+                segment_postings_for_gram(store, block_cache, namespace_id, descriptor, gram_lookup)
             }))
             .await?;
             for batch in batches {
@@ -357,9 +334,11 @@ impl GramLookup {
 async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     store: &S,
     block_cache: &GrepBlockCache,
-    descriptor: &GrepQuerySegment,
+    namespace_id: &NamespaceId,
+    descriptor: &GrepSegmentRef,
     gram_lookup: &GramLookup,
 ) -> Result<BTreeSet<(InodeId, RevisionNo)>> {
+    let object_key = segment_key(namespace_id, &descriptor.segment_id);
     let mut postings = BTreeSet::new();
     let admitted = match &descriptor.filter_inline {
         Some(inline) => {
@@ -367,38 +346,22 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
                 hex_decode_bytes(inline).map_err(|error| GrepError::CorruptIndex {
                     message: format!(
                         "index segment `{}` carries undecodable inline filter hex: {error}",
-                        descriptor.object_key
+                        object_key
                     ),
                 })?;
-            let filter =
-                decode_filter_block(&filter_bytes, &descriptor.filter_block).map_err(|error| {
-                    index_segment_corrupt(&descriptor.object_key, "filter block", &error)
-                })?;
+            let filter = decode_filter_block(&filter_bytes, &descriptor.filter_block)
+                .map_err(|error| index_segment_corrupt(&object_key, "filter block", &error))?;
             filter.may_contain(&gram_lookup.probe)
         }
         None => {
-            let filter = load_filter_block(
-                store,
-                block_cache,
-                &descriptor.object_key,
-                &descriptor.object_checksum,
-                &descriptor.filter_block,
-            )
-            .await?;
+            let filter = load_filter_block(store, block_cache, &object_key, descriptor).await?;
             filter.may_contain(&gram_lookup.probe)
         }
     };
     if !admitted {
         return Ok(postings);
     }
-    let entries = load_index_block(
-        store,
-        block_cache,
-        &descriptor.object_key,
-        &descriptor.object_checksum,
-        &descriptor.index_block,
-    )
-    .await?;
+    let entries = load_index_block(store, block_cache, &object_key, descriptor).await?;
     let range =
         index_blocks_for_key_range(&entries, &gram_lookup.prefix, gram_lookup.upper.as_deref());
     // The range's blocks are independent ranged GETs, so they fan out
@@ -410,7 +373,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
             load_data_block(
                 store,
                 block_cache,
-                &descriptor.object_key,
+                &object_key,
                 &descriptor.object_checksum,
                 &entry.block,
             )
@@ -422,9 +385,9 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
                 if *row_gram != gram_lookup.gram {
                     continue;
                 }
-                let batch = row.postings().map_err(|error| {
-                    index_segment_corrupt(&descriptor.object_key, "posting batch", &error)
-                })?;
+                let batch = row
+                    .postings()
+                    .map_err(|error| index_segment_corrupt(&object_key, "posting batch", &error))?;
                 postings.extend(
                     batch
                         .into_iter()
@@ -725,8 +688,14 @@ impl GrepService {
             .map_err(CoreError::InvalidQuery)?
         {
             GramPlanOutcome::Indexable(plan) => {
-                candidates.indexed =
-                    indexed_candidates(store, &self.block_cache, &snapshot.segments, &plan).await?;
+                candidates.indexed = indexed_candidates(
+                    store,
+                    &self.block_cache,
+                    reads.namespace_id(),
+                    snapshot.state.segments(),
+                    &plan,
+                )
+                .await?;
                 Some(ChangeFeedResume::new(
                     snapshot.built_through_seq,
                     snapshot.next_event_index,
@@ -1012,7 +981,9 @@ async fn scan_candidate_inodes(
                     }
                 }
             }
-            if inodes.len() > MAX_GREP_SCAN_FILES || walked_directories > MAX_GREP_SCAN_FILES {
+            if inodes.len() + directories.len() > MAX_GREP_SCAN_FILES
+                || walked_directories > MAX_GREP_SCAN_FILES
+            {
                 return Err(CoreError::QueryUnindexable(format!(
                     "the namespace exceeds the {MAX_GREP_SCAN_FILES}-file scan budget; \
                      give the pattern a run of at least 3 literal bytes so the \
