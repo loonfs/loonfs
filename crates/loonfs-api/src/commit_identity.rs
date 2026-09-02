@@ -32,6 +32,17 @@ const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v1";
 /// different hash without changing existing fingerprints.
 const FINGERPRINT_SCHEME: &str = "v1:sha256";
 
+/// The semantic identity of one mutation request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+pub struct CommitFingerprint(String);
+
+impl CommitFingerprint {
+    /// Returns the stored fingerprint string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Error returned when the canonical fingerprint input cannot be encoded.
 ///
 /// The input contains validated types, so this error indicates an internal
@@ -44,7 +55,7 @@ pub struct SemanticFingerprintError(#[from] serde_json::Error);
 ///
 /// The result has the form `v1:sha256:<64 lowercase hex>`. Compact JSON is
 /// part of the durable format, so fixed-value tests detect encoding changes.
-fn fingerprint_digest<T>(preimage: &T) -> Result<String, SemanticFingerprintError>
+fn fingerprint_digest<T>(preimage: &T) -> Result<CommitFingerprint, SemanticFingerprintError>
 where
     T: Serialize,
 {
@@ -52,12 +63,12 @@ where
     Ok(fingerprint_bytes(&bytes))
 }
 
-fn fingerprint_bytes(bytes: &[u8]) -> String {
+fn fingerprint_bytes(bytes: &[u8]) -> CommitFingerprint {
     let digest = Sha256::digest(bytes);
-    format!(
+    CommitFingerprint(format!(
         "{FINGERPRINT_SCHEME}:{}",
         crate::hex::hex_encode_bytes(&digest)
-    )
+    ))
 }
 
 /// Canonical preimage for one operation inside a mutation fingerprint.
@@ -67,20 +78,17 @@ fn fingerprint_bytes(bytes: &[u8]) -> String {
 /// identically across releases. A pinned-value test below fails if the
 /// encoding drifts.
 ///
-/// The variant names, the field names, and the field order below are all part
-/// of that preimage under the [`COMMIT_FINGERPRINT_DOMAIN`] tag, and none of
-/// them tracks the wire enum. They deliberately differ from it — `CreateDir`
-/// against the wire's `CreateDirectory`, `absolute_path` against its `path`,
-/// `behavior` ahead of `content_ref` in the put — because renaming a wire
-/// field must not silently restate every already-published commit's identity.
-/// [`operation_fingerprint_input`] is the one place the wire spelling is
-/// translated into this one; nothing else may name these variants. Change any
-/// of it and every stored fingerprint disagrees with its recomputed value,
-/// which the pinned tests below exist to catch.
+/// The serialized variant names, the field names, and the field order below
+/// are all part of that preimage under the [`COMMIT_FINGERPRINT_DOMAIN`] tag.
+/// They deliberately differ from the wire enum. [`operation_fingerprint_input`]
+/// is the one place the wire spelling is translated into this one. Change any
+/// serialized value and stored fingerprints disagree with recomputed values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum OperationFingerprintInput<'a> {
-    CreateDir {
+    // The string is the frozen preimage spelling.
+    #[serde(rename = "create_dir")]
+    CreateDirectory {
         absolute_path: &'a str,
         parents: bool,
     },
@@ -93,7 +101,9 @@ enum OperationFingerprintInput<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         expected_inode_id: Option<InodeId>,
     },
-    CreateDirByInode {
+    // The string is the frozen preimage spelling.
+    #[serde(rename = "create_dir_by_inode")]
+    CreateDirectoryByInode {
         parent_inode_id: InodeId,
         display_name: &'a str,
     },
@@ -212,7 +222,7 @@ fn content_ref_fingerprint_input(content_ref: &ContentRef) -> ContentRefFingerpr
 fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFingerprintInput<'_> {
     match operation {
         FilesystemOperation::CreateDirectory { path, parents } => {
-            OperationFingerprintInput::CreateDir {
+            OperationFingerprintInput::CreateDirectory {
                 absolute_path: path.as_str(),
                 parents: *parents,
             }
@@ -233,7 +243,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
         FilesystemOperation::CreateDirectoryByInode {
             parent_inode_id,
             display_name,
-        } => OperationFingerprintInput::CreateDirByInode {
+        } => OperationFingerprintInput::CreateDirectoryByInode {
             parent_inode_id: *parent_inode_id,
             display_name: display_name.as_str(),
         },
@@ -260,17 +270,15 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             expected_binding_generation,
             to_parent_inode_id,
             to_display_name,
-            behavior,
-            expected_destination_inode_id,
-            expected_destination_revision_no,
+            guard,
         } => OperationFingerprintInput::MoveByInode {
             inode_id: *inode_id,
-            expected_binding_generation,
+            expected_binding_generation: expected_binding_generation.as_str(),
             to_parent_inode_id: *to_parent_inode_id,
             to_display_name: to_display_name.as_str(),
-            behavior: *behavior,
-            expected_destination_inode_id: *expected_destination_inode_id,
-            expected_destination_revision_no: *expected_destination_revision_no,
+            behavior: guard.behavior,
+            expected_destination_inode_id: guard.expected_inode_id,
+            expected_destination_revision_no: guard.expected_revision_no,
         },
         FilesystemOperation::DeleteByInode {
             inode_id,
@@ -278,7 +286,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             behavior,
         } => OperationFingerprintInput::DeleteByInode {
             inode_id: *inode_id,
-            expected_binding_generation,
+            expected_binding_generation: expected_binding_generation.as_str(),
             behavior: *behavior,
         },
         FilesystemOperation::DeletePath {
@@ -293,28 +301,24 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
         FilesystemOperation::MovePath {
             from_path,
             to_path,
-            behavior,
-            expected_destination_inode_id,
-            expected_destination_revision_no,
+            guard,
         } => OperationFingerprintInput::MovePath {
             from_path: from_path.as_str(),
             to_path: to_path.as_str(),
-            behavior: *behavior,
-            expected_destination_inode_id: *expected_destination_inode_id,
-            expected_destination_revision_no: *expected_destination_revision_no,
+            behavior: guard.behavior,
+            expected_destination_inode_id: guard.expected_inode_id,
+            expected_destination_revision_no: guard.expected_revision_no,
         },
         FilesystemOperation::CopyPath {
             from_path,
             to_path,
-            behavior,
-            expected_destination_inode_id,
-            expected_destination_revision_no,
+            guard,
         } => OperationFingerprintInput::CopyFilePath {
             from_path: from_path.as_str(),
             to_path: to_path.as_str(),
-            behavior: *behavior,
-            expected_destination_inode_id: *expected_destination_inode_id,
-            expected_destination_revision_no: *expected_destination_revision_no,
+            behavior: guard.behavior,
+            expected_destination_inode_id: guard.expected_inode_id,
+            expected_destination_revision_no: guard.expected_revision_no,
         },
         FilesystemOperation::RestoreRevision {
             path,
@@ -369,7 +373,7 @@ pub fn semantic_commit_fingerprint(
     actor: &ActorRef,
     message: Option<&str>,
     operations: &[FilesystemOperation],
-) -> Result<String, SemanticFingerprintError> {
+) -> Result<CommitFingerprint, SemanticFingerprintError> {
     #[derive(Serialize)]
     struct CanonicalCommit<'a> {
         domain: &'static str,
@@ -402,7 +406,7 @@ pub fn put_retry_fingerprint(
     path: &AbsolutePath,
     options: &PutFileOptions,
     committed_content_ref: &ContentRef,
-) -> Result<String, SemanticFingerprintError> {
+) -> Result<CommitFingerprint, SemanticFingerprintError> {
     let operation = FilesystemOperation::PutFile {
         path: path.clone(),
         content_ref: committed_content_ref.clone(),
@@ -509,7 +513,8 @@ where
         attempt.options,
         content_ref,
     );
-    if retried.ok().as_deref() != Some(receipt.committed_fingerprint.as_str())
+    if retried.ok().as_ref().map(CommitFingerprint::as_str)
+        != Some(receipt.committed_fingerprint.as_str())
         || !content_ref.matches_evidence(attempt.staged)
     {
         return Err(conflict);
@@ -559,6 +564,8 @@ mod tests {
             &[operation],
         )
         .expect("fingerprint")
+        .as_str()
+        .to_owned()
     }
 
     fn update_attributes(
@@ -597,7 +604,7 @@ mod tests {
         .expect("fingerprint");
 
         assert_eq!(
-            fingerprint,
+            fingerprint.as_str(),
             "v1:sha256:bc41940773fa7df87aaeecf44b2fbd8205071e15fcb81705887ff1de0a9582bb"
         );
     }
@@ -702,12 +709,17 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let operation = |expected_binding_generation: &str| FilesystemOperation::MoveByInode {
             inode_id: InodeId(42),
-            expected_binding_generation: expected_binding_generation.to_owned(),
+            expected_binding_generation: crate::BindingGeneration::parse(
+                expected_binding_generation,
+            )
+            .expect("binding generation"),
             to_parent_inode_id: InodeId(7),
             to_display_name: DisplayName::parse("report.txt").expect("display name"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: crate::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         };
 
         let fingerprint = |generation| {
@@ -720,7 +732,7 @@ mod tests {
             .expect("fingerprint")
         };
 
-        assert_ne!(fingerprint("generation-a"), fingerprint("generation-b"));
+        assert_ne!(fingerprint("aaaa"), fingerprint("bbbb"));
     }
 
     #[test]
@@ -732,7 +744,7 @@ mod tests {
                 .expect("fingerprint");
 
         assert_eq!(
-            fingerprint,
+            fingerprint.as_str(),
             "v1:sha256:dc41318564ff5329c73ba2f1af338f24bd323be7a56305a2b9b94cb24b95ec5a"
         );
     }
@@ -775,7 +787,7 @@ mod tests {
         .expect("fingerprint");
 
         assert_eq!(
-            fingerprint,
+            fingerprint.as_str(),
             "v1:sha256:bd1dc71c8b7e0b1e503dbf0925b801275088b6f2598888f893787688f1f01d0f"
         );
     }
@@ -804,7 +816,7 @@ mod tests {
             serde_json::to_value("/docs/report.txt").expect("serialize"),
         );
         assert_eq!(
-            fingerprint,
+            fingerprint.as_str(),
             "v1:sha256:9146c9e675a2e132bb16adb32d235f73080a3ef065cbd2f5c82ccb83aee02e57"
         );
     }
@@ -826,7 +838,7 @@ mod tests {
         .expect("fingerprint");
 
         assert_eq!(
-            fingerprint,
+            fingerprint.as_str(),
             "v1:sha256:52e0be7cc080b08b6efb7dcabf474e795be9066dc30b77dac0cc1acd09f43bdb"
         );
     }
@@ -853,7 +865,7 @@ mod tests {
         .expect("fingerprint");
 
         assert_eq!(
-            fingerprint,
+            fingerprint.as_str(),
             "v1:sha256:bc5ab43ea228015ee13ceb52bb074b3ec1f3026babeb007eec8f5512fb64a924"
         );
     }
@@ -911,18 +923,22 @@ mod tests {
             FilesystemOperation::MovePath {
                 from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-                behavior: DestinationBehavior::Replace,
-                expected_destination_inode_id: inode_id,
-                expected_destination_revision_no: revision_no,
+                guard: crate::DestinationGuard {
+                    behavior: DestinationBehavior::Replace,
+                    expected_inode_id: inode_id,
+                    expected_revision_no: revision_no,
+                },
             }
         });
         assert_destination_guards_change_fingerprint(|inode_id, revision_no| {
             FilesystemOperation::CopyPath {
                 from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-                behavior: DestinationBehavior::Replace,
-                expected_destination_inode_id: inode_id,
-                expected_destination_revision_no: revision_no,
+                guard: crate::DestinationGuard {
+                    behavior: DestinationBehavior::Replace,
+                    expected_inode_id: inode_id,
+                    expected_revision_no: revision_no,
+                },
             }
         });
     }
@@ -957,7 +973,8 @@ mod tests {
                     &options,
                     &content_ref,
                 )
-                .expect("retry fingerprint"),
+                .expect("retry fingerprint")
+                .as_str(),
                 "v1:sha256:bc5ab43ea228015ee13ceb52bb074b3ec1f3026babeb007eec8f5512fb64a924"
             );
         }
@@ -1181,7 +1198,9 @@ mod tests {
                 &options,
                 &content_ref,
             )
-            .expect("fingerprint"),
+            .expect("fingerprint")
+            .as_str()
+            .to_owned(),
         };
         let page = crate::v0::ListChangesResponse {
             namespace_id: namespace_id.clone(),
@@ -1198,7 +1217,8 @@ mod tests {
                     inode_id: InodeId(2),
                     parent_inode_id: InodeId(1),
                     display_name: DisplayName::parse("report.txt").expect("valid display name"),
-                    binding_generation: "generation".to_owned(),
+                    binding_generation: crate::BindingGeneration::parse("abcdef")
+                        .expect("binding generation"),
                     revision_no: RevisionNo(1),
                     content_ref,
                 }],

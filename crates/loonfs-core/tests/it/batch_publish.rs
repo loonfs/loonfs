@@ -1389,7 +1389,7 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
         .await
         .expect("writer a commit");
     let writer_b = MutationContext {
-        writer_id: "writer-b".to_owned(),
+        writer_id: loonfs_api::WriterId::parse("writer-b").expect("writer id"),
         now_ms: writer_a.now_ms.saturating_add(1),
     };
 
@@ -1456,7 +1456,7 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
         .expect("poison compacted WAL");
 
     let later_context = MutationContext {
-        writer_id: "writer-b".to_owned(),
+        writer_id: loonfs_api::WriterId::parse("writer-b").expect("writer id"),
         now_ms: first_context.now_ms + 10_000,
     };
     let replay = submit_commit(

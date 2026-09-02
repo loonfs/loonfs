@@ -377,7 +377,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .ok_or(CoreError::InodeNotFound(inode_id))?;
         if inode.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
-                path: inode_id.to_string(),
+                target: inode_id.to_string(),
                 kind: inode.inode_kind,
             });
         }

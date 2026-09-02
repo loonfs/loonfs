@@ -4,33 +4,18 @@
 use crate::{Client, ClientError, PayloadStream, Result};
 use bytes::Bytes;
 use futures::StreamExt as _;
-use loonfs_api::{ApiError, ErrorCode};
+use loonfs_api::{transport_retry_backoff, ApiError, ErrorCode, OperationDeadline};
+pub(crate) use loonfs_api::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
 use reqwest::Method;
-use std::sync::OnceLock;
 use std::time::Duration;
-use std::time::Instant;
 
 /// Retry limits for a request that is safe to send more than once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TransportRetryPolicy {
-    pub(crate) max_retries: u32,
-    pub(crate) initial_backoff: Duration,
-    pub(crate) max_backoff: Duration,
-    pub(crate) operation_deadline: Duration,
-}
-
-impl TransportRetryPolicy {
-    pub(crate) const DEFAULT: Self = Self {
-        max_retries: 3,
-        initial_backoff: Duration::from_millis(250),
-        max_backoff: Duration::from_secs(2),
-        // The server limits most requests to 60 seconds. A 90-second client
-        // budget leaves time for short connection failures and retry delays
-        // while remaining below the longer provider operation limit. Content
-        // transfer retries do not use this total budget.
-        operation_deadline: Duration::from_secs(90),
-    };
-}
+pub(crate) const DEFAULT: TransportRetryPolicy = TransportRetryPolicy {
+    max_retries: 3,
+    initial_backoff: Duration::from_millis(250),
+    max_backoff: Duration::from_secs(2),
+    operation_deadline: Duration::from_secs(90),
+};
 
 /// Socket read/write inactivity timeout applied to every request. A
 /// connection that makes no progress for this long fails instead of hanging
@@ -42,57 +27,6 @@ pub(crate) enum SendPolicy {
     Once,
     Retry,
     RetryUnbounded,
-}
-
-/// Provides elapsed time from a monotonic clock for the total retry limit.
-pub(crate) trait MonotonicTimer: std::fmt::Debug + Send + Sync {
-    fn monotonic_now_ms(&self) -> u64;
-}
-
-/// Monotonic clock used by the production client.
-#[derive(Debug, Default)]
-pub(crate) struct StdMonotonicTimer {
-    origin: OnceLock<Instant>,
-}
-
-impl MonotonicTimer for StdMonotonicTimer {
-    fn monotonic_now_ms(&self) -> u64 {
-        // This value is used only for local retry timing. It is never stored
-        // or returned through the protocol.
-        #[allow(clippy::disallowed_methods)]
-        let now = Instant::now();
-        let origin = self.origin.get_or_init(|| now);
-        u64::try_from(now.saturating_duration_since(*origin).as_millis()).unwrap_or(u64::MAX)
-    }
-}
-
-/// Tracks the time remaining in one request's total retry budget.
-struct OperationDeadline<'timer> {
-    timer: &'timer dyn MonotonicTimer,
-    started_ms: u64,
-    deadline: Duration,
-}
-
-impl<'timer> OperationDeadline<'timer> {
-    fn start(timer: &'timer dyn MonotonicTimer, deadline: Duration) -> Self {
-        Self {
-            timer,
-            started_ms: timer.monotonic_now_ms(),
-            deadline,
-        }
-    }
-
-    fn remaining(&self) -> Option<Duration> {
-        let elapsed_ms = self
-            .timer
-            .monotonic_now_ms()
-            .saturating_sub(self.started_ms);
-        let deadline_ms = u64::try_from(self.deadline.as_millis()).unwrap_or(u64::MAX);
-        if elapsed_ms >= deadline_ms {
-            return None;
-        }
-        Some(Duration::from_millis(deadline_ms - elapsed_ms))
-    }
 }
 
 /// Reusable description of an outbound request.
@@ -281,7 +215,7 @@ impl Client {
         deadline: Option<OperationDeadline<'_>>,
     ) -> Result<WireResponse> {
         let mut retries = 0;
-        let mut attempt_timeout = deadline.as_ref().map(|deadline| deadline.deadline);
+        let mut attempt_timeout = deadline.as_ref().map(OperationDeadline::deadline);
         loop {
             let attempt = match self.send(request, body, attempt_timeout).await {
                 Ok(response) => return Ok(response),
@@ -501,17 +435,6 @@ pub(crate) fn retryable_transport_failure(transport: bool, error: &ClientError) 
             .is_some_and(ErrorCode::retryable_without_operator_action)
 }
 
-/// Computes deterministic exponential backoff for the requested retry number.
-///
-/// The delay doubles after each failure and never exceeds `max_backoff`.
-fn transport_retry_backoff(policy: &TransportRetryPolicy, retry: u32) -> Duration {
-    let doublings = retry.saturating_sub(1).min(16);
-    policy
-        .initial_backoff
-        .saturating_mul(1u32 << doublings)
-        .min(policy.max_backoff)
-}
-
 /// Returns the delay before the next retry, or `None` when a limit is reached.
 fn next_transport_retry_backoff(
     policy: &TransportRetryPolicy,
@@ -529,9 +452,9 @@ fn next_transport_retry_backoff(
     Some(transport_retry_backoff(policy, *retries).min(remaining))
 }
 
-#[allow(clippy::disallowed_methods)]
 // This delay affects only local retry scheduling. It is not stored or exposed
 // through the protocol.
+#[allow(clippy::disallowed_methods)]
 async fn transport_retry_pause(backoff: Duration) {
     tokio::time::sleep(backoff).await;
 }

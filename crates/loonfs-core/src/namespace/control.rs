@@ -5,6 +5,7 @@ use crate::control_object::{
     expect_foreign_fork_basis, expect_namespace, expect_own_manifest, load_control_object,
     ControlObjectLoadError, LoadedControl,
 };
+use crate::error::CoreError;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control_snapshot::load_head_and_metadata_basis;
 use loonfs_api::wire::control::{ControlObjectKind, HeadState, MetadataRootState, WalFloorState};
@@ -15,6 +16,15 @@ use loonfs_objectstore::ObjectStore;
 pub(crate) type LoadedHeadObject = LoadedControl<HeadState>;
 pub(crate) type LoadedMetadataRootObject = LoadedControl<MetadataRootState>;
 pub(crate) type LoadedWalFloorObject = LoadedControl<WalFloorState>;
+
+pub(crate) fn ensure_namespace_live(head: &HeadState) -> crate::error::Result<()> {
+    if head.status.is_deleted() {
+        return Err(CoreError::NamespaceDeleted {
+            namespace_id: head.namespace_id.clone(),
+        });
+    }
+    Ok(())
+}
 
 pub(crate) async fn load_wal_floor_object<S: ObjectStore + ?Sized>(
     store: &S,

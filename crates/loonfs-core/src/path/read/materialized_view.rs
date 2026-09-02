@@ -23,41 +23,17 @@ use crate::wal::{
     ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
 };
 use loonfs_api::v0::DirectoryBinding;
-use loonfs_api::wire::control::{HeadState, NamespaceStatus};
+use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
-    AbsolutePath, AttributesProjection, ChangeSeq, ContentRef, ContentStoreId, DirectoryPageCursor,
-    DisplayName, FileBytes, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo,
-    NamespaceId, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo, TrashEntry,
-    TrashPageCursor,
+    AbsolutePath, AttributeInclusion, AttributesProjection, ChangeSeq, ContentRef, ContentStoreId,
+    DirectoryPageCursor, DisplayName, FileBytes, FileRevision, FileRevisionsPageCursor, InodeId,
+    InodeKind, ManifestNo, NamespaceId, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo,
+    TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::Instrument;
-
-/// Whether an entry build reads the inode's attributes.
-///
-/// Attributes are the one part of an entry a read pays for per inode, so the
-/// caller states it rather than the builder guessing: a stat includes them,
-/// a listing omits them unless asked, and every other read that resolves a
-/// path on its way to content omits them.
-///
-/// A second projectable field should grow this into a projection struct
-/// rather than add a second parameter beside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AttributeInclusion {
-    Include,
-    Omit,
-}
-
-impl From<bool> for AttributeInclusion {
-    fn from(include: bool) -> Self {
-        match include {
-            true => Self::Include,
-            false => Self::Omit,
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 pub(crate) struct ReadLoadContext<'anchor, 'cache> {
@@ -204,11 +180,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 head.namespace_id, namespace_id
             )));
         }
-        if head.status == (NamespaceStatus::Deleted {}) {
-            return Err(CoreError::NamespaceDeleted {
-                namespace_id: namespace_id.clone(),
-            });
-        }
+        crate::namespace::control::ensure_namespace_live(&head)?;
         let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
         let manifest_no = basis.manifest_no();
         let loaded_basis = load_basis_metadata_segments(
@@ -362,7 +334,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             PathEntryKind::File { content_ref, .. } => content_ref.clone(),
             PathEntryKind::Directory {} => {
                 return Err(CoreError::ExpectedFile {
-                    path: entry.path.to_string(),
+                    target: entry.path.to_string(),
                     kind: InodeKind::Directory,
                 });
             }
@@ -400,7 +372,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             } => (*revision_no, content_ref.clone()),
             PathEntryKind::Directory {} => {
                 return Err(CoreError::ExpectedFile {
-                    path: entry.path.to_string(),
+                    target: entry.path.to_string(),
                     kind: InodeKind::Directory,
                 });
             }
@@ -448,7 +420,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await?;
         if matches!(entry.kind, PathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
-                path: entry.path.to_string(),
+                target: entry.path.to_string(),
                 kind: InodeKind::Directory,
             });
         }
@@ -471,9 +443,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<Page<TrashEntry, TrashPageCursor>> {
         if let Some(cursor) = request.cursor.as_ref() {
             if cursor.head_seq > self.head.seq {
-                // Forward-only drift, the same rule as every other cursor.
-                return Err(MetadataViewError::SnapshotUnavailable {
-                    requested_seq: cursor.head_seq,
+                return Err(MetadataViewError::CursorAheadOfHead {
+                    cursor_seq: cursor.head_seq,
                     head_seq: self.head.seq,
                 }
                 .into());
@@ -528,7 +499,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .ok_or(CoreError::InodeNotFound(inode_id))?;
         if inode.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
-                path: inode_id.to_string(),
+                target: inode_id.to_string(),
                 kind: inode.inode_kind,
             });
         }
@@ -589,7 +560,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await?;
         if matches!(entry.kind, PathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
-                path: entry.path.to_string(),
+                target: entry.path.to_string(),
                 kind: InodeKind::Directory,
             });
         }
@@ -650,11 +621,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
         match resolved.inode_kind {
             InodeKind::File => {
-                if request.cursor.is_some() {
-                    return Err(invalid_cursor(
-                        "directory cursor cannot resume a file listing",
-                    ));
-                }
                 return Ok(Page {
                     items: vec![
                         self.build_authoritative_path_entry_with_session(
@@ -695,7 +661,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .ok_or(CoreError::InodeNotFound(inode_id))?;
         if resolved.inode_kind != InodeKind::Directory {
             return Err(CoreError::ExpectedDirectory {
-                path: resolved.absolute_path.clone(),
+                target: resolved.absolute_path.clone(),
                 kind: resolved.inode_kind,
             });
         }
@@ -941,12 +907,8 @@ fn validate_file_revisions_cursor(
     inode_id: InodeId,
 ) -> Result<()> {
     if cursor.head_seq > head_seq {
-        // Forward-only drift, the same rule as directory listing and grep:
-        // an older cursor resumes strictly after its last returned row at
-        // whatever head is loaded now; only a cursor from the future is
-        // unanswerable (`rebootstrap_required`).
-        return Err(MetadataViewError::SnapshotUnavailable {
-            requested_seq: cursor.head_seq,
+        return Err(MetadataViewError::CursorAheadOfHead {
+            cursor_seq: cursor.head_seq,
             head_seq,
         }
         .into());
@@ -978,7 +940,7 @@ mod tests {
 
     fn context() -> MutationContext {
         MutationContext {
-            writer_id: "reader-tests".to_owned(),
+            writer_id: loonfs_api::WriterId::parse("reader-tests").expect("writer id"),
             now_ms: 1,
         }
     }

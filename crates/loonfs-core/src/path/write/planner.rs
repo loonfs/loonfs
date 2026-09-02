@@ -12,7 +12,6 @@ use super::plan_delete::plan_delete_path;
 use super::plan_restore::plan_restore_revision;
 use super::plan_transfer::{plan_copy_file_path, plan_move_path};
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
-use super::validate_expected_file_state;
 use crate::commit::{
     validate_ops, CandidateAllocation, CommitFingerprint, CommitNumbering, PublishValidationView,
     ValidatedCommitPlan, ValidatedOp,
@@ -20,7 +19,9 @@ use crate::commit::{
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{next_public_ordinal, ChangeSeq, NamespaceId, MAX_PUBLIC_INTEGER};
+use loonfs_api::{
+    next_public_ordinal, ChangeSeq, DestinationGuard, GuardFields, NamespaceId, MAX_PUBLIC_INTEGER,
+};
 use loonfs_objectstore::ObjectStore;
 
 /// Computes the semantic fingerprint of a mutation request.
@@ -38,7 +39,6 @@ pub(crate) fn commit_fingerprint(
         request.message.as_deref(),
         &request.operations,
     )
-    .map(CommitFingerprint::new_unchecked)
     .map_err(|err| CoreError::Internal(format!("failed to fingerprint mutation: {err}")))
 }
 
@@ -134,13 +134,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 path,
                 content_ref.clone(),
                 *behavior,
-                validate_expected_file_state(
-                    *behavior,
-                    *expected_inode_id,
-                    *expected_revision_no,
-                    "expected_revision_no",
-                    "expected_inode_id",
-                )?,
+                DestinationGuard {
+                    behavior: *behavior,
+                    expected_inode_id: *expected_inode_id,
+                    expected_revision_no: *expected_revision_no,
+                }
+                .resolve(GuardFields::Put)?,
                 view,
                 allocation,
             )
@@ -201,23 +200,15 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             expected_binding_generation,
             to_parent_inode_id,
             to_display_name,
-            behavior,
-            expected_destination_inode_id,
-            expected_destination_revision_no,
+            guard,
         } => {
             plan_move_by_inode(
                 *inode_id,
                 expected_binding_generation,
                 *to_parent_inode_id,
                 to_display_name,
-                *behavior,
-                validate_expected_file_state(
-                    *behavior,
-                    *expected_destination_inode_id,
-                    *expected_destination_revision_no,
-                    "expected_destination_revision_no",
-                    "expected_destination_inode_id",
-                )?,
+                guard.behavior,
+                guard.resolve(GuardFields::Destination)?,
                 view,
             )
             .await
@@ -225,21 +216,13 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::MovePath {
             from_path,
             to_path,
-            behavior,
-            expected_destination_inode_id,
-            expected_destination_revision_no,
+            guard,
         } => {
             plan_move_path(
                 from_path,
                 to_path,
-                *behavior,
-                validate_expected_file_state(
-                    *behavior,
-                    *expected_destination_inode_id,
-                    *expected_destination_revision_no,
-                    "expected_destination_revision_no",
-                    "expected_destination_inode_id",
-                )?,
+                guard.behavior,
+                guard.resolve(GuardFields::Destination)?,
                 view,
             )
             .await
@@ -247,21 +230,13 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::CopyPath {
             from_path,
             to_path,
-            behavior,
-            expected_destination_inode_id,
-            expected_destination_revision_no,
+            guard,
         } => {
             plan_copy_file_path(
                 from_path,
                 to_path,
-                *behavior,
-                validate_expected_file_state(
-                    *behavior,
-                    *expected_destination_inode_id,
-                    *expected_destination_revision_no,
-                    "expected_destination_revision_no",
-                    "expected_destination_inode_id",
-                )?,
+                guard.behavior,
+                guard.resolve(GuardFields::Destination)?,
                 view,
                 allocation,
             )
@@ -330,7 +305,7 @@ mod tests {
 
     fn test_context() -> MutationContext {
         MutationContext {
-            writer_id: "writer".to_owned(),
+            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
             now_ms: 1,
         }
     }
@@ -430,7 +405,7 @@ mod tests {
         let mut allocation = allocator.begin_candidate();
         let validated = prepare_commit_against_publish_view(
             request,
-            CommitFingerprint::new_unchecked("v1:sha256:test".to_owned()),
+            serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
             view.head(),
             view.projected_metadata_view(),
             &empty_overlay,

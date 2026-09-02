@@ -218,7 +218,7 @@ async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
     let namespace_id = namespace_id("demo");
     let first = mutation_context();
     let mut second = mutation_context();
-    second.writer_id = "writer-second".to_owned();
+    second.writer_id = loonfs_api::WriterId::parse("writer-second").expect("writer id");
 
     let (left, right) = tokio::join!(
         bootstrap_namespace(store.as_ref(), &namespace_id, &first, false),
@@ -258,7 +258,7 @@ async fn a_create_retry_after_a_lost_acknowledgment_reports_the_id_as_taken() {
     assert_eq!(conflict.code(), ErrorCode::NamespaceExists);
 
     let mut other_writer = context.clone();
-    other_writer.writer_id = "writer-other".to_owned();
+    other_writer.writer_id = loonfs_api::WriterId::parse("writer-other").expect("writer id");
     let conflict = bootstrap_namespace(&store, &namespace_id, &other_writer, false)
         .await
         .expect_err("another writer may not adopt this namespace either");
@@ -287,7 +287,7 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     seed_source_namespace_for_fork(store.as_ref(), &source, &context).await;
 
     let mut second = context.clone();
-    second.writer_id = "writer-second".to_owned();
+    second.writer_id = loonfs_api::WriterId::parse("writer-second").expect("writer id");
     let (left, right) = tokio::join!(
         fork_namespace(store.as_ref(), &source, &target, &context),
         fork_namespace(store.as_ref(), &source, &target, &second),

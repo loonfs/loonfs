@@ -3,12 +3,12 @@
 //! "Control objects").
 
 use crate::envelope::EnvelopeCodecError;
-use crate::WriterEpoch;
 use crate::{
     wal_segment_id_start_seq, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId,
     ContentId, ContentRef, ContentRefKind, ContentStoreId, InodeId, ManifestNo, ManifestObjectId,
     MetadataCompactionId, NamespaceId, UploadId, WalSegmentId,
 };
+use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
@@ -430,7 +430,7 @@ where
 #[serde(deny_unknown_fields)]
 pub struct WriterBlock {
     /// Stable writer label supplied by the embedding process for diagnostics.
-    pub writer_id: String,
+    pub writer_id: WriterId,
     /// Unix-millisecond stamp of the successful epoch-acquisition CAS.
     pub acquired_at_ms: u64,
 }
@@ -461,6 +461,13 @@ pub enum NamespaceStatus {
     /// Terminal: the namespace's history has ended. Reads, commits, forks,
     /// and re-creation of the same id are all refused.
     Deleted {},
+}
+
+impl NamespaceStatus {
+    /// Returns whether the namespace is permanently deleted.
+    pub const fn is_deleted(&self) -> bool {
+        matches!(self, Self::Deleted {})
+    }
 }
 
 /// Where a fork target's metadata basis lives before the target publishes
@@ -561,6 +568,8 @@ impl fmt::Display for HeadIdentityDrift {
         )
     }
 }
+
+impl std::error::Error for HeadIdentityDrift {}
 
 impl HeadState {
     /// Constructs the active sequence-zero head with the root inode already reserved.

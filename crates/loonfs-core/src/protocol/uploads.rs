@@ -35,7 +35,7 @@ use loonfs_api::v0::{
     UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };
 use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, NamespaceStatus, ProxiedStaging, UploadSessionMode,
+    encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
     UploadSessionRecordStatus, UploadSessionState,
 };
 use loonfs_api::{
@@ -452,11 +452,7 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .state;
-    if head.status == (NamespaceStatus::Deleted {}) {
-        return Err(CoreError::NamespaceDeleted {
-            namespace_id: namespace_id.clone(),
-        });
-    }
+    crate::namespace::control::ensure_namespace_live(&head)?;
     Ok(())
 }
 
@@ -1517,7 +1513,7 @@ mod tests {
 
     fn context(now_ms: u64) -> MutationContext {
         MutationContext {
-            writer_id: "upload-test".to_owned(),
+            writer_id: loonfs_api::WriterId::parse("upload-test").expect("writer id"),
             now_ms,
         }
     }

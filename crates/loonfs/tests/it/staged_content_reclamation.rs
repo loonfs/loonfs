@@ -52,7 +52,7 @@ async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: 
         namespace_id,
         &config(),
         &MutationContext {
-            writer_id: "reclamation-test".to_owned(),
+            writer_id: loonfs_api::WriterId::parse("reclamation-test").expect("writer id"),
             now_ms,
         },
     )

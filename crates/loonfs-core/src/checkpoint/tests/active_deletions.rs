@@ -9,9 +9,10 @@ use super::*;
 use crate::metadata::{
     active_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneRecord, TombstoneRowAction,
 };
-use crate::path::read::{load_current_metadata_view, AttributeInclusion};
+use crate::path::read::load_current_metadata_view;
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::manifest::{ActiveDeletionRowAction, DeletedDirentry, TombstoneGeneration};
+use loonfs_api::AttributeInclusion;
 use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 
 fn generation(seq: u64) -> TombstoneGeneration {

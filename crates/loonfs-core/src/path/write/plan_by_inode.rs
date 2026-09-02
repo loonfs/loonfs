@@ -7,12 +7,11 @@ use super::publish_path_planning::{
     resolve_visible_child, resolve_visible_directory, resolve_visible_inode,
     CompiledFilesystemOperation, PublishPathPlanningView,
 };
-use super::ExpectedFileState;
 use crate::commit::{CandidateAllocation, CommitOp};
 use crate::error::{CoreError, Result};
 use loonfs_api::{
-    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName, InodeId, InodeKind,
-    RevisionNo,
+    BindingGeneration, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
+    ExpectedFileState, InodeId, InodeKind, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -61,7 +60,7 @@ pub(super) async fn plan_put_file_revision_by_inode<S: ObjectStore + ?Sized>(
     let target = resolve_visible_inode(view, inode_id).await?;
     if target.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
-            path: target.absolute_path,
+            target: target.absolute_path,
             kind: target.inode_kind,
         });
     }
@@ -76,7 +75,7 @@ pub(super) async fn plan_put_file_revision_by_inode<S: ObjectStore + ?Sized>(
 
 pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
-    expected_binding_generation: &str,
+    expected_binding_generation: &BindingGeneration,
     to_parent_inode_id: InodeId,
     to_display_name: &DisplayName,
     behavior: DestinationBehavior,
@@ -103,7 +102,7 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
 
 pub(super) async fn plan_delete_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
-    expected_binding_generation: &str,
+    expected_binding_generation: &BindingGeneration,
     behavior: DeleteDirectoryBehavior,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {

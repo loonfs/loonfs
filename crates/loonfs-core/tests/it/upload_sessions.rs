@@ -109,9 +109,8 @@ async fn begin_upload_rejects_missing_and_deleted_namespaces() {
     loonfs_core::NamespaceWriterEngine::writer(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         namespace_id.clone(),
-        "writer-a",
+        loonfs_api::WriterId::parse("writer-a").expect("writer id"),
     )
-    .expect("engine")
     .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
     .await
     .expect("delete namespace");

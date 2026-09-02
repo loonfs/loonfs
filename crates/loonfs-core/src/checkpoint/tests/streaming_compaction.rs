@@ -623,7 +623,7 @@ async fn test_lease<'a, S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         spec.job_id(),
-        &context.writer_id,
+        context.writer_id.as_str(),
         context.now_ms,
         timer,
     )
@@ -3240,7 +3240,7 @@ async fn a_rebased_publication_never_moves_the_root_timestamp_backward() {
     )
     .await
     .expect("write a file the flush will publish");
-    let later = mutation_context(&context.writer_id, context.now_ms + 60_000);
+    let later = mutation_context(context.writer_id.as_str(), context.now_ms + 60_000);
     flush::flush_wal(&store, &namespace_id, &later)
         .await
         .expect("the flush must publish");

@@ -358,6 +358,11 @@
         ],
         "type": "object"
       },
+      "BindingGeneration": {
+        "description": "Opaque token identifying one parent and name binding generation.",
+        "pattern": "^[0-9a-f]+$",
+        "type": "string"
+      },
       "CapabilityDocument": {
         "description": "The profiles, features, and limits advertised by a deployment.",
         "properties": {
@@ -1103,8 +1108,8 @@
         "description": "A directory was created.",
         "properties": {
           "binding_generation": {
-            "description": "Opaque identifier for the binding created by this event.",
-            "type": "string"
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Opaque identifier for the binding created by this event."
           },
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
@@ -1138,8 +1143,8 @@
         "description": "A file and its first revision were created.",
         "properties": {
           "binding_generation": {
-            "description": "Opaque identifier for the binding created by this event.",
-            "type": "string"
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Opaque identifier for the binding created by this event."
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
@@ -1183,8 +1188,8 @@
         "description": "An inode moved to a new parent directory or name.",
         "properties": {
           "binding_generation": {
-            "description": "Opaque identifier for the binding created by this event.",
-            "type": "string"
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Opaque identifier for the binding created by this event."
           },
           "from_display_name": {
             "$ref": "#/components/schemas/DisplayName",
@@ -1228,8 +1233,8 @@
         "description": "A deleted inode was recovered and re-bound.",
         "properties": {
           "binding_generation": {
-            "description": "Opaque identifier for the binding created by this event.",
-            "type": "string"
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Opaque identifier for the binding created by this event."
           },
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
@@ -1326,15 +1331,15 @@
         "properties": {
           "behavior": {
             "$ref": "#/components/schemas/DestinationBehavior",
-            "description": "Whether an existing destination file may receive a copied revision."
+            "description": "Whether an existing destination file may be replaced."
           },
           "expected_destination_inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "With `replace` behavior, the request requires the destination to contain this inode."
+            "description": "With `replace` behavior, the destination inode required by the request."
           },
           "expected_destination_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior and an inode guard, the request requires this content revision."
+            "description": "With `replace` behavior and an inode guard, the required content revision."
           },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -1415,8 +1420,8 @@
             "description": "Whether a non-empty directory may be tombstoned recursively."
           },
           "expected_binding_generation": {
-            "description": "Binding generation required for the delete.",
-            "type": "string"
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Binding generation required for the delete."
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -1472,16 +1477,16 @@
             "description": "Whether an existing destination file may be replaced."
           },
           "expected_binding_generation": {
-            "description": "Binding generation required for the move.",
-            "type": "string"
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Binding generation required for the move."
           },
           "expected_destination_inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "With `replace` behavior, the request requires the destination to contain this inode."
+            "description": "With `replace` behavior, the destination inode required by the request."
           },
           "expected_destination_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior and an inode guard, the request requires this content revision."
+            "description": "With `replace` behavior and an inode guard, the required content revision."
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -1520,11 +1525,11 @@
           },
           "expected_destination_inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "With `replace` behavior, the request requires the destination to contain this inode."
+            "description": "With `replace` behavior, the destination inode required by the request."
           },
           "expected_destination_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior and an inode guard, the request requires this content revision."
+            "description": "With `replace` behavior and an inode guard, the required content revision."
           },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -2106,8 +2111,8 @@
             "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
           },
           "binding_generation": {
-            "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root.",
-            "type": "string"
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root."
           },
           "created_at_ms": {
             "description": "The inode creation time in Unix milliseconds.",
@@ -2183,8 +2188,8 @@
             "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
           },
           "binding_generation": {
-            "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root.",
-            "type": "string"
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root."
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",

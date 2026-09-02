@@ -60,7 +60,8 @@ pub use reads::{
     ReadFileOptions, TrashPager,
 };
 use transport::{
-    SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, IO_INACTIVITY_TIMEOUT,
+    SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT,
+    IO_INACTIVITY_TIMEOUT,
 };
 pub use ClientError as Error;
 
@@ -138,7 +139,7 @@ impl Client {
                 })?,
             request_timeout,
             transport_retry_enabled: !config.disable_transient_retry,
-            transport_retry: TransportRetryPolicy::DEFAULT,
+            transport_retry: DEFAULT,
             timer: Arc::new(StdMonotonicTimer::default()),
             capabilities: Arc::new(OnceLock::new()),
         })

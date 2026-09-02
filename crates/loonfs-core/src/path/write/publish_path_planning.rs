@@ -6,8 +6,8 @@ use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::read;
 use loonfs_api::{
-    AbsolutePath, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
-    ROOT_INODE_ID,
+    AbsolutePath, BindingGeneration as BindingGenerationToken, DestinationBehavior, DisplayName,
+    InodeId, InodeKind, NameKey, NamespaceId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -67,7 +67,7 @@ pub(super) async fn resolve_visible_directory<S: ObjectStore + ?Sized>(
     let resolved = resolve_visible_inode(view, inode_id).await?;
     if resolved.inode_kind != InodeKind::Directory {
         return Err(CoreError::ExpectedDirectory {
-            path: resolved.absolute_path,
+            target: resolved.absolute_path,
             kind: resolved.inode_kind,
         });
     }
@@ -100,7 +100,7 @@ pub(super) fn child_display_path(parent_path: &str, display_name: &DisplayName) 
 pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
-    expected_binding_generation: &str,
+    expected_binding_generation: &BindingGenerationToken,
 ) -> Result<()> {
     let expected = BindingGeneration::decode(expected_binding_generation, view.namespace_id)
         .map_err(|error| {
@@ -227,7 +227,7 @@ pub(super) fn classify_replace_destination(
         Some(existing) if behavior == DestinationBehavior::Replace => {
             if existing.inode_kind != InodeKind::File {
                 return Err(CoreError::ExpectedFile {
-                    path: destination_path.to_owned(),
+                    target: destination_path.to_owned(),
                     kind: existing.inode_kind,
                 });
             }
@@ -301,7 +301,7 @@ pub(super) async fn resolve_parent_directory<S: ObjectStore + ?Sized>(
     let resolved = view.view.resolve_visible_path(&parent_path).await?;
     if resolved.inode_kind != InodeKind::Directory {
         return Err(CoreError::ExpectedDirectory {
-            path: parent_path.as_str().to_owned(),
+            target: parent_path.as_str().to_owned(),
             kind: resolved.inode_kind,
         });
     }

@@ -1,5 +1,7 @@
 //! The durable key grammar: object families and key classification.
 
+use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, UploadId};
+
 /// One family in the [durable object key grammar].
 ///
 /// [durable object key grammar]: ../../../docs/specs/format.md#12-durable-object-families
@@ -144,6 +146,24 @@ pub(crate) fn wal_segment_id_from_key(key: &str) -> Option<&str> {
     parse_object_key(key)
         .filter(|parsed| parsed.family() == DurableObjectFamily::WalSegment)
         .and_then(|parsed| parsed.identifier())
+}
+
+/// Extracts and validates a manifest object identity from its durable key.
+pub fn manifest_object_id_of(
+    key: &str,
+) -> Option<Result<ManifestObjectId, GeneratedIdValidationError>> {
+    parse_object_key(key)
+        .filter(|parsed| parsed.family() == DurableObjectFamily::MetadataManifest)
+        .and_then(|parsed| parsed.identifier())
+        .map(ManifestObjectId::parse)
+}
+
+/// Extracts and validates an upload identity from its durable key.
+pub fn upload_id_of(key: &str) -> Option<UploadId> {
+    parse_object_key(key)
+        .filter(|parsed| parsed.family() == DurableObjectFamily::UploadSession)
+        .and_then(|parsed| parsed.identifier())
+        .and_then(|identifier| UploadId::parse(identifier).ok())
 }
 
 pub(crate) fn metadata_compaction_job_id_from_key(key: &str) -> Option<&str> {

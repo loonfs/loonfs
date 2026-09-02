@@ -2075,7 +2075,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
     .state;
     assert_eq!(
         head.writer.expect("writer block").writer_id,
-        "server-writer"
+        loonfs_api::WriterId::parse("server-writer").expect("writer id")
     );
 
     harness.server.abort();

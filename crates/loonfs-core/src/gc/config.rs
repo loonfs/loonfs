@@ -2,7 +2,7 @@
 
 use super::cursor::{initial_cursor, GcCursor};
 use crate::error::{CoreError, Result};
-use crate::limits::GC_MIN_GRACE_WINDOW_MS;
+use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
 use loonfs_api::NamespaceId;
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +47,7 @@ pub struct GcConfig {
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
-            grace_window_ms: 60 * 60 * 1000,
+            grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
             max_objects: None,
             cursor: None,
         }

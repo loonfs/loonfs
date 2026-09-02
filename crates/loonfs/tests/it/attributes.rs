@@ -205,7 +205,7 @@ fn read_options_project_grouped_attributes_or_none() {
         &namespace_id,
         "/docs/report.txt",
         StatPathOptions {
-            include_attributes: false,
+            include_attributes: loonfs_api::AttributeInclusion::Omit,
             snapshot_id: None,
         },
     ))
@@ -227,7 +227,7 @@ fn read_options_project_grouped_attributes_or_none() {
             cursor: None,
         },
         ListPathEntriesOptions {
-            include_attributes: true,
+            include_attributes: loonfs_api::AttributeInclusion::Include,
             snapshot_id: None,
         },
     ))

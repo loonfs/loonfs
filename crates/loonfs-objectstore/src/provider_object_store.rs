@@ -7,9 +7,7 @@ use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
 use crate::object_store::Result;
-use crate::retry::{
-    provider_transport_retryable, with_transport_retry, OperationDeadline, TransportRetryPolicy,
-};
+use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::{
@@ -20,6 +18,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt};
 use loonfs_api::Checksum;
+use loonfs_api::{OperationDeadline, TransportRetryPolicy};
 use object_store as provider_store;
 use provider_store::multipart::{MultipartStore, PartId};
 use provider_store::path::Path;
@@ -222,7 +221,7 @@ impl ProviderObjectStore {
             io_runtime,
             multipart_geometry: MultipartGeometry::DEFAULT,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
-            transport_retry: TransportRetryPolicy::DEFAULT,
+            transport_retry: DEFAULT,
             timer: Arc::new(StdMonotonicTimer::default()),
         })
     }
@@ -1259,9 +1258,9 @@ mod tests {
     use crate::metrics::{
         InstrumentedObjectStore, ObjectStoreOperation, VecObjectStoreMetricsRecorder,
     };
-    use crate::retry::transport_retry_backoff;
     use crate::test_support::SteppingTimer;
     use futures::StreamExt;
+    use loonfs_api::transport_retry_backoff;
     use object_store::memory::InMemory;
 
     fn memory_store() -> ProviderObjectStore {
@@ -1864,7 +1863,7 @@ mod tests {
 
     #[test]
     fn transport_retry_backoff_doubles_and_caps() {
-        let policy = TransportRetryPolicy::DEFAULT;
+        let policy = DEFAULT;
         assert_eq!(
             transport_retry_backoff(&policy, 1),
             Duration::from_millis(100)

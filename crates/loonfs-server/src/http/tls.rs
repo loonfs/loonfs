@@ -172,9 +172,9 @@ async fn handle_accept_error(error: io::Error) {
     accept_retry_pause().await;
 }
 
-#[allow(clippy::disallowed_methods)]
 // Backs off an accept loop that would otherwise spin on a resource the
 // process has run out of. No protocol time depends on it.
+#[allow(clippy::disallowed_methods)]
 async fn accept_retry_pause() {
     tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
 }

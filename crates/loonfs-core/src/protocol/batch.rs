@@ -443,7 +443,7 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let context = MutationContext {
-            writer_id: "writer".to_owned(),
+            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
         bootstrap_namespace(&store, &namespace_id, &context, false)

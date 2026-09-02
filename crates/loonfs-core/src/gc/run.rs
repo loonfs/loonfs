@@ -10,9 +10,7 @@ use super::fork_checkpoints::{
     MissingBasisCheckpointSweep,
 };
 use super::live_set::{collect_live_set, LiveSet, LiveSetCollection, SweepStep, SweepVerifier};
-use super::reap::{
-    grace_age, manifest_object_id_of, sweep_checkpoint_record, CheckpointSweep, GraceAge,
-};
+use super::reap::{grace_age, sweep_checkpoint_record, CheckpointSweep, GraceAge};
 use super::uploads::{
     sweep_upload_session, ContentReferences, UploadSessionSweep, UploadSweepContext,
 };
@@ -23,7 +21,8 @@ use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_STAGING_GRACE_MS;
 use crate::namespace::control_snapshot::load_control_snapshot;
 use futures::StreamExt;
-use loonfs_api::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason, UploadId};
+use loonfs_api::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
+use loonfs_objectstore::layout::{manifest_object_id_of, upload_id_of};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -506,9 +505,4 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         self.report.retention_degraded = self.sweep.degraded;
         Ok(self.report)
     }
-}
-
-fn upload_id_of(key: &str) -> Option<UploadId> {
-    let name = key.rsplit('/').next()?.strip_suffix(".json")?;
-    UploadId::parse(name).ok()
 }

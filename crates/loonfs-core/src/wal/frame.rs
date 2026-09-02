@@ -84,7 +84,7 @@ pub(crate) struct DecodedWalRecord<'a> {
     pub(crate) commit_id: &'a CommitId,
     pub(crate) committed_by: &'a loonfs_api::ActorRef,
     pub(crate) committed_at_ms: u64,
-    pub(crate) semantic_commit_fingerprint: &'a str,
+    pub(crate) semantic_commit_fingerprint: &'a loonfs_api::CommitFingerprint,
     pub(crate) message: Option<&'a str>,
     pub(crate) deltas: Cow<'a, [WalCommitDelta]>,
 }
@@ -205,6 +205,25 @@ pub enum WalChainLoadError {
     },
     #[error("WAL replay validation failed: {0}")]
     Replay(#[from] WalSegmentError),
+}
+
+impl WalChainLoadError {
+    pub fn code(&self) -> loonfs_api::ErrorCode {
+        use loonfs_api::ErrorCode;
+
+        match self {
+            Self::ReadWal { .. } => ErrorCode::ServerError,
+            Self::InvalidSeqRange { .. }
+            | Self::MissingVisibleTip { .. }
+            | Self::TipEndSeqMismatch { .. }
+            | Self::MissingWalObject { .. }
+            | Self::PointerMismatch { .. }
+            | Self::HeadSeqMismatch { .. }
+            | Self::CursorNotCovered { .. }
+            | Self::TailNotDescribedByHead { .. }
+            | Self::Replay(_) => ErrorCode::NamespaceCorrupt,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

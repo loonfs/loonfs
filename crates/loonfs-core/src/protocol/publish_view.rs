@@ -19,7 +19,7 @@ use crate::wal::{
     ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
 };
 use loonfs_api::v0::CommittedChange;
-use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceStatus};
+use loonfs_api::wire::control::{AcquiredWriter, HeadState};
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStore;
@@ -163,7 +163,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?;
     let head_etag = loaded.head.etag;
     let head = loaded.head.state;
-    if head.status == (NamespaceStatus::Deleted {}) {
+    if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),

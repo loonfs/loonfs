@@ -8,9 +8,7 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{load_head_object, load_metadata_root_object_if_present};
-use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordState, CheckpointStatus, NamespaceStatus,
-};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
@@ -168,7 +166,7 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
             }
         },
     };
-    if head.status == (NamespaceStatus::Deleted {}) {
+    if head.status.is_deleted() {
         // A nested fork must materialize its immediate source's metadata root
         // before it can publish the descendant checkpoint. That root may name
         // metadata and content owned by earlier ancestors, and it is a direct,

@@ -11,7 +11,7 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
-use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, NamespaceId, RetainedReason};
+use loonfs_api::{NamespaceId, RetainedReason};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,12 +177,4 @@ pub async fn delete_if_aged<S: ObjectStore + ?Sized>(
         store.delete(key).await?;
     }
     Ok(age)
-}
-
-pub(super) fn manifest_object_id_of(
-    key: &str,
-) -> Option<std::result::Result<ManifestObjectId, GeneratedIdValidationError>> {
-    let name = key.rsplit('/').next()?;
-    let object_id = name.strip_suffix(".manifest.json")?;
-    Some(ManifestObjectId::parse(object_id))
 }

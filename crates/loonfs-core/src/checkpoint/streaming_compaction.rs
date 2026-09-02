@@ -412,7 +412,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         spec.job_id(),
-        &context.writer_id,
+        context.writer_id.as_str(),
         context.now_ms,
         &timer,
     )

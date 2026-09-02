@@ -1,7 +1,7 @@
 use crate::common::commit_split_support::*;
 use loonfs_api::{
-    AbsolutePath, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName, InodeId,
-    NamespaceId, RevisionNo, ROOT_INODE_ID,
+    AbsolutePath, BindingGeneration, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+    DisplayName, InodeId, NamespaceId, RevisionNo, ROOT_INODE_ID,
 };
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitRequest, FilesystemOperation};
@@ -17,7 +17,7 @@ async fn read_entry<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> (InodeId, String) {
+) -> (InodeId, BindingGeneration) {
     let entry = resolve_path(store, namespace_id, absolute_path)
         .await
         .expect("resolve path");
@@ -52,7 +52,7 @@ async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &loonfs_core::MutationContext,
-) -> (InodeId, String, String) {
+) -> (InodeId, BindingGeneration, BindingGeneration) {
     write_file_bytes(
         store,
         namespace_id,
@@ -71,9 +71,11 @@ async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/renamed.txt").expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         context,
     )
@@ -218,9 +220,11 @@ async fn revision_write_requires_the_current_revision_and_survives_a_move() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
             to_path: AbsolutePath::parse("/report.txt").expect("path"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -268,9 +272,11 @@ async fn move_requires_the_current_binding_generation() {
             expected_binding_generation: stale_generation,
             to_parent_inode_id: ROOT_INODE_ID,
             to_display_name: display_name("moved.txt"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -287,9 +293,11 @@ async fn move_requires_the_current_binding_generation() {
             expected_binding_generation: fresh_generation,
             to_parent_inode_id: ROOT_INODE_ID,
             to_display_name: display_name("moved.txt"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
         &context,
     )
@@ -373,9 +381,11 @@ async fn earlier_move_makes_a_later_guard_stale_and_rolls_back_the_commit() {
                     expected_binding_generation: binding_generation.clone(),
                     to_parent_inode_id: ROOT_INODE_ID,
                     to_display_name: display_name("moved.txt"),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_destination_inode_id: None,
-                    expected_destination_revision_no: None,
+                    guard: loonfs_api::DestinationGuard {
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
                 },
                 FilesystemOperation::DeleteByInode {
                     inode_id: report_inode_id,
@@ -442,9 +452,11 @@ async fn content_write_preserves_the_guard_for_a_later_move() {
                     expected_binding_generation: binding_generation.clone(),
                     to_parent_inode_id: ROOT_INODE_ID,
                     to_display_name: display_name("moved.txt"),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_destination_inode_id: None,
-                    expected_destination_revision_no: None,
+                    guard: loonfs_api::DestinationGuard {
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
                 },
             ],
         },
@@ -466,7 +478,7 @@ async fn content_write_preserves_the_guard_for_a_later_move() {
 }
 
 #[tokio::test]
-async fn malformed_foreign_and_root_binding_guards_are_invalid() {
+async fn foreign_and_root_binding_guards_are_invalid() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
     let (docs_inode_id, local_generation) = read_entry(&store, &namespace_id, "/docs").await;
 
@@ -485,22 +497,20 @@ async fn malformed_foreign_and_root_binding_guards_are_invalid() {
     .expect("create directory in other namespace");
     let (_, foreign_generation) = read_entry(&store, &other_namespace_id, "/docs").await;
 
-    for token in [foreign_generation, "not-a-token".to_owned()] {
-        let error = submit_operation(
-            &store,
-            &namespace_id,
-            test_commit_id(None),
-            FilesystemOperation::DeleteByInode {
-                inode_id: docs_inode_id,
-                expected_binding_generation: token,
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-            },
-            &context,
-        )
-        .await
-        .expect_err("invalid guard must fail");
-        assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    }
+    let error = submit_operation(
+        &store,
+        &namespace_id,
+        test_commit_id(None),
+        FilesystemOperation::DeleteByInode {
+            inode_id: docs_inode_id,
+            expected_binding_generation: foreign_generation,
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+        },
+        &context,
+    )
+    .await
+    .expect_err("foreign guard must fail");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
     let root_error = submit_operation(
         &store,

@@ -1,10 +1,13 @@
 //! Encodes opaque identifiers for parent/name bindings.
 
-use loonfs_api::{ChangeSeq, NamespaceId};
+use loonfs_api::{
+    decode_token, encode_token, BindingGeneration as BindingGenerationToken, ChangeSeq,
+    NamespaceId, OpaqueToken,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const FORMAT_VERSION: u8 = 1;
+const BINDING_GENERATION_FORMAT_VERSION: u8 = 1;
 const KIND: &str = "binding_generation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,50 +17,44 @@ pub struct BindingGeneration {
 }
 
 impl BindingGeneration {
-    pub(crate) fn encode(&self, namespace_id: &NamespaceId) -> Result<String, serde_json::Error> {
-        let bytes = serde_json::to_vec(&BindingGenerationEnvelope {
-            format_version: FORMAT_VERSION,
-            kind: KIND,
-            namespace_id,
-            generation: *self,
-        })?;
-        Ok(loonfs_api::wire::hex::hex_encode_bytes(&bytes))
+    pub(crate) fn encode(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<BindingGenerationToken, serde_json::Error> {
+        let encoded = encode_token(
+            &BindingGenerationEnvelope {
+                namespace_id: namespace_id.clone(),
+                generation: *self,
+            },
+            BINDING_GENERATION_FORMAT_VERSION,
+        )?;
+        Ok(BindingGenerationToken::parse(encoded)
+            .expect("opaque token encoder should emit lowercase hex"))
     }
 
     pub(crate) fn decode(
-        value: &str,
+        value: &BindingGenerationToken,
         expected_namespace_id: &NamespaceId,
     ) -> Result<Self, InvalidBindingGeneration> {
-        let bytes =
-            loonfs_api::wire::hex::hex_decode_bytes(value).map_err(|_| InvalidBindingGeneration)?;
-        let envelope: DecodedBindingGenerationEnvelope =
-            serde_json::from_slice(&bytes).map_err(|_| InvalidBindingGeneration)?;
-        if envelope.format_version != FORMAT_VERSION
-            || envelope.kind != KIND
-            || envelope.namespace_id != *expected_namespace_id
-        {
+        let envelope: BindingGenerationEnvelope =
+            decode_token(value.as_str(), BINDING_GENERATION_FORMAT_VERSION)
+                .map_err(|_| InvalidBindingGeneration)?;
+        if envelope.namespace_id != *expected_namespace_id {
             return Err(InvalidBindingGeneration);
         }
         Ok(envelope.generation)
     }
 }
 
-#[derive(Serialize)]
-struct BindingGenerationEnvelope<'a> {
-    format_version: u8,
-    kind: &'static str,
-    namespace_id: &'a NamespaceId,
+#[derive(Serialize, Deserialize)]
+struct BindingGenerationEnvelope {
+    namespace_id: NamespaceId,
     #[serde(flatten)]
     generation: BindingGeneration,
 }
 
-#[derive(Deserialize)]
-struct DecodedBindingGenerationEnvelope {
-    format_version: u8,
-    kind: String,
-    namespace_id: NamespaceId,
-    #[serde(flatten)]
-    generation: BindingGeneration,
+impl OpaqueToken for BindingGenerationEnvelope {
+    const KIND: &'static str = KIND;
 }
 
 #[derive(Debug, Error)]

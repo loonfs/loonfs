@@ -2,7 +2,7 @@
 
 use super::*;
 
-const FORMAT_VERSION: u32 = 1;
+const CLI_JSON_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize)]
 struct JsonEnvelope<'a, T>
@@ -29,7 +29,7 @@ pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
         )),
         data => serde_json::to_string_pretty(&JsonEnvelope {
             kind: output.kind.as_str(),
-            format_version: FORMAT_VERSION,
+            format_version: CLI_JSON_FORMAT_VERSION,
             profile: output.profile.as_deref(),
             mode: output.mode.as_deref(),
             data: Some(data),
@@ -56,7 +56,7 @@ pub(crate) fn render_parse_error(error: &CliError) -> io::Result<()> {
 pub(crate) fn json_parse_error(error: &CliError) -> io::Result<String> {
     serde_json::to_string_pretty(&JsonEnvelope::<serde_json::Value> {
         kind: PARSE_ERROR_KIND,
-        format_version: FORMAT_VERSION,
+        format_version: CLI_JSON_FORMAT_VERSION,
         profile: None,
         mode: None,
         data: None,
@@ -68,7 +68,7 @@ pub(crate) fn json_parse_error(error: &CliError) -> io::Result<String> {
 pub(crate) fn json_error(failure: &CommandFailure) -> io::Result<String> {
     serde_json::to_string_pretty(&JsonEnvelope::<serde_json::Value> {
         kind: failure.kind.as_str(),
-        format_version: FORMAT_VERSION,
+        format_version: CLI_JSON_FORMAT_VERSION,
         profile: failure.profile.as_deref(),
         mode: failure.mode.as_deref(),
         data: None,

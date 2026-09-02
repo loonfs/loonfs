@@ -53,6 +53,14 @@ validation_error!(
     NameKeyValidationError,
     "invalid name_key {value:?}: {reason}"
 );
+validation_error!(
+    WriterIdValidationError,
+    "invalid writer_id {value:?}: {reason}"
+);
+validation_error!(
+    BindingGenerationValidationError,
+    "invalid binding_generation {value:?}: {reason}"
+);
 
 // ---------------------------------------------------------------------------
 // Id macros
@@ -504,6 +512,23 @@ fn name_key_error(value: &str, reason: impl Into<String>) -> NameKeyValidationEr
     }
 }
 
+fn writer_id_error(value: &str, reason: impl Into<String>) -> WriterIdValidationError {
+    WriterIdValidationError {
+        value: value.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+fn binding_generation_error(
+    value: &str,
+    reason: impl Into<String>,
+) -> BindingGenerationValidationError {
+    BindingGenerationValidationError {
+        value: value.to_owned(),
+        reason: reason.into(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // String ids
 // ---------------------------------------------------------------------------
@@ -525,6 +550,37 @@ string_id! {
         pattern = r"^[a-z0-9][a-z0-9._-]{0,127}$",
         example = "demo"
     )
+}
+
+string_id! {
+    /// Stable writer label supplied by the embedding process.
+    WriterId,
+    error = WriterIdValidationError,
+    validate = |value: &str| {
+        if value.trim().is_empty() {
+            return Err(writer_id_error(value, "must not be blank"));
+        }
+        Ok(())
+    }
+}
+
+string_id! {
+    /// Opaque token identifying one parent and name binding generation.
+    BindingGeneration,
+    error = BindingGenerationValidationError,
+    validate = |value: &str| {
+        if value.is_empty() {
+            return Err(binding_generation_error(value, "must not be empty"));
+        }
+        if !value.bytes().all(is_lower_hex_byte) {
+            return Err(binding_generation_error(
+                value,
+                "must contain only lowercase hex characters",
+            ));
+        }
+        Ok(())
+    },
+    schema(pattern = r"^[0-9a-f]+$")
 }
 
 string_id! {
@@ -904,9 +960,10 @@ impl fmt::Display for InodeKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_public_ordinal, ChangeSeq, CheckpointId, CommitId, ContentId, ContentStoreId, InodeId,
-        ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo,
-        UploadId, WalSegmentId, WriterEpoch, MAX_PUBLIC_INTEGER,
+        next_public_ordinal, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentId,
+        ContentStoreId, InodeId, ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey,
+        NamespaceId, RevisionNo, RunNo, UploadId, WalSegmentId, WriterEpoch, WriterId,
+        MAX_PUBLIC_INTEGER,
     };
     use crate::AttributeRevisionNo;
     use std::collections::BTreeSet;
@@ -1000,6 +1057,31 @@ mod tests {
         );
         // Commit ids share the base grammar but not the reservation.
         assert!(CommitId::parse("loonfs-retry-1").is_ok());
+    }
+
+    #[test]
+    fn writer_id_rejects_blank_text() {
+        for value in ["", " ", "\n", " \t "] {
+            assert!(WriterId::parse(value).is_err(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn binding_generation_requires_nonempty_lowercase_hex() {
+        for value in ["", "abcg", "ABC", "01-23"] {
+            assert!(
+                BindingGeneration::parse(value).is_err(),
+                "accepted {value:?}"
+            );
+        }
+        for value in ["0", "0123456789abcdef"] {
+            assert_eq!(
+                BindingGeneration::parse(value)
+                    .expect("valid binding generation")
+                    .as_str(),
+                value
+            );
+        }
     }
 
     #[test]

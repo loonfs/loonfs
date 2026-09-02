@@ -35,9 +35,8 @@ impl VisibilityHarness {
         let engine = NamespaceWriterEngine::writer(
             Arc::clone(&store),
             namespace_id,
-            "visibility-equivalence",
-        )
-        .expect("build namespace engine");
+            loonfs_api::WriterId::parse("visibility-equivalence").expect("writer id"),
+        );
         engine
             .bootstrap_namespace(BootstrapOptions::default())
             .await
@@ -138,9 +137,11 @@ impl VisibilityHarness {
         self.publish_operation(FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse(from_path).expect("valid source path"),
             to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         })
         .await
     }
@@ -149,9 +150,11 @@ impl VisibilityHarness {
         self.publish_operation(FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse(from_path).expect("valid source path"),
             to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         })
         .await
     }
@@ -539,9 +542,11 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
                 from_path: AbsolutePath::parse("/reverse/branch").expect("valid source path"),
                 to_path: AbsolutePath::parse("/safe/reverse-branch")
                     .expect("valid destination path"),
-                behavior: DestinationBehavior::NoReplace,
-                expected_destination_inode_id: None,
-                expected_destination_revision_no: None,
+                guard: loonfs_api::DestinationGuard {
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
             },
         ])
         .await
@@ -560,9 +565,11 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
             FilesystemOperation::MovePath {
                 from_path: AbsolutePath::parse("/source/branch").expect("valid source path"),
                 to_path: AbsolutePath::parse("/safe/branch").expect("valid destination path"),
-                behavior: DestinationBehavior::NoReplace,
-                expected_destination_inode_id: None,
-                expected_destination_revision_no: None,
+                guard: loonfs_api::DestinationGuard {
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
             },
             FilesystemOperation::DeletePath {
                 path: AbsolutePath::parse("/source").expect("valid path"),

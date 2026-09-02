@@ -384,9 +384,11 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
                 FilesystemOperation::MovePath {
                     from_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
                     to_path: AbsolutePath::parse("/docs/moved.txt").expect("path"),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_destination_inode_id: None,
-                    expected_destination_revision_no: None,
+                    guard: loonfs_api::DestinationGuard {
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
                 },
             ),
             CommitRequest::single(

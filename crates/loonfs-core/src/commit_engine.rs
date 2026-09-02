@@ -546,7 +546,7 @@ mod tests {
 
     fn context(writer_id: &str) -> MutationContext {
         MutationContext {
-            writer_id: writer_id.to_owned(),
+            writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
             now_ms: 1_000,
         }
     }
@@ -769,7 +769,10 @@ mod tests {
             .expect("read head")
             .state;
         assert_eq!(head.writer_epoch, epoch_after_takeover);
-        assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
+        assert_eq!(
+            head.writer.expect("writer block").writer_id.as_str(),
+            "writer-b"
+        );
     }
 
     #[tokio::test]
@@ -924,7 +927,10 @@ mod tests {
             .expect("read head")
             .state;
         assert_eq!(head.writer_epoch, epoch_after_fencing);
-        assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
+        assert_eq!(
+            head.writer.expect("writer block").writer_id.as_str(),
+            "writer-b"
+        );
     }
 
     /// Advances an entire publish budget per reading, so every publish

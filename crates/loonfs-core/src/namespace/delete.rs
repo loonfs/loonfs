@@ -29,11 +29,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                 .await
                 .map_err(CoreError::ControlObjectLoad)?;
             let head = loaded.state.clone();
-            if head.status == (NamespaceStatus::Deleted {}) {
-                return Err(CoreError::NamespaceDeleted {
-                    namespace_id: namespace_id.clone(),
-                });
-            }
+            super::control::ensure_namespace_live(&head)?;
 
             ensure_writer_not_fenced(&head, acquired_writer)?;
 
@@ -77,7 +73,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             let loaded = load_head_object(store, namespace_id)
                 .await
                 .map_err(CoreError::ControlObjectLoad)?;
-            if loaded.state.status == (NamespaceStatus::Deleted {}) {
+            if loaded.state.status.is_deleted() {
                 Ok(WriteEvidence::Landed(DeleteNamespaceResponse {
                     namespace_id: namespace_id.clone(),
                     head_seq: loaded.state.seq,

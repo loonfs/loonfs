@@ -22,6 +22,10 @@ fn name_key(value: &str) -> NameKey {
     NameKey::parse(value).expect("valid name key")
 }
 
+fn fingerprint(value: &str) -> loonfs_api::CommitFingerprint {
+    serde_json::from_value(value.into()).expect("fingerprint")
+}
+
 fn deleted_direntry(parent_inode_id: InodeId, display_name: &str) -> DeletedDirentry {
     DeletedDirentry {
         parent_inode_id,
@@ -68,7 +72,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         seq: ChangeSeq(9),
         commit_id: owning_commit_id.clone(),
         committed_by: actor(),
-        semantic_commit_fingerprint: "v1:sha256:test".to_owned(),
+        semantic_commit_fingerprint: fingerprint("v1:sha256:test"),
         committed_at_ms: 4_200,
         message: None,
         deltas,
@@ -432,7 +436,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
                 committed_by: loonfs_test_support::test_actor(),
-                semantic_commit_fingerprint: "old".to_owned(),
+                semantic_commit_fingerprint: fingerprint("old"),
                 committed_seq: ChangeSeq(1),
                 committed_at_ms: 4_200,
                 message: Some("old message".to_owned()),
@@ -440,7 +444,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
             CommitReceiptRecord {
                 commit_id: CommitId::parse("other-commit").expect("valid commit id"),
                 committed_by: loonfs_test_support::test_actor(),
-                semantic_commit_fingerprint: "other".to_owned(),
+                semantic_commit_fingerprint: fingerprint("other"),
                 committed_seq: ChangeSeq(3),
                 committed_at_ms: 4_200,
                 message: None,
@@ -448,7 +452,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
                 committed_by: loonfs_test_support::test_actor(),
-                semantic_commit_fingerprint: "new".to_owned(),
+                semantic_commit_fingerprint: fingerprint("new"),
                 committed_seq: ChangeSeq(2),
                 committed_at_ms: 4_200,
                 message: Some("new message".to_owned()),
@@ -461,7 +465,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
         .find_commit_receipt(&commit_id)
         .expect("receipt");
     assert_eq!(receipt.committed_seq, ChangeSeq(2));
-    assert_eq!(receipt.semantic_commit_fingerprint, "new");
+    assert_eq!(receipt.semantic_commit_fingerprint.as_str(), "new");
 }
 
 #[test]
@@ -501,7 +505,7 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
     builder.push_commit_receipt(CommitReceiptRecord {
         commit_id: CommitId::parse("indexed-commit").expect("valid commit id"),
         committed_by: loonfs_test_support::test_actor(),
-        semantic_commit_fingerprint: "fingerprint".to_owned(),
+        semantic_commit_fingerprint: fingerprint("fingerprint"),
         committed_seq: ChangeSeq(3),
         committed_at_ms: 4_200,
         message: Some("replace indexed file".to_owned()),

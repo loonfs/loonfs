@@ -6,6 +6,25 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
+/// Whether a path or inode read includes the attribute projection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AttributeInclusion {
+    /// Include the inode's attribute map and revision.
+    Include,
+    /// Omit the inode's attribute map and revision.
+    #[default]
+    Omit,
+}
+
+impl std::fmt::Display for AttributeInclusion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Include => "true",
+            Self::Omit => "false",
+        })
+    }
+}
+
 /// Commit settings shared by every filesystem mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitOptions {
@@ -32,7 +51,7 @@ impl CommitOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatPathOptions {
     /// Whether to include the inode's attribute map and revision, enabled by default.
-    pub include_attributes: bool,
+    pub include_attributes: AttributeInclusion,
     /// The snapshot for the path read; inode lookups do not support snapshots.
     pub snapshot_id: Option<CheckpointId>,
 }
@@ -40,7 +59,7 @@ pub struct StatPathOptions {
 impl Default for StatPathOptions {
     fn default() -> Self {
         Self {
-            include_attributes: true,
+            include_attributes: AttributeInclusion::Include,
             snapshot_id: None,
         }
     }
@@ -50,7 +69,7 @@ impl Default for StatPathOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListPathEntriesOptions {
     /// Whether to include each entry's attribute map and revision, disabled by default.
-    pub include_attributes: bool,
+    pub include_attributes: AttributeInclusion,
     /// Read the directory from this snapshot.
     pub snapshot_id: Option<CheckpointId>,
 }
@@ -59,7 +78,7 @@ pub struct ListPathEntriesOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListInodeChildrenOptions {
     /// Whether to include each entry's attribute map and revision, disabled by default.
-    pub include_attributes: bool,
+    pub include_attributes: AttributeInclusion,
 }
 
 /// Options for writing and removing an inode's attributes.

@@ -92,10 +92,10 @@ pub(crate) fn gcp_gcs_with_issuers(
 }
 
 impl GcsRequestSigner {
+    // A V4 signature is dated, so this internally issued request enters wall
+    // time here. Nothing durable is derived from it.
     #[allow(clippy::disallowed_methods)]
     fn signing_time() -> SystemTime {
-        // A V4 signature is dated, so this internally issued request enters
-        // wall time here. Nothing durable is derived from it.
         SystemTime::now()
     }
 }

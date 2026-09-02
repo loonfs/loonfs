@@ -110,7 +110,7 @@ mod tests {
 
     fn test_context() -> MutationContext {
         MutationContext {
-            writer_id: "writer".to_owned(),
+            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
             now_ms: 1,
         }
     }
@@ -198,14 +198,14 @@ mod tests {
         crate::path::read::load_current_metadata_view(store, namespace_id)
             .await
             .expect("load view")
-            .resolve_path(absolute_path, crate::path::read::AttributeInclusion::Omit)
+            .resolve_path(absolute_path, loonfs_api::AttributeInclusion::Omit)
             .await
             .expect("visible path")
             .inode_id
     }
 
     fn test_fingerprint() -> CommitFingerprint {
-        CommitFingerprint::new_unchecked("v1:sha256:test".to_owned())
+        serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint")
     }
 
     #[tokio::test]
@@ -473,10 +473,7 @@ mod tests {
         crate::path::read::load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("load view")
-            .resolve_path(
-                "/docs/doomed.txt",
-                crate::path::read::AttributeInclusion::Omit,
-            )
+            .resolve_path("/docs/doomed.txt", loonfs_api::AttributeInclusion::Omit)
             .await
             .expect_err("deleted file is no longer visible");
     }

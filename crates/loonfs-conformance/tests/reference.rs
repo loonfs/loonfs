@@ -11,9 +11,9 @@ use loonfs_api::v0::{
     UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
-    ActorRef, ApiError, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation, NamespaceId,
-    PathEntry,
+    ActorRef, ApiError, BindingGeneration, ChangeSeq, Checksum, CommitId, CommitRequest,
+    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation,
+    NamespaceId, PathEntry,
 };
 use loonfs_client::{
     Client, ClientConfig, ClientError, CommitOptions, CreateDirectoryOptions, DeleteOptions,
@@ -986,7 +986,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .map(|entry| {
             entry
                 .binding_generation
-                .as_deref()
+                .as_ref()
+                .map(BindingGeneration::as_str)
                 .expect("listed binding generation")
         })
         .collect();
@@ -1067,7 +1068,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .await
         .expect("rename file by path");
 
-    let move_by_inode = |id: &str, expected_binding_generation: String| {
+    let move_by_inode = |id: &str, expected_binding_generation: BindingGeneration| {
         CommitRequest::single(
             commit_id(id),
             request.actor.clone(),
@@ -1077,9 +1078,11 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 expected_binding_generation,
                 to_parent_inode_id: inode_directory_id,
                 to_display_name: display_name(&request.moved_file_name),
-                behavior: DestinationBehavior::NoReplace,
-                expected_destination_inode_id: None,
-                expected_destination_revision_no: None,
+                guard: loonfs_api::DestinationGuard {
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
             },
         )
     };
@@ -1093,17 +1096,28 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .expect_err("stale binding generation must fail");
     assert_api_error(&stale, &expected.stale_binding_generation);
     let malformed = harness
-        .client
-        .create_commit(
-            &namespace,
-            &move_by_inode(
-                "conf-inode-mutations-malformed-move",
-                request.malformed_binding_generation.clone(),
-            ),
-        )
+        .raw_client
+        .post(format!(
+            "{}/v0/namespaces/{}/commits",
+            harness.server_url, request.namespace_id
+        ))
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "commit_id": "conf-inode-mutations-malformed-move",
+            "actor": request.actor,
+            "operations": [{
+                "kind": "move_by_inode",
+                "inode_id": file_inode_id,
+                "expected_binding_generation": request.malformed_binding_generation,
+                "to_parent_inode_id": inode_directory_id,
+                "to_display_name": request.moved_file_name,
+                "behavior": "no_replace",
+            }],
+        }))
+        .send()
         .await
-        .expect_err("malformed binding generation must fail");
-    assert_api_error(&malformed, &expected.malformed_binding_generation);
+        .expect("send malformed binding generation");
+    assert_raw_status_error(malformed, &expected.malformed_binding_generation).await;
 
     let fresh_generation = harness
         .client

@@ -182,7 +182,8 @@ fn metadata_states_equivalent_ignoring_content_identity(
                         }) => MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
                             commit_id,
                             committed_by,
-                            semantic_commit_fingerprint: "<normalized>".to_owned(),
+                            semantic_commit_fingerprint: serde_json::from_str(r#""<normalized>""#)
+                                .expect("fingerprint"),
                             committed_seq,
                             committed_at_ms,
                             message,
@@ -1882,7 +1883,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = MutationContext {
-        writer_id: "budget-test".to_owned(),
+        writer_id: loonfs_api::WriterId::parse("budget-test").expect("writer id"),
         now_ms: 1_000,
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -1938,7 +1939,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = MutationContext {
-        writer_id: "budget-test".to_owned(),
+        writer_id: loonfs_api::WriterId::parse("budget-test").expect("writer id"),
         now_ms: 1_000,
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)

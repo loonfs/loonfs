@@ -179,6 +179,11 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     + PROVIDER_ATTEMPT_TIMEOUT_MS
     + GC_SAFETY_MARGIN_MS;
 
+/// Default age of an unreachable object before garbage collection may remove it.
+pub const GC_DEFAULT_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
+
+const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
+
 /// Most parts one direct multipart upload may cut into. This is the
 /// S3-compatible ceiling, so with the session's part size it fixes the
 /// largest object that session can carry: `part_size_bytes × 10_000`.

@@ -29,7 +29,7 @@ use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{
     ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
 };
-use loonfs_api::wire::control::{HeadState, ManifestRef, NamespaceStatus};
+use loonfs_api::wire::control::{HeadState, ManifestRef};
 use loonfs_api::wire::manifest::{
     MetadataRunRef, NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
 };
@@ -237,7 +237,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     let basis = snapshot.basis();
     let floor_seq = snapshot.retention_floor_seq;
     let head = snapshot.head.state;
-    if head.status == (NamespaceStatus::Deleted {}) {
+    if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),

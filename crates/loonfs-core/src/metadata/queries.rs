@@ -10,7 +10,7 @@ use super::visibility::{
 };
 use super::{DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord};
 use crate::binding_generation::BindingGeneration;
-use loonfs_api::{AbsolutePath, ActorRef, ChangeSeq, InodeId, InodeKind, NameKey};
+use loonfs_api::{AbsolutePath, ActorRef, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
@@ -41,6 +41,16 @@ pub enum VisiblePathError {
         inode_id: InodeId,
         inode_kind: InodeKind,
     },
+}
+
+impl VisiblePathError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::RootMissing => ErrorCode::NamespaceCorrupt,
+            Self::PathNotFound { .. } => ErrorCode::PathNotFound,
+            Self::PathComponentNotDirectory { .. } => ErrorCode::PathConflict,
+        }
+    }
 }
 
 impl MetadataState {

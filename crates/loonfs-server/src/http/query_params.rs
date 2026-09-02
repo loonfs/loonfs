@@ -21,8 +21,13 @@ pub(super) fn required_query_param(
     })
 }
 
-pub(super) fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseError> {
-    parse_boolean_query_param(value, "include_attributes")
+pub(super) fn parse_include_attributes(
+    value: &str,
+) -> Result<loonfs_api::AttributeInclusion, ApiResponseError> {
+    parse_boolean_query_param(value, "include_attributes").map(|include| match include {
+        true => loonfs_api::AttributeInclusion::Include,
+        false => loonfs_api::AttributeInclusion::Omit,
+    })
 }
 
 pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool, ApiResponseError> {

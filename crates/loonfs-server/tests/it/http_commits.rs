@@ -801,9 +801,11 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             FilesystemOperation::MovePath {
                 from_path: absolute("/reports/2026"),
                 to_path: absolute("/reports/2025"),
-                behavior: DestinationBehavior::NoReplace,
-                expected_destination_inode_id: None,
-                expected_destination_revision_no: None,
+                guard: loonfs_api::DestinationGuard {
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
             },
         ]
     };
@@ -862,9 +864,11 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         FilesystemOperation::MovePath {
             from_path: absolute("/reports/2026"),
             to_path: absolute("/reports/2025"),
-            behavior: DestinationBehavior::NoReplace,
-            expected_destination_inode_id: None,
-            expected_destination_revision_no: None,
+            guard: loonfs_api::DestinationGuard {
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
         },
     ];
     let replayed = harness

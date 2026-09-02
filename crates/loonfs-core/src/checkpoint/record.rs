@@ -22,7 +22,7 @@ use crate::namespace::control_snapshot::resolve_retention_floor_seq;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
-    ControlObjectKind, NamespaceStatus,
+    ControlObjectKind,
 };
 use loonfs_api::{CheckpointId, NamespaceId};
 use loonfs_objectstore::keys::checkpoint_record;
@@ -98,22 +98,12 @@ fn checkpoint_key_ids(
             reason: format!("the key belongs to durable family `{:?}`", parsed.family()),
         });
     }
-    let segments: Vec<_> = object_key.split('/').collect();
-    let ["namespaces", namespace, "checkpoints", file_name] = segments.as_slice() else {
-        return Err(ControlObjectLoadError::KeyLayout {
-            object_key: object_key.to_owned(),
-            expected_family: expected_family.to_owned(),
-            reason: "the key does not have the checkpoint-record path shape".to_owned(),
-        });
-    };
-    let checkpoint =
-        file_name
-            .strip_suffix(".json")
-            .ok_or_else(|| ControlObjectLoadError::KeyLayout {
-                object_key: object_key.to_owned(),
-                expected_family: expected_family.to_owned(),
-                reason: "the checkpoint filename does not end in `.json`".to_owned(),
-            })?;
+    let namespace = parsed
+        .owner_namespace_id()
+        .expect("checkpoint record keys carry a namespace identifier");
+    let checkpoint = parsed
+        .identifier()
+        .expect("checkpoint record keys carry a checkpoint identifier");
     let namespace_id =
         NamespaceId::parse(namespace).map_err(|error| ControlObjectLoadError::KeyLayout {
             object_key: object_key.to_owned(),
@@ -388,7 +378,7 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     // a new durable dependency after an ancestor collector had already
     // proved this namespace had none. The tombstone is terminal, so such a
     // record cannot become a readable checkpoint and must not verify.
-    if head.status == (NamespaceStatus::Deleted {}) {
+    if head.status.is_deleted() {
         return Ok(CheckpointBasisVerification::Invalid);
     }
     let floor_seq = resolve_retention_floor_seq(store, &head)

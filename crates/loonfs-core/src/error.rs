@@ -6,7 +6,7 @@
 //! chains where these constraints do not apply.
 
 use crate::checkpoint::ManifestLoadError;
-use crate::commit::{CommitHeadPublishError, CommitOperand, CommitValidationError};
+use crate::commit::{CommitHeadPublishError, CommitValidationError};
 use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
 use crate::metadata::VisiblePathError;
@@ -16,8 +16,8 @@ use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalChainLoadError, WalSegmentError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
-    ChangeSeq, CommitId, CommitIdValidationError, ErrorDetails, GeneratedIdValidationError,
-    InodeId, InodeKind, NamespaceId, NamespaceIdValidationError, RevisionNo, UploadId, WriterEpoch,
+    ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, RevisionNo, UploadId,
+    WriterEpoch,
 };
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use thiserror::Error;
@@ -68,14 +68,8 @@ pub enum CoreError {
     },
     #[error("invalid absolute path `{0}`")]
     InvalidPath(String),
-    #[error(transparent)]
-    InvalidNamespaceId(#[from] NamespaceIdValidationError),
-    #[error(transparent)]
-    InvalidCommitId(#[from] CommitIdValidationError),
     #[error("invalid commit request: {0}")]
     InvalidCommitRequest(String),
-    #[error(transparent)]
-    InvalidUploadId(#[from] GeneratedIdValidationError),
     #[error("path not found `{0}`")]
     PathNotFound(String),
     #[error("inode not found `{0}`")]
@@ -108,10 +102,10 @@ pub enum CoreError {
          verification covers the whole object, so all of them are needed first"
     )]
     ResumePrefixIncomplete { start_offset: u64, folded: u64 },
-    #[error("expected file at `{path}` but found `{kind}`")]
-    ExpectedFile { path: String, kind: InodeKind },
-    #[error("expected directory at `{path}` but found `{kind}`")]
-    ExpectedDirectory { path: String, kind: InodeKind },
+    #[error("expected file at `{target}` but found `{kind}`")]
+    ExpectedFile { target: String, kind: InodeKind },
+    #[error("expected directory at `{target}` but found `{kind}`")]
+    ExpectedDirectory { target: String, kind: InodeKind },
     #[error("cannot mutate root path")]
     RootMutationForbidden,
     #[error("{}", destination_exists_message(.path, .existing_display_name.as_deref()))]
@@ -250,20 +244,27 @@ pub enum CoreError {
 /// errors instead of falling back to a whole-namespace rebuild.
 #[derive(Debug, Clone, Error)]
 pub enum MetadataViewError {
-    #[error("namespace `{namespace_id}` head has no current manifest")]
-    MissingManifest { namespace_id: NamespaceId },
     #[error("metadata view for namespace `{namespace_id}` requires maintenance: {reason}")]
     MaintenanceRequired {
         namespace_id: NamespaceId,
         reason: String,
     },
     #[error(
-        "the cursor was minted at seq `{requested_seq}`, ahead of the loaded head `{head_seq}`; restart the listing"
+        "the cursor was minted at seq `{cursor_seq}`, ahead of the loaded head `{head_seq}`; restart the listing"
     )]
-    SnapshotUnavailable {
-        requested_seq: ChangeSeq,
+    CursorAheadOfHead {
+        cursor_seq: ChangeSeq,
         head_seq: ChangeSeq,
     },
+}
+
+impl MetadataViewError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
+            Self::CursorAheadOfHead { .. } => ErrorCode::RebootstrapRequired,
+        }
+    }
 }
 
 /// Failures while loading a bounded manifest-plus-tail metadata projection.
@@ -301,6 +302,23 @@ pub enum MetadataProjectionLoadError {
     },
 }
 
+impl MetadataProjectionLoadError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+            Self::LoadHead(error) => error.code(),
+            Self::WalChainLoad(error) => error.code(),
+            Self::WalReplay(_) | Self::ReplayedHeadMismatch { .. } => ErrorCode::NamespaceCorrupt,
+            Self::ManifestLoad(error) => match error.failure_class() {
+                crate::checkpoint::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
+                crate::checkpoint::ManifestLoadFailureClass::Store => ErrorCode::ServerError,
+            },
+            Self::MissingHeadEtag { .. } => ErrorCode::ServerError,
+            Self::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
+        }
+    }
+}
+
 impl From<NamespaceCatalogLoadError> for MetadataProjectionLoadError {
     fn from(value: NamespaceCatalogLoadError) -> Self {
         match value {
@@ -336,7 +354,7 @@ impl From<ImmutableWriteError> for CoreError {
     }
 }
 
-fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
+pub(crate) fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
     match class {
         StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
         StoreFailureClass::NotFound
@@ -372,26 +390,23 @@ impl CoreError {
 
     pub fn code(&self) -> ErrorCode {
         match self {
-            CoreError::MetadataProjection(error) => classify_metadata_projection_load_error(error),
-            CoreError::ControlObjectLoad(error) => classify_control_object_load_error(error),
-            CoreError::MetadataView(error) => classify_metadata_view_error(error),
-            CoreError::VisiblePath(error) => classify_visible_path_error(error),
-            CoreError::DurableContent(error) => classify_durable_content_error(error),
-            CoreError::WriterEpoch(error) => classify_writer_epoch_acquire_error(error),
-            CoreError::CommitValidation(error) => classify_commit_validation_error(error),
+            CoreError::MetadataProjection(error) => error.code(),
+            CoreError::ControlObjectLoad(error) => error.code(),
+            CoreError::MetadataView(error) => error.code(),
+            CoreError::VisiblePath(error) => error.code(),
+            CoreError::DurableContent(error) => error.code(),
+            CoreError::WriterEpoch(error) => error.code(),
+            CoreError::CommitValidation(error) => error.code(),
             CoreError::WalBuild(_) | CoreError::Codec { .. } | CoreError::Internal(_) => {
                 ErrorCode::ServerError
             }
             CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
                 classify_store_failure(*class)
             }
-            CoreError::HeadPublish(error) => classify_head_publish_error(error),
+            CoreError::HeadPublish(error) => error.code(),
             CoreError::InvalidPath(_)
             | CoreError::RootMutationForbidden
-            | CoreError::InvalidNamespaceId(_)
-            | CoreError::InvalidCommitId(_)
             | CoreError::InvalidCommitRequest(_)
-            | CoreError::InvalidUploadId(_)
             | CoreError::InvalidCheckpointRequest(_)
             | CoreError::InvalidGcConfig(_)
             | CoreError::InvalidQuery(_)
@@ -472,7 +487,71 @@ impl CoreError {
                 Some(class.public_message())
             }
             CoreError::FailedOperation { source, .. } => source.object_store_public_message(),
-            _ => None,
+            CoreError::DurableContent(
+                DurableContentValidationError::InvalidContentRef(_)
+                | DurableContentValidationError::MissingContentObject { .. }
+                | DurableContentValidationError::ContentLengthMismatch { .. }
+                | DurableContentValidationError::ContentChecksumMismatch { .. },
+            )
+            | CoreError::HeadPublish(
+                CommitHeadPublishError::EmptyExpectedHeadEtag
+                | CommitHeadPublishError::SegmentDoesNotConnect { .. }
+                | CommitHeadPublishError::EmptyWalSegment
+                | CommitHeadPublishError::SeqOverflow
+                | CommitHeadPublishError::StaleHead
+                | CommitHeadPublishError::PublishBudgetExceeded { .. }
+                | CommitHeadPublishError::Codec { .. },
+            )
+            | CoreError::MetadataView(_)
+            | CoreError::VisiblePath(_)
+            | CoreError::CommitValidation(_)
+            | CoreError::WalBuild(_)
+            | CoreError::InvalidPath(_)
+            | CoreError::InvalidCommitRequest(_)
+            | CoreError::PathNotFound(_)
+            | CoreError::InodeNotFound(_)
+            | CoreError::RevisionNotFound { .. }
+            | CoreError::ContentTooLarge { .. }
+            | CoreError::BatchTooLarge { .. }
+            | CoreError::ResumeOffsetOutOfRange { .. }
+            | CoreError::ResumePrefixIncomplete { .. }
+            | CoreError::ExpectedFile { .. }
+            | CoreError::ExpectedDirectory { .. }
+            | CoreError::RootMutationForbidden
+            | CoreError::DestinationExists { .. }
+            | CoreError::BindingGenerationMismatch { .. }
+            | CoreError::CommitIdReuseConflict { .. }
+            | CoreError::ContentPreparation(_)
+            | CoreError::CommitQueueFull
+            | CoreError::ShuttingDown
+            | CoreError::CheckpointUnavailable(_)
+            | CoreError::InvalidCheckpointRequest(_)
+            | CoreError::SnapshotNotFound { .. }
+            | CoreError::SnapshotGone { .. }
+            | CoreError::SnapshotQuotaExceeded { .. }
+            | CoreError::MetadataPublicationBudgetExceeded { .. }
+            | CoreError::InvalidGcConfig(_)
+            | CoreError::InvalidQuery(_)
+            | CoreError::QueryUnindexable(_)
+            | CoreError::IndexLagging { .. }
+            | CoreError::UploadNotFound { .. }
+            | CoreError::UploadAlreadyCompleted { .. }
+            | CoreError::UploadContentConflict { .. }
+            | CoreError::InvalidUploadContent(_)
+            | CoreError::InvalidCursor(_)
+            | CoreError::RebootstrapRequired { .. }
+            | CoreError::NonDirectoryPathComponent(_)
+            | CoreError::NamespaceCorrupt(_)
+            | CoreError::WriterFenced(_)
+            | CoreError::Codec { .. }
+            | CoreError::Internal(_)
+            | CoreError::NamespaceExists { .. }
+            | CoreError::NamespaceDeleted { .. }
+            | CoreError::StaleHeadPrecondition { .. } => None,
+            #[cfg(any(test, feature = "test-support"))]
+            CoreError::DurableContent(DurableContentValidationError::ContentStoreMismatch {
+                ..
+            }) => None,
         }
     }
 
@@ -512,7 +591,7 @@ impl CoreError {
                 actual_head_seq: Some(*actual),
                 ..ErrorDetails::default()
             }),
-            CoreError::CommitValidation(error) => commit_validation_details(error),
+            CoreError::CommitValidation(error) => error.details(),
             CoreError::FailedOperation {
                 operation_index,
                 source,
@@ -616,160 +695,6 @@ impl std::fmt::Display for WriterFence {
     }
 }
 
-fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetails> {
-    match error {
-        CommitValidationError::BindingPreconditionMismatch {
-            expected_child_inode_id,
-            actual_child_inode_id,
-            ..
-        } => Some(ErrorDetails {
-            expected_inode_id: Some(*expected_child_inode_id),
-            actual_inode_id: Some(*actual_child_inode_id),
-            ..ErrorDetails::default()
-        }),
-        CommitValidationError::BaseRevisionMismatch {
-            inode_id,
-            expected,
-            actual,
-        } => Some(ErrorDetails {
-            inode_id: Some(*inode_id),
-            expected_revision_no: Some(*expected),
-            actual_revision_no: *actual,
-            ..ErrorDetails::default()
-        }),
-        CommitValidationError::InodeMissing {
-            operand: CommitOperand::UndeleteTarget,
-            inode_id,
-        }
-        | CommitValidationError::UndeleteTargetNotDeleted { inode_id } => Some(ErrorDetails {
-            inode_id: Some(*inode_id),
-            ..ErrorDetails::default()
-        }),
-        CommitValidationError::UndeleteTargetsCurrentCommit {
-            inode_id,
-            requested_seq,
-        } => Some(ErrorDetails {
-            inode_id: Some(*inode_id),
-            expected_deletion_seq: Some(*requested_seq),
-            ..ErrorDetails::default()
-        }),
-        CommitValidationError::UndeleteGenerationMismatch {
-            inode_id,
-            requested_seq,
-            active_seq,
-        } => Some(ErrorDetails {
-            inode_id: Some(*inode_id),
-            expected_deletion_seq: Some(*requested_seq),
-            actual_deletion_seq: Some(*active_seq),
-            ..ErrorDetails::default()
-        }),
-        // The expected revision the guard carried is what a caller compares
-        // against, whether the caller stated it or the update supplied its
-        // own; the actual one is what to re-read from.
-        CommitValidationError::UpdateAttributesBaseRevisionMismatch {
-            inode_id,
-            expected,
-            actual,
-        } => Some(ErrorDetails {
-            inode_id: Some(*inode_id),
-            expected_attributes_revision_no: Some(*expected),
-            actual_attributes_revision_no: Some(*actual),
-            ..ErrorDetails::default()
-        }),
-        CommitValidationError::InodeMissing {
-            operand: CommitOperand::AttributeTarget,
-            inode_id,
-        } => Some(ErrorDetails {
-            inode_id: Some(*inode_id),
-            ..ErrorDetails::default()
-        }),
-        _ => None,
-    }
-}
-
-fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
-    match error {
-        MetadataViewError::MissingManifest { .. } => ErrorCode::NamespaceCorrupt,
-        MetadataViewError::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
-        // A well-formed cursor from ahead of the loaded head is a state
-        // condition, not a malformed request: the client's recovery is to
-        // restart the listing, same as a sub-floor change cursor.
-        MetadataViewError::SnapshotUnavailable { .. } => ErrorCode::RebootstrapRequired,
-    }
-}
-
-fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) -> ErrorCode {
-    match error {
-        MetadataProjectionLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-        // The head is the namespace: an absent head is the one and only
-        // "this namespace does not exist" signal.
-        MetadataProjectionLoadError::LoadHead(error) => classify_control_object_load_error(error),
-        MetadataProjectionLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
-        MetadataProjectionLoadError::WalReplay(_)
-        | MetadataProjectionLoadError::ReplayedHeadMismatch { .. } => ErrorCode::NamespaceCorrupt,
-        MetadataProjectionLoadError::ManifestLoad(error) => match error.failure_class() {
-            crate::checkpoint::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
-            crate::checkpoint::ManifestLoadFailureClass::Store => ErrorCode::ServerError,
-        },
-        MetadataProjectionLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
-        MetadataProjectionLoadError::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
-    }
-}
-
-pub(crate) fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCode {
-    match error {
-        ControlObjectLoadError::MissingObject { .. } => ErrorCode::NamespaceNotFound,
-        ControlObjectLoadError::RootAheadOfHead { .. }
-        | ControlObjectLoadError::FloorAheadOfHead { .. }
-        | ControlObjectLoadError::FloorAheadOfRoot { .. } => ErrorCode::StaleHead,
-        ControlObjectLoadError::MissingRootAfterFloor { .. }
-        | ControlObjectLoadError::NamespaceMismatch { .. }
-        | ControlObjectLoadError::IdentityMismatch { .. }
-        | ControlObjectLoadError::ForkBasisOwnerIsSelf { .. }
-        | ControlObjectLoadError::KeyLayout { .. }
-        | ControlObjectLoadError::ChecksumMismatch { .. }
-        | ControlObjectLoadError::Codec { .. } => ErrorCode::NamespaceCorrupt,
-        ControlObjectLoadError::Store { class, .. } => classify_store_failure(*class),
-    }
-}
-
-fn classify_wal_chain_load_error(error: &WalChainLoadError) -> ErrorCode {
-    match error {
-        WalChainLoadError::ReadWal { .. } => ErrorCode::ServerError,
-        WalChainLoadError::InvalidSeqRange { .. }
-        | WalChainLoadError::MissingVisibleTip { .. }
-        | WalChainLoadError::TipEndSeqMismatch { .. }
-        | WalChainLoadError::MissingWalObject { .. }
-        | WalChainLoadError::PointerMismatch { .. }
-        | WalChainLoadError::HeadSeqMismatch { .. }
-        | WalChainLoadError::CursorNotCovered { .. }
-        | WalChainLoadError::TailNotDescribedByHead { .. }
-        | WalChainLoadError::Replay(_) => ErrorCode::NamespaceCorrupt,
-    }
-}
-
-fn classify_visible_path_error(error: &VisiblePathError) -> ErrorCode {
-    match error {
-        VisiblePathError::RootMissing => ErrorCode::NamespaceCorrupt,
-        VisiblePathError::PathNotFound { .. } => ErrorCode::PathNotFound,
-        VisiblePathError::PathComponentNotDirectory { .. } => ErrorCode::PathConflict,
-    }
-}
-
-fn classify_durable_content_error(error: &DurableContentValidationError) -> ErrorCode {
-    match error {
-        DurableContentValidationError::InvalidContentRef(_)
-        | DurableContentValidationError::MissingContentObject { .. }
-        | DurableContentValidationError::ContentLengthMismatch { .. }
-        | DurableContentValidationError::ContentChecksumMismatch { .. } => {
-            ErrorCode::NamespaceCorrupt
-        }
-        #[cfg(any(test, feature = "test-support"))]
-        DurableContentValidationError::ContentStoreMismatch { .. } => ErrorCode::NamespaceCorrupt,
-        DurableContentValidationError::Store { .. } => ErrorCode::ServerError,
-    }
-}
-
 impl From<crate::control_update::ControlUpdateError> for CoreError {
     fn from(value: crate::control_update::ControlUpdateError) -> Self {
         use crate::control_update::ControlUpdateError;
@@ -791,76 +716,6 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
     }
 }
 
-fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> ErrorCode {
-    match error {
-        WriterEpochAcquireError::LoadHead(error) => classify_control_object_load_error(error),
-        WriterEpochAcquireError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-        WriterEpochAcquireError::EmptyWriterId
-        | WriterEpochAcquireError::WriterEpochOverflow { .. }
-        | WriterEpochAcquireError::RetryExhausted { .. }
-        | WriterEpochAcquireError::HeadIdentityDrift(_) => ErrorCode::ServerError,
-        WriterEpochAcquireError::HeadWrite { class, .. } => classify_store_failure(*class),
-    }
-}
-
-fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode {
-    match error {
-        CommitValidationError::BaseRevisionMismatch { .. } => ErrorCode::StaleRevision,
-        CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
-            ErrorCode::RevisionNotFound
-        }
-        // Corruption guards, not caller-actionable conflicts. Every inode an
-        // operation names is either freshly allocated by the same commit or
-        // resolved through visible bindings, and a visible binding already
-        // implies no covering tombstone (`metadata::visibility`: a visible
-        // inode is one no tombstone covers, and a delete unbinds and
-        // tombstones in the same commit). So a covered target here means the
-        // stored rows contradict themselves — a live binding under a
-        // tombstone — which is repair work, not something a caller can fix by
-        // re-reading and retrying.
-        CommitValidationError::TargetUnderSubtreeTombstone { .. } => ErrorCode::NamespaceCorrupt,
-        // The revision guard every attribute update carries, whether or not
-        // the caller stated an expectation. Both raise the same conflict.
-        CommitValidationError::UpdateAttributesBaseRevisionMismatch { .. } => {
-            ErrorCode::StaleAttributes
-        }
-        // Validation numbers the attribute revision, so running out of
-        // numbers is a bug in this server rather than a caller mistake.
-        CommitValidationError::UpdateAttributesRevisionOverflow { .. } => ErrorCode::ServerError,
-        CommitValidationError::NameTaken { .. }
-        | CommitValidationError::InodeWrongKind { .. }
-        | CommitValidationError::BindingPreconditionMissing { .. }
-        | CommitValidationError::BindingPreconditionMismatch { .. } => ErrorCode::PathConflict,
-        CommitValidationError::DirectoryNotEmpty { .. } => ErrorCode::DirectoryNotEmpty,
-        CommitValidationError::InodeMissing { .. } => ErrorCode::PathNotFound,
-        // Both are "the deletion you named is not the live one": absent
-        // entirely, or superseded by a newer generation. One code, with the
-        // generations in the structured details.
-        CommitValidationError::UndeleteTargetNotDeleted { .. }
-        | CommitValidationError::UndeleteTargetsCurrentCommit { .. }
-        | CommitValidationError::UndeleteGenerationMismatch { .. } => ErrorCode::NotDeleted,
-        CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
-        CommitValidationError::RestoreRevisionOverflow { .. }
-        | CommitValidationError::ReplaceFileRevisionOverflow { .. }
-        | CommitValidationError::OpIndexOverflow
-        | CommitValidationError::DeltaIndexOverflow => ErrorCode::ServerError,
-    }
-}
-
-fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
-    match error {
-        CommitHeadPublishError::StaleHead
-        | CommitHeadPublishError::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
-        CommitHeadPublishError::OutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
-        CommitHeadPublishError::EmptyExpectedHeadEtag
-        | CommitHeadPublishError::SegmentDoesNotConnect { .. }
-        | CommitHeadPublishError::EmptyWalSegment
-        | CommitHeadPublishError::SeqOverflow
-        | CommitHeadPublishError::Codec { .. }
-        | CommitHeadPublishError::Store { .. } => ErrorCode::ServerError,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -874,9 +729,7 @@ mod tests {
     use crate::namespace::writer_epoch::WriterEpochAcquireError;
     use crate::namespace::BootstrapNamespaceError;
     use crate::storage::content_admission::ContentTokenError;
-    use loonfs_api::{
-        ChangeSeq, CommitId, InodeId, ManifestNo, NamespaceId, RevisionNo, WriterEpoch,
-    };
+    use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId, RevisionNo, WriterEpoch};
     use loonfs_objectstore::ObjectStoreError;
 
     #[test]
@@ -942,16 +795,9 @@ mod tests {
     #[test]
     fn metadata_view_errors_map_to_actionable_public_codes() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let _manifest_no = ManifestNo(1);
         let head_seq = ChangeSeq(3);
 
         let cases = [
-            (
-                MetadataViewError::MissingManifest {
-                    namespace_id: namespace_id.clone(),
-                },
-                ErrorCode::NamespaceCorrupt,
-            ),
             (
                 MetadataViewError::MaintenanceRequired {
                     namespace_id: namespace_id.clone(),
@@ -960,8 +806,8 @@ mod tests {
                 ErrorCode::MaintenanceRequired,
             ),
             (
-                MetadataViewError::SnapshotUnavailable {
-                    requested_seq: ChangeSeq(1),
+                MetadataViewError::CursorAheadOfHead {
+                    cursor_seq: ChangeSeq(1),
                     head_seq,
                 },
                 ErrorCode::RebootstrapRequired,

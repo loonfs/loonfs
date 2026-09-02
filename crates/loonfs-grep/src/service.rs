@@ -184,8 +184,8 @@ impl GrepService {
                     .into());
                 }
                 if cursor.head_seq > head_seq {
-                    return Err(CoreError::from(MetadataViewError::SnapshotUnavailable {
-                        requested_seq: cursor.head_seq,
+                    return Err(CoreError::from(MetadataViewError::CursorAheadOfHead {
+                        cursor_seq: cursor.head_seq,
                         head_seq,
                     })
                     .into());

@@ -312,9 +312,10 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             seq: ChangeSeq(2),
             commit_id: commit_id(),
             committed_by: actor(),
-            semantic_commit_fingerprint:
-                "v1:sha256:0000000000000000000000000000000000000000000000000000000000000042"
-                    .to_owned(),
+            semantic_commit_fingerprint: serde_json::from_str(
+                r#""v1:sha256:0000000000000000000000000000000000000000000000000000000000000042""#,
+            )
+            .expect("fingerprint"),
             committed_at_ms: 4_000,
             message: Some("golden commit".to_owned()),
             deltas,
@@ -393,7 +394,7 @@ fn sample_head_state() -> HeadState {
         head_commit_id: commit_id(),
         writer_epoch: WriterEpoch(3),
         writer: Some(WriterBlock {
-            writer_id: "writer-a".to_owned(),
+            writer_id: loonfs_api::WriterId::parse("writer-a").expect("writer id"),
             acquired_at_ms: 2_000,
         }),
         next_inode_id: InodeId(10),
@@ -1948,7 +1949,7 @@ fn sample_commit_receipt_row() -> MetadataRow {
     MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
         commit_id: commit_id(),
         committed_by: actor(),
-        semantic_commit_fingerprint: "fp:golden".to_owned(),
+        semantic_commit_fingerprint: serde_json::from_str(r#""fp:golden""#).expect("fingerprint"),
         committed_seq: ChangeSeq(9),
         committed_at_ms: 9_000,
         message: None,
@@ -2464,7 +2465,8 @@ fn provenance_rows_reject_every_missing_required_field() {
             MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
                 commit_id: commit_id(),
                 committed_by: actor(),
-                semantic_commit_fingerprint: "v1:sha256:receipt".to_owned(),
+                semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:receipt""#)
+                    .expect("fingerprint"),
                 committed_seq: ChangeSeq(9),
                 committed_at_ms: 9_000,
                 message: None,

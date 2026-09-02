@@ -239,7 +239,7 @@ async fn the_client_round_trips_the_read_options() {
         .get_path_entry(
             &path("/docs/report.txt"),
             &StatPathOptions {
-                include_attributes: false,
+                include_attributes: loonfs_api::AttributeInclusion::Omit,
                 snapshot_id: None,
             },
         )
@@ -259,7 +259,7 @@ async fn the_client_round_trips_the_read_options() {
         &harness.client,
         &path("/docs"),
         &ListPathEntriesOptions {
-            include_attributes: true,
+            include_attributes: loonfs_api::AttributeInclusion::Include,
             snapshot_id: None,
         },
     )

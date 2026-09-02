@@ -170,11 +170,13 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
 ) -> Result<Option<CandidateAdmission>> {
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
         return Ok(Some(CandidateAdmission::independent(
-            if existing.semantic_commit_fingerprint != semantic_identity.as_str() {
+            if existing.semantic_commit_fingerprint != *semantic_identity {
                 Err(CoreError::CommitIdReuseConflict {
                     commit_id: commit_id.to_string(),
                     committed_seq: Some(existing.committed_seq),
-                    committed_fingerprint: Some(existing.semantic_commit_fingerprint.clone()),
+                    committed_fingerprint: Some(
+                        existing.semantic_commit_fingerprint.as_str().to_owned(),
+                    ),
                 })
             } else {
                 commit_response_from_commit_receipt(namespace_id, view, &existing).await
