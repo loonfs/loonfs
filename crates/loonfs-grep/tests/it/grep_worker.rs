@@ -2248,6 +2248,11 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .delete_namespace(&deleted_namespace, DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
+    let enable_error = worker
+        .enable(&deleted_namespace)
+        .await
+        .expect_err("a deleted namespace cannot enable grep");
+    assert_eq!(enable_error.code(), ErrorCode::NamespaceDeleted);
     let live_report = worker
         .garbage_collect_namespace(
             &live_namespace,
@@ -2545,7 +2550,7 @@ async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
 }
 
 #[tokio::test]
-async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
+async fn the_collection_budget_shares_reverification_across_a_candidate_chunk() {
     let namespace_id = NamespaceId::parse("gc-charge").expect("namespace id");
     let temp_dir = tempdir().expect("tempdir");
     let store = seed_collectable_namespace(temp_dir.path(), &namespace_id).await;
@@ -2582,8 +2587,8 @@ async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
         .expect("collect under a seven-read budget");
     let reclaimed = pass.deleted_segments + pass.deleted_other_objects;
     assert!(
-        reclaimed > 0 && reclaimed * 2 <= BUDGET,
-        "the budget must pay for each key's own reads, not just its listing: {pass:?}"
+        reclaimed > BUDGET / 3,
+        "one liveness read must authorize a chunk of candidate decisions: {pass:?}"
     );
     assert!(pass.next_cursor.is_some(), "{pass:?}");
     assert_eq!(
