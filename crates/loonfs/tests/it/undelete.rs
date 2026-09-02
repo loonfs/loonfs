@@ -9,7 +9,6 @@ use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
     DestinationBehavior, ErrorCode, InodeId, ListChangesOptions, PutFileOptions, RuntimeError,
 };
-use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 

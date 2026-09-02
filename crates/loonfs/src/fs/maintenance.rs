@@ -946,6 +946,19 @@ impl FsAdmin {
     }
 
     /// Extends a live snapshot, capped from its durable creation time.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.snapshot_extend",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.snapshot_extend",
+            namespace_id = %namespace_id,
+            snapshot_id = %snapshot_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,
@@ -970,6 +983,19 @@ impl FsAdmin {
     }
 
     /// Releases a snapshot. Repeated releases succeed.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.snapshot_release",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.snapshot_release",
+            namespace_id = %namespace_id,
+            snapshot_id = %snapshot_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn release_snapshot(
         &self,
         namespace_id: &NamespaceId,

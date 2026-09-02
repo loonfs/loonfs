@@ -82,6 +82,21 @@ macro_rules! phase_span {
 
 pub(crate) use phase_span;
 
+macro_rules! phase_event {
+    ($core:expr, $phase:literal, $namespace_id:expr, $level:expr $(, $($field:tt)+)?) => {
+        tracing::event!(
+            $level,
+            phase = $phase,
+            namespace_id = %$namespace_id,
+            mode = $core.trace_mode(),
+            store_kind = $core.trace_store_kind(),
+            $($($field)+)?
+        )
+    };
+}
+
+pub(crate) use phase_event;
+
 /// The `cache_path` trace label for a read served through the materialized
 /// metadata segments. The only value the label takes today.
 pub(crate) const CACHE_MATERIALIZED_SEGMENTS: &str = "materialized_segments";

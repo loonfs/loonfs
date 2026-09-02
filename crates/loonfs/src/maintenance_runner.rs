@@ -290,7 +290,7 @@ impl MaintenanceHandle {
     pub fn now_ms(&self) -> u64 {
         match self.inner.upgrade() {
             Some(inner) => inner.clock.now_ms(),
-            None => SystemMaintenanceClock::default().now_ms(),
+            None => loonfs_core::time::current_time_ms().unwrap_or(0),
         }
     }
 
@@ -346,10 +346,8 @@ impl RunnerCounters {
 
 pub(crate) struct RunnerInner {
     policy: FsBackgroundWork,
-    /// Runtime that owns spawned work. Handle builders pin the runtime they
-    /// were opened on; `None` resolves the runtime driving the triggering
-    /// call at spawn time.
-    runtime: Option<tokio::runtime::Handle>,
+    /// Runtime that owns spawned work.
+    runtime: tokio::runtime::Handle,
     clock: Arc<dyn MaintenanceClock>,
     jobs: Mutex<BTreeMap<MaintenanceJobId, Arc<dyn MaintenanceJob>>>,
     /// One lock over the shutdown flag, the admission book, and the task
@@ -393,7 +391,7 @@ struct RunnerState {
 impl MaintenanceRunner {
     pub(crate) fn new(
         policy: FsBackgroundWork,
-        runtime: Option<tokio::runtime::Handle>,
+        runtime: tokio::runtime::Handle,
         max_concurrent: std::num::NonZeroUsize,
         instruments: Arc<RuntimeInstruments>,
     ) -> Self {
@@ -408,7 +406,7 @@ impl MaintenanceRunner {
 
     pub(crate) fn with_clock(
         policy: FsBackgroundWork,
-        runtime: Option<tokio::runtime::Handle>,
+        runtime: tokio::runtime::Handle,
         max_concurrent: std::num::NonZeroUsize,
         clock: Arc<dyn MaintenanceClock>,
         instruments: Arc<RuntimeInstruments>,
@@ -611,20 +609,11 @@ impl RunnerInner {
         self.lock_jobs().get(&id).cloned()
     }
 
-    fn runtime(&self) -> Option<tokio::runtime::Handle> {
-        self.runtime
-            .clone()
-            .or_else(|| tokio::runtime::Handle::try_current().ok())
-    }
-
     /// Spawns maintenance on the owning runtime and tracks it for shutdown.
     ///
-    /// If no runtime is available or admission has closed, the future is
-    /// dropped. It must release any claimed key or permit when dropped.
+    /// If admission has closed, the future is dropped. It must release any
+    /// claimed key or permit when dropped.
     pub(super) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let Some(runtime) = self.runtime() else {
-            return;
-        };
         let mut state = self.lock_state();
         if state.admission.is_closed() {
             // A shutdown between this work's claim and now must win: the
@@ -648,7 +637,7 @@ impl RunnerInner {
             }
             false
         });
-        state.tasks.push(runtime.spawn(future));
+        state.tasks.push(self.runtime.spawn(future));
     }
 }
 
@@ -810,16 +799,13 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
 
 /// Starts the timer task if it is not already running.
 fn ensure_scheduler(inner: &Arc<RunnerInner>) {
-    let Some(runtime) = inner.runtime() else {
-        return;
-    };
     let mut state = inner.lock_state();
     if state.scheduler.is_some() || state.admission.is_closed() {
         return;
     }
     let weak = Arc::downgrade(inner);
     let wake = Arc::clone(&inner.wake);
-    state.scheduler = Some(runtime.spawn(scheduler_loop(weak, wake)));
+    state.scheduler = Some(inner.runtime.spawn(scheduler_loop(weak, wake)));
 }
 
 /// Scheduler task for deadlines and periodic reconciliation.

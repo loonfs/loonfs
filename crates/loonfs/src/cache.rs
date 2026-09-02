@@ -13,8 +13,8 @@ use loonfs_api::wire::control::HeadState;
 use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_namespace_read_anchor, load_snapshot_read_basis,
-    ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MetadataBasis,
-    VerifiedNamespaceCatalogEntry,
+    CheckpointReadBasis, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
+    MetadataBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
 use loonfs_objectstore::keys::wal_head;
@@ -24,16 +24,8 @@ use std::sync::Arc;
 
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeControlCache {
-    namespaces: HashMap<NamespaceId, NamespaceControlCacheEntry>,
+    namespaces: HashMap<NamespaceId, (CachedNamespaceAnchor, u64)>,
     namespace_order: Recency<NamespaceId>,
-}
-
-#[derive(Debug, Default)]
-struct NamespaceControlCacheEntry {
-    head: Option<CachedNamespaceAnchor>,
-    /// Recency stamp assigned on the most recent access. Recency records with
-    /// an older stamp for this namespace are ignored.
-    last_touch: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +155,7 @@ impl RuntimeControlCache {
         &mut self,
         namespace_id: &NamespaceId,
     ) -> Option<CachedNamespaceAnchor> {
-        let head = self.namespaces.get(namespace_id)?.head.clone()?;
+        let head = self.namespaces.get(namespace_id)?.0.clone();
         self.touch_namespace(namespace_id);
         Some(head)
     }
@@ -177,29 +169,9 @@ impl RuntimeControlCache {
         if max_cached_namespaces == 0 {
             return;
         }
-        self.namespace_entry(namespace_id, max_cached_namespaces)
-            .head = Some(head);
-    }
-
-    fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
-        // The head anchor goes stale on every mutation.
-        if let Some(entry) = self.namespaces.get_mut(namespace_id) {
-            entry.head = None;
-        }
-    }
-
-    /// Removes all cached control state for a deleted namespace.
-    fn remove_namespace(&mut self, namespace_id: &NamespaceId) {
-        self.namespaces.remove(namespace_id);
-    }
-
-    fn namespace_entry(
-        &mut self,
-        namespace_id: &NamespaceId,
-        max_cached_namespaces: usize,
-    ) -> &mut NamespaceControlCacheEntry {
-        self.namespaces.entry(namespace_id.clone()).or_default();
-        self.touch_namespace(namespace_id);
+        let last_touch = self.namespace_order.touch(namespace_id);
+        self.namespaces
+            .insert(namespace_id.clone(), (head, last_touch));
         let Self {
             namespaces,
             namespace_order,
@@ -212,15 +184,19 @@ impl RuntimeControlCache {
             };
             namespaces.remove(&evicted);
         }
-        namespaces
-            .get_mut(namespace_id)
-            .expect("namespace cache entry should exist")
+        namespace_order.compact(namespaces.len(), |key, stamp| {
+            namespace_slot_is_live(namespaces, key, stamp)
+        });
+    }
+
+    fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
+        self.namespaces.remove(namespace_id);
     }
 
     fn touch_namespace(&mut self, namespace_id: &NamespaceId) {
         let stamp = self.namespace_order.touch(namespace_id);
-        if let Some(entry) = self.namespaces.get_mut(namespace_id) {
-            entry.last_touch = stamp;
+        if let Some((_, last_touch)) = self.namespaces.get_mut(namespace_id) {
+            *last_touch = stamp;
         }
         let namespaces = &self.namespaces;
         self.namespace_order
@@ -231,13 +207,13 @@ impl RuntimeControlCache {
 }
 
 fn namespace_slot_is_live(
-    namespaces: &HashMap<NamespaceId, NamespaceControlCacheEntry>,
+    namespaces: &HashMap<NamespaceId, (CachedNamespaceAnchor, u64)>,
     namespace_id: &NamespaceId,
     stamp: u64,
 ) -> bool {
     namespaces
         .get(namespace_id)
-        .is_some_and(|entry| entry.last_touch == stamp)
+        .is_some_and(|(_, last_touch)| *last_touch == stamp)
 }
 
 impl ReadCore {
@@ -392,16 +368,7 @@ impl ReadCore {
             checkpoint_id,
         )
         .await?;
-        let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
-            head: CachedControl {
-                identity: ControlObjectIdentity {
-                    etag: pinned.head_etag,
-                },
-                state: pinned.head,
-            },
-            basis: pinned.basis,
-        });
-        Ok((self.reader_engine(namespace_id), read_context))
+        Ok(self.pinned_read_at_basis(namespace_id, pinned))
     }
 
     /// Pins a snapshot-owned checkpoint while enforcing its live lease.
@@ -423,6 +390,17 @@ impl ReadCore {
             now_ms,
         )
         .await?;
+        Ok(self.pinned_read_at_basis(namespace_id, pinned))
+    }
+
+    fn pinned_read_at_basis(
+        &self,
+        namespace_id: &NamespaceId,
+        pinned: CheckpointReadBasis,
+    ) -> (
+        loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
+        RuntimeReadContext,
+    ) {
         let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
             head: CachedControl {
                 identity: ControlObjectIdentity {
@@ -432,7 +410,7 @@ impl ReadCore {
             },
             basis: pinned.basis,
         });
-        Ok((self.reader_engine(namespace_id), read_context))
+        (self.reader_engine(namespace_id), read_context)
     }
 
     /// Pins the latest metadata view and records the read in cache metrics.
@@ -462,7 +440,9 @@ impl ReadCore {
     /// the namespace itself is gone. The publisher that ran the delete is
     /// evicted with its engine and session by the publication service.
     pub(crate) fn invalidate_namespace_cache_for_delete(&self, namespace_id: &NamespaceId) {
-        self.inner.control_cache().remove_namespace(namespace_id);
+        self.inner
+            .control_cache()
+            .invalidate_namespace(namespace_id);
         self.inner
             .wal_tail_projection_cache
             .invalidate_namespace(namespace_id);

@@ -21,7 +21,6 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,

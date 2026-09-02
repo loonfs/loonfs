@@ -6,6 +6,7 @@ use loonfs::publish::{
     parse_mutation_path, CommitCandidate, CommitRequest, ContentPreparationError,
     FilesystemOperation, PreparedContent,
 };
+use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     BeginUploadRequest, CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions,
     DestinationBehavior, ErrorCode, FsWriter, NamespaceId, PutFileOptions, RevisionNo,
@@ -589,7 +590,11 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
 
     let completed = harness
         .writer
-        .complete_upload_prepared(&harness.namespace_id, begin.upload_id())
+        .complete_upload(
+            &harness.namespace_id,
+            begin.upload_id(),
+            ResolvedUploadCompletion::KnownContent,
+        )
         .await
         .expect("complete upload with proof");
     let prepared = completed.prepared;

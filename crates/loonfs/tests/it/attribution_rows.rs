@@ -8,7 +8,6 @@ use loonfs::{
     DestinationBehavior, MaintenancePlan, MoveOptions, PageRequest, PutFileOptions,
     RestoreRevisionOptions, RevisionNo, UpdateAttributesOptions,
 };
-use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use std::collections::BTreeMap;
 use tempfile::tempdir;
