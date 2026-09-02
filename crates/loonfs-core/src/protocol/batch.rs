@@ -67,18 +67,19 @@ impl PublishBatchAgainstViewResult {
 /// Tracks one candidate's result and whether publication can change it.
 #[derive(Debug, Clone)]
 pub(super) enum BatchOutcomeSlot {
-    Pending,
     Accepted,
-    SettledIndependent(Result<ApiCommitResponse>),
-    SettledContingent(Result<ApiCommitResponse>),
+    Settled {
+        outcome: Result<ApiCommitResponse>,
+        depends_on_batch: bool,
+    },
     AliasOf(usize),
 }
 
 impl BatchOutcomeSlot {
     fn settled(&self) -> Option<&Result<ApiCommitResponse>> {
         match self {
-            Self::SettledIndependent(outcome) | Self::SettledContingent(outcome) => Some(outcome),
-            Self::Pending | Self::Accepted | Self::AliasOf(_) => None,
+            Self::Settled { outcome, .. } => Some(outcome),
+            Self::Accepted | Self::AliasOf(_) => None,
         }
     }
 }
@@ -105,7 +106,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             candidates.len()
         ]);
     }
-    let mut slots = vec![BatchOutcomeSlot::Pending; candidates.len()];
+    let mut slots = Vec::with_capacity(candidates.len());
     let mut session = PublishPlanningSession::new(&view.head);
     let mut accepted_commits = Vec::new();
     let mut dedup = BatchDedup::default();
@@ -135,7 +136,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let candidate_request = match admission {
                 CandidateAdmission::Prepared(candidate_request) => candidate_request,
                 CandidateAdmission::Settled(slot) => {
-                    slots[index] = settle_admission(slot, !accepted_commits.is_empty());
+                    slots.push(settle_admission(slot, !accepted_commits.is_empty()));
                     continue;
                 }
             };
@@ -144,10 +145,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let resulting_next_inode_id = match session.commit_candidate(allocation) {
                 Ok(resulting_next_inode_id) => resulting_next_inode_id,
                 Err(error) => {
-                    slots[index] = settle_admission(
-                        BatchOutcomeSlot::SettledContingent(Err(error)),
+                    slots.push(settle_admission(
+                        BatchOutcomeSlot::Settled {
+                            outcome: Err(error),
+                            depends_on_batch: true,
+                        },
                         !accepted_commits.is_empty(),
-                    );
+                    ));
                     continue;
                 }
             };
@@ -172,7 +176,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                         .entered();
                 session.apply_accepted_commit(&preview, &materialized.commit);
             }
-            slots[index] = BatchOutcomeSlot::Accepted;
+            slots.push(BatchOutcomeSlot::Accepted);
             accepted_commits.push(materialized);
         }
     }
@@ -236,15 +240,27 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     };
 
     let wal_records = wal.envelope.payload.records.clone();
-    let accepted_slots = slots
-        .iter_mut()
-        .filter(|slot| matches!(slot, BatchOutcomeSlot::Accepted));
-    for (slot, record) in accepted_slots.zip(&wal_records) {
-        *slot = BatchOutcomeSlot::SettledIndependent(
-            committed_change_from_wal_record(namespace_id, record).map(|change| {
-                ApiCommitResponse::from_committed_change(namespace_id.clone(), change)
-            }),
-        );
+    assert_eq!(
+        slots
+            .iter()
+            .filter(|slot| matches!(slot, BatchOutcomeSlot::Accepted))
+            .count(),
+        wal_records.len(),
+        "accepted slot count should match WAL record count"
+    );
+    let mut records = wal_records.iter();
+    for slot in &mut slots {
+        if matches!(slot, BatchOutcomeSlot::Accepted) {
+            let record = records
+                .next()
+                .expect("accepted slot count should match WAL record count");
+            *slot = BatchOutcomeSlot::Settled {
+                outcome: committed_change_from_wal_record(namespace_id, record).map(|change| {
+                    ApiCommitResponse::from_committed_change(namespace_id.clone(), change)
+                }),
+                depends_on_batch: false,
+            };
+        }
     }
     PublishBatchAgainstViewResult {
         results: finish_batch_outcomes(&slots),
@@ -359,9 +375,13 @@ async fn cas_batch_head<S: ObjectStore + ?Sized>(
 /// Before the first accepted commit, admission uses durable state only.
 fn settle_admission(slot: BatchOutcomeSlot, has_accepted_commits: bool) -> BatchOutcomeSlot {
     match slot {
-        BatchOutcomeSlot::SettledContingent(outcome) if !has_accepted_commits => {
-            BatchOutcomeSlot::SettledIndependent(outcome)
-        }
+        BatchOutcomeSlot::Settled {
+            outcome,
+            depends_on_batch,
+        } => BatchOutcomeSlot::Settled {
+            outcome,
+            depends_on_batch: depends_on_batch && has_accepted_commits,
+        },
         slot => slot,
     }
 }
@@ -369,11 +389,19 @@ fn settle_admission(slot: BatchOutcomeSlot, has_accepted_commits: bool) -> Batch
 /// Replaces results that depend on unpublished changes with the publication error.
 fn fail_unpublished_slots(slots: &mut [BatchOutcomeSlot], error: &CoreError) {
     for slot in slots {
-        if matches!(
-            slot,
-            BatchOutcomeSlot::Accepted | BatchOutcomeSlot::SettledContingent(_)
-        ) {
-            *slot = BatchOutcomeSlot::SettledIndependent(Err(error.clone()));
+        if matches!(slot, BatchOutcomeSlot::Accepted)
+            || matches!(
+                slot,
+                BatchOutcomeSlot::Settled {
+                    depends_on_batch: true,
+                    ..
+                }
+            )
+        {
+            *slot = BatchOutcomeSlot::Settled {
+                outcome: Err(error.clone()),
+                depends_on_batch: false,
+            };
         }
     }
 }
@@ -390,7 +418,7 @@ fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<ApiCommitResp
                 slot => slot.settled(),
             }
             .cloned()
-            .unwrap_or_else(|| Err(CoreError::Internal("unsettled batch outcome".to_owned())))
+            .expect("batch outcome should be settled")
         })
         .collect()
 }

@@ -2,17 +2,15 @@
 //! operations into one commit's operations.
 
 use super::intent::{CommitRequest, FilesystemOperation};
-use super::plan_attributes::plan_publish_update_attributes;
+use super::plan_attributes::plan_update_attributes;
 use super::plan_by_inode::{
-    plan_publish_create_by_inode, plan_publish_delete_by_inode, plan_publish_move_by_inode,
-    plan_publish_put_file_revision_by_inode, NewChild,
+    plan_create_by_inode, plan_delete_by_inode, plan_move_by_inode,
+    plan_put_file_revision_by_inode, NewChild,
 };
-use super::plan_create::{
-    plan_publish_create_directory, plan_publish_put_file_content_ref, plan_publish_undelete,
-};
-use super::plan_delete::plan_publish_delete_path;
-use super::plan_restore::plan_publish_restore_revision;
-use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
+use super::plan_create::{plan_create_directory, plan_put_file_content_ref, plan_undelete};
+use super::plan_delete::plan_delete_path;
+use super::plan_restore::plan_restore_revision;
+use super::plan_transfer::{plan_copy_file_path, plan_move_path};
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use super::validate_expected_file_state;
 use crate::commit::{
@@ -83,18 +81,17 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             let resolution_view = resolved.view();
             let view = PublishPathPlanningView {
                 namespace_id: &head.namespace_id,
-                metadata_state: &resolution_view,
+                view: &resolution_view,
             };
             plan_operation(operation, &view, allocation)
                 .await
                 .map_err(|error| attribute(error, index, operation_count))?
         };
-        let unit_ops = unit.into_planned_ops();
+        let unit_ops = unit.ops;
         let validated_unit = validate_ops(
             &unit_ops,
             &mut resolved,
             &mut numbering,
-            committed_seq,
             &request.commit_id,
             &request.actor,
             committed_at_ms,
@@ -124,7 +121,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     match operation {
         FilesystemOperation::CreateDirectory { path, parents } => {
-            plan_publish_create_directory(path, *parents, view, allocation).await
+            plan_create_directory(path, *parents, view, allocation).await
         }
         FilesystemOperation::PutFile {
             path,
@@ -133,7 +130,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             expected_inode_id,
             expected_revision_no,
         } => {
-            plan_publish_put_file_content_ref(
+            plan_put_file_content_ref(
                 path,
                 content_ref.clone(),
                 *behavior,
@@ -153,7 +150,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             parent_inode_id,
             display_name,
         } => {
-            plan_publish_create_by_inode(
+            plan_create_by_inode(
                 *parent_inode_id,
                 display_name,
                 NewChild::Directory,
@@ -167,7 +164,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             display_name,
             content_ref,
         } => {
-            plan_publish_create_by_inode(
+            plan_create_by_inode(
                 *parent_inode_id,
                 display_name,
                 NewChild::File(content_ref.clone()),
@@ -181,7 +178,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             content_ref,
             expected_revision_no,
         } => {
-            plan_publish_put_file_revision_by_inode(
+            plan_put_file_revision_by_inode(
                 *inode_id,
                 content_ref.clone(),
                 *expected_revision_no,
@@ -193,15 +190,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             path,
             behavior,
             expected_inode_id,
-        } => plan_publish_delete_path(path, *behavior, *expected_inode_id, view).await,
+        } => plan_delete_path(path, *behavior, *expected_inode_id, view).await,
         FilesystemOperation::DeleteByInode {
             inode_id,
             expected_binding_generation,
             behavior,
-        } => {
-            plan_publish_delete_by_inode(*inode_id, expected_binding_generation, *behavior, view)
-                .await
-        }
+        } => plan_delete_by_inode(*inode_id, expected_binding_generation, *behavior, view).await,
         FilesystemOperation::MoveByInode {
             inode_id,
             expected_binding_generation,
@@ -211,7 +205,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             expected_destination_inode_id,
             expected_destination_revision_no,
         } => {
-            plan_publish_move_by_inode(
+            plan_move_by_inode(
                 *inode_id,
                 expected_binding_generation,
                 *to_parent_inode_id,
@@ -235,7 +229,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             expected_destination_inode_id,
             expected_destination_revision_no,
         } => {
-            plan_publish_move_path(
+            plan_move_path(
                 from_path,
                 to_path,
                 *behavior,
@@ -257,7 +251,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             expected_destination_inode_id,
             expected_destination_revision_no,
         } => {
-            plan_publish_copy_file_path(
+            plan_copy_file_path(
                 from_path,
                 to_path,
                 *behavior,
@@ -276,12 +270,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::RestoreRevision {
             path,
             source_revision_no,
-        } => plan_publish_restore_revision(path, *source_revision_no, view).await,
+        } => plan_restore_revision(path, *source_revision_no, view).await,
         FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
             path,
-        } => plan_publish_undelete(*inode_id, *deletion_seq, path.as_ref(), view).await,
+        } => plan_undelete(*inode_id, *deletion_seq, path.as_ref(), view).await,
         FilesystemOperation::UpdateAttributes {
             path,
             set,
@@ -289,7 +283,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             expected_inode_id,
             expected_attributes_revision_no,
         } => {
-            plan_publish_update_attributes(
+            plan_update_attributes(
                 path,
                 set,
                 remove,

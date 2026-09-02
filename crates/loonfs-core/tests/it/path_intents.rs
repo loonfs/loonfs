@@ -1674,7 +1674,13 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
     )
     .await
     .expect_err("non-recursive delete should reject non-empty dir");
-    assert!(matches!(error, CoreError::DirectoryNotEmpty(path) if path == "/docs"));
+    assert!(matches!(
+        &error,
+        CoreError::CommitValidation(CommitValidationError::DirectoryNotEmpty {
+            inode_id: InodeId(2)
+        })
+    ));
+    assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
 #[tokio::test]

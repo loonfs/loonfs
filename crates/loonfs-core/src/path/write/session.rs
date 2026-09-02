@@ -52,10 +52,6 @@ impl PublishPlanningSession {
         self.inode_allocator.begin_candidate()
     }
 
-    pub(crate) fn discard_candidate(&self, allocation: CandidateAllocation) {
-        self.inode_allocator.discard_candidate(allocation);
-    }
-
     /// Plans and validates a mutation request in one pass, producing the
     /// validated plan that only awaits the accepted allocation position.
     pub(crate) async fn prepare_commit<S: ObjectStore + ?Sized>(
@@ -262,7 +258,6 @@ mod tests {
             )
             .await
             .expect("first plan");
-        session.discard_candidate(first_allocation);
         let after_first = session.durable_cache().stats();
 
         let second_request = CommitRequest::single(
@@ -288,7 +283,6 @@ mod tests {
             )
             .await
             .expect("second plan");
-        session.discard_candidate(second_allocation);
         let after_second = session.durable_cache().stats();
 
         assert!(

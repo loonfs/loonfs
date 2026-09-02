@@ -14,7 +14,8 @@ mod publish_path_planning;
 mod session;
 
 use crate::error::{CoreError, Result};
-use loonfs_api::{DestinationBehavior, InodeId, RevisionNo};
+use crate::metadata::ResolvedVisiblePath;
+use loonfs_api::{DestinationBehavior, DisplayName, InodeId, NameKey, RevisionNo, ROOT_INODE_ID};
 
 pub use intent::{CommitRequest, FilesystemOperation};
 pub(crate) use planner::commit_fingerprint;
@@ -24,6 +25,27 @@ pub(crate) use session::PublishPlanningSession;
 pub(super) struct ExpectedFileState {
     pub(super) inode_id: InodeId,
     pub(super) revision_no: Option<RevisionNo>,
+}
+
+pub(super) fn ensure_expected_inode(
+    resolved: &ResolvedVisiblePath,
+    expected: Option<InodeId>,
+    name: &DisplayName,
+) -> Result<()> {
+    if let Some(expected) = expected {
+        if resolved.inode_id != expected {
+            return Err(
+                crate::commit::CommitValidationError::BindingPreconditionMismatch {
+                    parent_inode_id: resolved.parent_inode_id.unwrap_or(ROOT_INODE_ID),
+                    name_key: NameKey::for_display_name(name),
+                    expected_child_inode_id: expected,
+                    actual_child_inode_id: resolved.inode_id,
+                }
+                .into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_expected_file_state(

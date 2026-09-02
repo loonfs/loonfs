@@ -11,7 +11,7 @@ use crate::{EffectiveLimit, GcConfig, Result, RuntimeError};
 use loonfs_api::{
     CreateCheckpointRequest, GcRequest, MaintenanceStepRequest, MetadataMaintenanceRequest,
 };
-use loonfs_core::publish::WalTailPolicy;
+use loonfs_core::limits::{CHECKPOINT_AT_WAL_SEGMENTS, MAX_UNFLUSHED_WAL_SEGMENTS};
 use std::num::NonZeroU64;
 
 pub use loonfs_api::options::{
@@ -49,9 +49,7 @@ pub struct MetadataMaintenanceOptions {
 impl Default for MetadataMaintenanceOptions {
     fn default() -> Self {
         Self {
-            max_wal_tail_segments: const {
-                NonZeroU64::new(WalTailPolicy::DEFAULT.checkpoint_at_segments).unwrap()
-            },
+            max_wal_tail_segments: const { NonZeroU64::new(CHECKPOINT_AT_WAL_SEGMENTS).unwrap() },
         }
     }
 }
@@ -110,7 +108,7 @@ fn metadata_options_from_request(
     // A threshold above the write-rejection cap would make the step answer
     // `not needed` while every publish is being rejected — the one tool that
     // relieves backpressure refusing to act.
-    let reject_writes_at_segments = WalTailPolicy::DEFAULT.reject_writes_at_segments;
+    let reject_writes_at_segments = MAX_UNFLUSHED_WAL_SEGMENTS;
     if max_wal_tail_segments.get() > reject_writes_at_segments {
         return Err(RuntimeError::Config(format!(
             "max_wal_tail_segments may not exceed the write-rejection threshold \
@@ -272,7 +270,7 @@ mod tests {
 
     #[test]
     fn a_useless_flush_threshold_is_rejected() {
-        for threshold in [0, WalTailPolicy::DEFAULT.reject_writes_at_segments + 1] {
+        for threshold in [0, MAX_UNFLUSHED_WAL_SEGMENTS + 1] {
             let error = MaintenancePlan::from_request(MaintenanceStepRequest {
                 metadata_maintenance: Some(MetadataMaintenanceRequest {
                     max_wal_tail_segments: Some(threshold),

@@ -40,6 +40,14 @@ pub const CONTENTION_RETRY_LIMIT: usize = 8;
 /// so a landed publication never leaves more than this behind.
 pub const MAX_UNFLUSHED_WAL_SEGMENTS: u64 = 128;
 
+/// Visible WAL-tail length, in segments, at which maintenance publishes a
+/// checkpoint.
+pub const CHECKPOINT_AT_WAL_SEGMENTS: u64 = 32;
+
+const _: () = assert!(
+    0 < CHECKPOINT_AT_WAL_SEGMENTS && CHECKPOINT_AT_WAL_SEGMENTS < MAX_UNFLUSHED_WAL_SEGMENTS
+);
+
 /// Segment pointers the head carries as a replay accelerator, newest first
 /// and always including the tip. Sized so the head describes the whole
 /// legal unflushed tail rather than to keep the head small: a full list

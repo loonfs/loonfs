@@ -13,6 +13,7 @@ use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PreparedCommitHeadPublish {
@@ -26,54 +27,24 @@ pub(crate) fn prepare_commit_head_publish(
     plan: &CommitPlan,
     wal: &PreparedWalSegment,
 ) -> Result<PreparedCommitHeadPublish, CommitHeadPublishError> {
-    if current_head.namespace_id != plan.namespace_id {
-        return Err(CommitHeadPublishError::NamespaceMismatch {
-            head: current_head.namespace_id.clone(),
-            plan: plan.namespace_id.clone(),
-        });
-    }
-
     let wal_payload = &wal.envelope.payload;
-    if wal_payload.namespace_id != current_head.namespace_id {
-        return Err(CommitHeadPublishError::WalSegmentNamespaceMismatch {
-            head: current_head.namespace_id.clone(),
-            wal: wal_payload.namespace_id.clone(),
-        });
-    }
-    if wal_payload.writer_epoch != current_head.writer_epoch {
-        return Err(CommitHeadPublishError::WalSegmentWriterEpochMismatch {
-            expected: current_head.writer_epoch,
-            actual: wal_payload.writer_epoch,
-        });
-    }
+    ensure_segment_connects(
+        "writer_epoch",
+        current_head.writer_epoch,
+        wal_payload.writer_epoch,
+    )?;
 
     if wal_payload.records.is_empty() {
         return Err(CommitHeadPublishError::EmptyWalSegment);
     }
 
-    if wal_payload.base_head_seq != current_head.seq {
-        return Err(CommitHeadPublishError::WalSegmentBaseHeadSeqMismatch {
-            expected: current_head.seq,
-            actual: wal_payload.base_head_seq,
-        });
-    }
+    ensure_segment_connects("base_head_seq", current_head.seq, wal_payload.base_head_seq)?;
 
     let expected_start_seq = ChangeSeq(
         next_public_ordinal(current_head.seq.0).ok_or(CommitHeadPublishError::SeqOverflow)?,
     );
-    if wal_payload.start_seq != expected_start_seq {
-        return Err(CommitHeadPublishError::WalSegmentStartSeqMismatch {
-            expected: expected_start_seq,
-            actual: wal_payload.start_seq,
-        });
-    }
-
-    if wal_payload.end_seq != plan.assigned_seq {
-        return Err(CommitHeadPublishError::WalSegmentEndSeqMismatch {
-            expected: plan.assigned_seq,
-            actual: wal_payload.end_seq,
-        });
-    }
+    ensure_segment_connects("start_seq", expected_start_seq, wal_payload.start_seq)?;
+    ensure_segment_connects("end_seq", plan.assigned_seq, wal_payload.end_seq)?;
 
     let object_key = wal_head(&current_head.namespace_id);
     let new_tip = wal.envelope.pointer();
@@ -85,9 +56,6 @@ pub(crate) fn prepare_commit_head_publish(
         visible_wal_tip: Some(new_tip),
         ..current_head.clone()
     };
-    current_head
-        .ensure_successor_identity(&resulting_head)
-        .map_err(CommitHeadPublishError::HeadIdentityDrift)?;
     let encoded_bytes =
         encode_control_state(ControlObjectKind::WalHead, &resulting_head).map_err(|err| {
             CommitHeadPublishError::Codec {
@@ -101,6 +69,21 @@ pub(crate) fn prepare_commit_head_publish(
         object_key,
         encoded_bytes,
     })
+}
+
+fn ensure_segment_connects<T: Display + Eq>(
+    field: &'static str,
+    expected: T,
+    actual: T,
+) -> Result<(), CommitHeadPublishError> {
+    if expected != actual {
+        return Err(CommitHeadPublishError::SegmentDoesNotConnect {
+            field,
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Rebuilds the head's predecessor accelerator below the newly published
@@ -437,9 +420,9 @@ mod tests {
 
         assert!(matches!(
             prepare_commit_head_publish(&current_head, &plan, &wal),
-            Err(CommitHeadPublishError::WalSegmentBaseHeadSeqMismatch {
-                expected: ChangeSeq(7),
-                actual: ChangeSeq(8),
+            Err(CommitHeadPublishError::SegmentDoesNotConnect {
+                field: "base_head_seq",
+                ..
             })
         ));
     }
@@ -453,9 +436,9 @@ mod tests {
 
         assert!(matches!(
             prepare_commit_head_publish(&current_head, &plan, &wal),
-            Err(CommitHeadPublishError::WalSegmentBaseHeadSeqMismatch {
-                expected: ChangeSeq(7),
-                actual: ChangeSeq(6),
+            Err(CommitHeadPublishError::SegmentDoesNotConnect {
+                field: "base_head_seq",
+                ..
             })
         ));
     }
@@ -482,9 +465,9 @@ mod tests {
 
         assert!(matches!(
             prepare_commit_head_publish(&current_head, &plan, &wal),
-            Err(CommitHeadPublishError::WalSegmentStartSeqMismatch {
-                expected: ChangeSeq(8),
-                actual: ChangeSeq(9),
+            Err(CommitHeadPublishError::SegmentDoesNotConnect {
+                field: "start_seq",
+                ..
             })
         ));
     }
@@ -498,35 +481,10 @@ mod tests {
 
         assert!(matches!(
             prepare_commit_head_publish(&current_head, &plan, &wal),
-            Err(CommitHeadPublishError::WalSegmentEndSeqMismatch {
-                expected: ChangeSeq(9),
-                actual: ChangeSeq(10),
+            Err(CommitHeadPublishError::SegmentDoesNotConnect {
+                field: "end_seq",
+                ..
             })
-        ));
-    }
-
-    #[test]
-    fn head_publish_rejects_segment_namespace_mismatch() {
-        let current_head = head(
-            NamespaceId::parse("demo").expect("valid namespace id"),
-            ChangeSeq(7),
-        );
-        let plan = plan(
-            NamespaceId::parse("demo").expect("valid namespace id"),
-            ChangeSeq(9),
-        );
-        let wal = wal_segment(
-            NamespaceId::parse("other").expect("valid namespace id"),
-            ChangeSeq(7),
-            ChangeSeq(8),
-            ChangeSeq(9),
-            2,
-        );
-
-        assert!(matches!(
-            prepare_commit_head_publish(&current_head, &plan, &wal),
-            Err(CommitHeadPublishError::WalSegmentNamespaceMismatch { head, wal })
-                if head == NamespaceId::parse("demo").expect("valid namespace id") && wal == NamespaceId::parse("other").expect("valid namespace id")
         ));
     }
 

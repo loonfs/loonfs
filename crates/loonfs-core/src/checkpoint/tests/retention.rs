@@ -1153,9 +1153,8 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    let boundary =
-        usize::try_from(crate::commit_engine::WalTailPolicy::DEFAULT.reject_writes_at_segments)
-            .expect("the write-stop bound fits a segment count");
+    let boundary = usize::try_from(crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS)
+        .expect("the write-stop bound fits a segment count");
 
     // Stop one short, so the next publish is the one that reaches the bound.
     for round in 0..boundary - 1 {

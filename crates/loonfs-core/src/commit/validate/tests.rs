@@ -5,8 +5,9 @@
 
 #![allow(clippy::panic)]
 
-use super::super::{CommitOp, CommitPrecondition, PlannedOp, ValidatedCommitPlan};
+use super::super::{CommitOp, ResolvedBinding, ValidatedCommitPlan};
 use super::checks::{validate_ops, CommitNumbering};
+use super::error::CommitOperand;
 use super::view::PublishValidationView;
 use crate::commit::{
     materialize_commit, CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator,
@@ -62,10 +63,8 @@ fn wal_append_attributes(
     }]
 }
 
-/// Operations with no race checks of their own: these tests drive the
-/// validation loop, not the planner that emits the checks.
-fn planned(ops: Vec<CommitOp>) -> Vec<PlannedOp> {
-    ops.into_iter().map(PlannedOp::unchecked).collect()
+fn planned(ops: Vec<CommitOp>) -> Vec<CommitOp> {
+    ops
 }
 
 fn test_fingerprint() -> CommitFingerprint {
@@ -213,15 +212,15 @@ fn validation_context(
 }
 
 async fn build_commit_plan(
-    ops: &[PlannedOp],
+    ops: &[CommitOp],
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
 ) -> Result<CommitPlan, CommitValidationError> {
     let accepted_rows = MetadataState::default();
     let mut allocator = InodeAllocator::new(context.head.next_inode_id);
     let mut allocation = allocator.begin_candidate();
-    for planned in ops {
-        let assigned = match &planned.op {
+    for op in ops {
+        let assigned = match op {
             CommitOp::CreateDirectory { child_inode_id, .. }
             | CommitOp::CreateFile { child_inode_id, .. } => Some(*child_inode_id),
             _ => None,
@@ -248,7 +247,6 @@ async fn build_commit_plan(
         ops,
         &mut metadata_state,
         &mut numbering,
-        committed_seq,
         &commit_id,
         &loonfs_test_support::test_actor(),
         committed_at_ms,
@@ -363,7 +361,8 @@ async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     assert!(
         matches!(
             error,
-            CommitValidationError::UpdateAttributesInodeMissing {
+            CommitValidationError::InodeMissing {
+                operand: CommitOperand::AttributeTarget,
                 inode_id: InodeId(9)
             }
         ),
@@ -396,7 +395,7 @@ async fn stale_revision_precondition_is_rejected() {
         .expect_err("stale revision");
     assert!(matches!(
         error,
-        CommitValidationError::ReplaceFileBaseRevisionMismatch {
+        CommitValidationError::BaseRevisionMismatch {
             inode_id: InodeId(3),
             expected: RevisionNo(1),
             actual: Some(RevisionNo(2)),
@@ -424,7 +423,8 @@ async fn a_create_for_a_bound_name_is_rejected() {
         .expect_err("the name is already bound");
     assert!(matches!(
         error,
-        CommitValidationError::CreateChildNameCollision {
+        CommitValidationError::NameTaken {
+            operand: CommitOperand::CreateParent,
             parent_inode_id: InodeId(1),
             child_inode_id: InodeId(2),
             ..
@@ -441,19 +441,18 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = vec![PlannedOp {
-        preconditions: vec![CommitPrecondition::BindingIs {
+    let request = vec![CommitOp::Rename {
+        source_binding: ResolvedBinding {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("missing.txt").expect("valid name key"),
+            display_name: test_display_name("missing.txt"),
             child_inode_id: InodeId(9),
             bind_seq: ChangeSeq(1),
             bind_delta_index: 0,
-        }],
-        op: CommitOp::Rename {
-            inode_id: InodeId(2),
-            new_parent_inode_id: InodeId(1),
-            new_display_name: test_display_name("renamed"),
         },
+        inode_id: InodeId(2),
+        new_parent_inode_id: InodeId(1),
+        new_display_name: test_display_name("renamed"),
     }];
 
     let error = build_commit_plan(&request, 4_200, &context)
@@ -496,7 +495,8 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         .expect_err("late op fails");
     assert!(matches!(
         error,
-        CommitValidationError::ReplaceFileInodeMissing {
+        CommitValidationError::InodeMissing {
+            operand: CommitOperand::ReplaceTarget,
             inode_id: InodeId(99)
         }
     ));
@@ -538,8 +538,9 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     .expect_err("create under tombstone");
     assert!(matches!(
         create_error,
-        CommitValidationError::CreateUnderSubtreeTombstone {
-            parent_inode_id: InodeId(2),
+        CommitValidationError::TargetUnderSubtreeTombstone {
+            operand: CommitOperand::CreateParent,
+            inode_id: InodeId(2),
             ..
         }
     ));
@@ -561,7 +562,8 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     .expect_err("replace under tombstone");
     assert!(matches!(
         replace_error,
-        CommitValidationError::ReplaceFileUnderSubtreeTombstone {
+        CommitValidationError::TargetUnderSubtreeTombstone {
+            operand: CommitOperand::ReplaceTarget,
             inode_id: InodeId(3),
             ..
         }
@@ -592,7 +594,8 @@ async fn restore_revision_validation_rejects_missing_inode() {
         .expect_err("restore missing inode");
     assert!(matches!(
         error,
-        CommitValidationError::RestoreRevisionInodeMissing {
+        CommitValidationError::InodeMissing {
+            operand: CommitOperand::RestoreTarget,
             inode_id: InodeId(99),
         }
     ));
@@ -618,9 +621,11 @@ async fn restore_revision_validation_rejects_non_file_target() {
         .expect_err("restore non-file");
     assert!(matches!(
         error,
-        CommitValidationError::RestoreRevisionInodeNotFile {
+        CommitValidationError::InodeWrongKind {
+            operand: CommitOperand::RestoreTarget,
             inode_id: InodeId(2),
-            actual_kind: InodeKind::Directory,
+            expected: InodeKind::File,
+            actual: InodeKind::Directory,
         }
     ));
 }
@@ -652,13 +657,17 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     .await
     .expect_err("restore stale base");
     assert!(matches!(
-        stale_base,
-        CommitValidationError::RestoreRevisionBaseRevisionMismatch {
+        &stale_base,
+        CommitValidationError::BaseRevisionMismatch {
             inode_id: InodeId(3),
             expected: RevisionNo(1),
             actual: Some(RevisionNo(2)),
         }
     ));
+    assert_eq!(
+        stale_base.to_string(),
+        "base revision mismatch for inode `3`: expected revision 1, found revision 2"
+    );
 
     let missing_source = build_commit_plan(
         &planned(vec![CommitOp::RestoreRevision {
@@ -800,7 +809,8 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     .expect_err("restore under a covering tombstone");
     assert!(matches!(
         error,
-        CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
+        CommitValidationError::TargetUnderSubtreeTombstone {
+            operand: CommitOperand::RestoreTarget,
             inode_id: InodeId(3),
             ..
         }
