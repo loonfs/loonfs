@@ -180,22 +180,28 @@ def remove_exact(source, snippet, expected_count, label):
     return source.replace(snippet, "")
 
 
+def replace_once(source, old, new):
+    actual_count = source.count(old)
+    assert actual_count == 1, f"expected exactly one match for {old!r}, found {actual_count}"
+    return source.replace(old, new)
+
+
 path = pathlib.Path("generated/python/core/pydantic_utilities.py")
 source = path.read_text()
 import_block = 'if TYPE_CHECKING:\n    from .http_sse._models import ServerSentEvent\n\n'
-assert source.count(import_block) == 1, "SSE type-checking import not found"
-source = source.replace(import_block, "")
+source = replace_once(source, import_block, "")
 start = source.index("def parse_sse_obj(")
 end = source.index("_type_adapter_cache")
 path.write_text(source[:start] + source[end:])
 
 request_options_path = pathlib.Path("generated/python/core/request_options.py")
 source = request_options_path.read_text()
-source = source.replace(
+source = replace_once(
+    source,
     "        - timeout_in_seconds: int. Deprecated alias for `timeout`; both are in seconds. Prefer `timeout`.\n\n",
     "",
 )
-source = source.replace("    timeout_in_seconds: NotRequired[int]\n", "")
+source = replace_once(source, "    timeout_in_seconds: NotRequired[int]\n", "")
 source = remove_exact(
     source,
     "    stream_reconnection_enabled: NotRequired[bool]\n",
@@ -212,7 +218,8 @@ request_options_path.write_text(source)
 
 http_client_path = pathlib.Path("generated/python/core/http_client.py")
 source = http_client_path.read_text()
-source = source.replace(
+source = replace_once(
+    source,
     '            else request_options.get("timeout_in_seconds")\n'
     '            if request_options is not None and request_options.get("timeout_in_seconds") is not None\n',
     "",
@@ -363,6 +370,12 @@ PY
 import pathlib
 import sys
 
+
+def replace_once(source, old, new):
+    actual_count = source.count(old)
+    assert actual_count == 1, f"expected exactly one match for {old!r}, found {actual_count}"
+    return source.replace(old, new)
+
 package_root = pathlib.Path("generated") / sys.argv[1]
 
 base_client_path = package_root / "BaseClient.ts"
@@ -372,18 +385,19 @@ client_stream_options = (
     "    stream?: { reconnectionEnabled?: boolean; maxReconnectionAttempts?: number };\n"
 )
 assert source.count(client_stream_options) == 1, "generated BaseClient.ts client stream options not found"
-source = source.replace(client_stream_options, "")
+source = replace_once(source, client_stream_options, "")
 request_stream_options = (
     "    /** Options for SSE stream reconnection behavior. Has no effect on non-resumable endpoints. */\n"
     "    stream?: { reconnectionEnabled?: boolean; maxReconnectionAttempts?: number };\n"
 )
 assert source.count(request_stream_options) == 1, "generated BaseClient.ts request stream options not found"
-source = source.replace(request_stream_options, "")
+source = replace_once(source, request_stream_options, "")
 base_client_path.write_text(source)
 
 response_path = package_root / "core/fetcher/APIResponse.ts"
 source = response_path.read_text()
-source = source.replace(
+source = replace_once(
+    source,
     '    /**\n     * @deprecated Use `rawResponse` instead\n     */\n'
     "    headers?: Record<string, any>;\n",
     "",
@@ -392,12 +406,14 @@ response_path.write_text(source)
 
 fetcher_path = package_root / "core/fetcher/Fetcher.ts"
 source = fetcher_path.read_text()
-source = source.replace('import { createRequestUrl } from "./createRequestUrl.js";\n', "")
-source = source.replace(
+source = replace_once(source, 'import { createRequestUrl } from "./createRequestUrl.js";\n', "")
+source = replace_once(
+    source,
     'import { redactUrl, SENSITIVE_QUERY_PARAMS } from "./redactUrl.js";',
     'import { redactUrl } from "./redactUrl.js";',
 )
-source = source.replace(
+source = replace_once(
+    source,
     '        /**\n'
     '         * @deprecated Prefer `queryString` (produced by `core.url.queryBuilder()`).\n'
     '         * Retained for backwards compatibility with custom fetchers and callers that\n'
@@ -409,15 +425,17 @@ source = source.replace(
 start = source.index("function redactQueryParameters(")
 end = source.index("async function getHeaders(", start)
 source = source[:start] + source[end:]
-source = source.replace(
+source = replace_once(
+    source,
     '    } else {\n        url = createRequestUrl(args.url, args.queryParameters);\n',
     "",
 )
-source = source.replace(
+source = replace_once(
+    source,
     "            queryParameters: redactQueryParameters(args.queryParameters),\n",
     "",
 )
-source = source.replace("                headers: response.headers,\n", "")
+source = replace_once(source, "                headers: response.headers,\n", "")
 fetcher_path.write_text(source)
 
 (package_root / "core/fetcher/createRequestUrl.ts").unlink()
@@ -426,7 +444,8 @@ index_path = package_root / "index.ts"
 source = index_path.read_text()
 generated_export = 'export { LoonFSClient } from "./Client.js";\n'
 assert source.count(generated_export) == 1, "generated index.ts client export not found"
-source = source.replace(
+source = replace_once(
+    source,
     generated_export,
     'export { LoonFSClient } from "./transfers.js";\n'
     'export type {\n'
