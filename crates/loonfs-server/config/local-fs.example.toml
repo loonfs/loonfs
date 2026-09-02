@@ -98,7 +98,7 @@ writer_id = "loonfs-server-local"
 
 # Omit the `[grep]` table and this server composes no grep at all: uniform
 # `not_supported` responses, and no `query.grep` feature or limits advertised.
-# A `[grep]` table with no `mode` both serves searches and maintains the index.
+# A `[grep]` table must set `mode`.
 # `serve_only` answers searches over an index another process maintains;
 # `maintain_only` maintains the index without answering searches; `disabled`
 # turns both off again.

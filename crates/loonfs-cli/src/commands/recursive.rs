@@ -4,7 +4,9 @@
 //! uses the corresponding single-file operation and commits independently.
 //! Transfers use bounded concurrency and report failures per file.
 
-use super::context::CommandContext;
+use super::context::{
+    create_directory_tolerating_existing, CommandContext, RemoteDirectoryOutcome,
+};
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
     TreeTransferFailure,
@@ -15,7 +17,7 @@ use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
 use futures::StreamExt;
-use loonfs_api::{CheckpointId, DestinationBehavior, ErrorCode, InodeKind, PathEntryKind};
+use loonfs_api::{CheckpointId, DestinationBehavior, PathEntryKind};
 use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -161,41 +163,22 @@ pub(crate) async fn run_put_tree(
                 continue;
             }
         };
-        let outcome = match context
-            .target
-            .create_directory(
-                &spec,
-                &CreateDirectoryOptions {
-                    commit: CommitOptions {
-                        actor: context.actor.clone(),
-                        commit_id: None,
-                        message: message.clone(),
-                    },
-                    parents: true,
+        let outcome = match create_directory_tolerating_existing(
+            context,
+            &spec,
+            &CreateDirectoryOptions {
+                commit: CommitOptions {
+                    actor: context.actor.clone(),
+                    commit_id: None,
+                    message: message.clone(),
                 },
-            )
-            .await
+                parents: true,
+            },
+        )
+        .await
         {
-            Ok(_) => DirectoryOutcome::Created,
-            Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
-                match context
-                    .target
-                    .get_path_entry_without_attributes(&spec)
-                    .await
-                {
-                    Ok(entry) if entry.inode_kind() == InodeKind::Directory => {
-                        DirectoryOutcome::AlreadyExists
-                    }
-                    Ok(_) => {
-                        tally.fail(remote, error.into());
-                        continue;
-                    }
-                    Err(error) => {
-                        tally.fail(remote, error.into());
-                        continue;
-                    }
-                }
-            }
+            Ok(RemoteDirectoryOutcome::Created(_)) => DirectoryOutcome::Created,
+            Ok(RemoteDirectoryOutcome::AlreadyExists { .. }) => DirectoryOutcome::AlreadyExists,
             Err(error) => {
                 tally.fail(remote, error.into());
                 continue;
@@ -426,28 +409,34 @@ pub(crate) async fn run_copy_tree(
                 continue;
             }
         };
-        match context
-            .target
-            .create_directory(
-                &spec,
-                &CreateDirectoryOptions {
-                    commit: CommitOptions {
-                        actor: context.actor.clone(),
-                        commit_id: None,
-                        message: message.clone(),
-                    },
-                    parents: components.is_empty(),
+        let outcome = match create_directory_tolerating_existing(
+            context,
+            &spec,
+            &CreateDirectoryOptions {
+                commit: CommitOptions {
+                    actor: context.actor.clone(),
+                    commit_id: None,
+                    message: message.clone(),
                 },
-            )
-            .await
+                parents: components.is_empty(),
+            },
+        )
+        .await
         {
-            Ok(_) => {
-                tally.record_directory(DirectoryOutcome::Created);
-                if runtime.progress.human_lines_enabled() {
-                    write_stderr_progress(format_args!("created {}", spec_target(&spec)));
-                }
+            Ok(RemoteDirectoryOutcome::Created(_)) => DirectoryOutcome::Created,
+            Ok(RemoteDirectoryOutcome::AlreadyExists { .. }) => DirectoryOutcome::AlreadyExists,
+            Err(error) => {
+                tally.fail(remote, error.into());
+                continue;
             }
-            Err(error) => tally.fail(remote, error.into()),
+        };
+        tally.record_directory(outcome);
+        if runtime.progress.human_lines_enabled() {
+            write_stderr_progress(format_args!(
+                "{} {}",
+                outcome.progress_label(),
+                spec_target(&spec)
+            ));
         }
     }
 

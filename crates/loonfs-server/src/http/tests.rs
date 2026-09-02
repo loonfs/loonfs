@@ -3442,7 +3442,10 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         writer_id: writer_id.to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
-        grep: crate::config::GrepConfig::default(),
+        grep: crate::config::GrepConfig {
+            mode: crate::config::GrepMode::ServeAndMaintain,
+            ..crate::config::GrepConfig::default()
+        },
         maintenance: crate::config::MaintenanceMode::Automatic,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,

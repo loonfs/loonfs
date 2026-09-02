@@ -52,9 +52,8 @@ pub struct ServerConfig {
     pub local_cache: Option<LocalCacheConfig>,
     /// What this server does about grep, plus the bounded-step budgets its
     /// index maintenance runs under. A config with no `[grep]` table
-    /// composes no grep at all; a table that names no `mode` both serves
-    /// queries and maintains the index.
-    #[serde(default = "grep_absent")]
+    /// composes no grep at all; a present table must name its `mode`.
+    #[serde(default)]
     pub grep: GrepConfig,
     /// Whether this server maintains the namespaces it touches by itself.
     /// Automatic by default; see [`MaintenanceMode`].
@@ -205,17 +204,6 @@ fn default_max_concurrent_maintenance() -> usize {
     loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
 }
 
-/// Default used when no `[grep]` table is present.
-///
-/// This disables grep routes and maintenance until the deployment explicitly
-/// configures grep.
-fn grep_absent() -> GrepConfig {
-    GrepConfig {
-        mode: GrepMode::Disabled,
-        ..GrepConfig::default()
-    }
-}
-
 /// The server's `[local_cache]` table: where the node-local cache of encoded
 /// metadata blocks lives, and how much memory and disk it may use.
 ///
@@ -297,7 +285,7 @@ impl MaintenanceMode {
 /// namespaces it never answers searches about; the reference deployment
 /// does both. Every combination is named here, so none has to be validated
 /// away.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrepMode {
     /// Neither answer grep queries nor maintain the index.
@@ -307,7 +295,6 @@ pub enum GrepMode {
     /// Maintain the index without answering queries about it.
     MaintainOnly,
     /// Answer queries and maintain the index in this process.
-    #[default]
     ServeAndMaintain,
 }
 
@@ -325,14 +312,23 @@ impl GrepMode {
 }
 
 /// The server's `[grep]` table.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrepConfig {
     pub mode: GrepMode,
     /// Flattening preserves the existing `[grep]` keys while leaving the
     /// worker policy itself as their one in-memory owner.
     #[serde(flatten)]
     pub worker: GrepWorkerConfig,
+}
+
+impl Default for GrepConfig {
+    fn default() -> Self {
+        Self {
+            mode: GrepMode::Disabled,
+            worker: GrepWorkerConfig::default(),
+        }
+    }
 }
 
 impl GrepConfig {
@@ -1337,6 +1333,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [grep]
+mode = "serve_and_maintain"
 max_decoded_input_rows_per_step = 0
 
 [store]
@@ -1526,6 +1523,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [grep]
+mode = "serve_and_maintain"
 max_files_per_stepp = 3
 
 [store]
@@ -1839,7 +1837,7 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn a_grep_table_without_a_mode_serves_and_maintains() {
+    fn a_grep_table_without_a_mode_is_rejected() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1854,18 +1852,8 @@ root = "/tmp/loonfs-server"
 "#,
         );
 
-        let config = load_server_config(&path).expect("load config");
-        assert_eq!(config.grep, super::GrepConfig::default());
-        assert_eq!(config.grep.mode, super::GrepMode::ServeAndMaintain);
-        assert_eq!(config.grep.worker, loonfs_grep::GrepWorkerConfig::default());
-        assert_eq!(
-            config
-                .grep
-                .worker_config()
-                .build_policy()
-                .expect("valid default grep policy"),
-            loonfs_grep::GramIndexBuildPolicy::default(),
-        );
+        let error = load_server_config(&path).expect_err("mode is required");
+        assert!(error.to_string().contains("mode"), "{error}");
     }
 
     #[test]
@@ -1914,6 +1902,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [grep]
+mode = "serve_and_maintain"
 max_concurrent_steps = 7
 
 [store]
@@ -1977,6 +1966,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [grep]
+mode = "serve_and_maintain"
 max_files_per_step = 1024
 max_delta_runs = 3
 

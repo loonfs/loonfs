@@ -2,15 +2,17 @@
 
 use super::output::CommandFailure;
 use crate::args::{ActorSelectorArgs, CommandKind, TargetSelectorArgs};
+use crate::backend_error::BackendError;
 use crate::config::{ConfigLocation, ConfigSource};
 use crate::error::CliError;
 use crate::resolve::{
     load_cli_config, resolve_actor, resolve_namespace, resolve_target_profile_from_config,
 };
 use loonfs_api::{
-    AbsolutePath, ActorRef, ChangeSeq, ErrorCode, InodeId, NamespaceId, PublicOrdinalRangeError,
+    AbsolutePath, ActorRef, ChangeSeq, CommitResponse, ErrorCode, InodeId, InodeKind, NamespaceId,
+    PublicOrdinalRangeError,
 };
-use loonfs_client::NamespacePath;
+use loonfs_client::{CreateDirectoryOptions, NamespacePath};
 use std::path::{Path, PathBuf};
 
 pub(crate) struct CommandContext {
@@ -19,6 +21,38 @@ pub(crate) struct CommandContext {
     pub(crate) namespace: NamespaceId,
     pub(crate) actor: ActorRef,
     pub(crate) target: crate::resolve::ResolvedTarget,
+}
+
+pub(crate) enum RemoteDirectoryOutcome {
+    Created(CommitResponse),
+    AlreadyExists {
+        inode_id: InodeId,
+        head_seq: ChangeSeq,
+    },
+}
+
+pub(crate) async fn create_directory_tolerating_existing(
+    context: &CommandContext,
+    spec: &NamespacePath,
+    options: &CreateDirectoryOptions,
+) -> Result<RemoteDirectoryOutcome, BackendError> {
+    match context.target.create_directory(spec, options).await {
+        Ok(result) => Ok(RemoteDirectoryOutcome::Created(result)),
+        Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
+            let existing = context
+                .target
+                .get_path_entry_without_attributes(spec)
+                .await?;
+            if existing.inode_kind() != InodeKind::Directory {
+                return Err(error);
+            }
+            Ok(RemoteDirectoryOutcome::AlreadyExists {
+                inode_id: existing.inode_id,
+                head_seq: existing.head_seq,
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Attributes a failure to a resolved profile and mode, for command paths
