@@ -112,6 +112,12 @@ impl ApiResponseError {
 
         Self::runtime(error)
     }
+
+    pub(super) fn for_namespace(
+        namespace_id: &NamespaceId,
+    ) -> impl FnOnce(RuntimeError) -> Self + '_ {
+        |error| Self::runtime_for_namespace(namespace_id, error)
+    }
 }
 
 pub(super) fn status_for_core_error_code(code: ErrorCode) -> StatusCode {

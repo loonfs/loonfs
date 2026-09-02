@@ -5,7 +5,8 @@ use loonfs_client::{
     Client, ClientConfig, NamespacePath, PutFileOptions, ReadFileOptions, StatPathOptions,
 };
 use loonfs_server::{
-    app, GrepConfig, MaintenanceMode, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
+    app, AppOptions, GrepConfig, MaintenanceMode, RuntimeCacheConfigOverrides, ServerConfig,
+    StoreConfig,
 };
 use tempfile::TempDir;
 
@@ -55,7 +56,9 @@ async fn start_server(name: &str) -> TestServer {
         .await
         .expect("bind listener");
     let address = listener.local_addr().expect("listener address");
-    let (router, _writer, _cache) = app(config).await.expect("build server");
+    let (router, _state) = app(config, AppOptions::default())
+        .await
+        .expect("build server");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });

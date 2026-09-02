@@ -529,11 +529,10 @@ fn kind_label(kind: StoredMetadataBlockKind) -> &'static str {
 
 /// Where one block kind's counter sits in a [`PerKind`] array.
 fn kind_index(kind: StoredMetadataBlockKind) -> usize {
-    match kind {
-        StoredMetadataBlockKind::Data => 0,
-        StoredMetadataBlockKind::Index => 1,
-        StoredMetadataBlockKind::Filter => 2,
-    }
+    BLOCK_KINDS
+        .iter()
+        .position(|candidate| *candidate == kind)
+        .expect("every block kind should be listed")
 }
 
 /// The counters this cache reports, every one registered at construction.

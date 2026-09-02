@@ -12,7 +12,6 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
 use loonfs_api::{AbsolutePath, NamespaceId};
-use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -82,31 +81,20 @@ struct NamespaceSegment {
 }
 
 /// Parses the `{namespace_id}` path segment.
-///
-/// The handler reads the result after authorization. This keeps malformed
-/// namespace ids from changing an unauthorized response from 401 to 400.
-pub(super) struct NamespaceIdPath(Result<NamespaceId, ApiResponseError>);
-
-impl NamespaceIdPath {
-    /// Returns the parsed namespace id, or the same 400
-    /// `invalid_namespace_id` response [`parse_namespace_id`] produces.
-    pub(super) fn into_id(self) -> Result<NamespaceId, ApiResponseError> {
-        self.0
-    }
-}
+pub(super) struct NamespaceIdPath(pub(super) NamespaceId);
 
 impl<S> FromRequestParts<S> for NamespaceIdPath
 where
     S: Send + Sync,
 {
-    type Rejection = Infallible;
+    type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match AxumPath::<NamespaceSegment>::from_request_parts(parts, state).await {
             Ok(AxumPath(NamespaceSegment { namespace_id })) => {
-                Ok(Self(parse_namespace_id(namespace_id)))
+                parse_namespace_id(namespace_id).map(Self)
             }
-            Err(rejection) => Ok(Self(Err(invalid_path_params(&rejection)))),
+            Err(rejection) => Err(invalid_path_params(&rejection)),
         }
     }
 }
@@ -118,51 +106,36 @@ fn invalid_path_params(rejection: &PathRejection) -> ApiResponseError {
     )
 }
 
-/// Path extractor that never rejects at extraction: the parse outcome is
-/// surfaced through [`AppPath::into_params`] inside the handler, after
-/// `authorize`, so malformed path parameters answer inside the JSON error
-/// envelope and never turn an unauthorized request's 401 into a 400.
-pub(super) struct AppPath<T>(Result<T, ApiResponseError>);
-
-impl<T> AppPath<T> {
-    pub(super) fn into_params(self) -> Result<T, ApiResponseError> {
-        self.0
-    }
-}
+/// Path extractor whose rejections stay inside the error contract.
+pub(super) struct AppPath<T>(pub(super) T);
 
 impl<S, T> FromRequestParts<S> for AppPath<T>
 where
     S: Send + Sync,
     T: serde::de::DeserializeOwned + Send,
 {
-    type Rejection = Infallible;
+    type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match AxumPath::<T>::from_request_parts(parts, state).await {
-            Ok(AxumPath(value)) => Ok(Self(Ok(value))),
-            Err(rejection) => Ok(Self(Err(invalid_path_params(&rejection)))),
+            Ok(AxumPath(value)) => Ok(Self(value)),
+            Err(rejection) => Err(invalid_path_params(&rejection)),
         }
     }
 }
 
-/// Defers query-string errors until the handler has authorized the request.
-pub(super) struct AppQuery<T>(Result<T, ApiResponseError>);
-
-impl<T> AppQuery<T> {
-    pub(super) fn into_params(self) -> Result<T, ApiResponseError> {
-        self.0
-    }
-}
+/// Query extractor whose rejections stay inside the error contract.
+pub(super) struct AppQuery<T>(pub(super) T);
 
 impl<S, T> FromRequestParts<S> for AppQuery<T>
 where
     S: Send + Sync,
     T: serde::de::DeserializeOwned,
 {
-    type Rejection = Infallible;
+    type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(Self(decode_query(parts.uri.query().unwrap_or_default())))
+        decode_query(parts.uri.query().unwrap_or_default()).map(Self)
     }
 }
 
@@ -206,6 +179,8 @@ fn failed_query_parameter(path: &serde_path_to_error::Path) -> Option<String> {
 /// the body is read so a malformed body never turns an unauthorized
 /// request's 401 into a 400.
 pub(super) struct AppJson<T>(pub(super) T);
+
+const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 async fn extract_json<S, T>(
     req: axum::extract::Request,
@@ -314,11 +289,11 @@ where
     type Rejection = ApiResponseError;
 
     async fn from_request(
-        req: axum::extract::Request,
+        mut req: axum::extract::Request,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorize(state.config.auth_policy(), req.headers())?;
-        extract_json(req, state, json_body_too_large_error())
+        DefaultBodyLimit::max(MAX_JSON_BODY_BYTES).apply(&mut req);
+        extract_json(req, state, body_too_large_error(MAX_JSON_BODY_BYTES))
             .await
             .map(AppJson)
     }
@@ -373,9 +348,8 @@ where
         mut req: axum::extract::Request,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorize(state.config.auth_policy(), req.headers())?;
         DefaultBodyLimit::max(MAX_BYTES).apply(&mut req);
-        extract_json(req, state, upload_control_body_too_large_error(MAX_BYTES))
+        extract_json(req, state, body_too_large_error(MAX_BYTES))
             .await
             .map(Self)
     }
@@ -419,15 +393,9 @@ impl<const MAX_BYTES: usize> FromRequest<AppState> for UploadBodyBytes<MAX_BYTES
         req: axum::extract::Request,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorize(state.config.auth_policy(), req.headers())?;
-        extract_body_bytes(
-            req,
-            state,
-            MAX_BYTES,
-            upload_control_body_too_large_error(MAX_BYTES),
-        )
-        .await
-        .map(Self)
+        extract_body_bytes(req, state, MAX_BYTES, body_too_large_error(MAX_BYTES))
+            .await
+            .map(Self)
     }
 }
 
@@ -534,7 +502,6 @@ impl FromRequest<AppState> for UploadBodyStream {
         req: axum::extract::Request,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorize(state.config.auth_policy(), req.headers())?;
         let permit = state
             .upload_permits
             .clone()
@@ -579,29 +546,10 @@ fn upload_body_too_large_error() -> ApiResponseError {
     )
 }
 
-/// 413 for ordinary JSON routes that retain the framework's default bound.
-fn json_body_too_large_error() -> ApiResponseError {
+fn body_too_large_error(limit: usize) -> ApiResponseError {
     ApiResponseError::new(
         ErrorCode::ContentTooLarge,
-        "JSON request body exceeds this route's body limit",
-    )
-}
-
-/// Returns a 413 error for an upload request that exceeds its route's limit.
-fn upload_control_body_too_large_error(max_bytes: usize) -> ApiResponseError {
-    ApiResponseError::new(
-        ErrorCode::ContentTooLarge,
-        &format!("upload-control request body exceeds this route's limit of {max_bytes} bytes"),
-    )
-}
-
-/// Returns a 413 error when optional JSON exceeds its body-size limit.
-fn optional_json_body_too_large_error() -> ApiResponseError {
-    ApiResponseError::new(
-        ErrorCode::ContentTooLarge,
-        &format!(
-            "JSON request body exceeds this route's limit of {MAX_OPTIONAL_JSON_BODY_BYTES} bytes"
-        ),
+        &format!("request body exceeds this route's limit of {limit} bytes"),
     )
 }
 
@@ -621,12 +569,11 @@ where
         req: axum::extract::Request,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorize(state.config.auth_policy(), req.headers())?;
         let body = extract_body_bytes(
             req,
             state,
             MAX_OPTIONAL_JSON_BODY_BYTES,
-            optional_json_body_too_large_error(),
+            body_too_large_error(MAX_OPTIONAL_JSON_BODY_BYTES),
         )
         .await?;
         if body.is_empty() {

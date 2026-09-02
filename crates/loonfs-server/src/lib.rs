@@ -15,12 +15,10 @@ pub use config::{
     MaintenanceMode, RuntimeCacheConfigOverrides, ServerConfig, ServerConfigError, StoreConfig,
     TlsServerConfig,
 };
-#[cfg(feature = "test-support")]
-pub use http::app_with_test_transfers;
 #[cfg(feature = "openapi")]
 pub use http::openapi_document;
 pub use http::{
-    app, app_with_store, check_config, probe_store, serve, serve_with_shutdown, ServeError,
+    app, check_config, probe_store, serve, serve_with_shutdown, AppOptions, AppState, ServeError,
     TlsConfigError,
 };
 pub use local_cache::FoyerStoredMetadataBlockCache;

@@ -2,9 +2,10 @@
 // HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
 
 use super::error::{status_for_core_error_code, ServedErrorCode};
+use super::metrics::ServerMetrics;
 use super::{
-    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path,
-    request_log_severity, AppState, RequestLogSeverity, SharedObjectStore,
+    app, build_handles, request_log_severity, AppOptions, AppState, RequestLogSeverity,
+    SharedObjectStore,
 };
 use crate::config::RuntimeCacheConfigOverrides;
 use crate::{ServerConfig, StoreConfig};
@@ -34,6 +35,13 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::path::Path;
+
+fn options_with_store(store: SharedObjectStore) -> AppOptions {
+    AppOptions {
+        store: Some(store),
+        direct_transfers: None,
+    }
+}
 
 const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "aborted_at_ms",
@@ -519,12 +527,13 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
     use tower::ServiceExt;
 
     let temp_dir = tempdir().expect("tempdir");
-    let router = app_with_store(
+    let router = app(
         test_config(temp_dir.path(), "provider-hygiene-writer"),
-        Arc::new(PoisonProviderStore),
+        options_with_store(Arc::new(PoisonProviderStore)),
     )
     .await
-    .expect("build app");
+    .expect("build app")
+    .0;
     let response = router
         .oneshot(
             axum::http::Request::builder()
@@ -674,10 +683,12 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     let metrics_path = metrics_dir.path().join("object-store.ndjson");
 
     {
-        let (writer, _reader, _admin) = build_handles_with_metrics_jsonl_path(
+        let (writer, _reader, _admin) = build_handles(
             &config,
             store,
+            &ServerMetrics::new(),
             Some(metrics_path.clone().into_os_string()),
+            None,
         )
         .await
         .expect("build handles");
@@ -697,7 +708,7 @@ async fn app_validates_directly_built_configs() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config(temp_dir.path(), "app-validate-writer");
     config.max_concurrent_uploads = 0;
-    match super::app(config).await {
+    match app(config, AppOptions::default()).await {
         Err(crate::config::ServerConfigError::InvalidField { field, .. }) => {
             assert_eq!(field, "max_concurrent_uploads");
         }
@@ -712,9 +723,9 @@ async fn admin_namespace_diagnostics_route_answers_storage_fields() {
 
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let (router, state) = app_with_store_and_state(
+    let (router, state) = app(
         test_config(temp_dir.path(), "namespace-diagnostics-route-writer"),
-        store,
+        options_with_store(store),
     )
     .await
     .expect("build app");
@@ -840,12 +851,13 @@ async fn deadline_exemptions_name_served_routes_and_cover_both_content_spellings
 
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let router = app_with_store(
+    let router = app(
         test_config(temp_dir.path(), "deadline-exempt-route-writer"),
-        store,
+        options_with_store(store),
     )
     .await
-    .expect("build app");
+    .expect("build app")
+    .0;
 
     for content_route in [
         "/v0/namespaces/{namespace_id}/filesystem/content",
@@ -887,7 +899,7 @@ async fn a_server_without_the_table_builds_no_local_cache() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "no-local-cache-writer");
 
-    let (_router, state) = app_with_store_and_state(config, store)
+    let (_router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
     assert!(state.local_cache.is_none());
@@ -901,7 +913,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "cache-metrics-writer");
 
-    let (_router, state) = app_with_store_and_state(config, store)
+    let (_router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
     let rendered = state.metrics.render(None, 0, 0);
@@ -951,7 +963,7 @@ async fn a_configured_local_cache_is_built_and_scraped() {
     let mut config = test_config(temp_dir.path(), "local-cache-writer");
     config.local_cache = Some(test_local_cache_config(cache_dir.path()));
 
-    let (_router, state) = app_with_store_and_state(config, store)
+    let (_router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
     let local_cache = state.local_cache.clone().expect("a local cache");
@@ -973,7 +985,7 @@ async fn graceful_shutdown_closes_the_local_cache() {
     config.local_cache = Some(test_local_cache_config(cache_dir.path()));
     let shutdown_deadline_ms = config.shutdown_deadline_ms;
 
-    let (router, state) = app_with_store_and_state(config, store)
+    let (router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
     let local_cache = state.local_cache.clone().expect("a local cache");
@@ -1151,7 +1163,7 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
 
     blocking_store.block_next();
     let config = test_config(temp_dir.path(), "grep-shutdown-server");
-    let (_router, state) = super::app_with_store_and_direct_transfers(config, store, None)
+    let (_router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
     state
@@ -1223,10 +1235,9 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
         OperationClass::CompareAndSwap,
     ));
     let config = test_config(temp_dir.path(), "shutdown-order-server");
-    let (_router, state) = super::app_with_store_and_direct_transfers(
+    let (_router, state) = app(
         config,
-        blocking.clone() as SharedObjectStore,
-        None,
+        options_with_store(blocking.clone() as SharedObjectStore),
     )
     .await
     .expect("build app");
@@ -1322,7 +1333,7 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "grep-observer-server");
-    let (_router, state) = super::app_with_store_and_direct_transfers(config, store, None)
+    let (_router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
     let namespace_id = namespace_id("grep-observer");
@@ -2143,7 +2154,10 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = app_with_store(config, store).await.expect("build app");
+    let router = app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -2175,6 +2189,105 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
     }
 
     server.abort();
+}
+
+#[tokio::test]
+async fn every_route_except_health_and_readiness_requires_authorization() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let router = app(
+        test_config(temp_dir.path(), "server-writer"),
+        options_with_store(store),
+    )
+    .await
+    .expect("build app")
+    .0;
+    let protected_routes = [
+        ("GET", "/metrics"),
+        ("GET", "/v0/capabilities"),
+        ("POST", "/v0/namespaces"),
+        ("GET", "/v0/namespaces/demo"),
+        ("DELETE", "/v0/namespaces/demo"),
+        ("POST", "/v0/namespaces/demo/forks"),
+        ("GET", "/v0/namespaces/demo/snapshots"),
+        ("POST", "/v0/namespaces/demo/snapshots"),
+        ("POST", "/v0/namespaces/demo/snapshots/chk_test/extend"),
+        ("POST", "/v0/namespaces/demo/snapshots/chk_test/release"),
+        ("GET", "/v0/admin/namespaces/demo/diagnostics"),
+        ("GET", "/v0/namespaces/demo/filesystem/entries"),
+        ("GET", "/v0/namespaces/demo/filesystem/entry"),
+        ("GET", "/v0/namespaces/demo/filesystem/content"),
+        ("POST", "/v0/namespaces/demo/filesystem/downloads"),
+        ("GET", "/v0/namespaces/demo/grep"),
+        ("GET", "/v0/admin/namespaces/demo/grep/index"),
+        ("POST", "/v0/admin/namespaces/demo/grep/index/enable"),
+        ("POST", "/v0/admin/namespaces/demo/grep/index/disable"),
+        ("POST", "/v0/admin/namespaces/demo/grep/index/gc"),
+        ("GET", "/v0/namespaces/demo/filesystem/revisions"),
+        ("GET", "/v0/namespaces/demo/inodes/ino_1"),
+        ("GET", "/v0/namespaces/demo/inodes/ino_1/children"),
+        ("GET", "/v0/namespaces/demo/inodes/ino_1/revisions"),
+        (
+            "GET",
+            "/v0/namespaces/demo/inodes/ino_1/revisions/1/content",
+        ),
+        (
+            "POST",
+            "/v0/namespaces/demo/inodes/ino_1/revisions/1/downloads",
+        ),
+        ("GET", "/v0/namespaces/demo/filesystem/trash"),
+        ("POST", "/v0/namespaces/demo/commits"),
+        ("POST", "/v0/namespaces/demo/uploads"),
+        ("PUT", "/v0/namespaces/demo/uploads/upl_test/content"),
+        ("POST", "/v0/namespaces/demo/uploads/upl_test/parts"),
+        ("POST", "/v0/namespaces/demo/uploads/upl_test/complete"),
+        ("POST", "/v0/namespaces/demo/uploads/upl_test/abort"),
+        ("GET", "/v0/namespaces/demo/uploads/upl_test"),
+        ("GET", "/v0/namespaces/demo/changes"),
+        ("GET", "/v0/admin/namespaces/demo/checkpoints"),
+        ("POST", "/v0/admin/namespaces/demo/checkpoints"),
+        (
+            "POST",
+            "/v0/admin/namespaces/demo/checkpoints/chk_test/release",
+        ),
+        ("POST", "/v0/admin/namespaces/demo/maintenance/run"),
+        ("POST", "/v0/admin/store/probe"),
+    ];
+
+    for (method, uri) in protected_routes {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .expect("route request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri}"
+        );
+    }
+
+    for uri in ["/health", "/readiness"] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .expect("public request"),
+            )
+            .await
+            .expect("public response");
+        assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+    }
 }
 
 /// Sends a request and checks its JSON error response.
@@ -2215,7 +2328,10 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = app_with_store(config, store).await.expect("build app");
+    let router = app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -2461,7 +2577,10 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = app_with_store(config, store).await.expect("build app");
+    let router = app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -2631,7 +2750,10 @@ async fn http_unknown_routes_and_methods_answer_in_envelope() {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = app_with_store(config, store).await.expect("build app");
+    let router = app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -2693,7 +2815,10 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = app_with_store(config, store).await.expect("build app");
+    let router = app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -2790,7 +2915,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = app_with_store_and_state(config, store)
+    let (router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
     let server = tokio::spawn(async move {
@@ -2870,7 +2995,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = app_with_store_and_state(config, store)
+    let (router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
     let server = tokio::spawn(async move {
@@ -2984,7 +3109,7 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
     .await;
     let mut config = test_config(temp_dir.path(), "server-writer");
     config.max_concurrent_downloads = 1;
-    let (router, state) = app_with_store_and_state(config, store)
+    let (router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
 
@@ -3064,7 +3189,10 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = app_with_store(config, store).await.expect("build app");
+    let router = app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -3152,7 +3280,7 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = app_with_store_and_state(config, store)
+    let (router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
     let slow_started = Arc::new(tokio::sync::Notify::new());
@@ -3406,7 +3534,10 @@ async fn start_server_with_config(store: SharedObjectStore, config: ServerConfig
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = app_with_store(config, store).await.expect("build app");
+    let router = app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -3564,7 +3695,6 @@ fn assert_api_error<T: std::fmt::Debug>(
 /// verification) runs end to end without a real bucket.
 mod direct_download {
     use super::*;
-    use crate::http::app_with_store_and_direct_transfers;
     use loonfs_api::{
         v0::{CompleteMultipartUploadRequest, UploadContentClaim},
         Checksum, ChecksumAlgorithm, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
@@ -3779,9 +3909,15 @@ mod direct_download {
         if let Some(max_upload_bytes) = max_upload_bytes {
             config.max_upload_bytes = max_upload_bytes;
         }
-        let (router, _state) = app_with_store_and_direct_transfers(config, store, direct_transfers)
-            .await
-            .expect("build app");
+        let (router, _state) = app(
+            config,
+            AppOptions {
+                store: Some(store),
+                direct_transfers,
+            },
+        )
+        .await
+        .expect("build app");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");

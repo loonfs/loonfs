@@ -18,8 +18,8 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, GrepConfig, GrepMode, MaintenanceMode, RuntimeCacheConfigOverrides, ServerConfig,
-    StoreConfig,
+    app, AppOptions, GrepConfig, GrepMode, MaintenanceMode, RuntimeCacheConfigOverrides,
+    ServerConfig, StoreConfig,
 };
 use serde::de::DeserializeOwned;
 use std::num::NonZeroUsize;
@@ -32,9 +32,12 @@ use tower::ServiceExt;
 async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "disabled").await;
-    let (router, server, _local_cache) = app(test_config(temp_dir.path(), GrepMode::Disabled))
-        .await
-        .expect("build app");
+    let (router, server) = app(
+        test_config(temp_dir.path(), GrepMode::Disabled),
+        AppOptions::default(),
+    )
+    .await
+    .expect("build app");
 
     let capabilities = capabilities(&router).await;
     assert!(!capabilities.features.contains_key(FEATURE_QUERY_GREP));
@@ -47,7 +50,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     for limit in grep_limits() {
         assert!(!capabilities.limits.contains_key(limit));
     }
-    assert!(!maintains_grep_index(&server));
+    assert!(!maintains_grep_index(&server.writer));
 
     // Searching and administering gate on their own keys, so a refusal names
     // the key whose absence the client just read.
@@ -70,16 +73,23 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
         FEATURE_ADMIN_GREP_INDEX,
     )
     .await;
-    server.shutdown().await.expect("settle the server writer");
+    server
+        .writer
+        .shutdown()
+        .await
+        .expect("settle the server writer");
 }
 
 #[tokio::test]
 async fn grep_get_query_parameters_use_the_list_route_grammar() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "query-grammar").await;
-    let (router, server, _local_cache) = app(test_config(temp_dir.path(), GrepMode::ServeOnly))
-        .await
-        .expect("build app");
+    let (router, server) = app(
+        test_config(temp_dir.path(), GrepMode::ServeOnly),
+        AppOptions::default(),
+    )
+    .await
+    .expect("build app");
     let path = query_path(&namespace_id);
 
     let response = send(&router, Method::GET, &path, None).await;
@@ -138,18 +148,24 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     assert_eq!(error.param.as_deref(), Some("pattern"));
     assert!(error.message.contains("maximum is 1024 bytes"));
 
-    server.shutdown().await.expect("settle the server writer");
+    server
+        .writer
+        .shutdown()
+        .await
+        .expect("settle the server writer");
 }
 
 #[tokio::test]
 async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespace() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "both").await;
-    let (router, server, _local_cache) =
-        app(test_config(temp_dir.path(), GrepMode::ServeAndMaintain))
-            .await
-            .expect("build app");
-    assert!(maintains_grep_index(&server));
+    let (router, server) = app(
+        test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
+        AppOptions::default(),
+    )
+    .await
+    .expect("build app");
+    assert!(maintains_grep_index(&server.writer));
     // Before anything is enabled the status route answers honestly rather
     // than inventing a namespace-not-found.
     assert_eq!(
@@ -186,7 +202,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         enabled.lifecycle,
         "the status route and the enable response describe the same root"
     );
-    settle(&server).await;
+    settle(&server.writer).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
     let active = index_status(&router, &namespace_id).await;
     assert_eq!(
@@ -223,7 +239,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         )
         .await
         .expect("write file");
-    settle(&server).await;
+    settle(&server.writer).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
 
     let capabilities = capabilities(&router).await;
@@ -243,7 +259,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     let response = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].path, "/note.txt");
-    settle(&server).await;
+    settle(&server.writer).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
     let caught_up = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(caught_up.matches.len(), 1);
@@ -261,7 +277,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         disabled.manifest_state().status(),
         GrepIndexStatus::Disabled {}
     ));
-    settle(&server).await;
+    settle(&server.writer).await;
     assert!(
         matches!(
             load_grep_root(&*store, &namespace_id)
@@ -292,11 +308,15 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     );
 
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
-    settle(&server).await;
+    settle(&server.writer).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
     let reenabled = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(reenabled.matches.len(), 1);
-    server.shutdown().await.expect("settle the server writer");
+    server
+        .writer
+        .shutdown()
+        .await
+        .expect("settle the server writer");
 }
 
 #[tokio::test]
@@ -380,13 +400,15 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
 
     // Nothing has nudged either namespace in this process: the first search
     // is what re-admits the index that trails its head.
-    let (router, server, _local_cache) =
-        app(test_config(temp_dir.path(), GrepMode::ServeAndMaintain))
-            .await
-            .expect("reopen app");
+    let (router, server) = app(
+        test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
+        AppOptions::default(),
+    )
+    .await
+    .expect("reopen app");
     let stale_response = grep(&router, &stale, "stale steady needle").await;
     assert_eq!(stale_response.matches.len(), 1);
-    settle(&server).await;
+    settle(&server.writer).await;
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     assert_eq!(watermark(&store, &stale).await, ChangeSeq(2));
 
@@ -404,21 +426,28 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         ),
         "first touch either observes backfill or its concurrently completed root"
     );
-    settle(&server).await;
+    settle(&server.writer).await;
     assert_eq!(watermark(&store, &backfill).await, ChangeSeq(3));
     let resumed = grep(&router, &backfill, "mid-backfill needle").await;
     assert_eq!(resumed.matches.len(), 3);
-    server.shutdown().await.expect("settle the server writer");
+    server
+        .writer
+        .shutdown()
+        .await
+        .expect("settle the server writer");
 }
 
 #[tokio::test]
 async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "serve-only").await;
-    let (router, server, _local_cache) = app(test_config(temp_dir.path(), GrepMode::ServeOnly))
-        .await
-        .expect("build app");
-    assert!(!maintains_grep_index(&server));
+    let (router, server) = app(
+        test_config(temp_dir.path(), GrepMode::ServeOnly),
+        AppOptions::default(),
+    )
+    .await
+    .expect("build app");
+    assert!(!maintains_grep_index(&server.writer));
 
     // The document says the same thing the routes do: searches yes,
     // administration no.
@@ -470,7 +499,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
         )
         .await
         .expect("write file");
-    settle(&server).await;
+    settle(&server.writer).await;
     assert_eq!(
         lifecycle_of(&store, &namespace_id).await.active_watermark(),
         None,
@@ -481,17 +510,24 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
     let response = grep(&router, &namespace_id, "external needle").await;
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.built_through_seq, ChangeSeq(1));
-    server.shutdown().await.expect("settle the server writer");
+    server
+        .writer
+        .shutdown()
+        .await
+        .expect("settle the server writer");
 }
 
 #[tokio::test]
 async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "maintain-only").await;
-    let (router, server, _local_cache) = app(test_config(temp_dir.path(), GrepMode::MaintainOnly))
-        .await
-        .expect("build app");
-    assert!(maintains_grep_index(&server));
+    let (router, server) = app(
+        test_config(temp_dir.path(), GrepMode::MaintainOnly),
+        AppOptions::default(),
+    )
+    .await
+    .expect("build app");
+    assert!(maintains_grep_index(&server.writer));
 
     let capabilities = capabilities(&router).await;
     assert!(
@@ -536,7 +572,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .await
         .expect("write file");
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
-    settle(&server).await;
+    settle(&server.writer).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
     let root = load_grep_root(&*store, &namespace_id)
         .await
@@ -550,21 +586,28 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         !root.manifest_state().segments().is_empty(),
         "the index this deployment maintains holds real segments"
     );
-    server.shutdown().await.expect("settle the server writer");
+    server
+        .writer
+        .shutdown()
+        .await
+        .expect("settle the server writer");
 }
 
 #[tokio::test]
 async fn manual_maintenance_registers_no_index_job_and_still_administers_one() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "manual-maintenance").await;
-    let (router, server, _local_cache) = app(ServerConfig {
-        maintenance: MaintenanceMode::Manual,
-        ..test_config(temp_dir.path(), GrepMode::ServeAndMaintain)
-    })
+    let (router, server) = app(
+        ServerConfig {
+            maintenance: MaintenanceMode::Manual,
+            ..test_config(temp_dir.path(), GrepMode::ServeAndMaintain)
+        },
+        AppOptions::default(),
+    )
     .await
     .expect("build app");
     assert!(
-        !maintains_grep_index(&server),
+        !maintains_grep_index(&server.writer),
         "a manual deployment registers no automatic index job, whatever the grep mode maintains"
     );
 
@@ -588,7 +631,7 @@ async fn manual_maintenance_registers_no_index_job_and_still_administers_one() {
         "the enable published a backfill this deployment left for someone else"
     );
 
-    settle(&server).await;
+    settle(&server.writer).await;
     assert_eq!(
         lifecycle_of(&store, &namespace_id).await.active_watermark(),
         None,
@@ -606,7 +649,11 @@ async fn manual_maintenance_registers_no_index_job_and_still_administers_one() {
             .len(),
         1
     );
-    server.shutdown().await.expect("settle the server writer");
+    server
+        .writer
+        .shutdown()
+        .await
+        .expect("settle the server writer");
 }
 
 async fn seed_namespace(root: &Path, name: &str) -> (SharedObjectStore, FsWriter, NamespaceId) {
