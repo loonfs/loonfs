@@ -623,7 +623,7 @@ async fn metadata_only_mutation_does_not_validate_content_store_refs() {
 }
 
 #[tokio::test]
-async fn a_guarded_put_reports_the_stale_revision_before_missing_content_without_content_reads() {
+async fn a_guarded_put_reports_missing_content_before_the_stale_revision_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -667,17 +667,13 @@ async fn a_guarded_put_reports_the_stale_revision_before_missing_content_without
     .into_iter()
     .next()
     .expect("one result")
-    .expect_err("the stale revision guard should win before unprepared content");
-    assert_eq!(error.code(), ErrorCode::StaleRevision);
+    .expect_err("unprepared content should be reported before the stale revision guard");
+    assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     assert!(matches!(
         error,
-        CoreError::CommitValidation(
-            loonfs_core::commit::CommitValidationError::ReplaceFileBaseRevisionMismatch {
-                expected: RevisionNo(99),
-                actual: Some(RevisionNo(1)),
-                ..
-            }
-        )
+        CoreError::ContentPreparation(
+            loonfs_core::publish::ContentPreparationError::ContentNotPrepared { ref content_id }
+        ) if *content_id == missing_content.content_id
     ));
     assert_eq!(guarded_store.content_store_access_count(), 0);
 }

@@ -7,11 +7,10 @@ use loonfs_api::{ActorRef, ChangeSeq, CommitId};
 use loonfs_objectstore::ObjectStore;
 
 /// The publish view: it holds the loaded [`MetadataView`] plus the
-/// accumulating commit overlay (seeded from the rows already accepted earlier
-/// in the batch), rebuilding an overlaid view for each lookup so object-store
-/// failures surface as [`CoreError`].
+/// accumulating commit overlay, rebuilding an overlaid view for each lookup.
 pub(crate) struct PublishValidationView<'a, S: ObjectStore + ?Sized> {
     base_view: MetadataView<'a, 'a, S>,
+    batch_accepted: &'a MetadataState,
     committed_seq: ChangeSeq,
     overlay: CommitOverlayRows,
 }
@@ -19,13 +18,14 @@ pub(crate) struct PublishValidationView<'a, S: ObjectStore + ?Sized> {
 impl<'a, S: ObjectStore + ?Sized> PublishValidationView<'a, S> {
     pub(crate) fn new(
         base_view: MetadataView<'a, 'a, S>,
-        accepted_rows: &MetadataState,
+        accepted_rows: &'a MetadataState,
         committed_seq: ChangeSeq,
     ) -> Self {
         Self {
             base_view,
+            batch_accepted: accepted_rows,
             committed_seq,
-            overlay: CommitOverlayRows::from_rows(accepted_rows),
+            overlay: CommitOverlayRows::new(),
         }
     }
 
@@ -35,7 +35,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishValidationView<'a, S> {
     /// what its predecessors did.
     pub(crate) fn view(&self) -> MetadataView<'_, 'a, S> {
         self.base_view
-            .with_overlay(self.overlay.rows(), self.committed_seq)
+            .with_overlay(self.overlay.rows(), self.batch_accepted, self.committed_seq)
     }
 }
 

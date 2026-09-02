@@ -66,11 +66,6 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     committed_at_ms: u64,
     allocation: &mut CandidateAllocation,
 ) -> Result<ValidatedCommitPlan> {
-    if request.operations.is_empty() {
-        return Err(CoreError::InvalidCommitRequest(
-            "mutation request carries no operations".to_owned(),
-        ));
-    }
     let committed_seq = next_public_ordinal(head.seq.0)
         .map(ChangeSeq)
         .ok_or_else(|| {
@@ -710,24 +705,5 @@ mod tests {
                 .operation_index,
             Some(1)
         );
-    }
-
-    #[tokio::test]
-    async fn an_empty_request_is_rejected() {
-        let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
-        let error = try_plan_against_current_state(
-            &store,
-            &namespace_id,
-            &CommitRequest {
-                commit_id: CommitId::parse("empty-request").expect("valid commit id"),
-                actor: loonfs_test_support::test_actor(),
-                message: None,
-                operations: Vec::new(),
-            },
-        )
-        .await
-        .expect_err("an empty request has nothing to commit");
-
-        assert_eq!(error.code(), crate::error::ErrorCode::InvalidRequest);
     }
 }

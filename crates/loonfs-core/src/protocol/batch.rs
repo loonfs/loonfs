@@ -2,9 +2,7 @@
 //! plus one head compare-and-swap, with outcomes fanned back to every
 //! candidate slot.
 
-use super::candidates::{
-    prepare_candidate_request, validate_commit_content_references, BatchDedup, CandidateAdmission,
-};
+use super::candidates::{prepare_candidate_request, BatchDedup, CandidateAdmission};
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
 use crate::commit::{
@@ -143,18 +141,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             };
             let validated = candidate_request.validated;
             let allocation = candidate_request.allocation;
-            // Validation first, uniformly: coverage is checked once the
-            // whole request has planned and validated.
-            if let Err(error) = validate_commit_content_references(
-                candidate,
-                namespace_id,
-                view.content_store_id(),
-                context.now_ms,
-            ) {
-                session.discard_candidate(allocation);
-                slots[index] = BatchOutcomeSlot::SettledIndependent(Err(error));
-                continue;
-            }
             let resulting_next_inode_id = match session.commit_candidate(allocation) {
                 Ok(resulting_next_inode_id) => resulting_next_inode_id,
                 Err(error) => {

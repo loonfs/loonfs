@@ -24,6 +24,7 @@ use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceStatus};
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStore;
+use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     content_store_id: ContentStoreId,
@@ -31,7 +32,7 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head_etag: String,
     pub(super) acquired_writer: AcquiredWriter,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
-    tail_state: MetadataState,
+    tail_state: Arc<MetadataState>,
 }
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
@@ -108,7 +109,7 @@ struct PublishProjectionKey {
 pub(crate) struct PublishTailProjection {
     key: PublishProjectionKey,
     pub(crate) wal_tail_segments: u64,
-    pub(crate) tail_state: MetadataState,
+    pub(crate) tail_state: Arc<MetadataState>,
 }
 
 impl PublishTailProjection {
@@ -197,7 +198,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     };
 
     let manifest_segments = loaded_basis.segments;
-    let tail_state = projection.tail_state.clone();
+    let tail_state = Arc::clone(&projection.tail_state);
     ensure_publish_head_etag_still_current(store, namespace_id, &head_etag, &acquired_writer)
         .await?;
 
@@ -250,7 +251,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     let projection = PublishTailProjection {
         key,
         wal_tail_segments,
-        tail_state: replayed.resulting_metadata_state,
+        tail_state: Arc::new(replayed.resulting_metadata_state),
     };
     Ok(projection)
 }
@@ -353,7 +354,7 @@ mod tests {
         PublishTailProjection {
             key,
             wal_tail_segments: 3,
-            tail_state: bootstrap_metadata_state(1_000),
+            tail_state: Arc::new(bootstrap_metadata_state(1_000)),
         }
     }
 
