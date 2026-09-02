@@ -3898,7 +3898,7 @@ mod direct_download {
 
     #[async_trait::async_trait]
     impl loonfs_objectstore::ObjectStore for Crc32cReadbackStore {
-        delegate_object_store!(self => self.inner);
+        delegate_object_store!(self => self.inner; except head_stored_checksum);
 
         async fn head_stored_checksum(
             &self,
