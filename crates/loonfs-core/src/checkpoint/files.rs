@@ -94,11 +94,11 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
         let inode_rows = rows
             .into_iter()
             .map(|(row_key, row)| match row {
-                MetadataRow::Inode {
+                MetadataRow::Inode(crate::metadata::InodeRecord {
                     inode_id,
                     inode_kind,
                     ..
-                } => Ok((inode_id, inode_kind)),
+                }) => Ok((inode_id, inode_kind)),
                 _ => Err(CoreError::NamespaceCorrupt(format!(
                     "inodes family returned a non-inode row at `{row_key}`"
                 ))),

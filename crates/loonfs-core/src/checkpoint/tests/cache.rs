@@ -322,9 +322,9 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
     let display_names = page
         .into_iter()
         .filter_map(|row| match row {
-            MetadataRow::DirentryBind { display_name, .. } => {
-                Some(display_name.as_str().to_owned())
-            }
+            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+                display_name, ..
+            }) => Some(display_name.as_str().to_owned()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -426,7 +426,10 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     let docs_inode = docs_binds
         .iter()
         .find_map(|row| match row {
-            MetadataRow::DirentryBind { child_inode_id, .. } => Some(*child_inode_id),
+            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+                child_inode_id,
+                ..
+            }) => Some(*child_inode_id),
             _ => None,
         })
         .expect("docs directory bind");

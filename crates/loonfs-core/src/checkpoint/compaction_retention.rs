@@ -115,7 +115,9 @@ impl RetentionOperator {
 /// mutation (format spec, section 3.3).
 fn keep_receipt(row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
     match &row {
-        MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq < floor_seq => None,
+        MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
+            committed_seq, ..
+        }) if *committed_seq < floor_seq => None,
         _ => Some(row),
     }
 }
@@ -142,12 +144,12 @@ pub(super) struct AttributeRetention {
 
 impl AttributeRetention {
     fn push(&mut self, row: MetadataRow, floor_seq: ChangeSeq) -> Result<Option<MetadataRow>> {
-        let MetadataRow::AttributesRevision {
+        let MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
             inode_id,
             attributes_revision_no,
             committed_seq,
             ..
-        } = &row
+        }) = &row
         else {
             return Ok(Some(row));
         };
@@ -193,7 +195,9 @@ pub(super) struct ActiveDeletionRetention {
 
 impl ActiveDeletionRetention {
     fn push(&mut self, row: MetadataRow) -> Option<MetadataRow> {
-        let MetadataRow::ActiveDeletion { action, .. } = &row else {
+        let MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord { action, .. }) =
+            &row
+        else {
             return Some(row);
         };
         match action {
@@ -240,14 +244,14 @@ pub(super) struct BindingRetention {
 impl BindingRetention {
     fn push(&mut self, row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
         match &row {
-            MetadataRow::DirentryUnbind {
+            MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
                 parent_inode_id,
                 name_key,
                 bind_seq,
                 bind_delta_index,
                 unbind_seq,
                 ..
-            } => {
+            }) => {
                 if *unbind_seq > floor_seq {
                     return Some(row);
                 }
@@ -264,8 +268,12 @@ impl BindingRetention {
             }
             // A bind above the floor survives whatever retired it later, so
             // it needs no verdict and is written straight through.
-            MetadataRow::DirentryBind { bind_seq, .. } if *bind_seq > floor_seq => Some(row),
-            MetadataRow::DirentryBind { .. } => {
+            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord { bind_seq, .. })
+                if *bind_seq > floor_seq =>
+            {
+                Some(row)
+            }
+            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord { .. }) => {
                 self.held_bind = Some(row);
                 None
             }
@@ -278,13 +286,13 @@ impl BindingRetention {
         let Some(row) = self.held_bind.take() else {
             return Ok(None);
         };
-        let MetadataRow::DirentryBind {
+        let MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
             parent_inode_id,
             name_key,
             bind_seq,
             bind_delta_index,
             ..
-        } = &row
+        }) = &row
         else {
             return Ok(Some(row));
         };
@@ -335,7 +343,7 @@ mod tests {
     }
 
     fn attribute_row(inode: u64, revision: u64, committed_seq: u64) -> MetadataRow {
-        MetadataRow::AttributesRevision {
+        MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
             inode_id: InodeId(inode),
             attributes_revision_no: AttributeRevisionNo(revision),
             committed_seq: ChangeSeq(committed_seq),
@@ -345,22 +353,22 @@ mod tests {
             updated_by: loonfs_api::ActorRef::loonfs_system(),
             updated_at_ms: 1_000 + committed_seq,
             attributes: Default::default(),
-        }
+        })
     }
 
     fn bind_row(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryBind {
+        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
             display_name: DisplayName::parse(name).expect("display name"),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(bind_seq),
             bind_delta_index: 0,
-        }
+        })
     }
 
     fn unbind_row(parent: u64, name: &str, bind_seq: u64, unbind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryUnbind {
+        MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
             display_name: DisplayName::parse(name).expect("display name"),
@@ -369,7 +377,7 @@ mod tests {
             bind_delta_index: 0,
             unbind_seq: ChangeSeq(unbind_seq),
             unbind_delta_index: 0,
-        }
+        })
     }
 
     #[test]
@@ -429,14 +437,14 @@ mod tests {
     #[test]
     fn a_cancelled_deletion_leaves_and_a_live_one_stays() {
         let mut operator = RetentionRule::ActiveDeletions.operator();
-        let removed = MetadataRow::ActiveDeletion {
+        let removed = MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
             root_inode_id: InodeId(9),
             deletion_seq: ChangeSeq(3),
             action: ActiveDeletionRowAction::Removed {
                 revocation_seq: ChangeSeq(4),
             },
-        };
-        let listed = MetadataRow::ActiveDeletion {
+        });
+        let listed = MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
             root_inode_id: InodeId(9),
             deletion_seq: ChangeSeq(3),
             action: ActiveDeletionRowAction::Listed {
@@ -449,7 +457,7 @@ mod tests {
                         .expect("valid display name"),
                 },
             },
-        };
+        });
         assert!(operator
             .push(MetadataRowFamily::ActiveDeletions, removed.clone(), floor())
             .expect("push")

@@ -1,10 +1,10 @@
 //! At-head indexes over the in-memory metadata rows, maintained
 //! incrementally as deltas apply so head reads skip the row scans.
 
-use super::visibility::unbind_matches_binding;
+use super::visibility::{same_binding, unbind_matches_binding};
 use super::{
     AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
+    InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -70,7 +70,7 @@ impl MetadataIndexes {
             let Some(latest_child_bind) = latest_by_child.get(&bind.child_inode_id) else {
                 continue;
             };
-            if !bind.same_binding(latest_child_bind) {
+            if !same_binding(bind, latest_child_bind) {
                 continue;
             }
             indexes
@@ -144,7 +144,7 @@ impl MetadataIndexes {
         // a revoke as the newest record means no tombstone is active.
         self.tombstone_by_root
             .get(&root_inode_id)
-            .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set { .. }))
+            .filter(|tombstone| matches!(tombstone.action, TombstoneRowAction::Set { .. }))
             .cloned()
     }
 
@@ -357,7 +357,7 @@ fn remove_active_parent_if_same(
 ) {
     if active_parent_by_child
         .get(&record.child_inode_id)
-        .is_some_and(|active| active.same_binding(record))
+        .is_some_and(|active| same_binding(active, record))
     {
         active_parent_by_child.remove(&record.child_inode_id);
     }
@@ -370,7 +370,7 @@ fn remove_active_child_if_same(
     let key = (record.parent_inode_id, record.name_key.clone());
     if active_child_by_parent_name
         .get(&key)
-        .is_some_and(|active| active.same_binding(record))
+        .is_some_and(|active| same_binding(active, record))
     {
         active_child_by_parent_name.remove(&key);
     }

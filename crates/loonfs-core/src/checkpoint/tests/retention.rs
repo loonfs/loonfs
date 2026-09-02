@@ -147,7 +147,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                 let rows = manifest_rows_for_family(state, family)
                     .into_iter()
                     .map(|row| match row {
-                        MetadataRow::FileRevision {
+                        MetadataRow::FileRevision(crate::metadata::RevisionRecord {
                             inode_id,
                             revision_no,
                             committed_seq,
@@ -156,7 +156,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             committed_by,
                             delta_index,
                             content_ref,
-                        } => MetadataRow::FileRevision {
+                        }) => MetadataRow::FileRevision(crate::metadata::RevisionRecord {
                             inode_id,
                             revision_no,
                             committed_seq,
@@ -171,22 +171,22 @@ fn metadata_states_equivalent_ignoring_content_identity(
                                 .expect("placeholder content id"),
                                 ..content_ref
                             },
-                        },
-                        MetadataRow::CommitReceipt {
+                        }),
+                        MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
                             commit_id,
                             committed_by,
                             semantic_commit_fingerprint: _,
                             committed_seq,
                             committed_at_ms,
                             message,
-                        } => MetadataRow::CommitReceipt {
+                        }) => MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
                             commit_id,
                             committed_by,
                             semantic_commit_fingerprint: "<normalized>".to_owned(),
                             committed_seq,
                             committed_at_ms,
                             message,
-                        },
+                        }),
                         other => other,
                     })
                     .collect::<Vec<_>>();

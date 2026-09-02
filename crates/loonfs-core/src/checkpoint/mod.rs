@@ -62,6 +62,7 @@ pub use self::streaming_compaction::{
 
 pub(crate) use self::compaction_lease::{claim_compaction_prefix, CompactionPrefixOwner};
 pub(crate) use self::create::create_checkpoint;
+pub(crate) use self::data_block_load::DecodedRowWeight;
 pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::flush::flush_wal;
 pub(crate) use self::list::list_checkpoints_page;

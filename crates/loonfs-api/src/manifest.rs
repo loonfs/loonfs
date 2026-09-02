@@ -142,153 +142,184 @@ pub struct MetadataSegmentRef {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MetadataRow {
     /// Establishes one inode's immutable identity and kind.
-    Inode {
-        /// Namespace-scoped inode identity allocated by the publishing writer.
-        inode_id: InodeId,
-        /// Classification fixed when the inode was created.
-        inode_kind: InodeKind,
-        /// Commit sequence from which the inode can become visible.
-        created_seq: ChangeSeq,
-        /// Commit ID associated with this row.
-        commit_id: CommitId,
-        /// Actor that created the inode, as supplied by the application.
-        created_by: crate::ActorRef,
-        /// Time the inode was created, in Unix milliseconds.
-        created_at_ms: u64,
-    },
+    Inode(InodeRecord),
     /// Records one generation of a directory name binding.
-    DirentryBind {
-        /// Directory in which the name was bound.
-        parent_inode_id: InodeId,
-        /// Policy-derived key used for uniqueness and lookup.
-        name_key: NameKey,
-        /// User-facing component spelling retained for directory responses.
-        display_name: DisplayName,
-        /// Inode reached while this binding generation remains active.
-        child_inode_id: InodeId,
-        /// Commit sequence that created this binding generation.
-        bind_seq: ChangeSeq,
-        /// Position that disambiguates the binding within `bind_seq`.
-        bind_delta_index: u32,
-    },
+    DirentryBind(DirentryBindRecord),
     /// Retires one exact directory-binding generation.
-    DirentryUnbind {
-        /// Directory that held the targeted binding.
-        parent_inode_id: InodeId,
-        /// Canonical name key of the targeted binding.
-        name_key: NameKey,
-        /// User-facing spelling the retired binding carried.
-        display_name: DisplayName,
-        /// Child identity recorded by the targeted binding.
-        child_inode_id: InodeId,
-        /// Commit sequence that created the binding being retired.
-        bind_seq: ChangeSeq,
-        /// Delta position of the binding being retired.
-        bind_delta_index: u32,
-        /// Commit sequence from which this unbind takes effect.
-        unbind_seq: ChangeSeq,
-        /// Position that disambiguates the unbind within `unbind_seq`.
-        unbind_delta_index: u32,
-    },
+    DirentryUnbind(DirentryUnbindRecord),
     /// Publishes one immutable content revision for a file inode.
-    FileRevision {
-        /// File inode whose history contains the revision.
-        inode_id: InodeId,
-        /// Monotonic revision number within that file's history.
-        revision_no: RevisionNo,
-        /// Namespace sequence that published the revision.
-        committed_seq: ChangeSeq,
-        /// Commit ID associated with this row.
-        commit_id: CommitId,
-        /// The owning commit's observational wall-clock stamp, denormalized
-        /// onto the row so revision reads answer times without a receipt
-        /// join. Never a validity input; `committed_seq` is the order.
-        committed_at_ms: u64,
-        /// Actor that committed this revision, as supplied by the application.
-        committed_by: crate::ActorRef,
-        /// Delta position that disambiguates the revision within `committed_seq`.
-        delta_index: u32,
-        /// Immutable bytes published by the revision.
-        content_ref: ContentRef,
-    },
+    FileRevision(RevisionRecord),
     /// Changes whether one root inode has an active subtree tombstone.
-    Tombstone {
-        /// Inode whose rooted subtree the event governs.
-        root_inode_id: InodeId,
-        /// Where this event sits in the namespace's history, and the
-        /// generation a later `revoke` names.
-        generation: TombstoneGeneration,
-        /// Commit ID associated with this row.
-        commit_id: CommitId,
-        /// What this event did; readers take the newest row per root and
-        /// treat a `revoke` newest row as "no active tombstone".
-        action: TombstoneRowAction,
-        /// Wall-clock stamp of the recording commit. Observational, like
-        /// every `committed_at_ms`.
-        deleted_at_ms: u64,
-        /// Actor that recorded this tombstone event.
-        deleted_by: crate::ActorRef,
-    },
+    Tombstone(SubtreeTombstoneRecord),
     /// Derived row used to list currently recoverable deletions.
     ///
     /// Materialization writes `listed` for each tombstone set and `removed` for
     /// each revoke. This lets trash listing use an ordered range scan instead of
     /// replaying all historical deletion events.
-    ActiveDeletion {
-        /// Subtree root the deletion covers. With `deletion_seq` this is
-        /// exactly the handle `undelete` addresses.
-        root_inode_id: InodeId,
-        /// Commit sequence of the deletion. A `removed` row repeats the
-        /// original deletion sequence so both rows sort together.
-        deletion_seq: ChangeSeq,
-        /// Whether the deletion is still recoverable, and the listing detail
-        /// it carries while it is.
-        action: ActiveDeletionRowAction,
-    },
+    ActiveDeletion(ActiveDeletionRecord),
     /// Preserves the evidence needed to answer a retried logical commit.
-    CommitReceipt {
-        /// Caller idempotency key whose later reuse is checked against this row.
-        commit_id: CommitId,
-        /// Actor that committed the change, as supplied by the application.
-        committed_by: crate::ActorRef,
-        /// Digest used to distinguish a safe retry from conflicting id reuse.
-        semantic_commit_fingerprint: String,
-        /// Namespace sequence assigned to the accepted commit.
-        committed_seq: ChangeSeq,
-        /// The commit's observational wall-clock stamp. Receipts are the
-        /// durable per-commit record once WAL history drops below the
-        /// retention floor, so the stamp lives here for every commit,
-        /// revision-bearing or not.
-        committed_at_ms: u64,
-        /// Caller annotation preserved for idempotent response reconstruction.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        message: Option<String>,
-    },
+    CommitReceipt(CommitReceiptRecord),
     /// Publishes one inode's complete attribute map at one revision.
     ///
     /// The row is whole state, not a change: a reader takes the newest row
     /// for an inode and needs nothing older. An inode with no row anywhere is
     /// at revision 0 with an empty map, so nothing is written until a caller
     /// writes an attribute.
-    AttributesRevision {
-        /// Inode whose attributes this revision states.
-        inode_id: InodeId,
-        /// Monotonic per-inode attribute revision.
-        attributes_revision_no: AttributeRevisionNo,
-        /// Namespace sequence that published the revision.
-        committed_seq: ChangeSeq,
-        /// Commit ID associated with this row.
-        commit_id: CommitId,
-        /// Delta position that disambiguates the revision within `committed_seq`.
-        delta_index: u32,
-        /// Actor that updated the attributes.
-        updated_by: crate::ActorRef,
-        /// Time of the attribute update, in Unix milliseconds.
-        updated_at_ms: u64,
-        /// The inode's complete attribute map at this revision. An empty map
-        /// is the cleared state.
-        attributes: Attributes,
-    },
+    AttributesRevision(AttributesRevisionRecord),
+}
+
+/// One inode's immutable identity and creation metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InodeRecord {
+    /// Namespace-scoped inode identity allocated by the publishing writer.
+    pub inode_id: InodeId,
+    /// Classification fixed when the inode was created.
+    pub inode_kind: InodeKind,
+    /// Commit sequence from which the inode can become visible.
+    pub created_seq: ChangeSeq,
+    /// Commit ID associated with this row.
+    pub commit_id: CommitId,
+    /// Actor that created the inode, as supplied by the application.
+    pub created_by: crate::ActorRef,
+    /// Time the inode was created, in Unix milliseconds.
+    pub created_at_ms: u64,
+}
+
+/// One generation of a directory name binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirentryBindRecord {
+    /// Directory in which the name was bound.
+    pub parent_inode_id: InodeId,
+    /// Policy-derived key used for uniqueness and lookup.
+    pub name_key: NameKey,
+    /// User-facing component spelling retained for directory responses.
+    pub display_name: DisplayName,
+    /// Inode reached while this binding generation remains active.
+    pub child_inode_id: InodeId,
+    /// Commit sequence that created this binding generation.
+    pub bind_seq: ChangeSeq,
+    /// Position that disambiguates the binding within `bind_seq`.
+    pub bind_delta_index: u32,
+}
+
+/// One event that retires an exact directory-binding generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirentryUnbindRecord {
+    /// Directory that held the targeted binding.
+    pub parent_inode_id: InodeId,
+    /// Canonical name key of the targeted binding.
+    pub name_key: NameKey,
+    /// User-facing spelling the retired binding carried.
+    pub display_name: DisplayName,
+    /// Child identity recorded by the targeted binding.
+    pub child_inode_id: InodeId,
+    /// Commit sequence that created the binding being retired.
+    pub bind_seq: ChangeSeq,
+    /// Delta position of the binding being retired.
+    pub bind_delta_index: u32,
+    /// Commit sequence from which this unbind takes effect.
+    pub unbind_seq: ChangeSeq,
+    /// Position that disambiguates the unbind within `unbind_seq`.
+    pub unbind_delta_index: u32,
+}
+
+/// One immutable content revision for a file inode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevisionRecord {
+    /// File inode whose history contains the revision.
+    pub inode_id: InodeId,
+    /// Monotonic revision number within that file's history.
+    pub revision_no: RevisionNo,
+    /// Namespace sequence that published the revision.
+    pub committed_seq: ChangeSeq,
+    /// Commit ID associated with this row.
+    pub commit_id: CommitId,
+    /// The owning commit's observational wall-clock stamp.
+    pub committed_at_ms: u64,
+    /// Actor that committed this revision, as supplied by the application.
+    pub committed_by: crate::ActorRef,
+    /// Delta position that disambiguates the revision within `committed_seq`.
+    pub delta_index: u32,
+    /// Immutable bytes published by the revision.
+    pub content_ref: ContentRef,
+}
+
+/// One event that changes whether a root inode has an active subtree tombstone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtreeTombstoneRecord {
+    /// Inode whose rooted subtree the event governs.
+    pub root_inode_id: InodeId,
+    /// Position of the event in namespace history.
+    pub generation: TombstoneGeneration,
+    /// Commit ID associated with this row.
+    pub commit_id: CommitId,
+    /// What this event did.
+    pub action: TombstoneRowAction,
+    /// Wall-clock stamp of the recording commit.
+    pub deleted_at_ms: u64,
+    /// Actor that recorded this tombstone event.
+    pub deleted_by: crate::ActorRef,
+}
+
+/// One current-state row for a recoverable deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveDeletionRecord {
+    /// Subtree root the deletion covers.
+    pub root_inode_id: InodeId,
+    /// Commit sequence of the deletion.
+    pub deletion_seq: ChangeSeq,
+    /// Current listing state for the deletion.
+    pub action: ActiveDeletionRowAction,
+}
+
+impl ActiveDeletionRecord {
+    /// Builds this row's durable key in trash-listing order.
+    pub fn row_key(&self) -> String {
+        lookup_keys::active_deletion_row_key(
+            self.deletion_seq,
+            self.root_inode_id,
+            self.action.sort_rank(),
+        )
+    }
+}
+
+/// One durable commit idempotency receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitReceiptRecord {
+    /// Caller idempotency key whose later reuse is checked against this row.
+    pub commit_id: CommitId,
+    /// Actor that committed the change, as supplied by the application.
+    pub committed_by: crate::ActorRef,
+    /// Digest used to distinguish a safe retry from conflicting ID reuse.
+    pub semantic_commit_fingerprint: String,
+    /// Namespace sequence assigned to the accepted commit.
+    pub committed_seq: ChangeSeq,
+    /// The commit's observational wall-clock stamp.
+    pub committed_at_ms: u64,
+    /// Caller annotation preserved for idempotent response reconstruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// One inode's complete attribute map at one revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttributesRevisionRecord {
+    /// Inode whose attributes this revision states.
+    pub inode_id: InodeId,
+    /// Monotonic per-inode attribute revision.
+    pub attributes_revision_no: AttributeRevisionNo,
+    /// Namespace sequence that published the revision.
+    pub committed_seq: ChangeSeq,
+    /// Commit ID associated with this row.
+    pub commit_id: CommitId,
+    /// Delta position that disambiguates the revision within `committed_seq`.
+    pub delta_index: u32,
+    /// Actor that updated the attributes.
+    pub updated_by: crate::ActorRef,
+    /// Time of the attribute update, in Unix milliseconds.
+    pub updated_at_ms: u64,
+    /// The inode's complete attribute map at this revision.
+    pub attributes: Attributes,
 }
 
 /// Names one deletion generation: the commit that recorded a tombstone
@@ -408,14 +439,14 @@ impl MetadataRow {
     /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
     pub fn row_key(&self) -> String {
         self.row_key_for_family(match self {
-            Self::Inode { .. } => MetadataRowFamily::Inodes,
-            Self::DirentryBind { .. } => MetadataRowFamily::DirentryBinds,
-            Self::DirentryUnbind { .. } => MetadataRowFamily::DirentryUnbinds,
-            Self::FileRevision { .. } => MetadataRowFamily::Revisions,
-            Self::Tombstone { .. } => MetadataRowFamily::Tombstones,
-            Self::ActiveDeletion { .. } => MetadataRowFamily::ActiveDeletions,
-            Self::CommitReceipt { .. } => MetadataRowFamily::CommitReceipts,
-            Self::AttributesRevision { .. } => MetadataRowFamily::Attributes,
+            Self::Inode(_) => MetadataRowFamily::Inodes,
+            Self::DirentryBind(_) => MetadataRowFamily::DirentryBinds,
+            Self::DirentryUnbind(_) => MetadataRowFamily::DirentryUnbinds,
+            Self::FileRevision(_) => MetadataRowFamily::Revisions,
+            Self::Tombstone(_) => MetadataRowFamily::Tombstones,
+            Self::ActiveDeletion(_) => MetadataRowFamily::ActiveDeletions,
+            Self::CommitReceipt(_) => MetadataRowFamily::CommitReceipts,
+            Self::AttributesRevision(_) => MetadataRowFamily::Attributes,
         })
     }
 
@@ -424,28 +455,21 @@ impl MetadataRow {
     /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
     pub fn row_key_for_family(&self, family: MetadataRowFamily) -> String {
         match self {
-            Self::Inode { inode_id, .. } => lookup_keys::inode_key(*inode_id),
-            Self::DirentryBind {
-                parent_inode_id,
-                name_key,
-                child_inode_id,
-                bind_seq,
-                bind_delta_index,
-                ..
-            } => match family {
+            Self::Inode(record) => lookup_keys::inode_key(record.inode_id),
+            Self::DirentryBind(record) => match family {
                 MetadataRowFamily::DirentryBinds => Some(lookup_keys::direntry_bind_row_key(
-                    *parent_inode_id,
-                    name_key.as_str(),
-                    *bind_seq,
-                    *bind_delta_index,
+                    record.parent_inode_id,
+                    record.name_key.as_str(),
+                    record.bind_seq,
+                    record.bind_delta_index,
                 )),
                 MetadataRowFamily::DirentryChildBinds => {
                     Some(lookup_keys::direntry_child_bind_row_key(
-                        *child_inode_id,
-                        *bind_seq,
-                        *bind_delta_index,
-                        *parent_inode_id,
-                        name_key.as_str(),
+                        record.child_inode_id,
+                        record.bind_seq,
+                        record.bind_delta_index,
+                        record.parent_inode_id,
+                        record.name_key.as_str(),
                     ))
                 }
                 MetadataRowFamily::Inodes
@@ -458,40 +482,26 @@ impl MetadataRow {
                 | MetadataRowFamily::Attributes => None,
             }
             .expect("a direntry bind row should use a direntry bind family"),
-            Self::DirentryUnbind {
-                parent_inode_id,
-                name_key,
-                bind_seq,
-                bind_delta_index,
-                unbind_seq,
-                unbind_delta_index,
-                ..
-            } => lookup_keys::direntry_unbind_row_key(
-                *parent_inode_id,
-                name_key.as_str(),
-                *bind_seq,
-                *bind_delta_index,
-                *unbind_seq,
-                *unbind_delta_index,
+            Self::DirentryUnbind(record) => lookup_keys::direntry_unbind_row_key(
+                record.parent_inode_id,
+                record.name_key.as_str(),
+                record.bind_seq,
+                record.bind_delta_index,
+                record.unbind_seq,
+                record.unbind_delta_index,
             ),
-            Self::FileRevision {
-                inode_id,
-                revision_no,
-                committed_seq,
-                delta_index,
-                ..
-            } => match family {
+            Self::FileRevision(record) => match family {
                 MetadataRowFamily::Revisions => Some(lookup_keys::revision_row_key(
-                    *inode_id,
-                    *revision_no,
-                    *delta_index,
+                    record.inode_id,
+                    record.revision_no,
+                    record.delta_index,
                 )),
                 MetadataRowFamily::RevisionsByInodeDesc => {
                     Some(lookup_keys::revision_by_inode_desc_row_key(
-                        *inode_id,
-                        *revision_no,
-                        *committed_seq,
-                        *delta_index,
+                        record.inode_id,
+                        record.revision_no,
+                        record.committed_seq,
+                        record.delta_index,
                     ))
                 }
                 MetadataRowFamily::Inodes
@@ -504,36 +514,22 @@ impl MetadataRow {
                 | MetadataRowFamily::Attributes => None,
             }
             .expect("a file revision row should use a revision family"),
-            Self::Tombstone {
-                root_inode_id,
-                generation,
-                ..
-            } => lookup_keys::tombstone_row_key(*root_inode_id, *generation),
-            Self::ActiveDeletion {
-                root_inode_id,
-                deletion_seq,
-                action,
-            } => lookup_keys::active_deletion_row_key(
-                *deletion_seq,
-                *root_inode_id,
-                action.sort_rank(),
+            Self::Tombstone(record) => {
+                lookup_keys::tombstone_row_key(record.root_inode_id, record.generation)
+            }
+            Self::ActiveDeletion(record) => lookup_keys::active_deletion_row_key(
+                record.deletion_seq,
+                record.root_inode_id,
+                record.action.sort_rank(),
             ),
-            Self::CommitReceipt {
-                committed_seq,
-                commit_id,
-                ..
-            } => lookup_keys::commit_receipt_row_key(commit_id.as_str(), *committed_seq),
-            Self::AttributesRevision {
-                inode_id,
-                attributes_revision_no,
-                committed_seq,
-                delta_index,
-                ..
-            } => lookup_keys::attributes_row_key(
-                *inode_id,
-                *attributes_revision_no,
-                *committed_seq,
-                *delta_index,
+            Self::CommitReceipt(record) => {
+                lookup_keys::commit_receipt_row_key(record.commit_id.as_str(), record.committed_seq)
+            }
+            Self::AttributesRevision(record) => lookup_keys::attributes_row_key(
+                record.inode_id,
+                record.attributes_revision_no,
+                record.committed_seq,
+                record.delta_index,
             ),
         }
     }
@@ -541,19 +537,14 @@ impl MetadataRow {
     /// Returns the Bloom filter key for this row in `family`.
     pub fn filter_key_for_family(&self, family: MetadataRowFamily) -> String {
         match self {
-            Self::Inode { .. } => self.row_key_for_family(family),
-            Self::DirentryBind {
-                parent_inode_id,
-                name_key,
-                child_inode_id,
-                ..
-            } => match family {
+            Self::Inode(_) => self.row_key_for_family(family),
+            Self::DirentryBind(record) => match family {
                 MetadataRowFamily::DirentryBinds => Some(lookup_keys::direntry_bind_probe(
-                    *parent_inode_id,
-                    name_key.as_str(),
+                    record.parent_inode_id,
+                    record.name_key.as_str(),
                 )),
                 MetadataRowFamily::DirentryChildBinds => {
-                    Some(lookup_keys::direntry_child_probe(*child_inode_id))
+                    Some(lookup_keys::direntry_child_probe(record.child_inode_id))
                 }
                 MetadataRowFamily::Inodes
                 | MetadataRowFamily::DirentryUnbinds
@@ -565,15 +556,13 @@ impl MetadataRow {
                 | MetadataRowFamily::Attributes => None,
             }
             .expect("a direntry bind row should use a direntry bind family"),
-            Self::DirentryUnbind {
-                parent_inode_id,
-                name_key,
-                ..
-            } => lookup_keys::direntry_unbind_probe(*parent_inode_id, name_key.as_str()),
-            Self::FileRevision { inode_id, .. } => match family {
-                MetadataRowFamily::Revisions => Some(lookup_keys::revision_probe(*inode_id)),
+            Self::DirentryUnbind(record) => {
+                lookup_keys::direntry_unbind_probe(record.parent_inode_id, record.name_key.as_str())
+            }
+            Self::FileRevision(record) => match family {
+                MetadataRowFamily::Revisions => Some(lookup_keys::revision_probe(record.inode_id)),
                 MetadataRowFamily::RevisionsByInodeDesc => {
-                    Some(lookup_keys::revision_by_inode_desc_probe(*inode_id))
+                    Some(lookup_keys::revision_by_inode_desc_probe(record.inode_id))
                 }
                 MetadataRowFamily::Inodes
                 | MetadataRowFamily::DirentryBinds
@@ -585,14 +574,14 @@ impl MetadataRow {
                 | MetadataRowFamily::Attributes => None,
             }
             .expect("a file revision row should use a revision family"),
-            Self::Tombstone { root_inode_id, .. } => lookup_keys::tombstone_probe(*root_inode_id),
+            Self::Tombstone(record) => lookup_keys::tombstone_probe(record.root_inode_id),
             // The family is only ever range-scanned in key order, never
             // probed for one deletion, so the filter key is the row key.
-            Self::ActiveDeletion { .. } => self.row_key_for_family(family),
-            Self::CommitReceipt { commit_id, .. } => {
-                lookup_keys::commit_receipt_probe(commit_id.as_str())
+            Self::ActiveDeletion(_) => self.row_key_for_family(family),
+            Self::CommitReceipt(record) => {
+                lookup_keys::commit_receipt_probe(record.commit_id.as_str())
             }
-            Self::AttributesRevision { inode_id, .. } => lookup_keys::attributes_probe(*inode_id),
+            Self::AttributesRevision(record) => lookup_keys::attributes_probe(record.inode_id),
         }
     }
 }
@@ -1216,14 +1205,14 @@ mod tests {
 
     #[test]
     fn direntry_bind_row_key_supports_parent_and_child_indexes() {
-        let row = super::MetadataRow::DirentryBind {
+        let row = super::MetadataRow::DirentryBind(super::DirentryBindRecord {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
             display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(17),
             bind_delta_index: 3,
-        };
+        });
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
@@ -1237,14 +1226,14 @@ mod tests {
 
     #[test]
     fn row_keys_hex_encode_dash_containing_variable_components() {
-        let row = super::MetadataRow::DirentryBind {
+        let row = super::MetadataRow::DirentryBind(super::DirentryBindRecord {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report-2024").expect("valid name key"),
             display_name: crate::DisplayName::parse("report-2024").expect("valid display name"),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(17),
             bind_delta_index: 3,
-        };
+        });
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
@@ -1254,7 +1243,7 @@ mod tests {
 
     #[test]
     fn revision_row_key_supports_newest_first_inode_index() {
-        let row = super::MetadataRow::FileRevision {
+        let row = super::MetadataRow::FileRevision(super::RevisionRecord {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
             committed_seq: ChangeSeq(12),
@@ -1267,7 +1256,7 @@ mod tests {
                     .expect("valid content id"),
                 b"row key sample",
             ),
-        };
+        });
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::Revisions),
@@ -1281,8 +1270,8 @@ mod tests {
 
     #[test]
     fn attributes_row_keys_sort_newest_revision_first_under_the_inode_prefix() {
-        let row_of =
-            |revision: u64, seq: u64, delta_index: u32| super::MetadataRow::AttributesRevision {
+        let row_of = |revision: u64, seq: u64, delta_index: u32| {
+            super::MetadataRow::AttributesRevision(super::AttributesRevisionRecord {
                 inode_id: InodeId(42),
                 attributes_revision_no: crate::AttributeRevisionNo(revision),
                 committed_seq: ChangeSeq(seq),
@@ -1291,7 +1280,8 @@ mod tests {
                 updated_by: crate::ActorRef::loonfs_system(),
                 updated_at_ms: 12_000 + seq,
                 attributes: crate::Attributes::default(),
-            };
+            })
+        };
         let newest = row_of(3, 12, 1);
         let older = row_of(2, 11, 0);
 
@@ -1326,15 +1316,15 @@ mod tests {
     fn row_key_prefixes_match_the_row_keys_they_front() {
         let name_key = NameKey::parse("report.txt").expect("valid name key");
         let display_name = crate::DisplayName::parse("report.txt").expect("valid display name");
-        let bind = super::MetadataRow::DirentryBind {
+        let bind = super::MetadataRow::DirentryBind(super::DirentryBindRecord {
             parent_inode_id: InodeId(9),
             name_key: name_key.clone(),
             display_name: display_name.clone(),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(17),
             bind_delta_index: 3,
-        };
-        let revision = super::MetadataRow::FileRevision {
+        });
+        let revision = super::MetadataRow::FileRevision(super::RevisionRecord {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
             committed_seq: ChangeSeq(12),
@@ -1347,24 +1337,24 @@ mod tests {
                     .expect("valid content id"),
                 b"row key prefix sample",
             ),
-        };
+        });
         let rows: [(MetadataRowFamily, super::MetadataRow); 10] = [
             (
                 MetadataRowFamily::Inodes,
-                super::MetadataRow::Inode {
+                super::MetadataRow::Inode(super::InodeRecord {
                     inode_id: InodeId(42),
                     inode_kind: crate::InodeKind::File,
                     created_seq: ChangeSeq(3),
                     commit_id: row_commit_id(),
                     created_by: crate::ActorRef::loonfs_system(),
                     created_at_ms: 3_000,
-                },
+                }),
             ),
             (MetadataRowFamily::DirentryBinds, bind.clone()),
             (MetadataRowFamily::DirentryChildBinds, bind),
             (
                 MetadataRowFamily::DirentryUnbinds,
-                super::MetadataRow::DirentryUnbind {
+                super::MetadataRow::DirentryUnbind(super::DirentryUnbindRecord {
                     parent_inode_id: InodeId(9),
                     name_key,
                     display_name,
@@ -1373,13 +1363,13 @@ mod tests {
                     bind_delta_index: 3,
                     unbind_seq: ChangeSeq(19),
                     unbind_delta_index: 0,
-                },
+                }),
             ),
             (MetadataRowFamily::Revisions, revision.clone()),
             (MetadataRowFamily::RevisionsByInodeDesc, revision),
             (
                 MetadataRowFamily::Tombstones,
-                super::MetadataRow::Tombstone {
+                super::MetadataRow::Tombstone(super::SubtreeTombstoneRecord {
                     root_inode_id: InodeId(42),
                     generation: super::TombstoneGeneration {
                         seq: ChangeSeq(12),
@@ -1391,21 +1381,21 @@ mod tests {
                     },
                     deleted_at_ms: 12_000,
                     deleted_by: crate::ActorRef::loonfs_system(),
-                },
+                }),
             ),
             (
                 MetadataRowFamily::ActiveDeletions,
-                super::MetadataRow::ActiveDeletion {
+                super::MetadataRow::ActiveDeletion(super::ActiveDeletionRecord {
                     root_inode_id: InodeId(42),
                     deletion_seq: ChangeSeq(12),
                     action: super::ActiveDeletionRowAction::Removed {
                         revocation_seq: ChangeSeq(15),
                     },
-                },
+                }),
             ),
             (
                 MetadataRowFamily::CommitReceipts,
-                super::MetadataRow::CommitReceipt {
+                super::MetadataRow::CommitReceipt(super::CommitReceiptRecord {
                     commit_id: CommitId::parse("c_00000000000000000000000000000001")
                         .expect("commit id"),
                     committed_by: crate::ActorRef::loonfs_system(),
@@ -1413,11 +1403,11 @@ mod tests {
                     committed_seq: ChangeSeq(12),
                     committed_at_ms: 12_000,
                     message: None,
-                },
+                }),
             ),
             (
                 MetadataRowFamily::Attributes,
-                super::MetadataRow::AttributesRevision {
+                super::MetadataRow::AttributesRevision(super::AttributesRevisionRecord {
                     inode_id: InodeId(42),
                     attributes_revision_no: crate::AttributeRevisionNo(3),
                     committed_seq: ChangeSeq(12),
@@ -1426,7 +1416,7 @@ mod tests {
                     updated_by: crate::ActorRef::loonfs_system(),
                     updated_at_ms: 12_000,
                     attributes: crate::Attributes::default(),
-                },
+                }),
             ),
         ];
 
@@ -1450,18 +1440,18 @@ mod tests {
             vec![
                 (
                     MetadataRowFamily::Inodes,
-                    super::MetadataRow::Inode {
+                    super::MetadataRow::Inode(super::InodeRecord {
                         inode_id: InodeId(42),
                         inode_kind: crate::InodeKind::File,
                         created_seq: ChangeSeq(3),
                         commit_id: row_commit_id(),
                         created_by: actor.clone(),
                         created_at_ms: 3_000,
-                    },
+                    }),
                 ),
                 (
                     MetadataRowFamily::RevisionsByInodeDesc,
-                    super::MetadataRow::FileRevision {
+                    super::MetadataRow::FileRevision(super::RevisionRecord {
                         inode_id: InodeId(42),
                         revision_no: crate::RevisionNo(7),
                         committed_seq: ChangeSeq(12),
@@ -1474,11 +1464,11 @@ mod tests {
                                 .expect("content id"),
                             b"attribution key test",
                         ),
-                    },
+                    }),
                 ),
                 (
                     MetadataRowFamily::Tombstones,
-                    super::MetadataRow::Tombstone {
+                    super::MetadataRow::Tombstone(super::SubtreeTombstoneRecord {
                         root_inode_id: InodeId(42),
                         generation: super::TombstoneGeneration {
                             seq: ChangeSeq(12),
@@ -1490,11 +1480,11 @@ mod tests {
                         },
                         deleted_at_ms: 12_000,
                         deleted_by: actor.clone(),
-                    },
+                    }),
                 ),
                 (
                     MetadataRowFamily::ActiveDeletions,
-                    super::MetadataRow::ActiveDeletion {
+                    super::MetadataRow::ActiveDeletion(super::ActiveDeletionRecord {
                         root_inode_id: InodeId(42),
                         deletion_seq: ChangeSeq(12),
                         action: super::ActiveDeletionRowAction::Listed {
@@ -1502,11 +1492,11 @@ mod tests {
                             deleted_by: actor.clone(),
                             deleted_direntry: deleted_direntry(),
                         },
-                    },
+                    }),
                 ),
                 (
                     MetadataRowFamily::Attributes,
-                    super::MetadataRow::AttributesRevision {
+                    super::MetadataRow::AttributesRevision(super::AttributesRevisionRecord {
                         inode_id: InodeId(42),
                         attributes_revision_no: crate::AttributeRevisionNo(2),
                         committed_seq: ChangeSeq(12),
@@ -1515,7 +1505,7 @@ mod tests {
                         updated_by: actor,
                         updated_at_ms: 12_000,
                         attributes: crate::Attributes::default(),
-                    },
+                    }),
                 ),
             ]
         }

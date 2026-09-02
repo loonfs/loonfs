@@ -18,18 +18,18 @@ mod view_session;
 mod visibility;
 
 pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
-pub use self::rows::{
+pub use self::rows::MetadataState;
+pub use loonfs_api::wire::manifest::{
     AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
+    InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;
 /// Newest-event-wins tombstone selection used by differential tests.
 #[cfg(test)]
 pub(crate) use self::rows::active_tombstone_from_records;
-pub(crate) use self::rows::content_ref_evidence_bytes;
 pub(crate) use self::rows::{
-    active_deletion_from_tombstone, ActiveDeletionAction, ActiveDeletionRecord, RecoverableDeletion,
+    active_deletion_from_tombstone, recoverable_deletion_from_active_record, RecoverableDeletion,
 };
 #[cfg(test)]
 pub(crate) use self::view::InMemoryMetadataView;
@@ -38,7 +38,8 @@ pub(crate) use self::view_session::{
     LeafRevisionPrefetch, MetadataViewSession, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
-pub(crate) use self::visibility::{unbind_matches_binding, BindingIdentity};
+pub(crate) use self::visibility::{binding_generation, unbind_matches_binding, BindingIdentity};
+pub(crate) use loonfs_api::wire::manifest::ActiveDeletionRecord;
 
 #[cfg(test)]
 pub(crate) use self::rows::MetadataStateBuilder;

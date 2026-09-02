@@ -62,11 +62,11 @@ fn kept_revisions(
         .expect("family rows")
         .iter()
         .map(|row| match row {
-            MetadataRow::AttributesRevision {
+            MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
                 inode_id,
                 attributes_revision_no,
                 ..
-            } => (inode_id.0, attributes_revision_no.0),
+            }) => (inode_id.0, attributes_revision_no.0),
             other => panic!("unexpected row: {other:?}"),
         })
         .collect()
@@ -141,11 +141,11 @@ fn the_fold_keeps_a_latest_empty_revision() {
     assert!(
         matches!(
             kept.as_slice(),
-            [MetadataRow::AttributesRevision {
+            [MetadataRow::AttributesRevision (crate::metadata::AttributesRevisionRecord {
                 attributes_revision_no: AttributeRevisionNo(2),
                 attributes,
                 ..
-            }] if attributes.is_empty()
+            })] if attributes.is_empty()
         ),
         "only the cleared revision survives: {kept:?}"
     );

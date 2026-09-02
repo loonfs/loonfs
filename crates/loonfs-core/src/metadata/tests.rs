@@ -471,7 +471,7 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
         commit_id: commit_id(2),
         committed_at_ms: 4_200,
         committed_by: actor(),
-        revision_delta_index: 0,
+        delta_index: 0,
         content_ref,
     });
     builder.push_revision(RevisionRecord {
@@ -481,7 +481,7 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
         commit_id: commit_id(3),
         committed_at_ms: 4_200,
         committed_by: actor(),
-        revision_delta_index: 0,
+        delta_index: 0,
         content_ref: replacement_ref,
     });
     builder.push_commit_receipt(CommitReceiptRecord {

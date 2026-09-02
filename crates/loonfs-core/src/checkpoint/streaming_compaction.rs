@@ -1166,13 +1166,13 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     /// below the floor cost one: a bind above the floor survives whatever
     /// retired it later.
     async fn reverse_bind_survives(&mut self, row: &MetadataRow) -> Result<bool> {
-        let MetadataRow::DirentryBind {
+        let MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
             parent_inode_id,
             name_key,
             bind_seq,
             bind_delta_index,
             ..
-        } = row
+        }) = row
         else {
             return Ok(true);
         };
@@ -1350,18 +1350,18 @@ mod tests {
     use loonfs_api::{ChangeSeq, DisplayName, InodeId, NameKey};
 
     fn bind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryBind {
+        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
             display_name: DisplayName::parse(name).expect("display name"),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(bind_seq),
             bind_delta_index: 0,
-        }
+        })
     }
 
     fn unbind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryUnbind {
+        MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
             display_name: DisplayName::parse(name).expect("display name"),
@@ -1370,7 +1370,7 @@ mod tests {
             bind_delta_index: 0,
             unbind_seq: ChangeSeq(bind_seq + 1),
             unbind_delta_index: 0,
-        }
+        })
     }
 
     fn fold_row(digest: &mut RowDigest, row: &MetadataRow) {

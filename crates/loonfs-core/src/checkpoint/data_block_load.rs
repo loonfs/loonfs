@@ -14,9 +14,13 @@ use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, MetadataSegmentCache};
 use super::error::ManifestLoadError;
 use super::stored_block_cache::StoredMetadataBlockKind;
-use crate::metadata::content_ref_evidence_bytes;
-use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataSegmentRef};
+use loonfs_api::wire::manifest::{
+    ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord, CommitReceiptRecord,
+    DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataRow,
+    MetadataSegmentRef, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+};
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
+use loonfs_api::ActorRef;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -268,68 +272,115 @@ pub(super) fn decoded_manifest_block_weight(block: &DecodedDataBlock) -> usize {
         .rows
         .iter()
         .zip(&block.row_keys)
-        .map(|(row, row_key)| {
-            BLOCK_ENTRY_OVERHEAD + row_key.len() + decoded_manifest_row_weight(row)
-        })
+        .map(|(row, row_key)| BLOCK_ENTRY_OVERHEAD + row_key.len() + row.decoded_weight())
         .sum::<usize>();
     row_weight.saturating_add(BLOCK_ALLOCATION_OVERHEAD)
 }
 
-pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
-    // Approximate inline row storage and heap allocation metadata.
-    const FIXED_ROW_OVERHEAD: usize = 32;
-    const ALLOCATED_ROW_OVERHEAD: usize = 96;
-    match row {
-        MetadataRow::Inode { commit_id, .. } => ALLOCATED_ROW_OVERHEAD + commit_id.as_str().len(),
-        MetadataRow::DirentryBind {
-            name_key,
-            display_name,
-            ..
-        } => ALLOCATED_ROW_OVERHEAD + name_key.as_str().len() + display_name.as_str().len(),
-        MetadataRow::DirentryUnbind { name_key, .. } => {
-            ALLOCATED_ROW_OVERHEAD + name_key.as_str().len()
+/// The approximate decoded size of one row. The block cache and the
+/// WAL-tail projection both charge rows with this.
+pub(crate) trait DecodedRowWeight {
+    fn decoded_weight(&self) -> usize;
+}
+
+// Approximate inline row storage and heap allocation metadata.
+const FIXED_ROW_OVERHEAD: usize = 32;
+const ALLOCATED_ROW_OVERHEAD: usize = 96;
+
+fn actor_bytes(actor: &ActorRef) -> usize {
+    actor.kind.as_str().len() + actor.id.as_str().len()
+}
+
+fn direntry_bytes(direntry: &DeletedDirentry) -> usize {
+    direntry.name_key.as_str().len() + direntry.display_name.as_str().len()
+}
+
+impl DecodedRowWeight for MetadataRow {
+    fn decoded_weight(&self) -> usize {
+        match self {
+            MetadataRow::Inode(record) => record.decoded_weight(),
+            MetadataRow::DirentryBind(record) => record.decoded_weight(),
+            MetadataRow::DirentryUnbind(record) => record.decoded_weight(),
+            MetadataRow::FileRevision(record) => record.decoded_weight(),
+            MetadataRow::Tombstone(record) => record.decoded_weight(),
+            MetadataRow::ActiveDeletion(record) => record.decoded_weight(),
+            MetadataRow::CommitReceipt(record) => record.decoded_weight(),
+            MetadataRow::AttributesRevision(record) => record.decoded_weight(),
         }
-        MetadataRow::FileRevision {
-            commit_id,
-            content_ref,
-            ..
-        } => {
-            ALLOCATED_ROW_OVERHEAD
-                + commit_id.as_str().len()
-                + content_ref_evidence_bytes(content_ref)
-        }
-        MetadataRow::Tombstone { commit_id, .. } => {
-            ALLOCATED_ROW_OVERHEAD + commit_id.as_str().len()
-        }
-        MetadataRow::ActiveDeletion { action, .. } => match action {
+    }
+}
+
+impl DecodedRowWeight for InodeRecord {
+    fn decoded_weight(&self) -> usize {
+        ALLOCATED_ROW_OVERHEAD + self.commit_id.as_str().len() + actor_bytes(&self.created_by)
+    }
+}
+
+impl DecodedRowWeight for DirentryBindRecord {
+    fn decoded_weight(&self) -> usize {
+        ALLOCATED_ROW_OVERHEAD + self.name_key.as_str().len() + self.display_name.as_str().len()
+    }
+}
+
+impl DecodedRowWeight for DirentryUnbindRecord {
+    fn decoded_weight(&self) -> usize {
+        ALLOCATED_ROW_OVERHEAD + self.name_key.as_str().len() + self.display_name.as_str().len()
+    }
+}
+
+impl DecodedRowWeight for RevisionRecord {
+    fn decoded_weight(&self) -> usize {
+        ALLOCATED_ROW_OVERHEAD
+            + self.commit_id.as_str().len()
+            + actor_bytes(&self.committed_by)
+            + self.content_ref.content_id.as_str().len()
+            + self.content_ref.checksum.value.len()
+    }
+}
+
+impl DecodedRowWeight for SubtreeTombstoneRecord {
+    fn decoded_weight(&self) -> usize {
+        let action_bytes = match &self.action {
+            TombstoneRowAction::Set { deleted_direntry } => direntry_bytes(deleted_direntry),
+            TombstoneRowAction::Revoke { .. } => 0,
+        };
+        ALLOCATED_ROW_OVERHEAD
+            + self.commit_id.as_str().len()
+            + actor_bytes(&self.deleted_by)
+            + action_bytes
+    }
+}
+
+impl DecodedRowWeight for ActiveDeletionRecord {
+    fn decoded_weight(&self) -> usize {
+        match &self.action {
             ActiveDeletionRowAction::Listed {
-                deleted_direntry, ..
+                deleted_by,
+                deleted_direntry,
+                ..
             } => {
-                ALLOCATED_ROW_OVERHEAD
-                    + deleted_direntry.name_key.as_str().len()
-                    + deleted_direntry.display_name.as_str().len()
+                ALLOCATED_ROW_OVERHEAD + actor_bytes(deleted_by) + direntry_bytes(deleted_direntry)
             }
             ActiveDeletionRowAction::Removed { .. } => FIXED_ROW_OVERHEAD,
-        },
-        MetadataRow::CommitReceipt {
-            commit_id,
-            committed_by,
-            semantic_commit_fingerprint,
-            message,
-            ..
-        } => {
-            ALLOCATED_ROW_OVERHEAD
-                + commit_id.as_str().len()
-                + committed_by.kind.as_str().len()
-                + committed_by.id.as_str().len()
-                + semantic_commit_fingerprint.len()
-                + message.as_ref().map_or(0, String::len)
         }
-        // The map's key and value bytes are what an attribute row weighs.
-        MetadataRow::AttributesRevision {
-            commit_id,
-            attributes,
-            ..
-        } => ALLOCATED_ROW_OVERHEAD + commit_id.as_str().len() + attributes.logical_bytes(),
+    }
+}
+
+impl DecodedRowWeight for CommitReceiptRecord {
+    fn decoded_weight(&self) -> usize {
+        ALLOCATED_ROW_OVERHEAD
+            + self.commit_id.as_str().len()
+            + actor_bytes(&self.committed_by)
+            + self.semantic_commit_fingerprint.len()
+            + self.message.as_ref().map_or(0, String::len)
+    }
+}
+
+impl DecodedRowWeight for AttributesRevisionRecord {
+    fn decoded_weight(&self) -> usize {
+        ALLOCATED_ROW_OVERHEAD
+            + self.commit_id.as_str().len()
+            + actor_bytes(&self.updated_by)
+            + self.attributes.logical_bytes()
     }
 }

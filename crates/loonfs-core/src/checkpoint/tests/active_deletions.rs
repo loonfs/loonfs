@@ -7,8 +7,7 @@
 
 use super::*;
 use crate::metadata::{
-    active_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneAction,
-    SubtreeTombstoneRecord,
+    active_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use crate::path::read::{load_current_metadata_view, AttributeInclusion};
 use loonfs_api::v0::DirectoryBinding;
@@ -29,7 +28,7 @@ fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombsto
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         deleted_at_ms: 1_000 + seq,
         deleted_by: loonfs_api::ActorRef::loonfs_system(),
-        action: SubtreeTombstoneAction::Set {
+        action: TombstoneRowAction::Set {
             deleted_direntry: DeletedDirentry {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse(name).expect("name key"),
@@ -46,7 +45,7 @@ fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> Subtre
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         deleted_at_ms: 1_000 + seq,
         deleted_by: loonfs_api::ActorRef::loonfs_system(),
-        action: SubtreeTombstoneAction::Revoke {
+        action: TombstoneRowAction::Revoke {
             target: generation(target_seq),
         },
     }
@@ -68,14 +67,14 @@ fn active_deletion_rows(state: &MetadataState) -> Vec<(String, &'static str)> {
         .map(|row| {
             let row_key = row.row_key_for_family(ApiMetadataRowFamily::ActiveDeletions);
             let kind = match row {
-                MetadataRow::ActiveDeletion {
+                MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
                     action: ActiveDeletionRowAction::Listed { .. },
                     ..
-                } => "listed",
-                MetadataRow::ActiveDeletion {
+                }) => "listed",
+                MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
                     action: ActiveDeletionRowAction::Removed { .. },
                     ..
-                } => "removed",
+                }) => "removed",
                 other => panic!("unexpected row in the active-deletions family: {other:?}"),
             };
             (row_key, kind)
@@ -152,10 +151,10 @@ fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
     assert!(
         matches!(
             &delta_rows[0],
-            MetadataRow::ActiveDeletion {
+            MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
                 action: ActiveDeletionRowAction::Removed { revocation_seq },
                 ..
-            } if *revocation_seq == ChangeSeq(9)
+            }) if *revocation_seq == ChangeSeq(9)
         ),
         "unexpected delta row: {:?}",
         delta_rows[0]
@@ -325,8 +324,8 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
         .filter_map(|(root_inode_id, records)| {
             let active = active_tombstone_from_records(records, head_seq)?;
             let deleted_direntry = match active.action {
-                SubtreeTombstoneAction::Set { deleted_direntry } => deleted_direntry,
-                SubtreeTombstoneAction::Revoke { .. } => {
+                TombstoneRowAction::Set { deleted_direntry } => deleted_direntry,
+                TombstoneRowAction::Revoke { .. } => {
                     panic!("the active tombstone is a set by construction")
                 }
             };
