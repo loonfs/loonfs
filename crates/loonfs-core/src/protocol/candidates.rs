@@ -11,7 +11,7 @@ use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::ContentAdmission;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
-use loonfs_api::{CommitId, ContentStoreId, NamespaceId};
+use loonfs_api::{CommitId, ContentId, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 
@@ -230,11 +230,13 @@ fn validate_commit_content_references(
     content_store_id: &ContentStoreId,
     now_ms: u64,
 ) -> Result<()> {
-    let mut admissions_by_content_id = HashMap::with_capacity(admissions.len());
+    let mut admissions_by_content_id: HashMap<&ContentId, Vec<&ContentAdmission>> =
+        HashMap::with_capacity(admissions.len());
     for admission in admissions {
         admissions_by_content_id
             .entry(admission.content_id())
-            .or_insert(admission);
+            .or_default()
+            .push(admission);
     }
     for content_ref in request
         .operations
@@ -243,8 +245,10 @@ fn validate_commit_content_references(
     {
         let admitted = admissions_by_content_id
             .get(&content_ref.content_id)
-            .is_some_and(|admission| {
-                admission.admits(namespace_id, content_store_id, content_ref, now_ms)
+            .is_some_and(|candidates| {
+                candidates.iter().any(|admission| {
+                    admission.admits(namespace_id, content_store_id, content_ref, now_ms)
+                })
             });
         if !admitted {
             return Err(ContentPreparationError::ContentNotPrepared {
