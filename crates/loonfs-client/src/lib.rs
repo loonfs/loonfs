@@ -55,7 +55,10 @@ pub use admin::{CheckpointsPager, SnapshotsPager};
 pub use config::ClientConfig;
 pub use error::ClientError;
 pub use payload::{PayloadSource, PayloadStream};
-pub use reads::{InodeChildrenPager, ListChangesOptions, PathEntriesPager, ReadFileOptions};
+pub use reads::{
+    ChangesPager, FileRevisionsPager, InodeChildrenPager, ListChangesOptions, PathEntriesPager,
+    ReadFileOptions, TrashPager,
+};
 use transport::{
     SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, IO_INACTIVITY_TIMEOUT,
 };

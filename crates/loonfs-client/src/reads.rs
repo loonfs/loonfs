@@ -25,6 +25,12 @@ pub struct ListChangesOptions {
 pub type PathEntriesPager = loonfs_api::Pager<ListPathEntriesResponse, ClientError>;
 /// A pager over directory children addressed by inode.
 pub type InodeChildrenPager = loonfs_api::Pager<ListInodeChildrenResponse, ClientError>;
+/// A pager over retained file revisions.
+pub type FileRevisionsPager = loonfs_api::Pager<ListFileRevisionsResponse, ClientError>;
+/// A pager over recoverable deletions.
+pub type TrashPager = loonfs_api::Pager<ListTrashResponse, ClientError>;
+/// A pager over committed changes.
+pub type ChangesPager = loonfs_api::Pager<ListChangesResponse, ClientError>;
 
 impl Client {
     /// Creates an empty namespace with the given ID and returns its genesis state.
@@ -202,6 +208,126 @@ impl Client {
                         inode_id,
                         page_size,
                         cursor.as_deref(),
+                        &options,
+                    )
+                    .await
+            }
+        })
+    }
+
+    /// Creates a path-based revision pager beginning at `cursor`.
+    pub fn list_file_revisions_pager(
+        &self,
+        spec: &NamespacePath,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> FileRevisionsPager {
+        let client = self.clone();
+        let spec = spec.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let client = client.clone();
+            let spec = spec.clone();
+            async move {
+                client
+                    .list_file_revisions_page(&spec, page_size, cursor.as_deref())
+                    .await
+            }
+        })
+    }
+
+    /// Creates an inode-based revision pager beginning at `cursor`.
+    pub fn list_file_revisions_by_inode_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> FileRevisionsPager {
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                client
+                    .list_file_revisions_by_inode_page(
+                        &namespace_id,
+                        inode_id,
+                        page_size,
+                        cursor.as_deref(),
+                    )
+                    .await
+            }
+        })
+    }
+
+    /// Creates a trash pager beginning at `cursor`.
+    pub fn list_trash_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> TrashPager {
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                client
+                    .list_trash_page(&namespace_id, page_size, cursor.as_deref())
+                    .await
+            }
+        })
+    }
+
+    /// Creates a change-feed pager beginning after `after_seq`.
+    pub fn list_changes_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        page_size: Option<u32>,
+    ) -> ChangesPager {
+        self.changes_pager(namespace_id, after_seq, page_size, None)
+    }
+
+    /// Creates a snapshot-bounded change-feed pager beginning after `after_seq`.
+    pub fn list_changes_pager_at_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        page_size: Option<u32>,
+        snapshot_id: &CheckpointId,
+    ) -> ChangesPager {
+        self.changes_pager(
+            namespace_id,
+            after_seq,
+            page_size,
+            Some(snapshot_id.clone()),
+        )
+    }
+
+    fn changes_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        page_size: Option<u32>,
+        snapshot_id: Option<CheckpointId>,
+    ) -> ChangesPager {
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(Some(after_seq), move |after_seq| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            let options = ListChangesOptions {
+                limit: page_size,
+                snapshot_id: snapshot_id.clone(),
+            };
+            async move {
+                client
+                    .list_changes(
+                        &namespace_id,
+                        after_seq.expect("change pager should carry a sequence"),
                         &options,
                     )
                     .await
