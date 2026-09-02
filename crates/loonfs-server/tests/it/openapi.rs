@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[path = "../../src/bin/loonfs-openapi/openapi_postprocess.rs"]
+#[path = "../../src/bin/loonfs-openapi/openapi_postprocess/mod.rs"]
 mod openapi_postprocess;
 
 const OPENAPI_JSON_PATH: &str =
@@ -460,7 +460,7 @@ fn openapi_documents_current_server_paths() {
 
 #[test]
 fn openapi_operation_ids_match_the_public_registry() {
-    const REGISTRY_MESSAGE: &str = "operation IDs are the wire registry; add or rename an operation in OPERATION_RETRY_CLASSES and OPERATION_SDK_NAMES together";
+    const REGISTRY_MESSAGE: &str = "operation IDs are the wire registry; add or rename an operation in OPERATION_SDK_NAMES or SDK_EXCLUDED_OPERATIONS";
 
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -509,30 +509,25 @@ fn openapi_operation_ids_match_the_public_registry() {
         "duplicate operationIds found; {REGISTRY_MESSAGE}"
     );
 
-    let registered = openapi_postprocess::OPERATION_RETRY_CLASSES
-        .iter()
-        .map(|(operation_id, _)| *operation_id)
-        .collect::<Vec<_>>();
+    let registered = registered_operation_ids();
     operation_ids.sort_unstable();
     assert_eq!(
-        operation_ids, registered,
+        operation_ids.into_iter().collect::<BTreeSet<_>>(),
+        registered,
         "operationIds changed; {REGISTRY_MESSAGE}"
     );
 }
 
 #[test]
 fn proxy_operation_ids_match_the_allowlist() {
-    let registered = openapi_postprocess::OPERATION_RETRY_CLASSES
-        .iter()
-        .map(|(operation_id, _)| *operation_id)
-        .collect::<BTreeSet<_>>();
-    let allowlisted = openapi_postprocess::PROXY_OPERATIONS
+    let registered = registered_operation_ids();
+    let allowlisted = openapi_postprocess::proxy::PROXY_OPERATIONS
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
     assert_eq!(
         allowlisted.len(),
-        openapi_postprocess::PROXY_OPERATIONS.len(),
+        openapi_postprocess::proxy::PROXY_OPERATIONS.len(),
         "proxy operation IDs must be unique"
     );
     assert!(
@@ -540,7 +535,7 @@ fn proxy_operation_ids_match_the_allowlist() {
         "proxy operation IDs must be registered public operations"
     );
     assert!(
-        openapi_postprocess::PROXY_OPERATIONS
+        openapi_postprocess::proxy::PROXY_OPERATIONS
             .windows(2)
             .all(|pair| pair[0] < pair[1]),
         "proxy operations must stay sorted"
@@ -723,11 +718,16 @@ fn every_registered_operation_publishes_its_retry_class() {
         })
         .collect::<BTreeMap<_, _>>();
 
-    let expected = openapi_postprocess::OPERATION_RETRY_CLASSES
-        .iter()
-        .map(|(operation_id, retry_class)| (*operation_id, retry_class.as_str()))
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(published, expected);
+    assert_eq!(
+        published.keys().copied().collect::<BTreeSet<_>>(),
+        registered_operation_ids()
+    );
+    for (operation_id, retry_class) in published {
+        assert!(
+            matches!(retry_class, "idempotent" | "replayable" | "not_idempotent"),
+            "operation `{operation_id}` has invalid retry class `{retry_class}`"
+        );
+    }
 }
 
 #[test]
@@ -820,12 +820,20 @@ fn non_idempotent_operations_disable_generated_sdk_retries() {
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
     let operations = operations_by_id(&spec);
 
-    for (operation_id, retry_class) in openapi_postprocess::OPERATION_RETRY_CLASSES {
-        let fern_retries = operations[operation_id].get("x-fern-retries");
-        if *retry_class == openapi_postprocess::RetryClass::NotIdempotent {
-            assert_eq!(fern_retries, Some(&serde_json::json!({"disabled": true})));
-        } else {
-            assert_eq!(fern_retries, None);
+    for (operation_id, operation) in operations {
+        let retry_class = operation
+            .get("x-loonfs-retry")
+            .and_then(Value::as_str)
+            .expect("operation retry class");
+        let fern_retries = operation.get("x-fern-retries");
+        match retry_class {
+            "not_idempotent" => {
+                assert_eq!(fern_retries, Some(&serde_json::json!({"disabled": true})));
+            }
+            "idempotent" | "replayable" => assert_eq!(fern_retries, None),
+            retry_class => {
+                panic!("operation `{operation_id}` has invalid retry class `{retry_class}`")
+            }
         }
     }
 }
@@ -850,12 +858,20 @@ fn cursor_list_operations_publish_the_registered_pagination_metadata() {
         .pointer("/components/schemas")
         .and_then(Value::as_object)
         .expect("openapi schemas object");
-    let expected = openapi_postprocess::PAGINATION_OPERATIONS
+    let expected = operations
         .iter()
-        .map(|&operation_id| {
-            let operation = operations
-                .get(operation_id)
-                .unwrap_or_else(|| panic!("missing pagination operation `{operation_id}`"));
+        .filter(|(_, operation)| {
+            operation
+                .get("parameters")
+                .and_then(Value::as_array)
+                .is_some_and(|parameters| {
+                    parameters.iter().any(|parameter| {
+                        parameter.get("in").and_then(Value::as_str) == Some("query")
+                            && parameter.get("name").and_then(Value::as_str) == Some("cursor")
+                    })
+                })
+        })
+        .map(|(&operation_id, &operation)| {
             let response_reference = operation
                 .pointer("/responses/200/content/application~1json/schema/$ref")
                 .and_then(Value::as_str)
@@ -900,21 +916,18 @@ fn proxy_cursor_list_operations_keep_pagination_metadata() {
     .expect("parse proxy openapi json");
     let full_operations = operations_by_id(&full);
     let proxy_operations = operations_by_id(&proxy);
-    let table_operation_ids = openapi_postprocess::PAGINATION_OPERATIONS
-        .iter()
+    let expected_proxy_operations = proxy_operations
+        .keys()
         .copied()
-        .collect::<BTreeSet<_>>();
-    let expected_proxy_operations = openapi_postprocess::PROXY_OPERATIONS
-        .iter()
-        .copied()
-        .filter(|operation_id| table_operation_ids.contains(operation_id))
+        .filter(|operation_id| {
+            full_operations[*operation_id]
+                .get("x-fern-pagination")
+                .is_some()
+        })
         .collect::<BTreeSet<_>>();
     let mut actual_proxy_operations = BTreeSet::new();
 
     for (operation_id, proxy_operation) in proxy_operations {
-        if !table_operation_ids.contains(operation_id) {
-            continue;
-        }
         let full_operation = full_operations
             .get(operation_id)
             .unwrap_or_else(|| panic!("missing full operation `{operation_id}`"));
@@ -923,7 +936,9 @@ fn proxy_cursor_list_operations_keep_pagination_metadata() {
             full_operation.get("x-fern-pagination"),
             "proxy pagination metadata differs for `{operation_id}`"
         );
-        actual_proxy_operations.insert(operation_id);
+        if proxy_operation.get("x-fern-pagination").is_some() {
+            actual_proxy_operations.insert(operation_id);
+        }
     }
 
     assert_eq!(actual_proxy_operations, expected_proxy_operations);
@@ -1393,9 +1408,15 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
         );
     }
 
-    assert!(
-        !schemas.contains_key("InodeId"),
-        "public inode fields use inline string schemas"
+    let inode_id = schemas.get("InodeId").expect("InodeId schema");
+    assert_eq!(inode_id.get("type").and_then(Value::as_str), Some("string"));
+    assert_eq!(
+        inode_id.get("pattern").and_then(Value::as_str),
+        Some(loonfs_api::public_inode_id::PATTERN)
+    );
+    assert_eq!(
+        inode_id.get("example").and_then(Value::as_str),
+        Some(loonfs_api::public_inode_id::EXAMPLE)
     );
 
     // Each flattened status variant must use the capped run number schema.
@@ -2047,6 +2068,14 @@ fn operations_by_id(spec: &Value) -> BTreeMap<&str, &Value> {
     }
 
     operations
+}
+
+fn registered_operation_ids() -> BTreeSet<&'static str> {
+    openapi_postprocess::OPERATION_SDK_NAMES
+        .iter()
+        .map(|(operation_id, _)| *operation_id)
+        .chain(openapi_postprocess::SDK_EXCLUDED_OPERATIONS.iter().copied())
+        .collect()
 }
 
 fn component_schema_for_ref<'a>(

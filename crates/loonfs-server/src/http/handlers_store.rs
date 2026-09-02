@@ -17,6 +17,10 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome};
     utoipa::path(
         post,
         operation_id = "probe_store",
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/admin/store/probe",
         tag = "admin",
         summary = "Probe the store contract",

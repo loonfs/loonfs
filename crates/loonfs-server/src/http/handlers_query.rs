@@ -36,6 +36,14 @@ pub(super) struct GrepQuery {
     utoipa::path(
         get,
         operation_id = "grep",
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-pagination" = json!({
+                "cursor": "$request.cursor",
+                "next_cursor": "$response.next_cursor",
+                "results": "$response.matches",
+            })),
+        ),
         path = "/v0/namespaces/{namespace_id}/grep",
         tag = "query",
         summary = "Content search",
@@ -150,6 +158,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
     utoipa::path(
         post,
         operation_id = "enable_grep_index",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/admin/namespaces/{namespace_id}/grep/index/enable",
         tag = "admin",
         summary = "Enable the grep index",
@@ -198,6 +207,7 @@ pub(super) async fn enable_grep_index(
     utoipa::path(
         get,
         operation_id = "get_grep_index",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/admin/namespaces/{namespace_id}/grep/index",
         tag = "admin",
         summary = "Get grep index status",
@@ -237,6 +247,7 @@ async fn read_grep_index_status(
     utoipa::path(
         post,
         operation_id = "disable_grep_index",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/admin/namespaces/{namespace_id}/grep/index/disable",
         tag = "admin",
         summary = "Disable the grep index",
@@ -285,6 +296,10 @@ pub(super) async fn disable_grep_index(
     utoipa::path(
         post,
         operation_id = "gc_grep_index",
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/admin/namespaces/{namespace_id}/grep/index/gc",
         tag = "admin",
         summary = "Collect grep-index garbage",

@@ -475,6 +475,7 @@ async fn method_not_allowed() -> ApiResponseError {
     utoipa::path(
         get,
         operation_id = "get_health",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/health",
         tag = "system",
         summary = "Check health",
@@ -495,6 +496,7 @@ async fn get_health() -> &'static str {
     utoipa::path(
         get,
         operation_id = "get_readiness",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/readiness",
         tag = "system",
         summary = "Check readiness",
@@ -531,6 +533,7 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
     utoipa::path(
         get,
         operation_id = "get_metrics",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/metrics",
         tag = "system",
         summary = "Scrape metrics",

@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "loonfs-openapi"
-path = "src/bin/loonfs-openapi.rs"
+path = "src/bin/loonfs-openapi/main.rs"
 required-features = ["openapi"]
 
 [dependencies]
@@ -29,7 +29,6 @@ fs4.workspace = true
 futures.workspace = true
 http-body.workspace = true
 http.workspace = true
-indexmap.workspace = true
 loonfs-api.workspace = true
 loonfs.workspace = true
 loonfs-grep.workspace = true

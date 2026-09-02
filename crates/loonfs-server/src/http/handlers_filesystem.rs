@@ -185,6 +185,14 @@ impl ReadTarget {
     utoipa::path(
         get,
         operation_id = "list_path_entries",
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-pagination" = json!({
+                "cursor": "$request.cursor",
+                "next_cursor": "$response.next_cursor",
+                "results": "$response.entries",
+            })),
+        ),
         path = "/v0/namespaces/{namespace_id}/filesystem/entries",
         tag = "filesystem",
         summary = "List directory",
@@ -240,6 +248,7 @@ pub(super) async fn list_path_entries(
     utoipa::path(
         get,
         operation_id = "get_path_entry",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/filesystem/entry",
         tag = "filesystem",
         summary = "Stat path",
@@ -287,6 +296,7 @@ pub(super) async fn get_path_entry(
     utoipa::path(
         get,
         operation_id = "get_file_bytes",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/filesystem/content",
         tag = "filesystem",
         summary = "Read file",
@@ -338,6 +348,14 @@ pub(super) async fn get_file_bytes(
     utoipa::path(
         get,
         operation_id = "list_trash",
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-pagination" = json!({
+                "cursor": "$request.cursor",
+                "next_cursor": "$response.next_cursor",
+                "results": "$response.entries",
+            })),
+        ),
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
         summary = "List recoverable deletions",
@@ -381,6 +399,14 @@ pub(super) async fn list_trash(
     utoipa::path(
         get,
         operation_id = "list_file_revisions",
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-pagination" = json!({
+                "cursor": "$request.cursor",
+                "next_cursor": "$response.next_cursor",
+                "results": "$response.revisions",
+            })),
+        ),
         path = "/v0/namespaces/{namespace_id}/filesystem/revisions",
         tag = "filesystem",
         summary = "List file revisions",
@@ -425,11 +451,13 @@ pub(super) async fn list_file_revisions(
     Ok(Json(response))
 }
 
+/// The server stores the actor from the request; the shared token does not verify it.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
         post,
         operation_id = "create_commit",
+        extensions(("x-loonfs-retry" = json!("replayable"))),
         path = "/v0/namespaces/{namespace_id}/commits",
         tag = "filesystem",
         summary = "Apply a commit",
@@ -447,7 +475,6 @@ pub(super) async fn list_file_revisions(
         )
     )
 )]
-/// The server stores the actor from the request; the shared token does not verify it.
 pub(super) async fn create_commit(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -539,6 +566,7 @@ pub(super) async fn create_commit(
     utoipa::path(
         get,
         operation_id = "list_changes",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/changes",
         tag = "filesystem",
         summary = "List changes after a sequence",

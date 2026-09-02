@@ -52,10 +52,6 @@ impl CommitResponse {
 pub struct DirectoryBinding {
     /// Parent directory containing the entry.
     #[serde(with = "crate::public_inode_id")]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub parent_inode_id: InodeId,
     /// Name used to look up the entry.
     pub name_key: NameKey,
@@ -78,17 +74,9 @@ pub enum FilesystemChange {
     DirectoryCreated {
         /// Newly allocated namespace-scoped inode identity.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// Directory the new entry was bound under.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
@@ -100,17 +88,9 @@ pub enum FilesystemChange {
     FileCreated {
         /// Newly allocated namespace-scoped inode identity.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// Directory the new entry was bound under.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
@@ -126,10 +106,6 @@ pub enum FilesystemChange {
     ContentChanged {
         /// File inode whose history advanced.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// New monotonic position in that file's revision history.
         revision_no: RevisionNo,
@@ -141,26 +117,14 @@ pub enum FilesystemChange {
     Moved {
         /// Inode whose binding changed.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// Directory that held the old binding.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         from_parent_inode_id: InodeId,
         /// Spelling of the old binding.
         from_display_name: DisplayName,
         /// Directory holding the new binding.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         to_parent_inode_id: InodeId,
         /// Spelling of the new binding.
         to_display_name: DisplayName,
@@ -172,10 +136,6 @@ pub enum FilesystemChange {
     Deleted {
         /// Inode at the root of the deleted subtree.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// Directory binding removed by the deletion.
         deleted_binding: DirectoryBinding,
@@ -185,17 +145,9 @@ pub enum FilesystemChange {
     Undeleted {
         /// Recovered inode.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// Directory the recovered entry was bound under.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         parent_inode_id: InodeId,
         /// Spelling of the recovered binding.
         display_name: DisplayName,
@@ -210,10 +162,6 @@ pub enum FilesystemChange {
     AttributesChanged {
         /// Inode whose attributes advanced.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// New attribute revision for that inode.
         attributes_revision_no: AttributeRevisionNo,

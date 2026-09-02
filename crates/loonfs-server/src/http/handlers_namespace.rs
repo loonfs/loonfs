@@ -57,6 +57,7 @@ pub(super) struct CheckpointPageQuery {
     utoipa::path(
         get,
         operation_id = "get_capabilities",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/capabilities",
         tag = "system",
         summary = "Get capabilities",
@@ -184,6 +185,10 @@ pub(super) async fn get_capabilities(
     utoipa::path(
         post,
         operation_id = "create_namespace",
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/namespaces",
         tag = "namespaces",
         summary = "Create namespace",
@@ -217,6 +222,7 @@ pub(super) async fn create_namespace(
     utoipa::path(
         get,
         operation_id = "get_namespace",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Get namespace",
@@ -250,6 +256,7 @@ pub(super) async fn get_namespace(
     utoipa::path(
         get,
         operation_id = "get_namespace_diagnostics",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/admin/namespaces/{namespace_id}/diagnostics",
         tag = "admin",
         summary = "Get namespace diagnostics",
@@ -283,6 +290,10 @@ pub(super) async fn get_namespace_diagnostics(
     utoipa::path(
         delete,
         operation_id = "delete_namespace",
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Delete namespace",
@@ -331,6 +342,10 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
     utoipa::path(
         post,
         operation_id = "fork_namespace",
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
         summary = "Fork namespace",
@@ -367,6 +382,10 @@ pub(super) async fn fork_namespace(
     utoipa::path(
         post,
         operation_id = "create_snapshot",
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "Create snapshot",
@@ -418,6 +437,14 @@ pub(super) async fn create_snapshot(
     utoipa::path(
         get,
         operation_id = "list_snapshots",
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-pagination" = json!({
+                "cursor": "$request.cursor",
+                "next_cursor": "$response.next_cursor",
+                "results": "$response.snapshots",
+            })),
+        ),
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "List snapshots",
@@ -461,6 +488,7 @@ pub(super) async fn list_snapshots(
     utoipa::path(
         post,
         operation_id = "extend_snapshot",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
         tag = "namespaces",
         summary = "Extend snapshot",
@@ -508,6 +536,7 @@ pub(super) async fn extend_snapshot(
     utoipa::path(
         post,
         operation_id = "release_snapshot",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
         tag = "namespaces",
         summary = "Release snapshot",
@@ -579,6 +608,10 @@ fn snapshot_expiry_from_ttl(
     utoipa::path(
         post,
         operation_id = "create_checkpoint",
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
         tag = "admin",
         summary = "Create checkpoint",
@@ -620,6 +653,14 @@ pub(super) async fn create_checkpoint(
     utoipa::path(
         get,
         operation_id = "list_checkpoints",
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-pagination" = json!({
+                "cursor": "$request.cursor",
+                "next_cursor": "$response.next_cursor",
+                "results": "$response.checkpoints",
+            })),
+        ),
         path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
         tag = "admin",
         summary = "List checkpoints",
@@ -663,6 +704,7 @@ pub(super) async fn list_checkpoints(
     utoipa::path(
         post,
         operation_id = "release_checkpoint",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
         tag = "admin",
         summary = "Release checkpoint",
@@ -718,6 +760,10 @@ fn decode_checkpoint_cursor(
     utoipa::path(
         post,
         operation_id = "run_maintenance",
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/admin/namespaces/{namespace_id}/maintenance/run",
         tag = "admin",
         summary = "Run maintenance step",

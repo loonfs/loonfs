@@ -100,6 +100,10 @@ pub(super) struct UploadPathParams {
     utoipa::path(
         post,
         operation_id = "create_upload",
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
@@ -253,6 +257,7 @@ async fn begin_direct_multipart_upload(
     utoipa::path(
         post,
         operation_id = "sign_upload_parts",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
         tag = "uploads",
         summary = "Sign multipart parts",
@@ -479,11 +484,25 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
     })
 }
 
+/// Forwards a proxied upload's body straight into object storage.
+///
+/// The body is never held: it is hashed and written a piece at a time, so
+/// the server's memory cost tracks the transfer's part size rather than the
+/// object's length. The reference this produces is the same one the
+/// buffered path produced: its `checksum` is the SHA-256 this server
+/// computed over the complete payload.
+///
+/// A failure has two possible authors. The store may have refused the
+/// write, or the body may have ended early — past the byte cap, or with a
+/// broken connection — and only the second is the client's. The stream
+/// records which, so the client is told the truth rather than a blanket
+/// storage error.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
         put,
         operation_id = "put_upload_content",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
         tag = "uploads",
         summary = "Upload content",
@@ -505,19 +524,6 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
         )
     )
 )]
-/// Forwards a proxied upload's body straight into object storage.
-///
-/// The body is never held: it is hashed and written a piece at a time, so
-/// the server's memory cost tracks the transfer's part size rather than the
-/// object's length. The reference this produces is the same one the
-/// buffered path produced: its `checksum` is the SHA-256 this server
-/// computed over the complete payload.
-///
-/// A failure has two possible authors. The store may have refused the
-/// write, or the body may have ended early — past the byte cap, or with a
-/// broken connection — and only the second is the client's. The stream
-/// records which, so the client is told the truth rather than a blanket
-/// storage error.
 pub(super) async fn put_upload_content(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -544,6 +550,7 @@ pub(super) async fn put_upload_content(
     utoipa::path(
         post,
         operation_id = "complete_upload",
+        extensions(("x-loonfs-retry" = json!("replayable"))),
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
@@ -595,13 +602,8 @@ fn decode_completion_body(
     mode: UploadMode,
     body: &[u8],
 ) -> std::result::Result<ResolvedUploadCompletion, String> {
-    let invalid = |error: serde_json::Error| {
-        format!(
-            "request body is not valid JSON for {} completion: {error}",
-            mode.as_str()
-        )
-    };
-    let request = serde_json::from_slice::<CompleteUploadRequest>(body).map_err(invalid)?;
+    let request = super::extractors::decode_json::<CompleteUploadRequest>(body)
+        .map_err(|error| error.message().to_owned())?;
     if request.mode() != mode {
         return Err(format!(
             "completion request mode `{}` does not match stored upload mode `{}`",
@@ -621,8 +623,90 @@ fn decode_completion_body(
     }
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        operation_id = "get_upload",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
+        tag = "uploads",
+        summary = "Get upload session",
+        description = "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("upload_id" = String, Path, description = "Upload session id")
+        ),
+        responses(
+            (status = 200, description = "Upload session state", body = UploadSession),
+            (status = 400, description = "Invalid upload id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or upload not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn get_upload(
+    State(state): State<AppState>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
+) -> Result<Json<UploadSession>, ApiResponseError> {
+    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
+    let (response, receipt) = state
+        .writer
+        .get_upload(&namespace_id, &upload_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    Ok(Json(with_content_token(
+        response,
+        ContentTokenVerifier::new(state.config.content_token_secret()),
+        receipt.as_ref(),
+    )?))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        operation_id = "abort_upload",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
+        tag = "uploads",
+        summary = "Abort upload",
+        description = "Ends an upload session without selecting content and deletes the object it was writing. Repeating it succeeds; a session that already completed cannot be aborted.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("upload_id" = String, Path, description = "Upload session id")
+        ),
+        responses(
+            (status = 200, description = "Upload aborted", body = UploadSession),
+            (status = 400, description = "Invalid upload id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or upload not found", body = ApiError),
+            (status = 409, description = "Upload already completed", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn abort_upload(
+    State(state): State<AppState>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
+) -> Result<Json<UploadSession>, ApiResponseError> {
+    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
+    let response = state
+        .writer
+        .abort_upload(&namespace_id, &upload_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    Ok(Json(response))
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod completion_body_tests {
     use super::*;
     use loonfs_api::{
@@ -650,8 +734,7 @@ mod completion_body_tests {
             .expect_err("completion mode is required");
         assert_eq!(
             multipart_error,
-            "request body is not valid JSON for direct_multipart completion: missing field \
-             `mode` at line 1 column 2"
+            "invalid JSON request body: missing field `mode` at line 1 column 2"
         );
 
         let missing_parts = format!(r#"{{"mode":"direct_multipart","content":{CONTENT}}}"#);
@@ -660,13 +743,12 @@ mod completion_body_tests {
                 .expect_err("multipart completion needs parts");
         assert_eq!(
             missing_parts_error,
-            "request body is not valid JSON for direct_multipart completion: missing field \
-             `parts`"
+            "invalid JSON request body: missing field `parts`"
         );
     }
 
     #[test]
-    fn retired_completion_fields_are_unknown_in_known_content_bodies() {
+    fn completion_body_decoder_rejects_unknown_fields_and_trailing_data() {
         for (body, field) in [
             (
                 r#"{"mode":"service_proxied","completion":"content_ref"}"#,
@@ -684,6 +766,17 @@ mod completion_body_tests {
                 "wrong error for {field}: {error}"
             );
         }
+
+        let error = decode_completion_body(
+            UploadMode::ServiceProxied,
+            br#"{"mode":"service_proxied"}{}"#,
+        )
+        .expect_err("trailing data");
+        assert!(
+            error.starts_with("invalid JSON request body:")
+                && error.contains("trailing characters"),
+            "wrong trailing-data error: {error}"
+        );
     }
 
     #[test]
@@ -746,85 +839,4 @@ mod completion_body_tests {
             .expect("maximal part-signing request decodes");
         assert_eq!(decoded, request);
     }
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        get,
-        operation_id = "get_upload",
-        path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
-        tag = "uploads",
-        summary = "Get upload session",
-        description = "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
-        params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("upload_id" = String, Path, description = "Upload session id")
-        ),
-        responses(
-            (status = 200, description = "Upload session state", body = UploadSession),
-            (status = 400, description = "Invalid upload id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or upload not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::UnavailableResponses
-        )
-    )
-)]
-pub(super) async fn get_upload(
-    State(state): State<AppState>,
-    NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
-    AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<UploadSession>, ApiResponseError> {
-    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let (response, receipt) = state
-        .writer
-        .get_upload(&namespace_id, &upload_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    Ok(Json(with_content_token(
-        response,
-        ContentTokenVerifier::new(state.config.content_token_secret()),
-        receipt.as_ref(),
-    )?))
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        post,
-        operation_id = "abort_upload",
-        path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
-        tag = "uploads",
-        summary = "Abort upload",
-        description = "Ends an upload session without selecting content and deletes the object it was writing. Repeating it succeeds; a session that already completed cannot be aborted.",
-        params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("upload_id" = String, Path, description = "Upload session id")
-        ),
-        responses(
-            (status = 200, description = "Upload aborted", body = UploadSession),
-            (status = 400, description = "Invalid upload id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or upload not found", body = ApiError),
-            (status = 409, description = "Upload already completed", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            crate::http::openapi::UnavailableResponses
-        )
-    )
-)]
-pub(super) async fn abort_upload(
-    State(state): State<AppState>,
-    NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
-    AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<UploadSession>, ApiResponseError> {
-    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let response = state
-        .writer
-        .abort_upload(&namespace_id, &upload_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    Ok(Json(response))
 }
