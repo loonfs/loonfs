@@ -35,6 +35,9 @@ pub const MAX_COMMIT_MESSAGE_BYTES: usize = 4096;
 /// Maximum attempts for a bounded compare-and-swap or allocation contention loop.
 pub const CONTENTION_RETRY_LIMIT: usize = 8;
 
+/// Maximum targeted rereads while reconciling one namespace control snapshot.
+pub const CONTROL_SNAPSHOT_REREAD_LIMIT: usize = 3;
+
 /// Longest visible WAL tail, in segments, a namespace may carry unflushed.
 /// Every publish surface rejects at this length with `maintenance_required`,
 /// so a landed publication never leaves more than this behind.

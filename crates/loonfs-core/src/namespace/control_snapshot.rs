@@ -2,6 +2,7 @@
 //! retention floor.
 
 use crate::control_object::ControlObjectLoadError;
+use crate::limits::CONTROL_SNAPSHOT_REREAD_LIMIT;
 use crate::namespace::basis::{metadata_basis_without_root, namespace_birth_seq, MetadataBasis};
 use crate::namespace::control::{
     load_head_object, load_metadata_root_object_if_present, load_wal_floor_object,
@@ -10,9 +11,6 @@ use crate::namespace::control::{
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-
-/// Maximum targeted rereads before returning the remaining inconsistency.
-const RECONCILE_ROUNDS: usize = 3;
 
 /// The namespace's control objects, read as one reconciled observation.
 pub(crate) struct NamespaceControlSnapshot {
@@ -197,7 +195,7 @@ async fn reconcile_reads<S: ObjectStore + ?Sized>(
             Ok(()) => return Ok(reads),
             Err(inconsistency) => inconsistency,
         };
-        if rounds == RECONCILE_ROUNDS {
+        if rounds == CONTROL_SNAPSHOT_REREAD_LIMIT {
             return Err(inconsistency.error);
         }
         rounds += 1;

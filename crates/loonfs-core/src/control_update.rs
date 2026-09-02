@@ -13,41 +13,69 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::keys::{upload_session, wal_head};
-use loonfs_objectstore::{ImmutableWriteError, ObjectMetadata, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CasAttempt<T> {
+#[derive(Debug)]
+pub(crate) enum CasAttempt<T, R = (), C = ()> {
     Settled(T),
-    Contended,
+    Contended(R),
+    Ambiguous(ObjectStoreError, C),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WriteEvidence<T, R = ()> {
+    Landed(T),
+    Lost(R),
+    Unknown,
+}
+
+pub(crate) async fn settle_control_write<T, R, C, E, F, Fut>(
+    attempt: CasAttempt<T, R, C>,
+    mut confirm: F,
+) -> std::result::Result<std::result::Result<T, R>, E>
+where
+    E: From<ControlUpdateError>,
+    F: FnMut(&ObjectStoreError, C) -> Fut,
+    Fut: Future<Output = std::result::Result<WriteEvidence<T, R>, E>>,
+{
+    match attempt {
+        CasAttempt::Settled(outcome) => Ok(Ok(outcome)),
+        CasAttempt::Contended(reason) => Ok(Err(reason)),
+        CasAttempt::Ambiguous(error, context) => match confirm(&error, context).await? {
+            WriteEvidence::Landed(outcome) => Ok(Ok(outcome)),
+            WriteEvidence::Lost(reason) => Ok(Err(reason)),
+            WriteEvidence::Unknown => Err(E::from(ControlUpdateError::store(&error))),
+        },
+    }
 }
 
 /// Runs up to [`CONTENTION_RETRY_LIMIT`] attempts.
-///
-/// Returns `None` if every attempt encounters contention.
-pub(crate) async fn retry_while_contended<T, E, F, Fut>(
+pub(crate) async fn retry_while_contended<T, R, C, E, F, Fut, Confirm, ConfirmFut>(
     mut attempt: F,
-) -> std::result::Result<Option<T>, E>
+    mut confirm: Confirm,
+) -> std::result::Result<std::result::Result<T, R>, E>
 where
+    E: From<ControlUpdateError>,
     F: FnMut() -> Fut,
-    Fut: Future<Output = std::result::Result<CasAttempt<T>, E>>,
+    Fut: Future<Output = std::result::Result<CasAttempt<T, R, C>, E>>,
+    Confirm: FnMut(&ObjectStoreError, C) -> ConfirmFut,
+    ConfirmFut: Future<Output = std::result::Result<WriteEvidence<T, R>, E>>,
 {
+    let mut last_reason = None;
     for _attempt in 0..CONTENTION_RETRY_LIMIT {
-        if let CasAttempt::Settled(outcome) = attempt().await? {
-            return Ok(Some(outcome));
+        match settle_control_write(attempt().await?, &mut confirm).await? {
+            Ok(outcome) => return Ok(Ok(outcome)),
+            Err(reason) => last_reason = Some(reason),
         }
     }
-    Ok(None)
+    Ok(Err(last_reason.expect(
+        "the positive contention retry limit should produce a contention reason",
+    )))
 }
 
 /// Creates a control object and reports a generated-ID collision as an internal error.
-///
-/// A transport failure from the first conditional write has an unknown
-/// outcome. Retry it through the immutable-write path, which accepts success
-/// only when the generated key contains the exact intended bytes. An immediate
-/// precondition failure remains a collision rather than adopting a record from
-/// another generated-ID owner.
 pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
@@ -58,23 +86,33 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
             "a generated id collided with the existing control object `{object_key}`"
         ))
     };
-    match store.put_if_absent(object_key, encoded.clone()).await {
-        Ok(metadata) => Ok(metadata),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Err(collision()),
-        Err(ObjectStoreError::Transport { .. }) => {
-            match store.put_immutable_verified(object_key, encoded).await {
-                Ok(metadata) => Ok(metadata),
-                Err(ImmutableWriteError::DifferentObject { .. }) => Err(collision()),
-                Err(ImmutableWriteError::Transport { source, .. }) => {
-                    Err(CoreError::store(object_key, &source))
+    retry_while_contended(
+        || async {
+            match store.put_if_absent(object_key, encoded.clone()).await {
+                Ok(metadata) => Ok(CasAttempt::Settled(metadata)),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Err(collision()),
+                Err(error @ ObjectStoreError::Transport { .. }) => {
+                    Ok(CasAttempt::Ambiguous(error, ()))
                 }
-                Err(error) => Err(CoreError::Internal(format!(
-                    "generated-id write reconciliation failed for `{object_key}`: {error}"
-                ))),
+                Err(error) => Err(CoreError::store(object_key, &error)),
             }
-        }
-        Err(error) => Err(CoreError::store(object_key, &error)),
-    }
+        },
+        |error, ()| {
+            let failed = CoreError::store(object_key, error);
+            let encoded = &encoded;
+            async move {
+                match store.get_with_metadata(object_key).await {
+                    Ok(Some(stored)) if stored.bytes == *encoded => {
+                        Ok(WriteEvidence::Landed(stored.metadata))
+                    }
+                    Ok(Some(_)) => Err(collision()),
+                    Ok(None) => Ok(WriteEvidence::Lost(failed)),
+                    Err(error) => Err(CoreError::store(object_key, &error)),
+                }
+            }
+        },
+    )
+    .await?
 }
 
 /// Replacement head state and the value returned after its CAS succeeds.
@@ -110,6 +148,19 @@ pub(crate) enum ControlUpdateError {
     RetryExhausted { object_key: String },
 }
 
+impl ControlUpdateError {
+    fn store(error: &ObjectStoreError) -> Self {
+        Self::Store {
+            object_key: error
+                .object_key()
+                .expect("an ambiguous control write should name its object")
+                .to_owned(),
+            message: error.public_message().into_owned(),
+            class: StoreFailureClass::of(error),
+        }
+    }
+}
+
 /// Reads the head, asks `update` to build a replacement, and applies it with
 /// a CAS against the loaded ETag. CAS conflicts retry the complete
 /// read-update-CAS cycle. Errors returned by `update` are returned immediately,
@@ -125,32 +176,39 @@ where
     F: Fn(&LoadedHeadObject) -> Result<HeadReplacement<T>, E>,
 {
     let update = &update;
-    let updated = retry_while_contended(|| async move {
-        let loaded = load_head_object(store, namespace_id)
-            .await
-            .map_err(|error| E::from(ControlUpdateError::LoadHead(error)))?;
-        let HeadReplacement { next, outcome } = update(&loaded)?;
-        let encoded = encode_head(*next, &loaded.object_key).map_err(E::from)?;
-        match store
-            .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
-            .await
-        {
-            Ok(_) => Ok(CasAttempt::Settled(outcome)),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
-            // Do not retry an unknown outcome because each attempt allocates a new epoch.
-            Err(error) => Err(E::from(ControlUpdateError::Store {
-                object_key: loaded.object_key,
-                message: error.public_message().into_owned(),
-                class: StoreFailureClass::of(&error),
-            })),
-        }
-    })
-    .await?;
-    updated.ok_or_else(|| {
-        E::from(ControlUpdateError::RetryExhausted {
-            object_key: wal_head(namespace_id),
-        })
-    })
+    retry_while_contended(
+        || async move {
+            let loaded = load_head_object(store, namespace_id)
+                .await
+                .map_err(|error| E::from(ControlUpdateError::LoadHead(error)))?;
+            let HeadReplacement { next, outcome } = update(&loaded)?;
+            let encoded = encode_head(*next, &loaded.object_key).map_err(E::from)?;
+            match store
+                .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
+                .await
+            {
+                Ok(_) => Ok(CasAttempt::Settled(outcome)),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
+                    E::from(ControlUpdateError::RetryExhausted {
+                        object_key: wal_head(namespace_id),
+                    }),
+                )),
+                Err(error @ ObjectStoreError::Transport { .. }) => {
+                    Ok(CasAttempt::Ambiguous(error, ()))
+                }
+                Err(error) => Err(E::from(ControlUpdateError::Store {
+                    object_key: loaded.object_key,
+                    message: error.public_message().into_owned(),
+                    class: StoreFailureClass::of(&error),
+                })),
+            }
+        },
+        |_, ()| async {
+            // Each attempt allocates a new epoch, so a later head cannot prove which write landed.
+            Ok(WriteEvidence::Unknown)
+        },
+    )
+    .await?
 }
 
 pub(crate) async fn update_upload_session<S, T, F, Fut>(
@@ -165,11 +223,11 @@ where
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     let update = &update;
-    let updated = retry_while_contended(|| async move {
-        try_update_upload_session(store, namespace_id, upload_id, update).await
-    })
-    .await?;
-    updated.ok_or_else(|| CoreError::contention_exhausted(&upload_session(namespace_id, upload_id)))
+    retry_while_contended(
+        || async move { try_update_upload_session(store, namespace_id, upload_id, update).await },
+        |_, ()| async { Ok::<_, CoreError>(WriteEvidence::Unknown) },
+    )
+    .await?
 }
 
 /// Tries one upload-session update against the state and ETag loaded together.
@@ -178,7 +236,7 @@ pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     update: F,
-) -> crate::error::Result<CasAttempt<T>>
+) -> crate::error::Result<CasAttempt<T, CoreError>>
 where
     S: ObjectStore + ?Sized,
     F: FnOnce(UploadSessionState) -> Fut,
@@ -198,7 +256,11 @@ where
                 .await
             {
                 Ok(_) => Ok(CasAttempt::Settled(outcome)),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
+                    CoreError::contention_exhausted(&loaded.object_key),
+                )),
+                // A generic upload update has no state predicate that proves an
+                // ambiguous write landed, so a transport failure is final.
                 Err(error) => Err(CoreError::store(&loaded.object_key, &error)),
             }
         }
@@ -303,7 +365,7 @@ mod tests {
                 .await
                 .expect("exact read-back reconciles the landed write");
 
-        assert_eq!(store.attempts(), 2);
+        assert_eq!(store.attempts(), 1);
         assert!(metadata.etag.is_some());
         assert_eq!(
             store.get(object_key, None).await.expect("read record"),
@@ -330,6 +392,27 @@ mod tests {
             error,
             CoreError::Internal(message) if message.contains("generated id collided")
         ));
+    }
+
+    #[tokio::test]
+    async fn retry_exhaustion_returns_the_last_contention_reason() {
+        let attempt = std::cell::Cell::new(0);
+        let exhausted = retry_while_contended(
+            || {
+                let reason = attempt.get();
+                attempt.set(reason + 1);
+                async move {
+                    Ok::<CasAttempt<(), usize, ()>, ControlUpdateError>(CasAttempt::Contended(
+                        reason,
+                    ))
+                }
+            },
+            |_, ()| async { Ok(WriteEvidence::Unknown) },
+        )
+        .await
+        .expect("contention attempts should not fail");
+
+        assert_eq!(exhausted, Err(CONTENTION_RETRY_LIMIT - 1));
     }
 
     #[tokio::test]

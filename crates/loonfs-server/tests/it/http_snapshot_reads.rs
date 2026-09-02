@@ -485,7 +485,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
     .expect_err("user checkpoint is not a snapshot");
     assert_eq!(status, 400);
     assert_eq!(error.code, "invalid_request");
-    assert!(error.message.contains("checkpoint, not a snapshot"));
+    assert!(error.message.contains("is a user checkpoint"));
 
     let unknown = "chk_ffffffffffffffffffffffffffffffff";
     let (status, error) = get_json::<PathEntry>(&stat_url(

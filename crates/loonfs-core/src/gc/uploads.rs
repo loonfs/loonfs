@@ -229,7 +229,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
             ))
         }
         Ok(CasAttempt::Settled(None)) => Ok(retain_undated()),
-        Ok(CasAttempt::Contended) => {
+        Ok(CasAttempt::Contended(_)) => {
             tracing::debug!(
                 namespace_id = %sweep.namespace_id,
                 upload_id = %upload_id,
@@ -237,6 +237,10 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
             );
             Ok(retain_undated())
         }
+        Ok(CasAttempt::Ambiguous(error, ())) => Err(CoreError::store(
+            loonfs_objectstore::keys::upload_session(sweep.namespace_id, upload_id),
+            &error,
+        )),
         Err(CoreError::UploadNotFound { .. }) => Ok(retain_undated()),
         Err(error) => Err(error),
     }

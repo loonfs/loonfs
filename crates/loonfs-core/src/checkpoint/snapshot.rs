@@ -1,13 +1,11 @@
 //! Snapshot-owned checkpoint reads, expiry, and release transitions.
 
 use super::read_basis::{load_checkpoint_read_basis_from_record, CheckpointReadBasis};
-use super::record::{
-    encode_checkpoint_record, load_checkpoint_record, release_checkpoint_record,
-    LoadedCheckpointRecord,
-};
+use super::record::{encode_checkpoint_record, load_checkpoint_record, LoadedCheckpointRecord};
+use super::release::{ensure_owner_is, release_owned_checkpoint, CheckpointOwnerKind};
 use super::MetadataSegmentCache;
 use crate::context::MutationContext;
-use crate::control_update::{retry_while_contended, CasAttempt};
+use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, HeadState};
 use loonfs_api::{Checkpoint, CheckpointId, NamespaceId, ReleaseSnapshotResponse};
@@ -39,57 +37,65 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<Checkpoint> {
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
-    let updated = retry_while_contended(|| async {
-        let loaded = classify_live_snapshot(
-            load_checkpoint_record(store, namespace_id, checkpoint_id).await?,
-            checkpoint_id,
-            context.now_ms,
-        )?;
-        let mut next = loaded.state.clone();
-        let lifetime_ceiling = next.created_at_ms.saturating_add(max_lifetime_ms);
-        let CheckpointOwner::Snapshot { expires_at_ms, .. } = &mut next.owner else {
-            return Err(CoreError::InvalidCheckpointRequest(format!(
-                "checkpoint `{checkpoint_id}` is not a snapshot"
-            )));
-        };
-        let new_expires_at_ms = requested_expires_at_ms
-            .min(lifetime_ceiling)
-            .max(*expires_at_ms);
-        if *expires_at_ms == new_expires_at_ms {
-            return Ok(CasAttempt::Settled(super::checkpoint_summary(next)));
-        }
-        *expires_at_ms = new_expires_at_ms;
-        let encoded = encode_checkpoint_record(&next)?;
-        match store
-            .compare_and_swap(&object_key, &loaded.etag, encoded)
-            .await
-        {
-            Ok(_) => Ok(CasAttempt::Settled(super::checkpoint_summary(next))),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
-            Err(error @ ObjectStoreError::Transport { .. }) => {
+    retry_while_contended(
+        || async {
+            let loaded = classify_live_snapshot(
+                load_checkpoint_record(store, namespace_id, checkpoint_id).await?,
+                checkpoint_id,
+                context.now_ms,
+            )?;
+            let mut next = loaded.state.clone();
+            let lifetime_ceiling = next.created_at_ms.saturating_add(max_lifetime_ms);
+            let expires_at_ms = snapshot_expiry_mut(&mut next.owner)
+                .expect("a classified snapshot should carry a snapshot owner");
+            let new_expires_at_ms = requested_expires_at_ms
+                .min(lifetime_ceiling)
+                .max(*expires_at_ms);
+            if *expires_at_ms == new_expires_at_ms {
+                return Ok(CasAttempt::Settled(super::checkpoint_summary(next)));
+            }
+            *expires_at_ms = new_expires_at_ms;
+            let encoded = encode_checkpoint_record(&next)?;
+            match store
+                .compare_and_swap(&object_key, &loaded.etag, encoded)
+                .await
+            {
+                Ok(_) => Ok(CasAttempt::Settled(super::checkpoint_summary(next))),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
+                    CoreError::contention_exhausted(&object_key),
+                )),
+                Err(error @ ObjectStoreError::Transport { .. }) => {
+                    Ok(CasAttempt::Ambiguous(error, new_expires_at_ms))
+                }
+                Err(error) => Err(CoreError::store(&object_key, &error)),
+            }
+        },
+        |_, new_expires_at_ms| {
+            let object_key = object_key.clone();
+            async move {
                 let current = classify_live_snapshot(
                     load_checkpoint_record(store, namespace_id, checkpoint_id).await?,
                     checkpoint_id,
                     context.now_ms,
                 )?;
-                let CheckpointOwner::Snapshot { expires_at_ms, .. } = &current.state.owner else {
-                    return Err(CoreError::Internal(
-                        "live snapshot classification returned a non-snapshot owner".to_owned(),
-                    ));
-                };
-                if *expires_at_ms >= new_expires_at_ms {
-                    Ok(CasAttempt::Settled(super::checkpoint_summary(
+                let expires_at_ms = current
+                    .state
+                    .owner
+                    .expires_at_ms()
+                    .expect("a classified snapshot should carry an expiry");
+                if expires_at_ms >= new_expires_at_ms {
+                    Ok(WriteEvidence::Landed(super::checkpoint_summary(
                         current.state,
                     )))
                 } else {
-                    Err(CoreError::store(&object_key, &error))
+                    Ok(WriteEvidence::Lost(CoreError::contention_exhausted(
+                        &object_key,
+                    )))
                 }
             }
-            Err(error) => Err(CoreError::store(&object_key, &error)),
-        }
-    })
-    .await?;
-    updated.ok_or_else(|| CoreError::contention_exhausted(&object_key))
+        },
+    )
+    .await?
 }
 
 pub(crate) async fn release_snapshot<S: ObjectStore + ?Sized>(
@@ -98,31 +104,14 @@ pub(crate) async fn release_snapshot<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     context: &MutationContext,
 ) -> Result<ReleaseSnapshotResponse> {
-    let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
-        return Ok(ReleaseSnapshotResponse {
-            namespace_id: namespace_id.clone(),
-            snapshot_id: checkpoint_id.clone(),
-        });
-    };
-    match &loaded.state.owner {
-        CheckpointOwner::Snapshot { .. } => {}
-        CheckpointOwner::User { .. } => {
-            return Err(CoreError::InvalidCheckpointRequest(format!(
-                "checkpoint `{checkpoint_id}` is user-owned; release it through the checkpoint \
-                 release operation, not the snapshot release operation"
-            )))
-        }
-        CheckpointOwner::Fork {
-            target_namespace_id,
-            ..
-        } => {
-            return Err(CoreError::InvalidCheckpointRequest(format!(
-                "checkpoint `{checkpoint_id}` is owned by fork target `{target_namespace_id}`; \
-                 it is released by deleting that namespace, not by the snapshot release operation"
-            )))
-        }
-    }
-    release_checkpoint_record(store, namespace_id, checkpoint_id, context.now_ms).await?;
+    release_owned_checkpoint(
+        store,
+        namespace_id,
+        checkpoint_id,
+        CheckpointOwnerKind::Snapshot,
+        context,
+    )
+    .await?;
     Ok(ReleaseSnapshotResponse {
         namespace_id: namespace_id.clone(),
         snapshot_id: checkpoint_id.clone(),
@@ -139,31 +128,30 @@ fn classify_live_snapshot(
             snapshot_id: checkpoint_id.clone(),
         });
     };
-    match &loaded.state.owner {
-        CheckpointOwner::Snapshot { expires_at_ms, .. } => {
-            if loaded.state.status != (CheckpointStatus::Active {}) {
-                return Err(snapshot_gone(checkpoint_id, "released"));
-            }
-            if *expires_at_ms <= now_ms {
-                return Err(snapshot_gone(checkpoint_id, "expired"));
-            }
-        }
-        CheckpointOwner::User { .. } => {
-            return Err(CoreError::InvalidCheckpointRequest(format!(
-                "`{checkpoint_id}` names a user-owned checkpoint, not a snapshot"
-            )))
-        }
-        CheckpointOwner::Fork {
-            target_namespace_id,
-            ..
-        } => {
-            return Err(CoreError::InvalidCheckpointRequest(format!(
-                "`{checkpoint_id}` names a checkpoint owned by fork target \
-                 `{target_namespace_id}`, not a snapshot"
-            )))
-        }
+    ensure_owner_is(
+        checkpoint_id,
+        &loaded.state.owner,
+        CheckpointOwnerKind::Snapshot,
+    )?;
+    let expires_at_ms = loaded
+        .state
+        .owner
+        .expires_at_ms()
+        .expect("a snapshot owner should carry an expiry");
+    if loaded.state.status != (CheckpointStatus::Active {}) {
+        return Err(snapshot_gone(checkpoint_id, "released"));
+    }
+    if expires_at_ms <= now_ms {
+        return Err(snapshot_gone(checkpoint_id, "expired"));
     }
     Ok(loaded)
+}
+
+fn snapshot_expiry_mut(owner: &mut CheckpointOwner) -> Option<&mut u64> {
+    match owner {
+        CheckpointOwner::Snapshot { expires_at_ms, .. } => Some(expires_at_ms),
+        CheckpointOwner::User { .. } | CheckpointOwner::Fork { .. } => None,
+    }
 }
 
 fn snapshot_gone(checkpoint_id: &CheckpointId, reason: &str) -> CoreError {

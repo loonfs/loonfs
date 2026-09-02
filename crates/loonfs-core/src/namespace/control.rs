@@ -11,30 +11,10 @@ use loonfs_api::wire::control::{ControlObjectKind, HeadState, MetadataRootState,
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::{metadata_root, wal_floor, wal_head};
 use loonfs_objectstore::ObjectStore;
-use serde::{Deserialize, Serialize};
 
 pub(crate) type LoadedHeadObject = LoadedControl<HeadState>;
 pub(crate) type LoadedMetadataRootObject = LoadedControl<MetadataRootState>;
 pub(crate) type LoadedWalFloorObject = LoadedControl<WalFloorState>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ControlObjectIdentity {
-    pub etag: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoadedMetadataRootControl {
-    pub object_key: String,
-    pub identity: ControlObjectIdentity,
-    pub state: MetadataRootState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoadedHeadControl {
-    pub object_key: String,
-    pub identity: ControlObjectIdentity,
-    pub state: HeadState,
-}
 
 pub(crate) async fn load_wal_floor_object<S: ObjectStore + ?Sized>(
     store: &S,
@@ -113,43 +93,24 @@ pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(
 pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<LoadedMetadataRootControl, ControlObjectLoadError> {
-    let loaded = load_metadata_root_object(store, expected_namespace_id).await?;
-    Ok(LoadedMetadataRootControl {
-        object_key: loaded.object_key,
-        identity: ControlObjectIdentity { etag: loaded.etag },
-        state: loaded.state,
-    })
+) -> Result<LoadedControl<MetadataRootState>, ControlObjectLoadError> {
+    load_metadata_root_object(store, expected_namespace_id).await
 }
 
 /// Loads the head and authorized metadata basis as one consistent read anchor.
 pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<(LoadedHeadControl, MetadataBasis), ControlObjectLoadError> {
+) -> Result<(LoadedControl<HeadState>, MetadataBasis), ControlObjectLoadError> {
     let loaded = load_head_and_metadata_basis(store, expected_namespace_id).await?;
-    Ok((
-        LoadedHeadControl {
-            object_key: loaded.head.object_key,
-            identity: ControlObjectIdentity {
-                etag: loaded.head.etag,
-            },
-            state: loaded.head.state,
-        },
-        loaded.basis,
-    ))
+    Ok((loaded.head, loaded.basis))
 }
 
 pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<LoadedHeadControl, ControlObjectLoadError> {
-    let loaded = load_head_object(store, expected_namespace_id).await?;
-    Ok(LoadedHeadControl {
-        object_key: loaded.object_key,
-        identity: ControlObjectIdentity { etag: loaded.etag },
-        state: loaded.state,
-    })
+) -> Result<LoadedControl<HeadState>, ControlObjectLoadError> {
+    load_head_object(store, expected_namespace_id).await
 }
 
 #[cfg(test)]
