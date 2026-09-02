@@ -41,10 +41,14 @@ impl CandidateFamily {
 
     /// This family's position in [`Self::ALL`], which is the sweep order.
     pub(super) fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|family| *family == self)
-            .expect("every family is listed in ALL")
+        match self {
+            Self::WalSegments => 0,
+            Self::MetadataSegments => 1,
+            Self::CompactionStaging => 2,
+            Self::Manifests => 3,
+            Self::Checkpoints => 4,
+            Self::UploadSessions => 5,
+        }
     }
 
     /// Returns whether `key` matches this family's durable grammar.
@@ -126,9 +130,6 @@ impl GcCursor {
     pub(super) fn decode(token: &str, namespace_id: &NamespaceId) -> Result<Self> {
         decode_namespace_cursor(token, namespace_id).map_err(|error| match error {
             NamespaceCursorError::ForeignNamespace => CoreError::InvalidGcConfig(error.to_string()),
-            NamespaceCursorError::Malformed(_) | NamespaceCursorError::OutsideKeyspace => {
-                invalid_cursor()
-            }
             _ => invalid_cursor(),
         })
     }

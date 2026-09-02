@@ -168,7 +168,7 @@ pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
     WriterFence,
 };
-pub use gc::{delete_if_aged, gc_namespace, AgedSweep, GcConfig, PassBudget};
+pub use gc::{delete_if_aged, gc_namespace, GcConfig, GraceAge, PassBudget};
 pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions};
 pub use path::read::{

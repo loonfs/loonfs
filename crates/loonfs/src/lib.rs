@@ -106,9 +106,9 @@ pub use loonfs_core::limits::{
 };
 pub use loonfs_core::time::current_time_ms;
 pub use loonfs_core::{
-    delete_if_aged, AgedSweep, BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage,
+    delete_if_aged, BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage,
     CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState, DeleteNamespaceOptions,
-    Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig,
+    Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig, GraceAge,
     MetadataCompactionJobOutcome, MetadataViewError, PassBudget, StoreFailureClass, WriterFence,
     CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };

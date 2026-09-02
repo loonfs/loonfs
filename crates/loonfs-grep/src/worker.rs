@@ -24,7 +24,7 @@ use futures::future::try_join_all;
 use futures::StreamExt as _;
 use loonfs::{
     delete_if_aged, CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsAdmin,
-    FsReader, PassBudget, RuntimeError, StoreFailureClass, DEFAULT_GC_MAX_OBJECTS,
+    FsReader, GraceAge, PassBudget, RuntimeError, StoreFailureClass, DEFAULT_GC_MAX_OBJECTS,
     GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
@@ -1457,7 +1457,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         if outcome.retained_reason().is_some() {
             report.retained_candidates += 1;
         }
-        if outcome.deleted() {
+        if outcome == GraceAge::Aged {
             count_deleted_key(key, report);
             return Ok(true);
         }

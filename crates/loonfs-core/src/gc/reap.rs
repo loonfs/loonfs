@@ -101,42 +101,9 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
-/// What aging one unreferenced candidate decided.
+/// Where one unreferenced candidate stands against the grace window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgedSweep {
-    /// The grace window had passed over the object and it was deleted.
-    Deleted,
-    /// The object was already gone; nothing was decided and nothing counts.
-    AlreadyGone,
-    /// Younger than the grace window by its own provider timestamp.
-    RetainedInGraceWindow,
-    /// The provider reported no last-modified time, so the object's age is
-    /// unknown and it is treated as young (rule 1).
-    RetainedWithoutTimestamp,
-}
-
-impl AgedSweep {
-    /// True when the key was deleted.
-    pub fn deleted(self) -> bool {
-        self == Self::Deleted
-    }
-
-    /// The retention reason this outcome is, for a caller reporting why a
-    /// pass kept what it kept. `None` for the two outcomes that retained
-    /// nothing.
-    pub fn retained_reason(self) -> Option<RetainedReason> {
-        match self {
-            Self::Deleted | Self::AlreadyGone => None,
-            Self::RetainedInGraceWindow => Some(RetainedReason::WithinGraceWindow),
-            Self::RetainedWithoutTimestamp => Some(RetainedReason::NoProviderTimestamp),
-        }
-    }
-}
-
-/// Where one unreferenced candidate stands against the grace window, before
-/// anything acts on the answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GraceAge {
+pub enum GraceAge {
     /// The window has passed over the object.
     Aged,
     /// Younger than the window by its own provider timestamp.
@@ -146,6 +113,19 @@ pub(super) enum GraceAge {
     Unknown,
     /// The object is not there any more.
     Gone,
+}
+
+impl GraceAge {
+    /// The retention reason this outcome is, for a caller reporting why a
+    /// pass kept what it kept. `None` for the two outcomes that retained
+    /// nothing.
+    pub fn retained_reason(self) -> Option<RetainedReason> {
+        match self {
+            Self::Aged | Self::Gone => None,
+            Self::Young => Some(RetainedReason::WithinGraceWindow),
+            Self::Unknown => Some(RetainedReason::NoProviderTimestamp),
+        }
+    }
 }
 
 /// Reads how one candidate stands against the grace window.
@@ -191,16 +171,12 @@ pub async fn delete_if_aged<S: ObjectStore + ?Sized>(
     key: &str,
     grace_window_ms: u64,
     now_ms: u64,
-) -> std::result::Result<AgedSweep, ObjectStoreError> {
-    match grace_age(store, key, grace_window_ms, now_ms).await? {
-        GraceAge::Gone => Ok(AgedSweep::AlreadyGone),
-        GraceAge::Unknown => Ok(AgedSweep::RetainedWithoutTimestamp),
-        GraceAge::Young => Ok(AgedSweep::RetainedInGraceWindow),
-        GraceAge::Aged => {
-            store.delete(key).await?;
-            Ok(AgedSweep::Deleted)
-        }
+) -> std::result::Result<GraceAge, ObjectStoreError> {
+    let age = grace_age(store, key, grace_window_ms, now_ms).await?;
+    if age == GraceAge::Aged {
+        store.delete(key).await?;
     }
+    Ok(age)
 }
 
 pub(super) fn manifest_object_id_of(

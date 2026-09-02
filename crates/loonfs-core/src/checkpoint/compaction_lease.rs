@@ -31,7 +31,7 @@ pub(crate) enum CompactionPrefixOwner {
     /// A job owns it: its lease is `Active` and was refreshed within
     /// [`METADATA_COMPACTION_LEASE_EXPIRY_MS`], or it heartbeated out from
     /// under this pass's claim. Nothing about the objects' age matters.
-    ALiveJob,
+    LiveJob,
     /// This pass claimed the prefix, or found a claim someone else won. The
     /// job that wrote the objects is fenced, so they are orphans — and the
     /// lease is deleted after them, once nothing unreferenced is left under
@@ -92,7 +92,7 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
             .heartbeat_at_ms
             .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS)
     {
-        return Ok(CompactionPrefixOwner::ALiveJob);
+        return Ok(CompactionPrefixOwner::LiveJob);
     }
 
     // Expired. Nothing is decided until the claim lands.
@@ -118,7 +118,7 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
         // The job wrote the lease between this pass's read and its claim, so
         // the job is alive and owns its prefix. This pass keeps every object
         // under it.
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CompactionPrefixOwner::ALiveJob),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CompactionPrefixOwner::LiveJob),
         Err(error) => Err(CoreError::store(&object_key, &error)),
     }
 }
@@ -143,56 +143,43 @@ pub(super) enum LeaseHold {
 pub(super) struct CompactionLease<'a> {
     object_key: String,
     state: MetadataCompactionLeaseState,
-    /// The etag of the last lease write this job made, which every later
-    /// write compare-and-swaps against. `None` before the create, and never
-    /// `None` after one: a store that returns no etag on the create fails the
-    /// job there rather than letting it run unfenceable.
-    etag: Option<String>,
+    etag: String,
     timer: &'a dyn MonotonicTimer,
     started_monotonic_ms: u64,
     next_heartbeat_monotonic_ms: u64,
 }
 
 impl<'a> CompactionLease<'a> {
-    pub(super) fn new(
+    /// Writes the lease before the job's first output object.
+    pub(super) async fn create<S: ObjectStore + ?Sized>(
+        store: &S,
         namespace_id: &NamespaceId,
         job_id: &MetadataCompactionId,
         writer_id: &str,
         started_at_ms: u64,
         timer: &'a dyn MonotonicTimer,
-    ) -> Self {
+    ) -> Result<Self> {
         let started_monotonic_ms = timer.monotonic_now_ms();
-        Self {
-            object_key: metadata_compaction_lease(namespace_id, job_id),
-            state: MetadataCompactionLeaseState {
-                job_id: job_id.clone(),
-                namespace_id: namespace_id.clone(),
-                writer_id: writer_id.to_owned(),
-                status: CompactionLeaseStatus::Active {},
-                started_at_ms,
-                heartbeat_at_ms: started_at_ms,
-            },
-            etag: None,
+        let object_key = metadata_compaction_lease(namespace_id, job_id);
+        let state = initial_lease_state(namespace_id, job_id, writer_id, started_at_ms);
+        let encoded = encode_lease(&state)?;
+        let metadata =
+            create_control_object_under_generated_id(store, &object_key, encoded).await?;
+        let etag = required_etag(&object_key, metadata.etag)?;
+        Ok(Self {
+            object_key,
+            state,
+            etag,
             timer,
             started_monotonic_ms,
             next_heartbeat_monotonic_ms: started_monotonic_ms,
-        }
+        })
     }
 
     /// The clock the job paces itself by. One clock for the job's heartbeat
     /// and its publication budget, because they measure the same span.
     pub(super) fn timer(&self) -> &'a dyn MonotonicTimer {
         self.timer
-    }
-
-    /// Writes the lease for the first time, before the job's first output
-    /// object, so no object under the prefix is ever unclaimed.
-    pub(super) async fn create<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
-        let encoded = encode_lease(&self.state)?;
-        let metadata =
-            create_control_object_under_generated_id(store, &self.object_key, encoded).await?;
-        self.etag = Some(self.required_etag(metadata.etag)?);
-        Ok(())
     }
 
     /// Refreshes the lease when the interval has passed since the last write.
@@ -219,13 +206,7 @@ impl<'a> CompactionLease<'a> {
         &mut self,
         store: &S,
     ) -> Result<LeaseHold> {
-        let expected_etag = self.etag.clone().ok_or_else(|| {
-            CoreError::Internal(
-                "a compaction lease heartbeat ran before the \
-                 lease was created"
-                    .to_owned(),
-            )
-        })?;
+        let expected_etag = self.etag.clone();
         let elapsed_ms = self
             .timer
             .monotonic_now_ms()
@@ -237,7 +218,7 @@ impl<'a> CompactionLease<'a> {
             .await
         {
             Ok(metadata) => {
-                self.etag = Some(self.required_etag(metadata.etag)?);
+                self.etag = required_etag(&self.object_key, metadata.etag)?;
                 self.next_heartbeat_monotonic_ms = self
                     .timer
                     .monotonic_now_ms()
@@ -269,37 +250,68 @@ impl<'a> CompactionLease<'a> {
     /// creates the lease for the first of them and adopts the existing one for
     /// the second. A job never creates its lease twice.
     #[cfg(test)]
-    pub(super) async fn open_for_test<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
-        let namespace_id = self.state.namespace_id.clone();
-        let job_id = self.state.job_id.clone();
+    pub(super) async fn open_for_test<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        job_id: &MetadataCompactionId,
+        writer_id: &str,
+        started_at_ms: u64,
+        timer: &'a dyn MonotonicTimer,
+    ) -> Result<Self> {
+        let object_key = metadata_compaction_lease(namespace_id, job_id);
         let loaded = load_control_object(
             store,
-            self.object_key.clone(),
+            object_key.clone(),
             ControlObjectKind::CompactionLease,
             |state: &MetadataCompactionLeaseState| {
-                expect_namespace(&namespace_id, &state.namespace_id)?;
+                expect_namespace(namespace_id, &state.namespace_id)?;
                 expect_identity_field("compaction job id", job_id.as_str(), state.job_id.as_str())
             },
         )
         .await;
         let loaded = match loaded {
             Ok(loaded) => loaded,
-            Err(ControlObjectLoadError::MissingObject { .. }) => return self.create(store).await,
+            Err(ControlObjectLoadError::MissingObject { .. }) => {
+                return Self::create(store, namespace_id, job_id, writer_id, started_at_ms, timer)
+                    .await
+            }
             Err(error) => return Err(CoreError::ControlObjectLoad(error)),
         };
-        self.etag = Some(loaded.etag);
-        Ok(())
-    }
-
-    fn required_etag(&self, etag: Option<String>) -> Result<String> {
-        etag.ok_or_else(|| {
-            CoreError::Internal(format!(
-                "the store returned no etag for the compaction lease `{}`, so the job cannot be \
-                 fenced against garbage collection",
-                self.object_key
-            ))
+        let started_monotonic_ms = timer.monotonic_now_ms();
+        Ok(Self {
+            object_key,
+            state: initial_lease_state(namespace_id, job_id, writer_id, started_at_ms),
+            etag: loaded.etag,
+            timer,
+            started_monotonic_ms,
+            next_heartbeat_monotonic_ms: started_monotonic_ms,
         })
     }
+}
+
+fn initial_lease_state(
+    namespace_id: &NamespaceId,
+    job_id: &MetadataCompactionId,
+    writer_id: &str,
+    started_at_ms: u64,
+) -> MetadataCompactionLeaseState {
+    MetadataCompactionLeaseState {
+        job_id: job_id.clone(),
+        namespace_id: namespace_id.clone(),
+        writer_id: writer_id.to_owned(),
+        status: CompactionLeaseStatus::Active {},
+        started_at_ms,
+        heartbeat_at_ms: started_at_ms,
+    }
+}
+
+fn required_etag(object_key: &str, etag: Option<String>) -> Result<String> {
+    etag.ok_or_else(|| {
+        CoreError::Internal(format!(
+            "the store returned no etag for the compaction lease `{object_key}`, so the job cannot \
+             be fenced against garbage collection"
+        ))
+    })
 }
 
 fn encode_lease(state: &MetadataCompactionLeaseState) -> Result<Bytes> {
