@@ -1,6 +1,4 @@
-//! The capability document (API spec, "Capability discovery"): the
-//! profiles and feature keys a deployment advertises, which clients gate
-//! on instead of guessing from the backend kind.
+//! Profiles, features, and limits advertised by a deployment.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -120,26 +118,15 @@ pub const LIMIT_QUERY_GREP_SCAN_BUDGET_FILES: &str = "query.grep.scan_budget_fil
 /// before failing with `index_lagging`.
 pub const LIMIT_QUERY_GREP_TAIL_BUDGET_FILES: &str = "query.grep.tail_budget_files";
 
-/// A deployment's self-description (API spec, "Capability discovery").
-///
-/// A remote client fetches this from `GET /v0/capabilities` and caches it; an
-/// embedded engine exposes the same document as a constant. SDK gating logic
-/// is therefore identical for both backends: check [`supports`] or
-/// [`has_profile`], and treat a `not_supported` error as authoritative when
-/// the two disagree.
-///
-/// [`supports`]: CapabilityDocument::supports
-/// [`has_profile`]: CapabilityDocument::has_profile
+/// The profiles, features, and limits advertised by a deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CapabilityDocument {
     /// The protocol generation, currently `v0`.
     pub protocol_version: String,
-    /// Advertised profiles, each `plane/version`. All-or-nothing: every
-    /// required op of an advertised profile is implemented.
+    /// The advertised `plane/version` profiles, each with every required operation implemented.
     pub profiles: Vec<String>,
-    /// Named features and whether this deployment supports them. An absent
-    /// key means unsupported.
+    /// The named features supported by this deployment, with absent keys treated as unsupported.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub features: BTreeMap<String, bool>,
     /// Advisory numeric limits clients may use to pre-validate requests.

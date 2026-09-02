@@ -1,5 +1,4 @@
-//! [`ContentRef`]: the durable reference a file revision points at, naming
-//! one immutable content object and carrying the integrity evidence for it.
+//! Immutable content references and their checksums.
 
 use crate::hex::{hex_encode_bytes, is_lower_hex_byte};
 use crate::ids::ContentId;
@@ -8,14 +7,9 @@ use sha2::{Digest, Sha256 as Sha2Sha256};
 use std::fmt;
 use thiserror::Error;
 
-/// Kind of content reference.
+/// A content reference kind serialized as a string.
 ///
-/// Serializes as a plain string (`"blob_v1"`). Kinds unknown to this build
-/// decode as [`ContentRefKind::Unsupported`] carrying the original string,
-/// and re-serialize to that same string — so a reader that merely relays or
-/// rewrites rows it does not fully understand can never destroy a newer
-/// kind. Writers must not *create* references with an unsupported kind;
-/// commit validation rejects them (format spec, "Validation and logical commits").
+/// Unknown values use [`ContentRefKind::Unsupported`], and writers must not create them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContentRefKind {
     /// One immutable content object, addressed by its random content id.
@@ -64,12 +58,7 @@ impl<'de> Deserialize<'de> for ContentRefKind {
     }
 }
 
-/// Supported checksum algorithms.
-///
-/// The enclosing value defines which bytes a checksum covers. Unknown
-/// algorithms fail to decode because every in-memory `ChecksumAlgorithm` must
-/// be recomputable by this build. Adding a variant also requires adding its
-/// implementation.
+/// A supported checksum algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -108,9 +97,7 @@ impl fmt::Display for ChecksumAlgorithm {
     }
 }
 
-/// An algorithm and its canonical lowercase-hex checksum value.
-///
-/// The enclosing value defines which bytes the checksum covers.
+/// A checksum algorithm and its canonical lowercase hexadecimal value.
 // This type also appears in request bodies, so it rejects unknown fields in
 // every context. Add new algorithms instead of new fields. This is not
 // rustdoc because it describes storage behavior, not the public API.
@@ -120,10 +107,7 @@ impl fmt::Display for ChecksumAlgorithm {
 pub struct Checksum {
     /// Algorithm that produced `value`.
     pub algorithm: ChecksumAlgorithm,
-    /// Lowercase hex of the raw checksum bytes.
-    ///
-    /// The algorithm is its own field, so the value carries no prefix.
-    /// Provider APIs that report base64 are converted at the adapter.
+    /// The canonical lowercase hexadecimal checksum without a prefix.
     pub value: String,
 }
 
@@ -201,10 +185,7 @@ pub enum ChecksumValidationError {
     },
 }
 
-/// Incremental checksum for streamed reads and writes.
-///
-/// It supports every [`ChecksumAlgorithm`] used by buffered verification, so
-/// buffered and streaming paths differ only in how bytes are supplied.
+/// An incremental checksum for streamed reads and writes.
 #[derive(Debug)]
 pub enum StreamingChecksum {
     /// SHA-256 folded over the payload.
@@ -244,12 +225,7 @@ impl StreamingChecksum {
     }
 }
 
-/// CRC-64/NVME over a payload delivered in pieces.
-///
-/// A direct multipart upload needs this digest twice over the same bytes:
-/// once per part, for the header the provider enforces on the way in, and
-/// once over the whole stream, for the reference completion verifies. Parts
-/// fed in order produce both without the object ever being held whole.
+/// An incremental CRC-64/NVME checksum.
 #[derive(Default)]
 pub struct Crc64Nvme {
     digest: crc64fast_nvme::Digest,
@@ -287,11 +263,7 @@ impl fmt::Debug for Crc64Nvme {
     }
 }
 
-/// Incremental CRC-32C (Castagnoli) checksum.
-///
-/// Google Cloud Storage reports this checksum for direct transfers. Resumed
-/// reads first add the retained prefix and then the fetched remainder, which
-/// produces the same full-object checksum as an uninterrupted read.
+/// An incremental CRC-32C checksum.
 #[derive(Default)]
 pub struct Crc32c {
     crc: u32,
@@ -327,11 +299,7 @@ impl fmt::Debug for Crc32c {
     }
 }
 
-/// SHA-256 over a payload delivered in pieces.
-///
-/// The proxied write path folds this over the request body as it forwards
-/// it to object storage, so a reference's full-object checksum exists without
-/// the payload ever being held whole. Pieces must be fed in order.
+/// An incremental SHA-256 checksum.
 #[derive(Default)]
 pub struct Sha256 {
     digest: Sha2Sha256,
@@ -368,7 +336,7 @@ impl fmt::Debug for Sha256 {
 /// Describes why a content reference cannot be part of a durable commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ContentRefValidationError {
-    /// The reference names a content strategy this build cannot write.
+    /// The reference contains a content strategy this build cannot write.
     #[error("unsupported content ref kind `{kind}`")]
     UnsupportedKind {
         /// Kind spelling carried by the rejected reference.
@@ -379,14 +347,9 @@ pub enum ContentRefValidationError {
     InvalidChecksum(ChecksumValidationError),
 }
 
-/// Pointer to one immutable content object.
+/// A reference to one immutable content object.
 ///
-/// `content_id` is identity — *which* object — and the checksum is
-/// evidence about its bytes. Separating the two is what lets the final
-/// object key exist before the first byte is read.
-///
-/// A `ContentRef` is safe to publish only after the referenced bytes are
-/// durable in the namespace's content store.
+/// The object must be durable before the reference is published.
 // This type also appears in request bodies, so it rejects unknown fields in
 // every context. Add new content kinds instead of new fields. This is not
 // rustdoc because it describes storage behavior, not the public API.

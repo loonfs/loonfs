@@ -1,6 +1,4 @@
-//! Authoritative read-result shapes for the v0 HTTP API: the stat/list
-//! entry, the directory-listing envelope, and the file-bytes read result.
-//! The mutating operation shapes live in [`super::operations`].
+//! Read response shapes for the v0 HTTP API.
 
 use super::DirectoryBinding;
 use crate::{
@@ -9,13 +7,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Metadata for one path returned by stat and directory-listing operations.
+/// Metadata for one path returned by stat and directory listings.
 ///
-/// File entries include the current revision and content details. Directory
-/// entries do not. Attribute fields are included only when requested and are
-/// serialized at the top level of the entry. Callers can pass
-/// `attributes_revision_no` as `expected_attributes_revision_no` when updating
-/// attributes.
+/// Attribute fields are included only when requested.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PathEntry {
@@ -32,8 +26,7 @@ pub struct PathEntry {
     pub inode_id: InodeId,
     /// Actor that created this inode, as supplied by the application.
     pub created_by: ActorRef,
-    /// Time the inode was created, in Unix milliseconds. Sequence numbers
-    /// determine order.
+    /// The inode creation time in Unix milliseconds.
     pub created_at_ms: u64,
     /// File-or-directory classification and its kind-specific payload.
     #[serde(flatten)]
@@ -55,7 +48,7 @@ pub struct PathEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub display_name: Option<DisplayName>,
-    /// Opaque identifier for this entry's current parent/name binding. Absent for the namespace root.
+    /// The opaque ID for the current parent and name binding, or `None` for the namespace root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub binding_generation: Option<String>,
@@ -112,9 +105,7 @@ impl PathEntry {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "inode_kind", rename_all = "snake_case")]
 pub enum PathEntryKind {
-    /// A directory, which has no revision payload in v0.
-    ///
-    /// The entry tag reuses [`InodeKind`]'s wire vocabulary.
+    /// A directory without a revision payload.
     #[serde(rename = "dir")]
     #[cfg_attr(feature = "openapi", schema(title = "PathEntryDirectory"))]
     Directory {},
@@ -123,17 +114,13 @@ pub enum PathEntryKind {
     File {
         /// Current file revision number.
         revision_no: RevisionNo,
-        /// Current file size in bytes.
-        ///
-        /// This remains explicit even though `content_ref` also carries the
-        /// length because callers sort directory listings by this field.
+        /// The current file size in bytes.
         size_bytes: u64,
         /// Current content reference.
         content_ref: ContentRef,
         /// Actor responsible for the current revision.
         revision_committed_by: ActorRef,
-        /// Time of the current revision, in Unix milliseconds. Revision
-        /// sequences determine order.
+        /// The current revision time in Unix milliseconds.
         revision_committed_at_ms: u64,
     },
 }
@@ -160,39 +147,29 @@ impl PathEntryKind {
     }
 }
 
-/// Attributes returned for one inode.
-///
-/// A path entry omits this entire group unless the caller requests attributes.
-/// OpenAPI flattens these fields with `allOf`, so none of them can be marked as
-/// required on every path entry.
+/// The optional attributes returned for one inode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AttributesProjection {
     /// The attribute revision this projection represents.
     #[cfg_attr(feature = "openapi", schema(required = false))]
     pub attributes_revision_no: AttributeRevisionNo,
-    /// Actor responsible for the latest attribute update. This is `None` for
-    /// the initial empty state at revision 0.
+    /// The actor responsible for the latest attribute update, or `None` for the
+    /// initial empty state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub attributes_updated_by: Option<ActorRef>,
-    /// Time of the latest attribute update, in Unix milliseconds. This is
-    /// `None` for the initial empty state at revision 0.
+    /// The latest attribute update time in Unix milliseconds, or `None` for the
+    /// initial empty state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attributes_updated_at_ms: Option<u64>,
-    /// The complete attribute map at `attributes_revision_no`.
-    ///
-    /// An inode that has never had attributes written is at revision 0 with
-    /// an empty map.
+    /// The complete attribute map at `attributes_revision_no`, including an empty map
+    /// for the initial state.
     #[cfg_attr(feature = "openapi", schema(required = false))]
     pub attributes: Attributes,
 }
 
-/// One directory listing and the namespace head it was answered at.
-///
-/// The envelope names the listing target and head so an empty directory
-/// still tells the caller which state it observed, and so the response can
-/// grow without reshaping `entries`.
+/// One directory listing and the namespace head used to read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListPathEntriesResponse {
@@ -202,22 +179,14 @@ pub struct ListPathEntriesResponse {
     pub path: AbsolutePath,
     /// Namespace head sequence this listing was read from.
     pub head_seq: ChangeSeq,
-    /// Directory entries for this page.
-    ///
-    /// Entries are returned in canonical name-key order. Higher-level display
-    /// surfaces may sort entries separately for presentation.
+    /// The directory entries in canonical name-key order.
     pub entries: Vec<PathEntry>,
     /// Cursor for the next page, if more entries remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
 
-/// One directory listing addressed by parent inode, and the namespace head
-/// it was answered at.
-///
-/// The envelope names the parent by its stable inode identity rather than a
-/// path, so a page and its resumption always describe the same directory
-/// even when the parent is concurrently renamed or moved.
+/// One directory listing addressed by parent inode and the namespace head used to read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListInodeChildrenResponse {
@@ -232,10 +201,7 @@ pub struct ListInodeChildrenResponse {
     pub parent_inode_id: InodeId,
     /// Namespace head sequence this listing was read from.
     pub head_seq: ChangeSeq,
-    /// Directory entries for this page.
-    ///
-    /// Entries are returned in canonical name-key order. Higher-level display
-    /// surfaces may sort entries separately for presentation.
+    /// The directory entries in canonical name-key order.
     pub entries: Vec<PathEntry>,
     /// Cursor for the next page, if more entries remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -252,10 +218,7 @@ pub struct FileBytes {
     pub bytes: Vec<u8>,
 }
 
-/// One deletion that can still be restored.
-///
-/// `inode_id` and `deletion_seq` identify it. The removed directory binding
-/// determines where an in-place restore binds it.
+/// One recoverable deletion and its removed directory binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {

@@ -4271,7 +4271,7 @@
       },
       "AdvanceRetentionRequest": {
         "type": "object",
-        "description": "Selects retention-floor advancement. This request has no options yet.",
+        "description": "An option-free request that selects retention-floor advancement.",
         "additionalProperties": false
       },
       "AdvanceRetentionResponse": {
@@ -4289,7 +4289,7 @@
       },
       "AttributeKey": {
         "type": "string",
-        "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected.",
+        "description": "A validated inode attribute name from 1 to 128 UTF-8 bytes without control characters.\n\nNames are byte-exact; writes reject the reserved `loonfs.` prefix even though\nthe type accepts it.",
         "example": "owner"
       },
       "AttributeRevisionNo": {
@@ -4301,12 +4301,12 @@
       },
       "AttributeValue": {
         "type": "string",
-        "description": "One validated attribute value.\n\nA value is at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes. It is\notherwise free text: control characters and the empty string are legal.\nEmpty is a stored value, not a tombstone; only an explicit remove\noperation deletes an attribute.",
+        "description": "A validated inode attribute value of at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes.\n\nEmpty strings and control characters are valid, and only an explicit remove\noperation deletes an attribute.",
         "example": "platform"
       },
       "Attributes": {
         "type": "object",
-        "description": "A validated attribute map for one inode.\n\nConstruction and decoding both enforce the same limits: a map holds at\nmost [`MAX_ATTRIBUTE_ENTRIES`] entries, each value is at most\n[`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes, and the whole map is at most\n[`MAX_ATTRIBUTES_TOTAL_BYTES`] logical UTF-8 bytes. The total counts key\nbytes and value bytes and nothing else, so it does not depend on the\nencoding the map is written in. Durable state that breaks a limit fails to\ndecode rather than decoding to something smaller.\n\nAn empty map is valid. It is the cleared state, and clearing an inode's\nattributes is a real update with its own revision.",
+        "description": "A validated attribute map limited to [`MAX_ATTRIBUTE_ENTRIES`] entries and\n[`MAX_ATTRIBUTES_TOTAL_BYTES`] total key and value UTF-8 bytes.\n\nConstruction and decoding reject values over these limits; an empty map\nrepresents cleared attributes.",
         "additionalProperties": {
           "$ref": "#/components/schemas/AttributeValue"
         },
@@ -4356,7 +4356,7 @@
       },
       "BeginDownloadRequest": {
         "type": "object",
-        "description": "What a client names when it asks to read a file directly.\n\nA path and, optionally, the revision it wants — the same two things the\nproxied content read takes, so a caller switching transports changes\nnothing about what it is asking for.",
+        "description": "The path to download and, optionally, the revision to download.",
         "required": [
           "path"
         ],
@@ -4374,7 +4374,7 @@
       },
       "BeginDownloadResponse": {
         "type": "object",
-        "description": "A short-lived capability to read one file's content object, plus\neverything the reader needs to check what arrives.\n\nThe raw object key is deliberately not here, exactly as it is not in a\n`direct_put` grant: a client learns a URL that expires, not an address it\ncan revisit.\n\nThe grant names one immutable content object, so it does not go stale\nwhen the path moves on. A commit that replaces the file writes a new\nobject and leaves this one alone; what the capability reads is what the\nrequested revision held when the grant was issued, and the reference\nsays which bytes those are.",
+        "description": "A presigned URL for one content object.\n\nThe URL expires at `access.expires_at_ms`; later path changes do not change the object.",
         "required": [
           "namespace_id",
           "path",
@@ -4389,7 +4389,7 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Identity, byte length, and checksum evidence for the object the\ncapability reads. A reader checks the bytes it receives against\n`size_bytes` and recomputes `checksum.algorithm` over the complete\npayload."
+            "description": "The identity, byte length, and checksum of the object to download."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -4417,7 +4417,7 @@
             "$ref": "#/components/schemas/BeginUploadDirectMultipart"
           }
         ],
-        "description": "Request to start an upload session, tagged by transport mode.\n\nEach variant contains only fields valid for that transport, so invalid\ncombinations are rejected during decoding. The `mode` field is required.",
+        "description": "A request to start an upload session for one required transport mode.",
         "discriminator": {
           "propertyName": "mode",
           "mapping": {
@@ -4439,7 +4439,7 @@
             "$ref": "#/components/schemas/BeginUploadResponseDirectMultipart"
           }
         ],
-        "description": "Response to starting an upload session, tagged by transport mode.\n\nEach variant contains only the fields needed by that transport. Unknown\nresponse fields are accepted for forward compatibility.",
+        "description": "The response from starting an upload session for one transport mode.",
         "discriminator": {
           "propertyName": "mode",
           "mapping": {
@@ -4451,7 +4451,7 @@
       },
       "CapabilityDocument": {
         "type": "object",
-        "description": "A deployment's self-description (API spec, \"Capability discovery\").\n\nA remote client fetches this from `GET /v0/capabilities` and caches it; an\nembedded engine exposes the same document as a constant. SDK gating logic\nis therefore identical for both backends: check [`supports`] or\n[`has_profile`], and treat a `not_supported` error as authoritative when\nthe two disagree.\n\n[`supports`]: CapabilityDocument::supports\n[`has_profile`]: CapabilityDocument::has_profile",
+        "description": "The profiles, features, and limits advertised by a deployment.",
         "required": [
           "protocol_version",
           "profiles"
@@ -4459,7 +4459,7 @@
         "properties": {
           "features": {
             "type": "object",
-            "description": "Named features and whether this deployment supports them. An absent\nkey means unsupported.",
+            "description": "The named features supported by this deployment, with absent keys treated as unsupported.",
             "additionalProperties": {
               "type": "boolean"
             },
@@ -4484,7 +4484,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Advertised profiles, each `plane/version`. All-or-nothing: every\nrequired op of an advertised profile is implemented."
+            "description": "The advertised `plane/version` profiles, each with every required operation implemented."
           },
           "protocol_version": {
             "type": "string",
@@ -4501,7 +4501,7 @@
       },
       "Checkpoint": {
         "type": "object",
-        "description": "One checkpoint resource, reported from what its durable record carries.",
+        "description": "One checkpoint resource described by its durable record.",
         "required": [
           "namespace_id",
           "checkpoint_id",
@@ -4528,7 +4528,7 @@
           "expires_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "When garbage collection may release the record without being asked,\nin Unix milliseconds. Absent means the pin holds until it is\nreleased. An instant already in the past is a record whose expiry\nhas passed and which no collection pass has reached yet: it is still\na root, so it is still listed.",
+            "description": "The automatic release time in Unix milliseconds, or `None` until an explicit release.",
             "minimum": 0
           },
           "manifest_no": {
@@ -4575,7 +4575,7 @@
       },
       "Checksum": {
         "type": "object",
-        "description": "An algorithm and its canonical lowercase-hex checksum value.\n\nThe enclosing value defines which bytes the checksum covers.",
+        "description": "A checksum algorithm and its canonical lowercase hexadecimal value.",
         "required": [
           "algorithm",
           "value"
@@ -4587,14 +4587,14 @@
           },
           "value": {
             "type": "string",
-            "description": "Lowercase hex of the raw checksum bytes.\n\nThe algorithm is its own field, so the value carries no prefix.\nProvider APIs that report base64 are converted at the adapter."
+            "description": "The canonical lowercase hexadecimal checksum without a prefix."
           }
         },
         "additionalProperties": false
       },
       "ChecksumAlgorithm": {
         "type": "string",
-        "description": "Supported checksum algorithms.\n\nThe enclosing value defines which bytes a checksum covers. Unknown\nalgorithms fail to decode because every in-memory `ChecksumAlgorithm` must\nbe recomputable by this build. Adding a variant also requires adding its\nimplementation.",
+        "description": "A supported checksum algorithm.",
         "enum": [
           "sha256",
           "crc64nvme",
@@ -4609,7 +4609,7 @@
       },
       "CommitRequest": {
         "type": "object",
-        "description": "A request to commit one or more filesystem operations.\n\nOperations run in order and either all succeed or none are committed. A\nrequest with one operation uses the same fingerprint rules as a batch.\n\nUnknown fields are rejected here for the same reason they are on\n[`FilesystemOperation`]: the fields a typo can hide are the ones that\ndecide whether the commit is guarded at all.",
+        "description": "A request to commit one or more filesystem operations atomically in order.\n\nUnknown fields are rejected.",
         "required": [
           "commit_id",
           "actor",
@@ -4629,28 +4629,28 @@
             "items": {
               "$ref": "#/components/schemas/ContentToken"
             },
-            "description": "Proofs for any new external content refs introduced by this request.\nOne proof covers every operation that names its content ref."
+            "description": "The proofs for new external content references in this request."
           },
           "message": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Caller annotation recorded on the commit and reported by the change\nfeed. Part of the commit's identity: reusing `commit_id` with a\ndifferent message is a `commit_id_reuse_conflict`, exactly as it is\nfor an explicit commit."
+            "description": "The caller annotation that forms part of the commit identity."
           },
           "operations": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/FilesystemOperation"
             },
-            "description": "Ordered operations to apply. Must be non-empty; they commit all\ntogether or not at all."
+            "description": "The non-empty ordered operations to commit atomically."
           }
         },
         "additionalProperties": false
       },
       "CommitResponse": {
         "type": "object",
-        "description": "Result of one commit.\n\nEvery commit resolves to this envelope — path-oriented operations and\nexplicit commits, embedded or remote. The commit id is the caller's\nreconciliation handle: resubmitting the same request with the same id\nreplays this result instead of committing twice.\n\nThe response includes the same attribution and events as\n[`CommittedChange`], including IDs created by the commit.",
+        "description": "The result of one commit, including its attribution and filesystem events.",
         "required": [
           "namespace_id",
           "commit_id",
@@ -4661,12 +4661,12 @@
         "properties": {
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
-            "description": "Idempotency key the commit landed under: caller-supplied, or\ngenerated on the caller's behalf when the request carried none."
+            "description": "The idempotency key for the commit."
           },
           "committed_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Wall-clock stamp of the commit, in Unix milliseconds.\nObservational: `committed_seq` is the order.",
+            "description": "The commit time in Unix milliseconds; `committed_seq` defines commit order.",
             "minimum": 0
           },
           "committed_by": {
@@ -4682,11 +4682,11 @@
             "items": {
               "$ref": "#/components/schemas/FilesystemChange"
             },
-            "description": "Semantic filesystem events in commit order. This is omitted only when\nreplaying a commit whose WAL history is no longer retained."
+            "description": "The filesystem events in commit order, or `None` when replaying a commit\nwithout retained WAL history."
           },
           "message": {
             "type": "string",
-            "description": "Caller annotation, omitted when absent and carrying no filesystem\nsemantics."
+            "description": "The optional caller annotation for the commit."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -4712,7 +4712,7 @@
           "committed_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Wall-clock stamp of the commit, in Unix milliseconds.\nObservational: `committed_seq` is the order.",
+            "description": "The commit time in Unix milliseconds; `committed_seq` defines commit order.",
             "minimum": 0
           },
           "committed_by": {
@@ -4728,7 +4728,7 @@
             "items": {
               "$ref": "#/components/schemas/FilesystemChange"
             },
-            "description": "Semantic filesystem events for this commit, in the order the commit\napplied them. One request operation may produce more than one event\n(see [`FilesystemChange`])."
+            "description": "The filesystem events for this commit in commit order."
           },
           "message": {
             "type": "string",
@@ -4738,7 +4738,7 @@
       },
       "CompletedUploadPart": {
         "type": "object",
-        "description": "One uploaded part, as the client observed the provider accept it.\n\nThe server keeps no durable record of any part. Part bookkeeping is the\nclient's, exactly as it is in the provider's own multipart API, and this\nis where the client hands it back.",
+        "description": "One uploaded part accepted by the object-store provider.",
         "required": [
           "part_number",
           "etag",
@@ -4770,7 +4770,7 @@
       },
       "ContentRef": {
         "type": "object",
-        "description": "Pointer to one immutable content object.\n\n`content_id` is identity — *which* object — and the checksum is\nevidence about its bytes. Separating the two is what lets the final\nobject key exist before the first byte is read.\n\nA `ContentRef` is safe to publish only after the referenced bytes are\ndurable in the namespace's content store.",
+        "description": "A reference to one immutable content object.\n\nThe object must be durable before the reference is published.",
         "required": [
           "kind",
           "content_id",
@@ -4813,7 +4813,7 @@
           },
           "token": {
             "type": "string",
-            "description": "Opaque, server-signed token. Clients must not parse it."
+            "description": "The opaque server-signed token that clients must not parse."
           }
         },
         "additionalProperties": false
@@ -4827,7 +4827,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Label recorded on the checkpoint record. A label, not a key: several\nrecords may carry the same name over different bases."
+            "description": "The non-unique label recorded on the checkpoint."
           },
           "ttl_ms": {
             "type": [
@@ -4835,7 +4835,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Optional lifetime; the server computes the record's expiry from its\nown clock. Absent means the pin holds until explicitly released.",
+            "description": "The checkpoint lifetime in milliseconds, or `None` for an explicit release only.",
             "minimum": 0
           }
         },
@@ -4894,7 +4894,7 @@
         "properties": {
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The head's last committed sequence; the delete linearized\nimmediately after it, so this is where history ended."
+            "description": "The final committed sequence before the namespace was deleted."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -4904,7 +4904,7 @@
       },
       "DeletedObjectCounts": {
         "type": "object",
-        "description": "Objects deleted by one GC pass, grouped by object family. Every field is\npresent, including zero counts.",
+        "description": "Object counts deleted by one garbage-collection pass, grouped by family.",
         "required": [
           "wal_segments",
           "metadata_segments",
@@ -4923,7 +4923,7 @@
           "content_objects": {
             "type": "integer",
             "format": "int64",
-            "description": "Content objects deleted after their completed upload session passed\nthe reclamation grace period and no reachable data referenced them.\nCleanup of abandoned sessions is not counted here.",
+            "description": "Unreferenced content objects deleted after their completed sessions passed the\nreclamation grace period.",
             "minimum": 0
           },
           "manifests": {
@@ -4992,17 +4992,17 @@
       },
       "ErrorDetails": {
         "type": "object",
-        "description": "Optional machine-readable details for an [`ApiError`].\n\nClients make retry decisions from the error code and use these fields for\nrelevant identifiers such as commit ids, writer epochs, and revisions.\nFields may be absent and clients must ignore fields they do not use.",
+        "description": "Optional machine-readable identifiers and state for an [`ApiError`].",
         "properties": {
           "active_acquired_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Unix milliseconds at which the current epoch's acquirer took it, when\nthe head recorded one. Writer ids are process labels, so two runs on\none machine can share one; the stamp is what tells them apart.",
+            "description": "The Unix-millisecond time when the current writer acquired its epoch, when available.",
             "minimum": 0
           },
           "active_writer": {
             "type": "string",
-            "description": "Writer id recorded by the current epoch's acquirer, when the head\nrecorded one."
+            "description": "The writer ID recorded for the current epoch, when available."
           },
           "active_writer_epoch": {
             "$ref": "#/components/schemas/WriterEpoch",
@@ -5018,7 +5018,7 @@
           },
           "actual_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Head sequence the namespace was actually at, which is what a caller\nthat still means to delete it retries against."
+            "description": "The actual namespace head sequence."
           },
           "actual_inode_id": {
             "type": "string",
@@ -5040,11 +5040,11 @@
           },
           "committed_fingerprint": {
             "type": "string",
-            "description": "Semantic identity of the mutation that already landed under that\ncommit id, from the same receipt as `committed_seq` and present\nexactly when it is. A retry recomputes this value from the request it\njust made — see\n[`put_retry_fingerprint`](crate::put_retry_fingerprint) — and equality\nis what proves the two are the same request."
+            "description": "The fingerprint of the mutation that landed under `commit_id`, present with `committed_seq`."
           },
           "committed_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence at which that commit id already landed. Present when the\nfailure was decided against a durable commit receipt, which is what\nholds the sequence; absent when nothing has committed under the id\nyet and two live requests are simply claiming it at once."
+            "description": "The sequence where this commit ID already landed, when recorded by a durable receipt."
           },
           "expected_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
@@ -5056,7 +5056,7 @@
           },
           "expected_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Head sequence a namespace delete required the namespace to still be\nat."
+            "description": "The head sequence required by a namespace delete."
           },
           "expected_inode_id": {
             "type": "string",
@@ -5081,7 +5081,7 @@
           "operation_index": {
             "type": "integer",
             "format": "int32",
-            "description": "Position, in the request's operation list, of the operation that\nfailed. A commit applies all of its operations or none of them, so\nthis names the one that stopped the whole request.",
+            "description": "The index of the failed operation in the request.",
             "minimum": 0
           },
           "retention_floor_seq": {
@@ -5100,15 +5100,15 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
+            "description": "The stable machine-readable error code as a string."
           },
           "details": {
             "$ref": "#/components/schemas/ErrorDetails",
-            "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
+            "description": "The optional machine-readable context for the error code."
           },
           "feature": {
             "type": "string",
-            "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
+            "description": "The capability feature key for a `not_supported` error."
           },
           "message": {
             "type": "string",
@@ -5116,11 +5116,11 @@
           },
           "param": {
             "type": "string",
-            "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
+            "description": "The invalid JSON Pointer, parameter name, CLI flag, or CLI argument."
           },
           "request_id": {
             "type": "string",
-            "description": "Correlation id the server assigned to the failed request; the same\nvalue is sent as the `x-request-id` response header."
+            "description": "The request correlation ID also sent in the `x-request-id` response header."
           }
         }
       },
@@ -5160,7 +5160,7 @@
           "committed_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Wall-clock stamp of the commit that created this revision, in Unix\nmilliseconds. Observational: `committed_seq` is the order.",
+            "description": "The commit time in Unix milliseconds; `committed_seq` defines commit order.",
             "minimum": 0
           },
           "committed_by": {
@@ -5211,7 +5211,7 @@
             "$ref": "#/components/schemas/FilesystemChangeAttributesChanged"
           }
         ],
-        "description": "One semantic filesystem change inside a commit.\n\nA commit's events are the operations it applied, in the order it applied\nthem. One request operation can apply several: creating missing parent\ndirectories, or replacing a file by moving over it, each produce an event\nper directory created or file replaced. So a request with three\noperations may report more than three events, and the events stay in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode or\nmaintain its own binding projection from this feed.",
+        "description": "One filesystem change within a commit.\n\nOne request operation can produce multiple changes.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
@@ -5267,7 +5267,7 @@
             "$ref": "#/components/schemas/FilesystemOperationUpdateAttributes"
           }
         ],
-        "description": "One filesystem operation.\n\nUnknown fields are rejected so a misspelled concurrency guard cannot be ignored.\nFieldless variants must use empty braces so serde rejects unexpected fields.",
+        "description": "One filesystem operation.\n\nUnknown fields are rejected, and fieldless variants require empty objects.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
@@ -5303,14 +5303,14 @@
       },
       "GcRequest": {
         "type": "object",
-        "description": "Optional overrides for one garbage-collection pass. Absent fields use\nthe server's conservative defaults.\n\nEvery field is optional, so a typo would take the default instead of the\noverride the caller asked for. Unknown fields are rejected so a misspelled\n`max_objects` fails loudly rather than running an unbounded pass.",
+        "description": "Optional overrides for one garbage-collection pass.\n\nUnknown fields are rejected.",
         "properties": {
           "cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Opaque resume token returned as `next_cursor` by an earlier pass\nagainst the same namespace."
+            "description": "The opaque `next_cursor` returned by an earlier pass for the same namespace."
           },
           "grace_window_ms": {
             "type": [
@@ -5318,7 +5318,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Objects younger than this are never deleted, reachable or not. The\nwindow has a derived safety floor (publication budgets plus provider\ndeadlines); a smaller value is rejected as `invalid_request`.",
+            "description": "The minimum object age for deletion in milliseconds, which must meet the\nserver's advertised safety floor.",
             "minimum": 0
           },
           "max_objects": {
@@ -5327,7 +5327,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Maximum objects this invocation may read or decide. Omit to retain\nthe run-to-completion behavior.\n\nA completed upload session past its reclamation grace makes the pass\nread every live manifest and retained WAL segment to find out\nwhether anything still references its content, and that read is\ncharged here like any other. A budget too small to finish it does\nnot stall the pass: the session is retained, the response sets\n`content_reclamation_deferred`, and the sweep carries on through\neverything else. What a chronically small budget costs is content\nleft unreclaimed, not progress. Give a pass at least as many objects\nas the namespace has live manifests and retained segments for that\ncontent to come back.",
+            "description": "The maximum objects this pass may inspect, or `None` to run to completion.",
             "minimum": 0
           }
         },
@@ -5335,7 +5335,7 @@
       },
       "GcResponse": {
         "type": "object",
-        "description": "Result of one mark-and-sweep garbage-collection pass.\n\nDeletion counts are grouped by object family. Checkpoint releases and\nretained candidates are grouped by reason.",
+        "description": "The result of one mark-and-sweep garbage-collection pass.",
         "required": [
           "namespace_id",
           "deleted",
@@ -5349,11 +5349,11 @@
         "properties": {
           "budget_exhausted": {
             "type": "boolean",
-            "description": "True when the pass reached `max_objects` before it finished. Use\n`next_cursor` to continue or run again with a larger limit."
+            "description": "Whether the pass reached `max_objects` before completion."
           },
           "content_reclamation_deferred": {
             "type": "boolean",
-            "description": "True when `max_objects` was too small to build the complete reference\nset required for completed-content reclamation."
+            "description": "Whether `max_objects` prevented a complete reference scan for content reclamation."
           },
           "deleted": {
             "$ref": "#/components/schemas/DeletedObjectCounts",
@@ -5365,17 +5365,17 @@
           },
           "next_cursor": {
             "type": "string",
-            "description": "Opaque resume token when more candidates remain. It is valid only for\nthe same namespace."
+            "description": "The opaque resume token for remaining candidates in the same namespace."
           },
           "next_reclamation_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Earliest known time when a retained upload session may become\nreclaimable. This covers open-session leases and grace periods for\naborted or completed sessions. It only reflects candidates inspected\nby this pass, so absence does not mean no future work remains.",
+            "description": "The earliest known reclamation time for an upload session inspected by this\npass, in Unix milliseconds.",
             "minimum": 0
           },
           "released_checkpoints": {
             "$ref": "#/components/schemas/ReleasedCheckpointCounts",
-            "description": "Checkpoint records the pass released, split by the reason each one\nwas released."
+            "description": "The checkpoint records released by the pass, grouped by reason."
           },
           "retained": {
             "$ref": "#/components/schemas/RetainedCandidates",
@@ -5384,7 +5384,7 @@
           "retained_candidates": {
             "type": "integer",
             "format": "int64",
-            "description": "Candidates retained at delete time (grace window, missing\ntimestamps, or reachable from the fresh root set).",
+            "description": "The number of candidates retained at deletion time.",
             "minimum": 0
           },
           "retention_degraded": {
@@ -5402,7 +5402,7 @@
               "string",
               "null"
             ],
-            "description": "Opaque resume token returned as `next_cursor` by an earlier pass\nagainst the same namespace."
+            "description": "The opaque `next_cursor` returned by an earlier pass for the same namespace."
           },
           "max_objects": {
             "type": [
@@ -5410,7 +5410,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Reads this pass may spend before returning with a `next_cursor`.\nOmit to take the same per-pass default the runtime's own collection\ntakes.",
+            "description": "The maximum reads for this pass, or `None` for the server default.",
             "minimum": 0
           }
         },
@@ -5465,7 +5465,7 @@
         }
       },
       "GrepIndex": {
-        "description": "The namespace's grep-index lifecycle and its cheap bookkeeping (admin\nplane).",
+        "description": "The administrative status of a namespace's grep index.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/GrepIndexLifecycleDisabled"
@@ -5552,14 +5552,14 @@
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence this page was evaluated at. Pages are evaluated against\nthe namespace head at page time; the cursor is an ordering resume,\nnot a snapshot pin."
+            "description": "The namespace head sequence used to evaluate this page."
           },
           "matches": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/GrepMatch"
             },
-            "description": "Matches in ascending `(inode_id, byte_offset)` order. A page may\nreturn fewer matches than its limit and still carry a cursor: the\nper-page verified-candidate budget bounds how much content one\nrequest reads, whatever the plan's false-positive rate."
+            "description": "The matches in ascending `(inode_id, byte_offset)` order."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -5571,7 +5571,7 @@
           },
           "tail_scanned": {
             "type": "boolean",
-            "description": "True when revisions after `built_through_seq` were scanned\nexhaustively; false only when `allow_stale` skipped them."
+            "description": "Whether revisions after `built_through_seq` were scanned exhaustively."
           }
         }
       },
@@ -5631,7 +5631,7 @@
             "items": {
               "$ref": "#/components/schemas/Checkpoint"
             },
-            "description": "Active records in ascending checkpoint-id order. Released records are\nomitted even if garbage collection has not deleted them yet."
+            "description": "The active records in ascending checkpoint ID order."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -5682,7 +5682,7 @@
       },
       "ListInodeChildrenResponse": {
         "type": "object",
-        "description": "One directory listing addressed by parent inode, and the namespace head\nit was answered at.\n\nThe envelope names the parent by its stable inode identity rather than a\npath, so a page and its resumption always describe the same directory\neven when the parent is concurrently renamed or moved.",
+        "description": "One directory listing addressed by parent inode and the namespace head used to read it.",
         "required": [
           "namespace_id",
           "parent_inode_id",
@@ -5695,7 +5695,7 @@
             "items": {
               "$ref": "#/components/schemas/PathEntry"
             },
-            "description": "Directory entries for this page.\n\nEntries are returned in canonical name-key order. Higher-level display\nsurfaces may sort entries separately for presentation."
+            "description": "The directory entries in canonical name-key order."
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -5719,7 +5719,7 @@
       },
       "ListPathEntriesResponse": {
         "type": "object",
-        "description": "One directory listing and the namespace head it was answered at.\n\nThe envelope names the listing target and head so an empty directory\nstill tells the caller which state it observed, and so the response can\ngrow without reshaping `entries`.",
+        "description": "One directory listing and the namespace head used to read it.",
         "required": [
           "namespace_id",
           "path",
@@ -5732,7 +5732,7 @@
             "items": {
               "$ref": "#/components/schemas/PathEntry"
             },
-            "description": "Directory entries for this page.\n\nEntries are returned in canonical name-key order. Higher-level display\nsurfaces may sort entries separately for presentation."
+            "description": "The directory entries in canonical name-key order."
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -5809,26 +5809,26 @@
       },
       "MaintenanceStepRequest": {
         "type": "object",
-        "description": "One explicit maintenance step: the actions it selects, and nothing more.\n\nSelection is presence. Each field names one independent action, and a\nstep runs exactly the ones the body carries — a request that selects\nnothing is rejected rather than quietly doing nothing. Unknown fields are\nrejected for the same reason: a misspelled selector would leave its action\nunrun, and the caller would read the empty report as \"there was nothing to\ndo\".",
+        "description": "The actions selected for one explicit maintenance step.\n\nThe request must select at least one action, and unknown fields are rejected.",
         "properties": {
           "gc": {
             "$ref": "#/components/schemas/GcRequest",
-            "description": "Run one bounded mark-and-sweep garbage-collection pass. Omit this\nfield to skip garbage collection."
+            "description": "The optional bounded mark-and-sweep garbage-collection action."
           },
           "metadata_maintenance": {
             "$ref": "#/components/schemas/MetadataMaintenanceRequest",
-            "description": "Flush the visible WAL tail into metadata segments, then run one bounded\nreorganization step."
+            "description": "The optional WAL flush and bounded metadata reorganization action."
           },
           "retention": {
             "$ref": "#/components/schemas/AdvanceRetentionRequest",
-            "description": "Advance the retention floor to the flushed manifest head. Include this\nfield to select the action."
+            "description": "The optional action that advances the retention floor to the flushed manifest head."
           }
         },
         "additionalProperties": false
       },
       "MaintenanceStepResponse": {
         "type": "object",
-        "description": "Result of one explicit maintenance step.\n\nOne report per action the request selected, and none for an action it\ndid not: an absent field means \"not selected\", never \"ran and found\nnothing to do\". The latter is what the outcomes inside a report say.",
+        "description": "The result of one explicit maintenance step.\n\nEach field is present only when the request selected its action.",
         "required": [
           "namespace_id",
           "status_before"
@@ -5873,7 +5873,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Flush the visible WAL tail once it reaches this many segments.\nAbsent uses the server's default threshold; zero, and any value above\nthe write-rejection threshold, are rejected as `invalid_request`.",
+            "description": "The WAL-tail threshold for flushing, or `None` for the server default.",
             "minimum": 0
           }
         },
@@ -5994,7 +5994,7 @@
         }
       },
       "PathEntry": {
-        "description": "Metadata for one path returned by stat and directory-listing operations.\n\nFile entries include the current revision and content details. Directory\nentries do not. Attribute fields are included only when requested and are\nserialized at the top level of the entry. Callers can pass\n`attributes_revision_no` as `expected_attributes_revision_no` when updating\nattributes.",
+        "description": "Metadata for one path returned by stat and directory listings.\n\nAttribute fields are included only when requested.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/PathEntryDirectory"
@@ -6049,7 +6049,7 @@
       },
       "ReleasedCheckpointCounts": {
         "type": "object",
-        "description": "Checkpoint records released by one GC pass, grouped by reason.\n\nReleasing a record stops it from pinning data. A later pass may delete the\nrecord after its grace window and count that under\n[`DeletedObjectCounts::checkpoint_records`].",
+        "description": "Checkpoint record counts released by one garbage-collection pass, grouped by reason.",
         "required": [
           "fork",
           "expired",
@@ -6060,25 +6060,25 @@
           "expired": {
             "type": "integer",
             "format": "int64",
-            "description": "User-owned records released because their expiry passed, or because\nthey sit on a terminally deleted namespace.",
+            "description": "User-owned records released after expiry or terminal namespace deletion.",
             "minimum": 0
           },
           "fork": {
             "type": "integer",
             "format": "int64",
-            "description": "Fork-owned records released because their target namespace is\nprovably gone.",
+            "description": "Fork-owned records released because their target namespaces are gone.",
             "minimum": 0
           },
           "missing_basis": {
             "type": "integer",
             "format": "int64",
-            "description": "Active records released because their basis manifest is verifiably\ngone.",
+            "description": "Active records released because their basis manifests are gone.",
             "minimum": 0
           },
           "snapshot": {
             "type": "integer",
             "format": "int64",
-            "description": "Snapshot-owned records released because their expiry passed, or\nbecause they sit on a terminally deleted namespace.",
+            "description": "Snapshot-owned records released after expiry or terminal namespace deletion.",
             "minimum": 0
           }
         }
@@ -6107,7 +6107,7 @@
             "$ref": "#/components/schemas/ReorganizeStepOutcomeRootAdvanced"
           }
         ],
-        "description": "What the metadata-reorganization part of a maintenance step did.\n\nDeliberately coarse: the run counts and byte budgets a reorganization\nconsumes are engine policy, not a wire contract.",
+        "description": "The outcome of the metadata-reorganization part of a maintenance step.",
         "discriminator": {
           "propertyName": "outcome",
           "mapping": {
@@ -6123,7 +6123,7 @@
       },
       "RetainedCandidates": {
         "type": "object",
-        "description": "Candidates inspected but not deleted by one GC pass.\n\nEvery field is present, including zero counts. The fields sum to\n`retained_candidates` in [`GcResponse`].\n\nAn object inspected by multiple passes is counted once per pass.",
+        "description": "The candidates inspected but not deleted by one garbage-collection pass.\n\nEvery field is present and contributes to [`GcResponse::retained_candidates`].",
         "required": [
           "referenced",
           "within_grace_window",
@@ -6146,25 +6146,25 @@
           "content_scan_deferred": {
             "type": "integer",
             "format": "int64",
-            "description": "Completed sessions skipped because the reference scan exceeded\n`max_objects`. The response also sets `content_reclamation_deferred`.",
+            "description": "Completed sessions retained because their reference scan exceeded `max_objects`.",
             "minimum": 0
           },
           "degraded_roots": {
             "type": "integer",
             "format": "int64",
-            "description": "Candidates kept because root resolution failed. The response also\nsets `retention_degraded`.",
+            "description": "Candidates retained because root resolution failed.",
             "minimum": 0
           },
           "no_provider_timestamp": {
             "type": "integer",
             "format": "int64",
-            "description": "Unreachable candidates with no provider timestamp. Their age is\nunknown, so the pass keeps them.",
+            "description": "Unreachable candidates without provider timestamps.",
             "minimum": 0
           },
           "no_reference_manifest": {
             "type": "integer",
             "format": "int64",
-            "description": "Unreachable candidates that cannot be checked against a manifest old\nenough to cover the grace window.",
+            "description": "Unreachable candidates without a reference manifest old enough to cover the grace window.",
             "minimum": 0
           },
           "referenced": {
@@ -6176,13 +6176,13 @@
           "unrecognized_key": {
             "type": "integer",
             "format": "int64",
-            "description": "Unrecognized keys in a family scanned by GC. These keys are never\ndeleted.",
+            "description": "Unrecognized keys retained from object families scanned by garbage collection.",
             "minimum": 0
           },
           "upload_session_undecided": {
             "type": "integer",
             "format": "int64",
-            "description": "Upload sessions kept because the pass could not determine whether\nthey were safe to delete.",
+            "description": "Upload sessions whose deletion safety could not be determined.",
             "minimum": 0
           },
           "upload_session_window": {
@@ -6194,7 +6194,7 @@
           "within_grace_window": {
             "type": "integer",
             "format": "int64",
-            "description": "Unreachable, but younger than the grace window by the object's own\nprovider timestamp. A later pass deletes it.",
+            "description": "Unreachable candidates younger than the grace window by their provider timestamps.",
             "minimum": 0
           }
         }
@@ -6225,7 +6225,7 @@
             "items": {
               "$ref": "#/components/schemas/UploadPartChecksumClaim"
             },
-            "description": "Parts to authorize and the checksum for each part. Requesting a part\nagain replaces the previous upload for that part number."
+            "description": "The parts to authorize; repeated part numbers replace their previous uploads."
           }
         },
         "additionalProperties": false
@@ -6337,7 +6337,7 @@
         "properties": {
           "message": {
             "type": "string",
-            "description": "What was expected and what happened instead. Present only on\n`failed`."
+            "description": "The expected and actual behavior for a failed check."
           },
           "name": {
             "type": "string",
@@ -6351,12 +6351,12 @@
       },
       "StoreProbeRequest": {
         "type": "object",
-        "description": "Options for one store contract probe. Empty today; a body is still sent\nso later options do not change the shape of the request. An option this\nbuild does not know is rejected rather than ignored, so a caller never\nbelieves it selected something.",
+        "description": "An empty request for one store contract probe.",
         "additionalProperties": false
       },
       "StoreProbeResponse": {
         "type": "object",
-        "description": "What one store contract probe observed, check by check.",
+        "description": "The ordered results from one store contract probe.",
         "required": [
           "run_id",
           "checks"
@@ -6367,17 +6367,17 @@
             "items": {
               "$ref": "#/components/schemas/StoreProbeCheckResult"
             },
-            "description": "Every check the run performed, in the order it performed them. A\nfailed check lives here rather than in an error: the probe answered\nthe question, and the answer is that the store is wrong."
+            "description": "The check results in execution order."
           },
           "run_id": {
             "type": "string",
-            "description": "Label the server minted for this run. It scopes the objects the run\nwrote, so it identifies the run in provider logs too."
+            "description": "The server-generated label for this probe run and its objects."
           }
         }
       },
       "TrashEntry": {
         "type": "object",
-        "description": "One deletion that can still be restored.\n\n`inode_id` and `deletion_seq` identify it. The removed directory binding\ndetermines where an in-place restore binds it.",
+        "description": "One recoverable deletion and its removed directory binding.",
         "required": [
           "inode_id",
           "deletion_seq",
@@ -6424,7 +6424,7 @@
             "$ref": "#/components/schemas/CompleteUploadDirectMultipart"
           }
         ],
-        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Direct uploads\ninclude the expected content details. Multipart also includes its parts.",
+        "description": "A request to complete an upload session using the mode that started it.",
         "discriminator": {
           "propertyName": "mode",
           "mapping": {
@@ -6436,7 +6436,7 @@
       },
       "UploadContentClaim": {
         "type": "object",
-        "description": "Size and checksum reported by the client for a complete payload.\n\nDirect uploads provide this at completion. The server verifies it against\nthe object stored by the provider.",
+        "description": "The size and checksum reported for a complete direct-upload payload.",
         "required": [
           "size_bytes",
           "checksum"
@@ -6495,7 +6495,7 @@
       },
       "UploadPartChecksumClaim": {
         "type": "object",
-        "description": "One part's checksum, supplied by the client so the server can sign it\ninto that part's upload URL.",
+        "description": "One upload part number and its checksum.",
         "required": [
           "part_number",
           "checksum"
@@ -6621,7 +6621,7 @@
           "part_size_bytes": {
             "type": "integer",
             "format": "int64",
-            "description": "Byte length of every part except the last. The server uses its\ndefault when this is omitted.",
+            "description": "The byte length of every part except the last, or `None` for the server default.",
             "minimum": 0
           }
         }
@@ -6647,7 +6647,7 @@
           },
           "upload_id": {
             "$ref": "#/components/schemas/UploadId",
-            "description": "Durable session identity used by subsequent append and completion\ncalls."
+            "description": "The session identity used by later append and completion calls."
           }
         }
       },
@@ -6714,12 +6714,12 @@
           "part_size_bytes": {
             "type": "integer",
             "format": "int64",
-            "description": "Byte length of every part except the last. At most 10,000 parts\nmay be uploaded, so this bounds the object at 10,000 times the\npart size.",
+            "description": "The byte length of every part except the last, with at most 10,000 parts allowed.",
             "minimum": 0
           },
           "upload_id": {
             "$ref": "#/components/schemas/UploadId",
-            "description": "Durable session identity used by subsequent part-signing and\ncompletion calls."
+            "description": "The session identity used by later part-signing and completion calls."
           }
         }
       },
@@ -6739,13 +6739,13 @@
           },
           "name": {
             "type": "string",
-            "description": "The label the creator recorded. Not a key: several records may\ncarry one label over different bases."
+            "description": "The non-unique label recorded by the creator."
           }
         }
       },
       "CheckpointOwnerFork": {
         "type": "object",
-        "description": "A fork target keeping its source basis alive for the length of one\nfork attempt.",
+        "description": "A fork target retaining its source basis for one fork attempt.",
         "required": [
           "target_namespace_id",
           "kind"
@@ -6759,7 +6759,7 @@
           },
           "target_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace whose continued existence keeps this pin standing."
+            "description": "The target namespace whose existence retains this checkpoint."
           }
         }
       },
@@ -6873,7 +6873,7 @@
       },
       "FilesystemChangeContentChanged": {
         "type": "object",
-        "description": "A file received a new current revision — a put over an existing\nfile, or a revision restore (one durable fact for both).",
+        "description": "A file received a new current revision from a put or revision restore.",
         "required": [
           "inode_id",
           "revision_no",
@@ -6956,7 +6956,7 @@
       },
       "FilesystemChangeDeleted": {
         "type": "object",
-        "description": "A file or directory subtree was deleted. Use the enclosing change's\n`committed_seq` as `deletion_seq` when restoring it.",
+        "description": "A file or directory subtree was deleted.",
         "required": [
           "inode_id",
           "deleted_binding",
@@ -7032,7 +7032,7 @@
         "properties": {
           "attributes": {
             "$ref": "#/components/schemas/Attributes",
-            "description": "The inode's complete attribute map after the update, so a consumer\nprojects it without reading anything back. An empty map is the\ncleared state."
+            "description": "The inode's complete attribute map after the update, including an empty map\nwhen all attributes were cleared."
           },
           "attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
@@ -7068,7 +7068,7 @@
           },
           "parents": {
             "type": "boolean",
-            "description": "Also create missing ancestor directories (the same auto-create\n`put_file` performs). The final component must still be new."
+            "description": "Whether to create missing ancestor directories while requiring the final\ncomponent to be new."
           },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -7144,7 +7144,7 @@
       },
       "FilesystemOperationPutFileByInode": {
         "type": "object",
-        "description": "Create a file under an existing parent inode. The name must be unused.",
+        "description": "Create a file with an unused name under an existing parent inode.",
         "required": [
           "parent_inode_id",
           "display_name",
@@ -7400,7 +7400,7 @@
       },
       "FilesystemOperationUndelete": {
         "type": "object",
-        "description": "Restore a deleted file or subtree.\n\n`inode_id` and `deletion_seq` identify one exact deletion. A stale\nsequence returns `not_deleted` and cannot undo a later deletion.",
+        "description": "Restore the deletion identified by `inode_id` and `deletion_seq`.",
         "required": [
           "inode_id",
           "deletion_seq",
@@ -7425,7 +7425,7 @@
           },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Optional destination for the restored inode.\n\nWhen absent, the inode is rebound to the parent and name recorded by the\ndeletion. Parent identity, rather than an old path string, keeps this\ncorrect after ancestor renames."
+            "description": "The restore destination, or `None` to use the recorded binding."
           }
         }
       },
@@ -7464,7 +7464,7 @@
         "properties": {
           "expected_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
-            "description": "When set, the update applies only while the inode's attribute\nrevision is still this one. Absent means the update is applied\nover whatever revision is current; either way the write carries\nits own revision guard, so a concurrent update never merges\nsilently."
+            "description": "The attribute revision that must still be current before the update."
           },
           "expected_inode_id": {
             "type": "string",
@@ -7487,17 +7487,17 @@
             "items": {
               "$ref": "#/components/schemas/AttributeKey"
             },
-            "description": "Attribute keys to remove.\n\nA list preserves duplicate entries so validation can report them instead\nof silently deduplicating the request."
+            "description": "The attribute keys to remove, including duplicates that validation must reject."
           },
           "set": {
             "type": "object",
-            "description": "Attributes to write. Each key replaces whatever the inode\ncurrently holds under it; keys the inode holds and this map does\nnot name are left alone.",
+            "description": "The attributes to write, replacing values for matching keys and leaving\nother keys unchanged.",
             "additionalProperties": {
               "$ref": "#/components/schemas/AttributeValue"
             },
             "propertyNames": {
               "type": "string",
-              "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected.",
+              "description": "A validated inode attribute name from 1 to 128 UTF-8 bytes without control characters.\n\nNames are byte-exact; writes reject the reserved `loonfs.` prefix even though\nthe type accepts it.",
               "example": "owner"
             }
           }
@@ -7535,7 +7535,7 @@
       },
       "GrepIndexLifecycleBackfilling": {
         "type": "object",
-        "description": "The initial walk over a pinned checkpoint is running. Nothing is\nsearchable yet.",
+        "description": "An initial scan of a pinned checkpoint that is not yet searchable.",
         "required": [
           "target_seq",
           "checkpoint_id",
@@ -7563,7 +7563,7 @@
           },
           "target_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Namespace sequence the pinned checkpoint captured. Reaching it\nis what completes the backfill."
+            "description": "The namespace sequence that completes the backfill when reached."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -7581,7 +7581,7 @@
       },
       "GrepIndexLifecycleActive": {
         "type": "object",
-        "description": "The index follows the change feed. Commits at or below the watermark\nare searchable.",
+        "description": "An index following the change feed through its searchable watermark.",
         "required": [
           "built_through_seq",
           "status",
@@ -7597,7 +7597,7 @@
           "next_event_index": {
             "type": "integer",
             "format": "int32",
-            "description": "Offset of the next change event within `built_through_seq`, or\nzero when the whole commit is represented.",
+            "description": "The next change-event offset within `built_through_seq`, or zero when the\nwhole commit is indexed.",
             "minimum": 0
           },
           "status": {
@@ -7664,7 +7664,7 @@
       },
       "PathEntryDirectory": {
         "type": "object",
-        "description": "A directory, which has no revision payload in v0.\n\nThe entry tag reuses [`InodeKind`]'s wire vocabulary.",
+        "description": "A directory without a revision payload.",
         "required": [
           "inode_kind",
           "namespace_id",
@@ -7683,7 +7683,7 @@
           },
           "attributes": {
             "$ref": "#/components/schemas/Attributes",
-            "description": "The complete attribute map at `attributes_revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
+            "description": "The complete attribute map at `attributes_revision_no`, including an empty map\nfor the initial state."
           },
           "attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
@@ -7692,21 +7692,21 @@
           "attributes_updated_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
+            "description": "The latest attribute update time in Unix milliseconds, or `None` for the\ninitial empty state.",
             "minimum": 0
           },
           "attributes_updated_by": {
             "$ref": "#/components/schemas/ActorRef",
-            "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
+            "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
           },
           "binding_generation": {
             "type": "string",
-            "description": "Opaque identifier for this entry's current parent/name binding. Absent for the namespace root."
+            "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root."
           },
           "created_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Time the inode was created, in Unix milliseconds. Sequence numbers\ndetermine order.",
+            "description": "The inode creation time in Unix milliseconds.",
             "minimum": 0
           },
           "created_by": {
@@ -7774,7 +7774,7 @@
           "revision_committed_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
+            "description": "The current revision time in Unix milliseconds.",
             "minimum": 0
           },
           "revision_committed_by": {
@@ -7788,12 +7788,12 @@
           "size_bytes": {
             "type": "integer",
             "format": "int64",
-            "description": "Current file size in bytes.\n\nThis remains explicit even though `content_ref` also carries the\nlength because callers sort directory listings by this field.",
+            "description": "The current file size in bytes.",
             "minimum": 0
           },
           "attributes": {
             "$ref": "#/components/schemas/Attributes",
-            "description": "The complete attribute map at `attributes_revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
+            "description": "The complete attribute map at `attributes_revision_no`, including an empty map\nfor the initial state."
           },
           "attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
@@ -7802,21 +7802,21 @@
           "attributes_updated_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
+            "description": "The latest attribute update time in Unix milliseconds, or `None` for the\ninitial empty state.",
             "minimum": 0
           },
           "attributes_updated_by": {
             "$ref": "#/components/schemas/ActorRef",
-            "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
+            "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
           },
           "binding_generation": {
             "type": "string",
-            "description": "Opaque identifier for this entry's current parent/name binding. Absent for the namespace root."
+            "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root."
           },
           "created_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Time the inode was created, in Unix milliseconds. Sequence numbers\ndetermine order.",
+            "description": "The inode creation time in Unix milliseconds.",
             "minimum": 0
           },
           "created_by": {
@@ -8028,7 +8028,7 @@
           "expires_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Unix-millisecond instant after which the session is abandoned and\nmay be aborted by server-side cleanup.",
+            "description": "The Unix-millisecond time after which cleanup may abort the session.",
             "minimum": 0
           },
           "status": {
@@ -8075,7 +8075,7 @@
           },
           "content_token": {
             "$ref": "#/components/schemas/ContentToken",
-            "description": "Fresh proof for a later commit. This is absent after the token\nminting window closes, while `content_ref` remains available."
+            "description": "Fresh proof for a later commit, or `None` after the token minting window closes."
           },
           "status": {
             "type": "string",
@@ -8171,7 +8171,7 @@
       },
       "WalFlushStepOutcomeAlreadyPublished": {
         "type": "object",
-        "description": "The step did not update the root because it already referenced a\ndifferent manifest.",
+        "description": "The step did not update a root that already referenced another manifest.",
         "required": [
           "attempted_seq",
           "current_manifest_no",
@@ -8196,7 +8196,7 @@
       },
       "WalFlushStepOutcomeRetriesExhausted": {
         "type": "object",
-        "description": "Concurrent updates prevented every attempt from publishing. Nothing\nwas flushed, and a later step can try again.",
+        "description": "Concurrent updates prevented every publication attempt.",
         "required": [
           "observed_head_seq",
           "outcome"
@@ -8230,15 +8230,15 @@
               "properties": {
                 "code": {
                   "type": "string",
-                  "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
+                  "description": "The stable machine-readable error code as a string."
                 },
                 "details": {
                   "$ref": "#/components/schemas/ErrorDetails",
-                  "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
+                  "description": "The optional machine-readable context for the error code."
                 },
                 "feature": {
                   "type": "string",
-                  "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
+                  "description": "The capability feature key for a `not_supported` error."
                 },
                 "message": {
                   "type": "string",
@@ -8246,11 +8246,11 @@
                 },
                 "param": {
                   "type": "string",
-                  "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
+                  "description": "The invalid JSON Pointer, parameter name, CLI flag, or CLI argument."
                 },
                 "request_id": {
                   "type": "string",
-                  "description": "Correlation id the server assigned to the failed request; the same\nvalue is sent as the `x-request-id` response header."
+                  "description": "The request correlation ID also sent in the `x-request-id` response header."
                 }
               }
             }

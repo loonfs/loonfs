@@ -4,10 +4,7 @@ use crate::{Checksum, ChecksumAlgorithm, ContentRef, NamespaceId, UploadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Size and checksum reported by the client for a complete payload.
-///
-/// Direct uploads provide this at completion. The server verifies it against
-/// the object stored by the provider.
+/// The size and checksum reported for a complete direct-upload payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -43,10 +40,7 @@ impl UploadMode {
     }
 }
 
-/// Request to start an upload session, tagged by transport mode.
-///
-/// Each variant contains only fields valid for that transport, so invalid
-/// combinations are rejected during decoding. The `mode` field is required.
+/// A request to start an upload session for one required transport mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -67,8 +61,7 @@ pub enum BeginUploadRequest {
     /// Write the object in parts through presigned part uploads.
     #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectMultipart"))]
     DirectMultipart {
-        /// Byte length of every part except the last. The server uses its
-        /// default when this is omitted.
+        /// The byte length of every part except the last, or `None` for the server default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         part_size_bytes: Option<u64>,
@@ -109,8 +102,7 @@ pub enum ObjectTransferAccess {
     },
 }
 
-/// One part's checksum, supplied by the client so the server can sign it
-/// into that part's upload URL.
+/// One upload part number and its checksum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -126,8 +118,7 @@ pub struct UploadPartChecksumClaim {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SignUploadPartsRequest {
-    /// Parts to authorize and the checksum for each part. Requesting a part
-    /// again replaces the previous upload for that part number.
+    /// The parts to authorize; repeated part numbers replace their previous uploads.
     pub parts: Vec<UploadPartChecksumClaim>,
 }
 
@@ -153,11 +144,7 @@ pub struct SignUploadPartsResponse {
     pub parts: Vec<SignedUploadPart>,
 }
 
-/// One uploaded part, as the client observed the provider accept it.
-///
-/// The server keeps no durable record of any part. Part bookkeeping is the
-/// client's, exactly as it is in the provider's own multipart API, and this
-/// is where the client hands it back.
+/// One uploaded part accepted by the object-store provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -177,14 +164,11 @@ pub struct CompletedUploadPart {
 pub struct ContentToken {
     /// Content authorized by this token.
     pub content_ref: ContentRef,
-    /// Opaque, server-signed token. Clients must not parse it.
+    /// The opaque server-signed token that clients must not parse.
     pub token: String,
 }
 
-/// Response to starting an upload session, tagged by transport mode.
-///
-/// Each variant contains only the fields needed by that transport. Unknown
-/// response fields are accepted for forward compatibility.
+/// The response from starting an upload session for one transport mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -197,8 +181,7 @@ pub enum BeginUploadResponse {
     ServiceProxied {
         /// Namespace authorized to consume the eventual staged content.
         namespace_id: NamespaceId,
-        /// Durable session identity used by subsequent append and completion
-        /// calls.
+        /// The session identity used by later append and completion calls.
         upload_id: UploadId,
     },
     /// One presigned request writes the whole object.
@@ -221,12 +204,9 @@ pub enum BeginUploadResponse {
     DirectMultipart {
         /// Namespace authorized to consume the eventual staged content.
         namespace_id: NamespaceId,
-        /// Durable session identity used by subsequent part-signing and
-        /// completion calls.
+        /// The session identity used by later part-signing and completion calls.
         upload_id: UploadId,
-        /// Byte length of every part except the last. At most 10,000 parts
-        /// may be uploaded, so this bounds the object at 10,000 times the
-        /// part size.
+        /// The byte length of every part except the last, with at most 10,000 parts allowed.
         part_size_bytes: u64,
         /// Checksum algorithm for every part and for the complete payload.
         checksum_algorithm: ChecksumAlgorithm,
@@ -274,10 +254,7 @@ pub struct UploadContentResponse {
     pub content_ref: ContentRef,
 }
 
-/// Request to complete an upload session.
-///
-/// `mode` must match the mode used to start the session. Direct uploads
-/// include the expected content details. Multipart also includes its parts.
+/// A request to complete an upload session using the mode that started it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "openapi", schema(as = UploadCompletion))]
@@ -324,12 +301,9 @@ pub struct CompleteMultipartUploadRequest {
     pub parts: Vec<CompletedUploadPart>,
 }
 
-/// Observed state of an upload session.
+/// The current state of an upload session.
 ///
-/// A session starts as `Open` and ends as either `Completed` or `Aborted`.
-/// Both final states are permanent. Reading a completed session issues a new
-/// receipt for the durable content, so a lost commit response does not require
-/// the content to be uploaded again.
+/// A session starts as `Open` and permanently ends as `Completed` or `Aborted`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -337,8 +311,7 @@ pub enum UploadSessionStatus {
     /// Accepting content until its lease passes.
     #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusOpen"))]
     Open {
-        /// Unix-millisecond instant after which the session is abandoned and
-        /// may be aborted by server-side cleanup.
+        /// The Unix-millisecond time after which cleanup may abort the session.
         expires_at_ms: u64,
     },
     /// Final: the content is durable and verified.
@@ -348,8 +321,7 @@ pub enum UploadSessionStatus {
         completed_at_ms: u64,
         /// Verified content selected by this session.
         content_ref: ContentRef,
-        /// Fresh proof for a later commit. This is absent after the token
-        /// minting window closes, while `content_ref` remains available.
+        /// Fresh proof for a later commit, or `None` after the token minting window closes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_token: Option<ContentToken>,
@@ -372,8 +344,7 @@ pub struct UploadSession {
     pub upload_id: UploadId,
     /// Transport selected when the session began.
     pub mode: UploadMode,
-    /// The session's lifecycle and state-specific fields. Completed HTTP
-    /// responses carry a fresh receipt while the minting window remains open.
+    /// The session lifecycle and its state-specific fields.
     #[serde(flatten)]
     pub status: UploadSessionStatus,
 }

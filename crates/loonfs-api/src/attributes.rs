@@ -1,10 +1,4 @@
-//! Inode attributes: bounded, validated key/value metadata held against one
-//! inode.
-//!
-//! Attributes belong to the resource, not to the commit that wrote them, and
-//! they travel with inode identity: a rename or a move leaves them unchanged.
-//! Every size limit here counts logical UTF-8 bytes, so the encoding that
-//! carries a map never changes what a caller is allowed to store.
+//! Validated key-value attributes stored on inodes.
 
 use crate::ids::{numeric_id, string_id, validation_error};
 use serde::{Deserialize, Serialize};
@@ -33,17 +27,10 @@ validation_error!(
 );
 
 string_id! {
-    /// Validated name of one inode attribute.
+    /// A validated inode attribute name from 1 to 128 UTF-8 bytes without control characters.
     ///
-    /// A key is 1 to 128 UTF-8 bytes and carries no Unicode control
-    /// character, which is also what rejects NUL. Keys are compared exactly:
-    /// nothing case-folds or normalizes them, so two spellings that differ in
-    /// any byte name two different attributes.
-    ///
-    /// The `loonfs.` prefix is reserved for system-owned attributes. This
-    /// type accepts a reserved key, because a durable row has to be able to
-    /// carry a system attribute. The write operation is where a caller's
-    /// attempt to write a reserved key is rejected.
+    /// Names are byte-exact; writes reject the reserved `loonfs.` prefix even though
+    /// the type accepts it.
     AttributeKey,
     error = AttributeKeyValidationError,
     validate = validate_attribute_key,
@@ -93,11 +80,9 @@ validation_error!(
 );
 
 string_id! {
-    /// One validated attribute value.
+    /// A validated inode attribute value of at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes.
     ///
-    /// A value is at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes. It is
-    /// otherwise free text: control characters and the empty string are legal.
-    /// Empty is a stored value, not a tombstone; only an explicit remove
+    /// Empty strings and control characters are valid, and only an explicit remove
     /// operation deletes an attribute.
     AttributeValue,
     error = AttributeValueValidationError,
@@ -126,18 +111,11 @@ impl AttributeValue {
     }
 }
 
-/// A validated attribute map for one inode.
+/// A validated attribute map limited to [`MAX_ATTRIBUTE_ENTRIES`] entries and
+/// [`MAX_ATTRIBUTES_TOTAL_BYTES`] total key and value UTF-8 bytes.
 ///
-/// Construction and decoding both enforce the same limits: a map holds at
-/// most [`MAX_ATTRIBUTE_ENTRIES`] entries, each value is at most
-/// [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes, and the whole map is at most
-/// [`MAX_ATTRIBUTES_TOTAL_BYTES`] logical UTF-8 bytes. The total counts key
-/// bytes and value bytes and nothing else, so it does not depend on the
-/// encoding the map is written in. Durable state that breaks a limit fails to
-/// decode rather than decoding to something smaller.
-///
-/// An empty map is valid. It is the cleared state, and clearing an inode's
-/// attributes is a real update with its own revision.
+/// Construction and decoding reject values over these limits; an empty map
+/// represents cleared attributes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(
@@ -242,12 +220,10 @@ pub enum AttributesError {
 }
 
 numeric_id! {
-    /// Revision number for an inode's attributes.
+    /// The revision number for an inode's attribute map.
     ///
-    /// Every inode starts at revision 0 with an empty attribute map. The
-    /// revision increases only when an update changes the map. Clients can
-    /// provide the current revision to reject a write if another update
-    /// happened first. Earlier attribute maps cannot be queried.
+    /// It starts at zero and increases when the map changes; clients can guard
+    /// updates but cannot query earlier maps.
     AttributeRevisionNo,
     public_ordinal,
     schema_description = "Revision number for an inode's attributes. It starts at 0 and increases whenever the attribute map changes."
