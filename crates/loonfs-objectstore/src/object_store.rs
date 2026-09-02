@@ -499,13 +499,11 @@ pub trait ObjectStore: Send + Sync + Debug {
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String>>;
 
-    /// Collects and sorts every key under `prefix`.
+    /// Collects every key under `prefix` in the order returned by the provider.
     ///
     /// The operation fails if prefix validation or any streamed provider page fails.
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let mut keys: Vec<String> = self.list_prefix_stream(prefix).try_collect().await?;
-        keys.sort();
-        Ok(keys)
+        self.list_prefix_stream(prefix).try_collect().await
     }
 
     /// Writes bytes unconditionally, replacing any existing object at `key`.

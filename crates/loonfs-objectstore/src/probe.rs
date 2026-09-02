@@ -524,15 +524,12 @@ async fn sorted_listing(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult 
         )?;
     }
 
-    // The streamed keys are the provider's own answer; `list_prefix` sorts
-    // client-side, so it is the documented convenience rather than evidence
-    // about the provider.
+    // Both listing methods preserve the provider's order.
     let mut streamed = Vec::new();
     let mut stream = store.list_prefix_stream(&prefix);
     while let Some(item) = stream.next().await {
         streamed.push(ok("list", item)?);
     }
-    streamed.sort();
     let listed = ok("list", store.list_prefix(&prefix).await)?;
     if streamed != keys {
         return Err(wrong(format!(

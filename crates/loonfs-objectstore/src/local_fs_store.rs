@@ -445,9 +445,18 @@ impl LocalFsStore {
             }
         }
 
-        Self::metadata_for_path(key, &path)
-            .await?
-            .ok_or_else(|| ObjectStoreError::transport(key, "object disappeared after write"))
+        let content_digest = sha256_digest(bytes);
+        let metadata = match fs::metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ObjectStoreError::transport(
+                    key,
+                    "object disappeared after write",
+                ));
+            }
+            Err(err) => return Err(io_error(key, err)),
+        };
+        Self::metadata_from_fs_metadata(key, &metadata, &content_digest, &path)
     }
 
     async fn delete_object(&self, key: &str) -> Result<()> {
@@ -588,10 +597,7 @@ async fn list_prefix_for_root(
         return Ok(Vec::new());
     }
 
-    let mut keys = collect_keys(&prefix, root).await?;
-    keys.retain(|key| {
-        key.starts_with(&prefix) && start_after.is_none_or(|start_after| key.as_str() > start_after)
-    });
+    let mut keys = collect_keys(&prefix, start_after, root).await?;
     keys.sort();
     Ok(keys)
 }
@@ -660,7 +666,11 @@ async fn sync_dir_chain(key: &str, path: &Path, root: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn collect_keys(prefix: &str, root: PathBuf) -> Result<Vec<String>> {
+async fn collect_keys(
+    prefix: &str,
+    start_after: Option<&str>,
+    root: PathBuf,
+) -> Result<Vec<String>> {
     let mut keys = Vec::new();
     let mut dirs = vec![root.clone()];
 
@@ -703,12 +713,21 @@ async fn collect_keys(prefix: &str, root: PathBuf) -> Result<Vec<String>> {
                 Err(err) => return Err(io_error(prefix, err)),
             };
             if metadata.is_dir() {
-                dirs.push(path);
+                let mut directory_prefix = relative_key(prefix, &root, &path)?;
+                directory_prefix.push('/');
+                if directory_prefix.starts_with(prefix) || prefix.starts_with(&directory_prefix) {
+                    dirs.push(path);
+                }
                 continue;
             }
 
             if metadata.is_file() {
-                keys.push(relative_key(prefix, &root, &path)?);
+                let key = relative_key(prefix, &root, &path)?;
+                if key.starts_with(prefix)
+                    && start_after.is_none_or(|start_after| key.as_str() > start_after)
+                {
+                    keys.push(key);
+                }
             }
         }
     }

@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
+use loonfs_api::Checksum;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-    StoredObjectChecksum,
+    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use std::fmt;
 use std::pin::pin;
@@ -196,6 +197,32 @@ impl<S: ObjectStore> ObjectStore for BlockingStore<S> {
         let result = self.inner.head(key).await;
         self.mark_completed(blocked);
         result
+    }
+
+    async fn create_multipart_upload(&self, key: &str) -> Result<String, ObjectStoreError> {
+        self.inner.create_multipart_upload(key).await
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        checksum: &Checksum,
+    ) -> Result<MultipartCompletion, ObjectStoreError> {
+        self.inner
+            .complete_multipart_upload(key, provider_upload_id, parts, checksum)
+            .await
+    }
+
+    async fn abort_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+    ) -> Result<(), ObjectStoreError> {
+        self.inner
+            .abort_multipart_upload(key, provider_upload_id)
+            .await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {

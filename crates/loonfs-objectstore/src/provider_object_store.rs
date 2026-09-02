@@ -48,9 +48,10 @@ pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Reads apply it through the provider client. Verified immutable writes and
 /// deletes apply it through `TransportRetryPolicy`. A new outer attempt may
-/// start only while time remains. Multipart uploads are excluded because
-/// each part has its own timeout and retry limit. The garbage-collection
-/// grace period is longer than the maximum publication operation.
+/// start only while time remains. Multipart uploads apply it to each control
+/// call and to each part, so one part's outer retries cannot outlast it. The
+/// garbage-collection grace period is longer than the maximum publication
+/// operation.
 pub const PROVIDER_OPERATION_DEADLINE: Duration = Duration::from_secs(120);
 
 /// Minimum payload size for native multipart overwrite uploads.
@@ -274,7 +275,7 @@ impl ProviderObjectStore {
     /// ambiguous transport error, immutable writes verify the stored bytes before
     /// deciding whether the write succeeded.
     ///
-    /// Multipart uploads have per-part limits rather than one total deadline.
+    /// Each control call and each part is bounded by the operation deadline.
     /// Conditional write modes do not use this path.
     async fn put_large_multipart(
         &self,
@@ -443,6 +444,10 @@ struct MultipartWrite<'op> {
 
 impl MultipartWrite<'_> {
     async fn create(&self, payload_bytes: u64) -> Result<AbortUploadOnDrop> {
+        let deadline = OperationDeadline::start(
+            self.store.timer.as_ref(),
+            self.store.transport_retry.operation_deadline,
+        );
         let mut retries: u32 = 0;
         loop {
             let err = match self.multipart.create_multipart(self.path).await {
@@ -464,7 +469,7 @@ impl MultipartWrite<'_> {
                 "create_multipart",
                 payload_bytes,
                 &mut retries,
-                None,
+                Some(&deadline),
             ) else {
                 return Err(map_provider_error(self.key, err));
             };
@@ -590,6 +595,10 @@ impl MultipartWrite<'_> {
         payload: Bytes,
     ) -> Result<PartId> {
         let payload_bytes = payload.len() as u64;
+        let deadline = OperationDeadline::start(
+            self.store.timer.as_ref(),
+            self.store.transport_retry.operation_deadline,
+        );
         let mut retries: u32 = 0;
         loop {
             let err = match self
@@ -614,7 +623,7 @@ impl MultipartWrite<'_> {
                 "put_part",
                 payload_bytes,
                 &mut retries,
-                None,
+                Some(&deadline),
             ) else {
                 return Err(map_provider_error(self.key, err));
             };
@@ -2761,7 +2770,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multipart_part_retries_are_count_bounded_not_clock_bounded() {
+    async fn multipart_part_retries_stop_once_the_operation_deadline_is_spent() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky))
             .monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
@@ -2770,13 +2779,13 @@ mod tests {
         let error = store
             .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
             .await
-            .expect_err("persistent part failure surfaces after the retry budget");
+            .expect_err("persistent part failure surfaces after the operation deadline");
 
         assert!(matches!(error, ObjectStoreError::Transport { .. }));
-        assert_eq!(
-            part_attempts(&flaky, 0),
-            5,
-            "1 attempt + max_retries, unaffected by elapsed time"
+        let attempts = part_attempts(&flaky, 0);
+        assert!(
+            attempts < 5,
+            "deadline must stop the loop before the count budget ({attempts} attempts)"
         );
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }
