@@ -14,7 +14,7 @@ use crate::commit::{
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
 use loonfs_api::wire::control::{HeadState, NamespaceStatus, WriterBlock};
-use loonfs_api::wire::wal::WalDelta;
+use loonfs_api::wire::{manifest::DeletedDirentry, wal::WalDelta};
 use loonfs_api::{
     next_public_ordinal, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
     CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
@@ -143,7 +143,11 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
     vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode_id,
-        deleted_direntry: None,
+        deleted_direntry: DeletedDirentry {
+            parent_inode_id: InodeId(1),
+            name_key: NameKey::parse("docs").expect("valid name key"),
+            display_name: test_display_name("docs"),
+        },
     }]
 }
 

@@ -122,12 +122,9 @@ pub struct SubtreeTombstoneRecord {
 /// names the exact deletion generation it cancels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubtreeTombstoneAction {
-    /// The subtree rooted here is deleted, removing the binding described
-    /// here when the delete came by path. The tombstone row is immortal, so
-    /// this is where a deleted name lives after unbind rows age out.
-    Set {
-        deleted_direntry: Option<DeletedDirentry>,
-    },
+    /// The subtree rooted here is deleted. The tombstone row is immortal, so
+    /// this is where the removed binding lives after unbind rows age out.
+    Set { deleted_direntry: DeletedDirentry },
     /// The deletion recorded at `target` is revoked. Validation guarantees
     /// the target was the active generation when the revoke committed.
     Revoke { target: TombstoneGeneration },
@@ -179,7 +176,7 @@ pub(crate) enum ActiveDeletionAction {
     Listed {
         deleted_at_ms: u64,
         deleted_by: ActorRef,
-        deleted_direntry: Option<DeletedDirentry>,
+        deleted_direntry: DeletedDirentry,
     },
     /// An undelete cancelled the deletion, so the listing skips the key.
     Removed { revocation_seq: ChangeSeq },
@@ -258,9 +255,8 @@ pub(crate) struct RecoverableDeletion {
     pub(crate) deletion_seq: ChangeSeq,
     pub(crate) deleted_at_ms: u64,
     pub(crate) deleted_by: ActorRef,
-    /// The binding the delete removed, and so the one undelete restores in
-    /// place; `None` when the deletion recorded no binding.
-    pub(crate) deleted_direntry: Option<DeletedDirentry>,
+    /// The binding the delete removed and an in-place undelete restores.
+    pub(crate) deleted_direntry: DeletedDirentry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

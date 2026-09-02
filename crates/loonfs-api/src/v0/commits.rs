@@ -200,11 +200,8 @@ pub enum FilesystemChange {
             schema(schema_with = crate::public_inode_id::schema)
         )]
         inode_id: InodeId,
-        /// Directory binding removed by the deletion, when the delete
-        /// recorded one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        deleted_binding: Option<DirectoryBinding>,
+        /// Directory binding removed by the deletion.
+        deleted_binding: DirectoryBinding,
     },
     /// A deleted inode was recovered and re-bound.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeUndeleted"))]
@@ -465,11 +462,11 @@ mod tests {
 
         let deleted = FilesystemChange::Deleted {
             inode_id: InodeId(2),
-            deleted_binding: Some(super::DirectoryBinding {
+            deleted_binding: super::DirectoryBinding {
                 parent_inode_id: InodeId(1),
                 name_key: crate::NameKey::parse("a.txt").expect("valid name key"),
                 display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
-            }),
+            },
         };
         assert_eq!(
             serde_json::to_string(&deleted).expect("serialize deleted event"),

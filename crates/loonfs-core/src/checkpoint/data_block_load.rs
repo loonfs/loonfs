@@ -306,9 +306,8 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
                 deleted_direntry, ..
             } => {
                 ALLOCATED_ROW_OVERHEAD
-                    + deleted_direntry.as_ref().map_or(0, |direntry| {
-                        direntry.name_key.as_str().len() + direntry.display_name.as_str().len()
-                    })
+                    + deleted_direntry.name_key.as_str().len()
+                    + deleted_direntry.display_name.as_str().len()
             }
             ActiveDeletionRowAction::Removed { .. } => FIXED_ROW_OVERHEAD,
         },

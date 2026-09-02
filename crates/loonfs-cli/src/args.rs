@@ -1024,8 +1024,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// Destination path for the recovered file or directory. Omit to
     /// restore in place: the entry re-binds under the parent and name its
     /// deletion recorded, which lands correctly even when the enclosing
-    /// directories were renamed since. A deletion that recorded no binding
-    /// needs the explicit path.
+    /// directories were renamed since.
     #[arg(value_hint = ValueHint::Other)]
     pub path: Option<String>,
     /// Inode ID of the deleted item, as reported by `rm` and the change

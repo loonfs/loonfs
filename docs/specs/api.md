@@ -1648,7 +1648,7 @@ by `(deletion_seq, inode_id)` — paged with the standard `limit`/`cursor`
 pattern (the cursor is an ordering resume like every other). The listing is a
 range scan over the derived active-deletions family (format spec, section
 2.5), so a page costs the page rather than the namespace's deletion history.
-Those rows represent current state and are not removed when the retention floor advances. Each entry includes the inode id and deletion sequence required by `undelete`, plus `deleted_by` and `deleted_at_ms` from that deletion. When available, `deleted_binding` contains the directory binding that was removed. Entries without this binding still contain everything needed for recovery. Nested deletions remain separate entries, and recovering an outer deletion does not remove an inner deletion from the list.
+Those rows represent current state and are not removed when the retention floor advances. Each entry includes the inode id and deletion sequence required by `undelete`, plus `deleted_by`, `deleted_at_ms`, and the removed `deleted_binding`. Nested deletions remain separate entries, and recovering an outer deletion does not remove an inner deletion from the list.
 
 ```json
 {
@@ -1937,11 +1937,9 @@ exist and be visible, and its name must be free. When absent, the entry
 restores in place — it re-binds under the parent inode and name its
 deletion recorded, anchored on the parent's identity rather than a
 remembered spelling, so recovery lands correctly even when the enclosing
-directories were renamed after the delete. A deletion that recorded no
-binding (early tombstones carry none) answers `invalid_request` and needs
-the explicit path. The in-place parent and name obey the same rules a path
-would: the parent must not be deleted, and the name must be free, each
-answering its usual code otherwise.
+directories were renamed after the delete. The in-place parent and name obey
+the same rules a path would: the parent must not be deleted, and the name must
+be free, each answering its usual code otherwise.
 
 Only the root of a deletion can be undeleted, and `deletion_seq` must match the active deletion generation. A mismatch returns `not_deleted` with the expected and actual generations, preventing a stale recovery request from cancelling a later deletion.
 
@@ -2379,7 +2377,7 @@ Event kinds:
 | `file_created` | A file was created with its first revision. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`, `revision_no`, `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`, `binding_generation`. |
-| `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus optional `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
+| `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 

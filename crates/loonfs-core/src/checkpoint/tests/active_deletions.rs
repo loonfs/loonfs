@@ -30,11 +30,11 @@ fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombsto
         deleted_at_ms: 1_000 + seq,
         deleted_by: loonfs_api::ActorRef::loonfs_system(),
         action: SubtreeTombstoneAction::Set {
-            deleted_direntry: Some(DeletedDirentry {
+            deleted_direntry: DeletedDirentry {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse(name).expect("name key"),
                 display_name: DisplayName::parse(name).expect("display name"),
-            }),
+            },
         },
     }
 }
@@ -335,11 +335,11 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
                 deletion_seq: active.generation.seq,
                 deleted_at_ms: active.deleted_at_ms,
                 deleted_by: active.deleted_by,
-                deleted_binding: deleted_direntry.map(|direntry| DirectoryBinding {
-                    parent_inode_id: direntry.parent_inode_id,
-                    name_key: direntry.name_key,
-                    display_name: direntry.display_name,
-                }),
+                deleted_binding: DirectoryBinding {
+                    parent_inode_id: deleted_direntry.parent_inode_id,
+                    name_key: deleted_direntry.name_key,
+                    display_name: deleted_direntry.display_name,
+                },
             })
         })
         .collect()
@@ -507,14 +507,7 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
     let entries = trash_entries(&store, &namespace_id, 10).await;
     let names = entries
         .iter()
-        .map(|entry| {
-            entry
-                .deleted_binding
-                .as_ref()
-                .expect("a path delete records the deleted binding")
-                .display_name
-                .to_string()
-        })
+        .map(|entry| entry.deleted_binding.display_name.to_string())
         .collect::<Vec<_>>();
     assert_eq!(
         names,

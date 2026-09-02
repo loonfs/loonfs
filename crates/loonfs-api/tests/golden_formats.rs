@@ -280,12 +280,12 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             delta: WalDelta::TombstoneSubtree {
                 delta_index: 4,
                 root_inode_id: InodeId(9),
-                deleted_direntry: Some(DeletedDirentry {
+                deleted_direntry: DeletedDirentry {
                     parent_inode_id: InodeId(1),
                     name_key: NameKey::parse("old.txt").expect("valid name key"),
                     display_name: loonfs_api::DisplayName::parse("Old.txt")
                         .expect("valid display name"),
-                }),
+                },
             },
         },
         WalCommitDelta {
@@ -1598,12 +1598,12 @@ fn wal_decode_tolerates_additive_fields_inside_tombstone_deltas() {
             delta: WalDelta::TombstoneSubtree {
                 delta_index: 0,
                 root_inode_id: InodeId(9),
-                deleted_direntry: Some(DeletedDirentry {
+                deleted_direntry: DeletedDirentry {
                     parent_inode_id: InodeId(1),
                     name_key: name_key("old.txt"),
                     display_name: loonfs_api::DisplayName::parse("Old.txt")
                         .expect("valid display name"),
-                }),
+                },
             },
         },
         WalCommitDelta {
@@ -1790,7 +1790,11 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::TombstoneSubtree {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
-                deleted_direntry: None,
+                deleted_direntry: DeletedDirentry {
+                    parent_inode_id: InodeId(1),
+                    name_key: name_key("a"),
+                    display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
+                },
             }),
             "tombstone_subtree",
         ),
@@ -1835,12 +1839,12 @@ fn sample_tombstone_set_row() -> MetadataRow {
         },
         commit_id: commit_id(),
         action: TombstoneRowAction::Set {
-            deleted_direntry: Some(DeletedDirentry {
+            deleted_direntry: DeletedDirentry {
                 parent_inode_id: InodeId(1),
                 name_key: name_key("docs-archive"),
                 display_name: loonfs_api::DisplayName::parse("Docs-Archive")
                     .expect("valid display name"),
-            }),
+            },
         },
         deleted_at_ms: 4_000,
         deleted_by: actor(),
@@ -1877,12 +1881,12 @@ fn sample_active_deletion_listed_row() -> MetadataRow {
         action: ActiveDeletionRowAction::Listed {
             deleted_at_ms: 4_000,
             deleted_by: actor(),
-            deleted_direntry: Some(DeletedDirentry {
+            deleted_direntry: DeletedDirentry {
                 parent_inode_id: InodeId(1),
                 name_key: name_key("docs-archive"),
                 display_name: loonfs_api::DisplayName::parse("Docs-Archive")
                     .expect("valid display name"),
-            }),
+            },
         },
     }
 }
@@ -2361,11 +2365,11 @@ fn tombstone_revoke_rows_ignore_a_deleted_direntry() {
 }
 
 #[test]
-fn tombstone_rows_reject_the_pre_grouping_flat_encoding() {
+fn tombstone_rows_reject_flat_binding_fields() {
     let row = row_cbor(&sample_tombstone_set_row());
     assert_row_is_corrupt(
         &with_flat_binding(with_flat_generation(row.clone())),
-        "the pre-grouping layout is not a row this format has",
+        "flat binding fields are not a tombstone row",
     );
 
     // Each half of that encoding on its own, over a row that is otherwise

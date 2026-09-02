@@ -785,12 +785,10 @@ A `set` also carries the binding the delete removed, as one
 `deleted_direntry` value holding the `parent_inode_id`, `name_key`, and
 `display_name` together. Tombstone rows are immortal, so this is where a
 deleted name survives after unbind rows age out, and it is the binding
-undelete restores in place. A delete addressed by inode has no name to
-record and writes `deleted_direntry` as `null`; the field is always
-written, so omitting it is corruption rather than an unnamed deletion. Only a
-`set` includes this field. A reader ignores it on a `revoke`, just like any
-other unknown field (encoding conventions above). A partial binding is not
-valid.
+undelete restores in place. Every deletion records the binding it removed.
+Only a `set` includes this field. A reader ignores it on a `revoke`, just like
+any other unknown field (encoding conventions above). A partial binding is
+not valid.
 
 The `active_deletions` family tracks deletions that can still be restored. A
 `set` tombstone creates a `listed` row keyed by `(deletion_seq,
@@ -1498,7 +1496,7 @@ Five use inode IDs:
 
 Every `path`, `from_path`, and `to_path` is a canonical absolute path (section 2.3). Every `display_name` and `to_display_name` is one path component under the same grammar.
 
-Parameters marked `?` are optional and have no default. The optional `expected_*` parameters prevent races; omitting one disables that check. A revision guard requires its matching inode guard. Inode revision writes require `expected_revision_no`, while inode moves and deletes require `expected_binding_generation`. `undelete.path` overrides the original parent and name and is required when the deletion did not record a binding.
+Parameters marked `?` are optional and have no default. The optional `expected_*` parameters prevent races; omitting one disables that check. A revision guard requires its matching inode guard. Inode revision writes require `expected_revision_no`, while inode moves and deletes require `expected_binding_generation`. `undelete.path` overrides the original parent and name.
 
 `parents`, `behavior`, `set`, and `remove` have defaults. `parents` defaults to false. `behavior` defaults to `no_replace` for puts, moves, and copies, and to `non_recursive` for deletes. `set` and `remove` default to empty collections.
 
@@ -1531,8 +1529,8 @@ metadata deltas derived from the semantic operations: `create_inode`,
 standard client-facing commit operations.
 
 The two tombstone deltas carry the same values their rows do (section 2.5):
-`tombstone_subtree` states its `deleted_direntry`, as a whole binding or as
-`null`, and `revoke_subtree_tombstone` names its `target` generation. The
+`tombstone_subtree` states its `deleted_direntry` as a whole binding, and
+`revoke_subtree_tombstone` names its `target` generation. The
 delta's own generation is implied — its commit's sequence and its
 `delta_index` — so it is not written a second time.
 
@@ -1832,18 +1830,12 @@ Every durable lifecycle field is named `status`, is always present, and uses a
 `kind`-tagged object. HTTP responses flatten the same data beside their
 `status` field.
 
-Two rules govern an absent value in every durable encoding.
+One rule governs an absent value in every durable encoding.
 
-1. **An optional field is omitted when it has no value, and absence never
-   means a default.** Every field that has a value is written, including a
-   zero number and an empty list. "Absent means the default" would be a third
-   state beside present and absent, and no schema language states it, so no
-   durable encoding writes one.
-2. **One field is written as `null` instead of being omitted.** That field is
-   `deleted_direntry`, and three deletion records write it either way: the
-   tombstone `set` action, the `active_deletions` `listed` action, and the WAL
-   `tombstone_subtree` delta. A delete addressed by inode recorded no binding,
-   so it writes `null`. A record that omits the field fails to decode.
+**An optional field is omitted when it has no value, and absence never means a
+default.** Every field that has a value is written, including a zero number and
+an empty list. "Absent means the default" would be a third state beside present
+and absent, and no schema language states it, so no durable encoding writes one.
 
 ### 4.2 Format families and versions
 

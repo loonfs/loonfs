@@ -165,7 +165,7 @@ pub(super) fn materialize_validated_op(op: &ValidatedOp) -> Vec<MaterializedComm
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
                     root_inode_id: *inode_id,
-                    deleted_direntry: Some(deleted_direntry(source_binding)),
+                    deleted_direntry: deleted_direntry(source_binding),
                 },
             );
         }
@@ -206,7 +206,7 @@ pub(super) fn materialize_validated_op(op: &ValidatedOp) -> Vec<MaterializedComm
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
                     root_inode_id: *root_inode_id,
-                    deleted_direntry: Some(deleted_direntry(source_binding)),
+                    deleted_direntry: deleted_direntry(source_binding),
                 },
             );
         }

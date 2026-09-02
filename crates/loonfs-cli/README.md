@@ -297,7 +297,7 @@ History and recovery
     stale command cannot cancel a later delete. Omit <path> to restore in
     place under the parent and name recorded with the deletion. This still
     works if an enclosing directory was renamed. Pass <path> to restore it
-    somewhere else, or when the deletion did not record a binding
+    somewhere else
 
   loonfs changes [--after <seq>] [--limit <n>] [--page-size <n>]
                  [--all] [--jsonl] [--snapshot-id <id>]

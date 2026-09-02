@@ -132,12 +132,9 @@ pub struct DeletedBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubtreeTombstoneAction {
-    /// Deletes the subtree rooted at the record's inode. Only a delete has
-    /// a binding to remove, so this is the one action that can carry one —
-    /// absent when the delete was addressed by inode.
-    Set {
-        deleted_binding: Option<DeletedBinding>,
-    },
+    /// Deletes the subtree rooted at the record's inode and records its
+    /// removed binding.
+    Set { deleted_binding: DeletedBinding },
     /// Cancels exactly the deletion recorded at `target`.
     Revoke { target: DeletionGeneration },
 }
@@ -237,13 +234,11 @@ impl MetadataState {
                             deleted_at_ms: committed_at_ms,
                             deleted_by: actor.clone(),
                             action: SubtreeTombstoneAction::Set {
-                                deleted_binding: deleted_direntry.as_ref().map(|direntry| {
-                                    DeletedBinding {
-                                        parent_inode_id: direntry.parent_inode_id,
-                                        name_key: direntry.name_key.as_str().to_owned(),
-                                        display_name: direntry.display_name.as_str().to_owned(),
-                                    }
-                                }),
+                                deleted_binding: DeletedBinding {
+                                    parent_inode_id: deleted_direntry.parent_inode_id,
+                                    name_key: deleted_direntry.name_key.as_str().to_owned(),
+                                    display_name: deleted_direntry.display_name.as_str().to_owned(),
+                                },
                             },
                         });
                 }
@@ -343,12 +338,12 @@ mod tests {
                 WalDelta::TombstoneSubtree {
                     delta_index: 1,
                     root_inode_id: InodeId(2),
-                    deleted_direntry: Some(DeletedDirentry {
+                    deleted_direntry: DeletedDirentry {
                         parent_inode_id: InodeId(1),
                         name_key: NameKey::parse("report.txt").expect("valid name key"),
                         display_name: loonfs_api::DisplayName::parse("Report.TXT")
                             .expect("valid display name"),
-                    }),
+                    },
                 },
                 WalDelta::RevokeSubtreeTombstone {
                     delta_index: 2,
@@ -369,11 +364,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 SubtreeTombstoneAction::Set {
-                    deleted_binding: Some(DeletedBinding {
+                    deleted_binding: DeletedBinding {
                         parent_inode_id: InodeId(1),
                         name_key: "report.txt".to_owned(),
                         display_name: "Report.TXT".to_owned(),
-                    }),
+                    },
                 },
                 SubtreeTombstoneAction::Revoke {
                     target: DeletionGeneration {

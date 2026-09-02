@@ -6377,12 +6377,13 @@
       },
       "TrashEntry": {
         "type": "object",
-        "description": "One deletion that can still be restored.\n\n`inode_id` and `deletion_seq` are sufficient to restore it. The removed\ndirectory binding is included when available.",
+        "description": "One deletion that can still be restored.\n\n`inode_id` and `deletion_seq` identify it. The removed directory binding\ndetermines where an in-place restore binds it.",
         "required": [
           "inode_id",
           "deletion_seq",
           "deleted_at_ms",
-          "deleted_by"
+          "deleted_by",
+          "deleted_binding"
         ],
         "properties": {
           "deleted_at_ms": {
@@ -6393,7 +6394,7 @@
           },
           "deleted_binding": {
             "$ref": "#/components/schemas/DirectoryBinding",
-            "description": "Directory binding removed by the deletion, when available."
+            "description": "Directory binding removed by the deletion."
           },
           "deleted_by": {
             "$ref": "#/components/schemas/ActorRef",
@@ -6965,12 +6966,13 @@
         "description": "A file or directory subtree was deleted. Use the enclosing change's\n`committed_seq` as `deletion_seq` when restoring it.",
         "required": [
           "inode_id",
+          "deleted_binding",
           "kind"
         ],
         "properties": {
           "deleted_binding": {
             "$ref": "#/components/schemas/DirectoryBinding",
-            "description": "Directory binding removed by the deletion, when the delete\nrecorded one."
+            "description": "Directory binding removed by the deletion."
           },
           "inode_id": {
             "type": "string",
@@ -7430,7 +7432,7 @@
           },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Optional destination for the restored inode.\n\nWhen absent, the inode is rebound to the parent and name recorded by the\ndeletion. Parent identity, rather than an old path string, keeps this\ncorrect after ancestor renames. An explicit path is required when the\ndeletion recorded no binding."
+            "description": "Optional destination for the restored inode.\n\nWhen absent, the inode is rebound to the parent and name recorded by the\ndeletion. Parent identity, rather than an old path string, keeps this\ncorrect after ancestor renames."
           }
         }
       },

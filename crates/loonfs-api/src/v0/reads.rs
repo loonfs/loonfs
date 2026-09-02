@@ -254,8 +254,8 @@ pub struct FileBytes {
 
 /// One deletion that can still be restored.
 ///
-/// `inode_id` and `deletion_seq` are sufficient to restore it. The removed
-/// directory binding is included when available.
+/// `inode_id` and `deletion_seq` identify it. The removed directory binding
+/// determines where an in-place restore binds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {
@@ -272,10 +272,8 @@ pub struct TrashEntry {
     pub deleted_at_ms: u64,
     /// Actor responsible for the deletion.
     pub deleted_by: ActorRef,
-    /// Directory binding removed by the deletion, when available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub deleted_binding: Option<DirectoryBinding>,
+    /// Directory binding removed by the deletion.
+    pub deleted_binding: DirectoryBinding,
 }
 
 /// One trash listing page: the namespace's recoverable deletions.
@@ -520,11 +518,11 @@ mod tests {
             deletion_seq: ChangeSeq(417),
             deleted_at_ms: 1,
             deleted_by: ActorRef::loonfs_system(),
-            deleted_binding: Some(DirectoryBinding {
+            deleted_binding: DirectoryBinding {
                 parent_inode_id: InodeId(7),
                 name_key: NameKey::parse("report.txt").expect("name key"),
                 display_name: DisplayName::parse("report.txt").expect("display name"),
-            }),
+            },
         };
         assert_eq!(
             serde_json::to_value(&trash).expect("serialize trash entry"),
@@ -540,15 +538,6 @@ mod tests {
                 }
             })
         );
-
-        // Omit the field when no binding was recorded.
-        let bindingless = TrashEntry {
-            deleted_binding: None,
-            ..trash
-        };
-        let bindingless_json =
-            serde_json::to_value(bindingless).expect("serialize bindingless entry");
-        assert!(bindingless_json.get("deleted_binding").is_none());
     }
 
     #[test]
@@ -558,11 +547,11 @@ mod tests {
             deletion_seq: ChangeSeq(417),
             deleted_at_ms: 1_752_625_000_000,
             deleted_by: ActorRef::loonfs_system(),
-            deleted_binding: Some(DirectoryBinding {
+            deleted_binding: DirectoryBinding {
                 parent_inode_id: InodeId(7),
                 name_key: NameKey::parse("report.txt").expect("name key"),
                 display_name: DisplayName::parse("Report.txt").expect("display name"),
-            }),
+            },
         };
         let trash_json = serde_json::to_value(trash).expect("serialize trash entry");
         assert_eq!(trash_json["inode_id"], serde_json::json!("ino_42"));

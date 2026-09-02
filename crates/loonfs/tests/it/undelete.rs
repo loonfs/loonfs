@@ -564,9 +564,8 @@ fn the_feed_names_deleted_entries_and_their_writer() {
         .flat_map(|change| &change.events)
         .find_map(|event| match event {
             loonfs::FilesystemChange::Deleted {
-                deleted_binding: Some(binding),
-                ..
-            } => Some(binding.display_name.as_str().to_owned()),
+                deleted_binding, ..
+            } => Some(deleted_binding.display_name.as_str().to_owned()),
             _ => None,
         });
     assert_eq!(deleted_name.as_deref(), Some("Quarterly Report.PDF"));

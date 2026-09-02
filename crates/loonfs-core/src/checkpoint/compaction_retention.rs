@@ -442,7 +442,12 @@ mod tests {
             action: ActiveDeletionRowAction::Listed {
                 deleted_at_ms: 1_000,
                 deleted_by: loonfs_api::ActorRef::loonfs_system(),
-                deleted_direntry: None,
+                deleted_direntry: loonfs_api::wire::manifest::DeletedDirentry {
+                    parent_inode_id: InodeId(1),
+                    name_key: loonfs_api::NameKey::parse("deleted").expect("valid name key"),
+                    display_name: loonfs_api::DisplayName::parse("deleted")
+                        .expect("valid display name"),
+                },
             },
         };
         assert!(operator

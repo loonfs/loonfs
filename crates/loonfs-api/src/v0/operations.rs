@@ -512,8 +512,7 @@ pub enum FilesystemOperation {
         ///
         /// When absent, the inode is rebound to the parent and name recorded by the
         /// deletion. Parent identity, rather than an old path string, keeps this
-        /// correct after ancestor renames. An explicit path is required when the
-        /// deletion recorded no binding.
+        /// correct after ancestor renames.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         path: Option<AbsolutePath>,
