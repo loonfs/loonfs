@@ -8,10 +8,10 @@ use crate::commit::{CandidateAllocation, CommitFingerprint, ValidatedCommitPlan}
 use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
-use crate::path::write::{FilesystemOperation, PublishPlanningSession};
+use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::ContentAdmission;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
-use loonfs_api::{CommitId, ContentRef, ContentStoreId, NamespaceId};
+use loonfs_api::{CommitId, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 
@@ -90,6 +90,9 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     committed_at_ms: u64,
     dedup: &mut BatchDedup,
 ) -> CandidateAdmission {
+    if let Err(error) = candidate.validate_request_has_operations() {
+        return CandidateAdmission::independent(Err(error));
+    }
     let mutation = candidate.request();
     let semantic_identity = match candidate.semantic_identity(namespace_id) {
         Ok(semantic_identity) => semantic_identity,
@@ -109,7 +112,17 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         Ok(None) => {}
         Err(error) => return CandidateAdmission::independent(Err(error)),
     }
-    if let Err(error) = validate_new_primary(candidate) {
+    let admissions = match validate_new_primary(candidate) {
+        Ok(admissions) => admissions,
+        Err(error) => return CandidateAdmission::independent(Err(error)),
+    };
+    if let Err(error) = validate_commit_content_references(
+        mutation,
+        admissions,
+        namespace_id,
+        view.content_store_id(),
+        committed_at_ms,
+    ) {
         return CandidateAdmission::independent(Err(error));
     }
     let mut allocation = session.begin_candidate();
@@ -134,11 +147,11 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     }
 }
 
-fn validate_new_primary(candidate: &CommitCandidate) -> Result<()> {
+fn validate_new_primary(candidate: &CommitCandidate) -> Result<&[ContentAdmission]> {
     // Check request limits before content preparation errors.
     candidate.validate_request_limits()?;
     match candidate.content_preparation() {
-        ContentPreparation::Ready(_) => Ok(()),
+        ContentPreparation::Ready(admissions) => Ok(admissions),
         ContentPreparation::Rejected(error) => Err(error.clone().into()),
     }
 }
@@ -209,67 +222,37 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     ))
 }
 
-struct CommitContentAdmissions<'a> {
-    namespace_id: &'a NamespaceId,
-    content_store_id: &'a ContentStoreId,
-    admissions: &'a [ContentAdmission],
-    now_ms: u64,
-}
-
-impl CommitContentAdmissions<'_> {
-    fn admits(&self, content_ref: &ContentRef) -> bool {
-        self.admissions.iter().any(|admission| {
-            admission.admits(
-                self.namespace_id,
-                self.content_store_id,
-                content_ref,
-                self.now_ms,
-            )
-        })
-    }
-}
-
 /// Checks that each put has a matching content preparation proof.
-pub(super) fn validate_commit_content_references(
-    candidate: &CommitCandidate,
+fn validate_commit_content_references(
+    request: &CommitRequest,
+    admissions: &[ContentAdmission],
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     now_ms: u64,
 ) -> Result<()> {
-    let admissions = CommitContentAdmissions {
-        namespace_id,
-        content_store_id,
-        now_ms,
-        admissions: match candidate.content_preparation() {
-            ContentPreparation::Ready(admissions) => admissions,
-            ContentPreparation::Rejected(_) => {
-                return Err(CoreError::Internal(
-                    "rejected content preparation reached coverage validation".to_owned(),
-                ));
-            }
-        },
-    };
-    for content_ref in candidate
-        .request()
+    let mut admissions_by_content_id = HashMap::with_capacity(admissions.len());
+    for admission in admissions {
+        admissions_by_content_id
+            .entry(admission.content_id())
+            .or_insert(admission);
+    }
+    for content_ref in request
         .operations
         .iter()
         .filter_map(FilesystemOperation::content_ref)
     {
-        require_content_admission(&admissions, content_ref)?;
+        let admitted = admissions_by_content_id
+            .get(&content_ref.content_id)
+            .is_some_and(|admission| {
+                admission.admits(namespace_id, content_store_id, content_ref, now_ms)
+            });
+        if !admitted {
+            return Err(ContentPreparationError::ContentNotPrepared {
+                content_id: content_ref.content_id.clone(),
+            }
+            .into());
+        }
     }
 
     Ok(())
-}
-
-fn require_content_admission(
-    admissions: &CommitContentAdmissions<'_>,
-    content_ref: &ContentRef,
-) -> Result<()> {
-    if admissions.admits(content_ref) {
-        return Ok(());
-    }
-    Err(ContentPreparationError::ContentNotPrepared {
-        content_id: content_ref.content_id.clone(),
-    }
-    .into())
 }

@@ -115,6 +115,7 @@ impl CommitCandidate {
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
         // Apply limits to the complete request because the serialized publisher
         // processes every operation before releasing the write path.
+        self.validate_request_has_operations()?;
         if self.request.operations.len() > crate::limits::MAX_COMMIT_OPERATIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {} operations; maximum is {}",
@@ -153,6 +154,15 @@ impl CommitCandidate {
                 "mutation references {distinct_content_refs} distinct external content refs; maximum is {}",
                 crate::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS
             )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_request_has_operations(&self) -> Result<()> {
+        if self.request.operations.is_empty() {
+            return Err(CoreError::InvalidCommitRequest(
+                "mutation request carries no operations".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -462,7 +472,7 @@ impl NamespaceCommitEngine {
                     head_etag: projection.head_etag().to_owned(),
                     basis: projection.basis().clone(),
                     manifest_head_seq: projection.manifest_head_seq(),
-                    tail_rows: Arc::new(projection.tail_state.clone()),
+                    tail_rows: Arc::clone(&projection.tail_state),
                 })
             }
             _ => None,
@@ -514,8 +524,9 @@ impl NamespaceCommitEngine {
                     self.invalidate_projection();
                     return wal_tail_segments;
                 };
+                let tail_state = Arc::make_mut(&mut projection.tail_state);
                 for record in &records {
-                    projection.tail_state.apply_committed_wal_record_mut(record);
+                    tail_state.apply_committed_wal_record_mut(record);
                 }
                 projection.reanchor(head.seq, head_etag);
                 if projection.within_limits(tail_options) {

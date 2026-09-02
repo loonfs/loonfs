@@ -11,15 +11,10 @@ pub(super) struct CommitOverlayRows {
 }
 
 impl CommitOverlayRows {
-    #[cfg(test)]
     pub(super) fn new() -> Self {
         Self {
             rows: MetadataState::default(),
         }
-    }
-
-    pub(super) fn from_rows(rows: &MetadataState) -> Self {
-        Self { rows: rows.clone() }
     }
 
     pub(super) fn rows(&self) -> &MetadataState {

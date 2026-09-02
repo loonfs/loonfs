@@ -1243,6 +1243,48 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
 }
 
 #[tokio::test]
+async fn empty_request_is_rejected_before_commit_id_reuse() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    submit_commit(
+        &store,
+        &namespace_id,
+        commit_request(
+            "empty-reuse",
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/docs").expect("path"),
+                parents: false,
+            },
+        ),
+        &context,
+    )
+    .await
+    .expect("initial commit");
+
+    let error = submit_commit(
+        &store,
+        &namespace_id,
+        CommitRequest {
+            commit_id: CommitId::parse("empty-reuse").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
+            message: None,
+            operations: Vec::new(),
+        },
+        &context,
+    )
+    .await
+    .expect_err("empty request must fail before commit id reuse");
+
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+}
+
+#[tokio::test]
 async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

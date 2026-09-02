@@ -10,7 +10,7 @@ use crate::limits::CONTENT_RECEIPT_TTL_MS;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use base64::Engine as _;
 use loonfs_api::v0::ContentToken;
-use loonfs_api::{ContentRef, ContentStoreId, NamespaceId};
+use loonfs_api::{ContentId, ContentRef, ContentStoreId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -56,6 +56,10 @@ pub(crate) struct ContentAdmission {
 }
 
 impl ContentAdmission {
+    pub(crate) fn content_id(&self) -> &ContentId {
+        &self.content_ref.content_id
+    }
+
     /// Unbounded admission for a ref the caller keeps externally rooted;
     /// no deadline is derivable from the reference alone.
     #[cfg(any(test, feature = "test-support"))]

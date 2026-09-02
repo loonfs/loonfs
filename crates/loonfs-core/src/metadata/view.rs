@@ -70,6 +70,7 @@ pub(crate) struct MetadataSnapshot {
 
 pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
     overlay: Option<&'a MetadataState>,
+    batch_accepted: Option<&'a MetadataState>,
     wal_tail: Option<&'a MetadataState>,
     manifest: Option<&'a VerifiedMetadataSegments<'store, S>>,
     durable_cache: Option<&'a DurableVisibilityCache>,
@@ -110,6 +111,7 @@ impl<'a> InMemoryMetadataView<'a> {
             snapshot: MetadataSnapshot { visible_seq },
             sources: MetadataSourceStack {
                 overlay,
+                batch_accepted: None,
                 wal_tail: Some(base),
                 manifest: None,
                 durable_cache: None,
@@ -130,6 +132,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             },
             sources: MetadataSourceStack {
                 overlay: None,
+                batch_accepted: None,
                 wal_tail: Some(wal_tail_rows),
                 manifest: Some(segments),
                 durable_cache: None,
@@ -152,6 +155,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             },
             sources: MetadataSourceStack {
                 overlay: None,
+                batch_accepted: None,
                 wal_tail: None,
                 manifest: Some(segments),
                 durable_cache: None,
@@ -162,12 +166,14 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) fn with_overlay<'view>(
         &'view self,
         overlay: &'view MetadataState,
+        batch_accepted: &'view MetadataState,
         visible_seq: ChangeSeq,
     ) -> MetadataView<'view, 'store, S> {
         MetadataView {
             snapshot: MetadataSnapshot { visible_seq },
             sources: MetadataSourceStack {
                 overlay: Some(overlay),
+                batch_accepted: Some(batch_accepted),
                 wal_tail: self.sources.wal_tail,
                 manifest: self.sources.manifest,
                 durable_cache: self.sources.durable_cache,
@@ -193,13 +199,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     pub(super) fn row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
-        [self.sources.overlay, self.sources.wal_tail]
-            .into_iter()
-            .flatten()
+        [
+            self.sources.overlay,
+            self.sources.batch_accepted,
+            self.sources.wal_tail,
+        ]
+        .into_iter()
+        .flatten()
     }
 
-    fn overlay_state(&self) -> Option<&'a MetadataState> {
-        self.sources.overlay
+    fn overlay_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
+        [self.sources.overlay, self.sources.batch_accepted]
+            .into_iter()
+            .flatten()
     }
 
     fn durable_row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
@@ -263,8 +275,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         inode_id: InodeId,
     ) -> Result<Option<InodeRecord>, CoreError> {
         if let Some(inode) = self
-            .overlay_state()
-            .and_then(|state| state.inode_at_seq(inode_id, self.visible_seq()))
+            .overlay_states()
+            .find_map(|state| state.inode_at_seq(inode_id, self.visible_seq()))
         {
             return Ok(Some(inode));
         }
@@ -600,8 +612,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             durable
         };
         let overlay = self
-            .overlay_state()
-            .into_iter()
+            .overlay_states()
             .flat_map(|state| {
                 state
                     .direntry_binds()
@@ -650,8 +661,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             durable
         };
         let overlay = self
-            .overlay_state()
-            .into_iter()
+            .overlay_states()
             .flat_map(|state| {
                 state
                     .direntry_binds()
@@ -698,8 +708,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             durable
         };
         let overlay = self
-            .overlay_state()
-            .into_iter()
+            .overlay_states()
             .flat_map(|state| {
                 state
                     .direntry_unbinds()
@@ -906,8 +915,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             durable
         };
         let overlay = self
-            .overlay_state()
-            .into_iter()
+            .overlay_states()
             .flat_map(|state| {
                 state
                     .subtree_tombstones()
