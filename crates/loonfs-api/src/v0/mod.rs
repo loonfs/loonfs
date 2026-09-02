@@ -34,10 +34,11 @@ pub use operations::{
     FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
     ListCheckpointsResponse, ListFileRevisionsResponse, ListSnapshotsResponse,
     MaintenanceStepRequest, MaintenanceStepResponse, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, ReleaseCheckpointResponse,
-    ReleaseSnapshotResponse, ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates,
-    RetainedReason, SnapshotSummary, StoreProbeCheckOutcome, StoreProbeCheckResult,
-    StoreProbeRequest, StoreProbeResponse, WalFlushStepOutcome,
+    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, NamespaceStorageDiagnostics,
+    ReleaseCheckpointResponse, ReleaseSnapshotResponse, ReleasedCheckpointCounts,
+    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, SnapshotSummary,
+    StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse,
+    WalFlushStepOutcome,
 };
 pub use reads::{
     AttributesProjection, FileBytes, ListInodeChildrenResponse, ListPathEntriesResponse,

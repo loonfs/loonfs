@@ -225,6 +225,24 @@ pub struct NamespaceDiagnostics {
     pub live_checkpoints: u64,
 }
 
+/// Namespace storage state observed without listing checkpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NamespaceStorageDiagnostics {
+    /// Namespace ID.
+    pub namespace_id: NamespaceId,
+    /// Current visible namespace sequence.
+    pub head_seq: ChangeSeq,
+    /// Oldest sequence still promised for incremental replay.
+    pub retention_floor_seq: ChangeSeq,
+    /// Current manifest pointer recorded by the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub current_manifest_no: Option<ManifestNo>,
+    /// Number of visible WAL segments after the current manifest.
+    pub wal_tail_segments: u64,
+}
+
 /// Result of deleting a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1354,8 +1372,8 @@ pub enum ReorganizeStepOutcome {
 pub struct MaintenanceStepResponse {
     /// Namespace the step ran against.
     pub namespace_id: NamespaceId,
-    /// Namespace diagnostics observed before the step acted.
-    pub status_before: NamespaceDiagnostics,
+    /// Namespace storage state observed before the step acted.
+    pub status_before: NamespaceStorageDiagnostics,
     /// What the metadata-upkeep action did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]

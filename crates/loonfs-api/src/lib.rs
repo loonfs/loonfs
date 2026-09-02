@@ -135,7 +135,8 @@ pub use v0::{
     GrepResponse, ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace,
-    NamespaceDiagnostics, PathEntry, PathEntryKind, ReleaseCheckpointResponse,
-    ReleaseSnapshotResponse, ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates,
-    RetainedReason, SnapshotSummary, TrashEntry, WalFlushStepOutcome,
+    NamespaceDiagnostics, NamespaceStorageDiagnostics, PathEntry, PathEntryKind,
+    ReleaseCheckpointResponse, ReleaseSnapshotResponse, ReleasedCheckpointCounts,
+    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, SnapshotSummary, TrashEntry,
+    WalFlushStepOutcome,
 };

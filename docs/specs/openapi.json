@@ -5851,8 +5851,8 @@
             "description": "Where the retention floor ended up."
           },
           "status_before": {
-            "$ref": "#/components/schemas/NamespaceDiagnostics",
-            "description": "Namespace diagnostics observed before the step acted."
+            "$ref": "#/components/schemas/NamespaceStorageDiagnostics",
+            "description": "Namespace storage state observed before the step acted."
           }
         }
       },
@@ -5978,6 +5978,40 @@
         "description": "Durable id for one namespace.\n\nA namespace is one filesystem history. This id is not a display name and\nshould not be reused after destruction. Its serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",
         "example": "demo",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+      },
+      "NamespaceStorageDiagnostics": {
+        "type": "object",
+        "description": "Namespace storage state observed without listing checkpoints.",
+        "required": [
+          "namespace_id",
+          "head_seq",
+          "retention_floor_seq",
+          "wal_tail_segments"
+        ],
+        "properties": {
+          "current_manifest_no": {
+            "$ref": "#/components/schemas/ManifestNo",
+            "description": "Current manifest pointer recorded by the head."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Current visible namespace sequence."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace ID."
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Oldest sequence still promised for incremental replay."
+          },
+          "wal_tail_segments": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of visible WAL segments after the current manifest.",
+            "minimum": 0
+          }
+        }
       },
       "ObjectTransferAccess": {
         "oneOf": [

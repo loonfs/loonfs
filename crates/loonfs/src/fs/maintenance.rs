@@ -234,7 +234,7 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
         collects_only: bool,
-    ) -> Result<NamespaceDiagnostics> {
+    ) -> Result<NamespaceStorageDiagnostics> {
         let diagnostics =
             match loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id)
                 .await
@@ -250,7 +250,7 @@ impl FsAdmin {
                 }
                 Err(error) => return Err(error.into()),
             };
-        Ok(Self::namespace_diagnostics(diagnostics, 0, 0))
+        Ok(diagnostics)
     }
 
     /// Runs one bounded maintenance step against a namespace.
@@ -330,7 +330,7 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
         options: MetadataMaintenanceOptions,
-        status_before: &NamespaceDiagnostics,
+        status_before: &NamespaceStorageDiagnostics,
     ) -> Result<MetadataMaintenanceResponse> {
         let flush = options.flush_is_due(status_before.wal_tail_segments);
         self.flush_then_reorganize(namespace_id, flush, status_before.head_seq)
@@ -777,8 +777,9 @@ impl FsAdmin {
 
     /// Creates a snapshot only when the namespace has quota for it.
     ///
-    /// A caller that exceeds the quota releases its tentative snapshot before
-    /// returning the quota error.
+    /// The second quota check closes the race between concurrent callers that
+    /// both observe the same free slot. A caller that loses that race releases
+    /// its tentative snapshot before returning the quota error.
     pub async fn create_snapshot_with_quota(
         &self,
         namespace_id: &NamespaceId,
@@ -786,6 +787,8 @@ impl FsAdmin {
         now_ms: u64,
         max_live: usize,
     ) -> Result<Checkpoint> {
+        self.ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 1)
+            .await?;
         let checkpoint = self.create_snapshot(namespace_id, options).await?;
         if let Err(error) = self
             .ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 0)

@@ -159,8 +159,11 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
     let step = fs
         .maintenance_step_namespace_blocking(&source, MaintenancePlan::metadata())
         .expect("run maintenance");
-    assert_eq!(step.status_before.live_snapshots, 0);
-    assert_eq!(step.status_before.live_checkpoints, 0);
+    assert_eq!(step.status_before.head_seq, diagnostics.head_seq);
+    assert_eq!(
+        step.status_before.wal_tail_segments,
+        diagnostics.wal_tail_segments
+    );
 }
 
 /// Pointers a head published before the accelerator was sized to cover the
@@ -1059,9 +1062,12 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
             .await
     });
 
-    wait_for_operations(&checkpoint_writes, 2).await;
-    checkpoint_write_gate.release();
     wait_for_operations(&checkpoint_lists, 2).await;
+    checkpoint_list_gate.release();
+    wait_for_operations(&checkpoint_writes, 2).await;
+    checkpoint_list_gate.arm();
+    checkpoint_write_gate.release();
+    wait_for_operations(&checkpoint_lists, 4).await;
     checkpoint_list_gate.release();
 
     let first = first.await.expect("first create task");

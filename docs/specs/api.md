@@ -826,7 +826,7 @@ This request selects all three actions:
 {"metadata_maintenance":{"max_wal_tail_segments":8},"retention":{},"gc":{"max_objects":1024}}
 ```
 
-Each selected action reports under the same field that selected it. `metadata_maintenance` contains `wal_flush` and `reorganize`, `retention` contains `retention_floor_seq`, and `gc` contains the collection result. An absent field means the action was not selected. `status_before.live_snapshots` and `status_before.live_checkpoints` are zero because a maintenance step does not list checkpoints. Compare `retention.retention_floor_seq` with `status_before.retention_floor_seq` to see whether the floor moved. Races and supersessions are outcomes, not errors.
+Each selected action reports under the same field that selected it. `metadata_maintenance` contains `wal_flush` and `reorganize`, `retention` contains `retention_floor_seq`, and `gc` contains the collection result. An absent field means the action was not selected. `status_before` carries the namespace's storage diagnostics without checkpoint counts, because a maintenance step does not list checkpoints. Compare `retention.retention_floor_seq` with `status_before.retention_floor_seq` to see whether the floor moved. Races and supersessions are outcomes, not errors.
 
 Outcome names describe what the step observed. The same name has the same meaning in every maintenance response.
 

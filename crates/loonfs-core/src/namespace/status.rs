@@ -16,15 +16,7 @@ pub struct NamespaceFlushBasis {
     pub has_unflushed_wal_tail: bool,
 }
 
-/// Namespace storage diagnostics that do not require checkpoint enumeration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamespaceStorageDiagnostics {
-    pub namespace_id: NamespaceId,
-    pub head_seq: ChangeSeq,
-    pub retention_floor_seq: ChangeSeq,
-    pub current_manifest_no: Option<ManifestNo>,
-    pub wal_tail_segments: u64,
-}
+pub use loonfs_api::NamespaceStorageDiagnostics;
 
 /// Namespace head state needed for storage diagnostics.
 struct LoadedHeadBasis {
