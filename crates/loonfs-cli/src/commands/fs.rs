@@ -2,9 +2,10 @@
 //! and grep.
 
 use super::context::{
-    default_remote_put_path, destination_path_for_get, destination_user_path, directory_intent,
-    fail, namespace_path, parse_public_ordinal_arg, parse_user_path_arg, render_target,
-    resolve_command_context, resolve_mutation_context, CommandContext, UndeleteHint,
+    create_directory_tolerating_existing, default_remote_put_path, destination_path_for_get,
+    destination_user_path, directory_intent, fail, namespace_path, parse_public_ordinal_arg,
+    parse_user_path_arg, render_target, resolve_command_context, resolve_mutation_context,
+    CommandContext, RemoteDirectoryOutcome, UndeleteHint,
 };
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
@@ -29,7 +30,7 @@ use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
     AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq,
     CheckpointId, CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior,
-    DestinationBehavior, ErrorCode, InodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
+    DestinationBehavior, InodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
 use loonfs_client::{
     CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
@@ -1398,35 +1399,30 @@ pub(crate) async fn run_filesystem_mkdir(
         parents: args.parents,
         commit: commit_options(&context.actor, commit_id, args.message.clone()),
     };
-    let result = match context.target.create_directory(&spec, &options).await {
-        Ok(result) => result,
-        // Unix `mkdir -p` treats a directory that is already there as
-        // success. The conflict is what says the path is occupied, and a
-        // stat then says by what: a directory is the state `-p` asked for,
-        // anything else is the conflict the caller has to hear about.
-        // Reading the conflict rather than pre-checking keeps the ordinary
-        // path one round trip, and a pre-check would race just the same.
-        Err(error) if args.parents && error.code == ErrorCode::PathConflict.as_str() => {
-            let existing = context
-                .target
-                .get_path_entry_without_attributes(&spec)
-                .await
-                .map_err(|_| context.fail(kind, error.clone()))?;
-            if existing.inode_kind() != InodeKind::Directory {
-                return Err(context.fail(kind, error));
-            }
+    let outcome = if args.parents {
+        create_directory_tolerating_existing(&context, &spec, &options).await
+    } else {
+        context
+            .target
+            .create_directory(&spec, &options)
+            .await
+            .map(RemoteDirectoryOutcome::Created)
+    }
+    .map_err(|error| context.fail(kind, error))?;
+    let result = match outcome {
+        RemoteDirectoryOutcome::Created(result) => result,
+        RemoteDirectoryOutcome::AlreadyExists { inode_id, head_seq } => {
             return Ok(CommandOutput {
                 kind,
                 profile: Some(context.profile_name),
                 mode: Some(context.mode),
                 data: CommandData::DirectoryAlreadyExists {
                     target: render_target(&context.namespace, spec.absolute_path()),
-                    inode_id: existing.inode_id,
-                    head_seq: existing.head_seq,
+                    inode_id,
+                    head_seq,
                 },
             });
         }
-        Err(error) => return Err(context.fail(kind, error)),
     };
 
     Ok(CommandOutput {

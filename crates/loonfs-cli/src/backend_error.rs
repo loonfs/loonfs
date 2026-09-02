@@ -121,6 +121,12 @@ impl From<ClientError> for BackendError {
                 request_id,
                 details,
             },
+            ClientError::UploadTooLarge { size_bytes, reason } => Self::new(
+                ErrorCode::ContentTooLarge.as_str(),
+                format!(
+                    "payload of {size_bytes} bytes exceeds every upload transport this deployment offers: {reason}"
+                ),
+            ),
             ClientError::Io(message) => Self::io_error(format!("i/o error: {message}")),
             // `ClientError` is non-exhaustive across crate boundaries, so future
             // variants map to a generic transport failure. Add an explicit arm when a
@@ -241,6 +247,12 @@ mod tests {
         let error = BackendError::from(ClientError::Io("read failed".to_owned()));
         assert_eq!(error.code, "io_error");
         assert_eq!(error.message, "i/o error: read failed");
+
+        let error = BackendError::from(ClientError::UploadTooLarge {
+            size_bytes: 1024,
+            reason: "proxied and direct limits are lower".to_owned(),
+        });
+        assert_eq!(error.code, loonfs_api::ErrorCode::ContentTooLarge.as_str());
     }
 
     #[test]
