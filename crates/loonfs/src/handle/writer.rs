@@ -310,7 +310,7 @@ impl FsWriterBuilder {
     /// Handles that share this writer's decoded cache also share this local
     /// cache. The host owns and closes it; object storage remains authoritative.
     ///
-    /// [`FsAdminBuilder::shared_metadata_segment_cache`]: crate::FsAdminBuilder::shared_metadata_segment_cache
+    /// [`FsAdminBuilder::over_writer`]: crate::FsAdminBuilder::over_writer
     pub fn stored_metadata_block_cache(
         mut self,
         stored_metadata_block_cache: Arc<dyn StoredMetadataBlockCache>,

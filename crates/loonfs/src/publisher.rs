@@ -543,7 +543,11 @@ enum SubmissionAdmission {
     /// A different claim currently owns the commit ID. Its successful outcome
     /// supplies the receipt evidence this submission needs for a useful
     /// conflict; if it fails, this submission gets another turn at admission.
-    Contended { primary_identity: CommitFingerprint },
+    Contended {
+        primary_identity: CommitFingerprint,
+        candidate: CommitCandidate,
+        semantic_identity: CommitFingerprint,
+    },
 }
 
 impl NamespacePublisher {
@@ -648,13 +652,14 @@ impl NamespacePublisher {
     async fn submit(&self, candidate: CommitCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
         let enqueued_at = Instant::now();
-        let semantic_identity = candidate.semantic_identity(&self.namespace_id)?;
-        loop {
+        let mut candidate = candidate;
+        let mut semantic_identity = candidate.semantic_identity(&self.namespace_id)?;
+        for _ in 0..CONTENTION_RETRY_LIMIT {
             let (sender, receiver) = oneshot::channel();
             let admission = self.admit(
                 commit_id.clone(),
-                candidate.clone(),
-                semantic_identity.clone(),
+                candidate,
+                semantic_identity,
                 sender,
                 enqueued_at,
             )?;
@@ -665,7 +670,11 @@ impl NamespacePublisher {
             })?;
             match admission {
                 SubmissionAdmission::OwnOutcome => return result,
-                SubmissionAdmission::Contended { primary_identity } => match result {
+                SubmissionAdmission::Contended {
+                    primary_identity,
+                    candidate: returned_candidate,
+                    semantic_identity: returned_identity,
+                } => match result {
                     Ok(response) => {
                         return Err(CoreError::CommitIdReuseConflict {
                             commit_id: commit_id.to_string(),
@@ -674,10 +683,19 @@ impl NamespacePublisher {
                         }
                         .into())
                     }
-                    Err(_) => continue,
+                    Err(_) => {
+                        candidate = returned_candidate;
+                        semantic_identity = returned_identity;
+                    }
                 },
             }
         }
+        Err(CoreError::CommitIdReuseConflict {
+            commit_id: commit_id.to_string(),
+            committed_seq: None,
+            committed_fingerprint: None,
+        }
+        .into())
     }
 
     fn admit(
@@ -695,7 +713,11 @@ impl NamespacePublisher {
                 let primary_identity = existing.semantic_identity.clone();
                 existing.waiters.push(waiter);
                 self.trace_enqueue(queued_candidates(&state), "contended");
-                return Ok(SubmissionAdmission::Contended { primary_identity });
+                return Ok(SubmissionAdmission::Contended {
+                    primary_identity,
+                    candidate,
+                    semantic_identity,
+                });
             }
             existing.waiters.push(waiter);
             self.trace_enqueue(queued_candidates(&state), "duplicate");

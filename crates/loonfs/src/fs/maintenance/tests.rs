@@ -61,7 +61,7 @@ async fn manual_deployment(
         .expect("build the standalone admin");
     let scheduled = FsAdmin::builder_with_store(store)
         .actor_id("scheduled-admin")
-        .background_maintenance(&writer)
+        .over_writer(&writer)
         .build()
         .await
         .expect("build the writer-backed admin");

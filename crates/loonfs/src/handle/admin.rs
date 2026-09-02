@@ -23,24 +23,18 @@ use std::sync::Arc;
 pub struct FsAdmin {
     pub(crate) core: ReadCore,
     pub(crate) actor: WriterIdentity,
-    /// A tail projection to invalidate exists only where a publisher does,
-    /// so a standalone admin holds `None`, and an admin built over a
-    /// writer's runtime for background maintenance holds that writer's
-    /// registry.
-    pub(crate) publisher: Option<PublisherRegistry>,
-    /// The streaming metadata compactions a writer's maintenance runner is
-    /// running, when this handle has a writer behind it.
-    ///
-    /// A maintenance step consults it twice: to leave alone the group a job
-    /// is rebuilding, and to start a job when it plans one. A handle with no
-    /// writer behind it holds `None`, schedules no background work of any
-    /// kind, and reports the plan instead of starting it.
-    pub(crate) compactions: Option<BackgroundCompactions>,
+    pub(crate) writer: Option<WriterParts>,
     /// A narrowed per-step row budget for the tests that need a family group
     /// whose base run no bounded step can fold. See
     /// [`Self::starve_reorganization_row_budget`].
     #[cfg(test)]
     pub(crate) reorganization_row_budget: Option<std::num::NonZeroUsize>,
+}
+
+#[derive(Clone)]
+pub(crate) struct WriterParts {
+    pub(crate) publisher: PublisherRegistry,
+    pub(crate) compactions: BackgroundCompactions,
 }
 
 impl FsAdmin {
@@ -73,8 +67,10 @@ impl FsAdmin {
         Self {
             core,
             actor,
-            publisher: Some(publisher),
-            compactions: Some(compactions),
+            writer: Some(WriterParts {
+                publisher,
+                compactions,
+            }),
             #[cfg(test)]
             reorganization_row_budget: None,
         }
@@ -111,7 +107,7 @@ impl FsAdmin {
 pub struct FsAdminBuilder {
     core: HandleBuilderCore,
     actor_id: Option<String>,
-    compactions: Option<BackgroundCompactions>,
+    writer: Option<WriterParts>,
 }
 
 impl FsAdminBuilder {
@@ -119,7 +115,7 @@ impl FsAdminBuilder {
         Self {
             core,
             actor_id: None,
-            compactions: None,
+            writer: None,
         }
     }
 
@@ -136,31 +132,18 @@ impl FsAdminBuilder {
         self
     }
 
-    /// Shares the writer's decoded-block cache with this admin handle. Use a
-    /// writer from the same runtime. The shared cache keeps the writer's byte
+    /// Connects this admin to a writer from the same runtime.
+    ///
+    /// The admin shares the writer's decoded-block cache, publisher, and
+    /// background compactions. The shared cache keeps the writer's byte
     /// budget; [`Self::runtime_cache`] still configures this handle's other
     /// caches.
-    pub fn shared_metadata_segment_cache(mut self, writer: &super::FsWriter) -> Self {
+    pub fn over_writer(mut self, writer: &super::FsWriter) -> Self {
         self.core.shared_metadata_segment_cache = Some(writer.metadata_segment_cache());
-        self
-    }
-
-    /// Lets this handle's maintenance steps start background work on
-    /// `writer`'s maintenance runner instead of declining it.
-    ///
-    /// One kind of upkeep does not fit in a step: a family group that has
-    /// outgrown one step's budgets is rebuilt by a streaming compaction that
-    /// runs for as long as it takes and publishes once at the end. Without
-    /// this, an explicit step reports that the group needs one and starts
-    /// nothing, because a handle that owns no background work has nowhere to
-    /// run it. With it, an operator's step starts the same job the writer's
-    /// own steps start, the two share the one-job-per-namespace rule, and
-    /// `writer`'s shutdown cancels and drains it.
-    ///
-    /// Only for a writer in the same runtime ownership domain, like
-    /// [`Self::shared_metadata_segment_cache`].
-    pub fn background_maintenance(mut self, writer: &super::FsWriter) -> Self {
-        self.compactions = Some(writer.background_compactions());
+        self.writer = Some(WriterParts {
+            publisher: writer.publisher(),
+            compactions: writer.background_compactions(),
+        });
         self
     }
 
@@ -209,8 +192,7 @@ impl FsAdminBuilder {
         Ok(FsAdmin {
             core: self.core.open_read_core()?,
             actor,
-            publisher: None,
-            compactions: self.compactions,
+            writer: self.writer,
             #[cfg(test)]
             reorganization_row_budget: None,
         })

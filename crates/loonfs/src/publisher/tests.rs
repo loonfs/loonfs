@@ -11,7 +11,7 @@ use crate::maintenance_runner::MaintenanceRunner;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
 use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
 use crate::{
-    BeginUploadRequest, CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig,
+    BeginUploadRequest, CreateNamespaceOptions, ErrorCode, FsAdmin, RuntimeCacheConfig,
     SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
 };
 use async_trait::async_trait;
@@ -796,6 +796,63 @@ async fn publisher_contender_retries_after_active_request_fails() {
         .expect("contender publishes after the failed primary");
     assert_eq!(response.commit_id, commit_id);
     assert_eq!(response.committed_seq, ChangeSeq(1));
+}
+
+#[tokio::test]
+async fn publisher_contender_reports_conflict_after_retry_limit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let runtime = test_runtime(store);
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+    let commit_id = CommitId::parse("bounded-handoff").expect("valid commit id");
+    let primary_identity =
+        CommitCandidate::new(create_directory_request("bounded-handoff", "first"))
+            .semantic_identity(&namespace_id)
+            .expect("primary identity");
+    publisher_state(&publisher).in_flight.insert(
+        commit_id.clone(),
+        InFlightRequest {
+            semantic_identity: primary_identity,
+            waiters: Vec::new(),
+        },
+    );
+
+    let contender = {
+        let publisher = publisher.clone();
+        tokio::spawn(async move {
+            publisher
+                .submit(CommitCandidate::new(create_directory_request(
+                    "bounded-handoff",
+                    "second",
+                )))
+                .await
+        })
+    };
+    for _ in 0..CONTENTION_RETRY_LIMIT {
+        wait_for_commit_waiters(&publisher, &commit_id, 1).await;
+        let waiter = publisher_state(&publisher)
+            .in_flight
+            .get_mut(&commit_id)
+            .expect("in-flight primary")
+            .waiters
+            .pop()
+            .expect("contender waiter");
+        let _ = waiter.send(Err(CoreError::Internal("primary failed".to_owned()).into()));
+    }
+
+    let error = contender
+        .await
+        .expect("contender task")
+        .expect_err("retry limit reports a conflict");
+    assert!(matches!(
+        error,
+        RuntimeError::Core(CoreError::CommitIdReuseConflict {
+            commit_id: conflicting_id,
+            committed_seq: None,
+            committed_fingerprint: None,
+        }) if conflicting_id == commit_id.as_str()
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2137,6 +2194,37 @@ async fn retained_tail_projections_stay_within_the_namespace_count_cap() {
         .drain()
         .await
         .expect("drain settles every publisher");
+}
+
+#[tokio::test]
+async fn admin_over_writer_invalidates_publisher_projection() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let writer = test_writer_with_interval(store.clone(), 0).await;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .publisher()
+        .submit_candidate(
+            namespace_id.clone(),
+            CommitCandidate::new(create_directory_request("seed", "docs")),
+        )
+        .await
+        .expect("publish commit");
+    assert_eq!(retained_projections(&writer.publisher()).projections, 1);
+
+    let admin = FsAdmin::builder_with_store(store)
+        .actor_id("admin")
+        .over_writer(&writer)
+        .build()
+        .await
+        .expect("build admin");
+    admin.invalidate_namespace(&namespace_id);
+
+    assert_eq!(retained_projections(&writer.publisher()).projections, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -18,7 +18,7 @@ use crate::{
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
-use loonfs_core::cache::load_namespace_flush_basis;
+use loonfs_core::cache::{load_namespace_flush_basis, NamespaceStorageDiagnostics};
 use loonfs_core::CheckpointPageCursor;
 use std::num::NonZeroU32;
 use tokio::time::Instant;
@@ -134,8 +134,8 @@ impl FsAdmin {
     /// rebuildable half of that namespace's publisher state.
     pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
         self.core.invalidate_namespace_read_cache(namespace_id);
-        if let Some(publisher) = &self.publisher {
-            publisher.invalidate_projection(namespace_id);
+        if let Some(writer) = &self.writer {
+            writer.publisher.invalidate_projection(namespace_id);
         }
     }
 
@@ -168,11 +168,22 @@ impl FsAdmin {
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceDiagnostics> {
         self.core.record_trace_context(&tracing::Span::current());
-        let mut diagnostics =
+        let diagnostics =
             loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?;
+        let (live_checkpoints, live_snapshots) = self.count_live_checkpoints(namespace_id).await?;
+        Ok(Self::namespace_diagnostics(
+            diagnostics,
+            live_checkpoints,
+            live_snapshots,
+        ))
+    }
+
+    async fn count_live_checkpoints(&self, namespace_id: &NamespaceId) -> Result<(u64, u64)> {
         let now_ms = self.actor.mutation_context()?.now_ms;
         let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
         let mut cursor = None;
+        let mut live_checkpoints = 0_u64;
+        let mut live_snapshots = 0_u64;
         loop {
             let page = self
                 .engine(namespace_id)
@@ -185,23 +196,61 @@ impl FsAdmin {
             for checkpoint in page.items {
                 match checkpoint.owner {
                     loonfs_api::CheckpointOwnerSummary::User { .. } => {
-                        diagnostics.live_checkpoints =
-                            diagnostics.live_checkpoints.saturating_add(1);
+                        live_checkpoints = live_checkpoints.saturating_add(1);
                     }
                     loonfs_api::CheckpointOwnerSummary::Snapshot { expires_at_ms, .. }
                         if expires_at_ms > now_ms =>
                     {
-                        diagnostics.live_snapshots = diagnostics.live_snapshots.saturating_add(1);
+                        live_snapshots = live_snapshots.saturating_add(1);
                     }
                     loonfs_api::CheckpointOwnerSummary::Fork { .. }
                     | loonfs_api::CheckpointOwnerSummary::Snapshot { .. } => {}
                 }
             }
             let Some(next_cursor) = page.next_cursor else {
-                return Ok(diagnostics);
+                return Ok((live_checkpoints, live_snapshots));
             };
             cursor = Some(next_cursor);
         }
+    }
+
+    fn namespace_diagnostics(
+        diagnostics: NamespaceStorageDiagnostics,
+        live_checkpoints: u64,
+        live_snapshots: u64,
+    ) -> NamespaceDiagnostics {
+        NamespaceDiagnostics {
+            namespace_id: diagnostics.namespace_id,
+            head_seq: diagnostics.head_seq,
+            retention_floor_seq: diagnostics.retention_floor_seq,
+            current_manifest_no: diagnostics.current_manifest_no,
+            wal_tail_segments: diagnostics.wal_tail_segments,
+            live_snapshots,
+            live_checkpoints,
+        }
+    }
+
+    async fn load_maintenance_status_before(
+        &self,
+        namespace_id: &NamespaceId,
+        collects_only: bool,
+    ) -> Result<NamespaceDiagnostics> {
+        let diagnostics =
+            match loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id)
+                .await
+            {
+                Ok(diagnostics) => diagnostics,
+                Err(error) if error.code() == ErrorCode::NamespaceDeleted && collects_only => {
+                    // These control objects survive deleted-namespace reclamation.
+                    loonfs_core::cache::load_deleted_namespace_diagnostics(
+                        self.core.store(),
+                        namespace_id,
+                    )
+                    .await?
+                }
+                Err(error) => return Err(error.into()),
+            };
+        Ok(Self::namespace_diagnostics(diagnostics, 0, 0))
     }
 
     /// Runs one bounded maintenance step against a namespace.
@@ -243,27 +292,9 @@ impl FsAdmin {
                 .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
         }
         let collects_only = plan.gc.is_some() && plan.metadata.is_none() && !plan.advance_retention;
-        let status_before = match self.get_namespace_diagnostics(namespace_id).await {
-            Ok(status) => status,
-            // A tombstoned namespace keeps reclaimable derived state — WAL
-            // segments, metadata segments, manifests, checkpoint records — until GC
-            // ages it out, and a collection-only step is the reclamation
-            // path. It proceeds against the tombstone; the summary comes
-            // from the two control objects that outlive reclamation,
-            // because the manifest and chain a live summary consults may
-            // already be reaped. Any other plan still refuses: a tombstone
-            // has nothing to flush, reorganize, or retain.
-            Err(RuntimeError::Core(error))
-                if error.code() == ErrorCode::NamespaceDeleted && collects_only =>
-            {
-                loonfs_core::cache::load_deleted_namespace_diagnostics(
-                    self.core.store(),
-                    namespace_id,
-                )
-                .await?
-            }
-            Err(error) => return Err(error),
-        };
+        let status_before = self
+            .load_maintenance_status_before(namespace_id, collects_only)
+            .await?;
 
         let metadata_maintenance = if let Some(options) = plan.metadata {
             Some(
@@ -359,8 +390,8 @@ impl FsAdmin {
         // Writers with background maintenance spread a rebuild across delta
         // merges. Manual-only handles report that compaction is required
         // instead of starting work they cannot finish in the background.
-        let frozen_base = match &self.compactions {
-            Some(compactions) => compactions.amortization(namespace_id),
+        let frozen_base = match &self.writer {
+            Some(writer) => writer.compactions.amortization(namespace_id),
             None => loonfs_core::FrozenBasePolicy::CompactImmediately,
         };
         Ok(
@@ -395,9 +426,9 @@ impl FsAdmin {
         // exactly as a namespace nothing is running for. It could not start
         // one either way.
         let active = self
-            .compactions
+            .writer
             .as_ref()
-            .and_then(|compactions| compactions.active_spec(namespace_id));
+            .and_then(|writer| writer.compactions.active_spec(namespace_id));
         let report = self
             .engine(namespace_id)
             .reorganize_metadata(loonfs_core::MetadataCompactionView {
@@ -422,8 +453,12 @@ impl FsAdmin {
                 self.invalidate_namespace(namespace_id);
                 // Track delta-only merges across steps so the runner knows
                 // when to schedule a full compaction.
-                if let Some(compactions) = &self.compactions {
-                    compactions.record_merge(namespace_id, group, bottom_anchored_merge_blocked);
+                if let Some(writer) = &self.writer {
+                    writer.compactions.record_merge(
+                        namespace_id,
+                        group,
+                        bottom_anchored_merge_blocked,
+                    );
                 }
                 tracing::info!(
                     families = ?group.families(),
@@ -458,8 +493,8 @@ impl FsAdmin {
         let families = spec.families();
         let input_runs = spec.input_runs();
         let input_rows = spec.input_rows();
-        let started = match &self.compactions {
-            Some(compactions) => compactions.start(self, namespace_id, spec),
+        let started = match &self.writer {
+            Some(writer) => writer.compactions.start(self, namespace_id, spec),
             None => CompactionStart::NoRunner,
         };
         match started {
@@ -539,7 +574,7 @@ impl FsAdmin {
             }
             ReorganizationStep::Concluded(_) => return Ok(MetadataCompactionOutcome::NoWork),
         };
-        let Some(compactions) = &self.compactions else {
+        let Some(writer) = &self.writer else {
             // Standalone handles have no shared concurrency limit.
             let cancellation = loonfs_core::MetadataCompactionCancellation::default();
             let outcome = self
@@ -547,7 +582,7 @@ impl FsAdmin {
                 .await;
             return Ok(MetadataCompactionOutcome::Ran(outcome?));
         };
-        let Some(mut claim) = compactions.claim(namespace_id, &spec) else {
+        let Some(mut claim) = writer.compactions.claim(namespace_id, &spec) else {
             return Ok(MetadataCompactionOutcome::AlreadyRunning);
         };
         if !claim.admitted().await {
@@ -604,8 +639,10 @@ impl FsAdmin {
                 self.invalidate_namespace(namespace_id);
                 // A full compaction includes the base run, so reset the count
                 // of delta-only merges.
-                if let Some(compactions) = &self.compactions {
-                    compactions.clear_published_delta_merges(namespace_id, spec.group());
+                if let Some(writer) = &self.writer {
+                    writer
+                        .compactions
+                        .clear_published_delta_merges(namespace_id, spec.group());
                 }
                 tracing::info!(
                     namespace_id = %namespace_id,
@@ -740,9 +777,8 @@ impl FsAdmin {
 
     /// Creates a snapshot only when the namespace has quota for it.
     ///
-    /// The second quota check closes the race between concurrent callers that
-    /// both observe the same free slot. A caller that loses that race releases
-    /// its tentative snapshot before returning the quota error.
+    /// A caller that exceeds the quota releases its tentative snapshot before
+    /// returning the quota error.
     pub async fn create_snapshot_with_quota(
         &self,
         namespace_id: &NamespaceId,
@@ -750,8 +786,6 @@ impl FsAdmin {
         now_ms: u64,
         max_live: usize,
     ) -> Result<Checkpoint> {
-        self.ensure_snapshot_quota(namespace_id, now_ms, max_live)
-            .await?;
         let checkpoint = self.create_snapshot(namespace_id, options).await?;
         if let Err(error) = self
             .ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 0)
@@ -762,17 +796,6 @@ impl FsAdmin {
             return Err(error);
         }
         Ok(checkpoint)
-    }
-
-    /// Checks whether the namespace has room for another live snapshot.
-    pub async fn ensure_snapshot_quota(
-        &self,
-        namespace_id: &NamespaceId,
-        now_ms: u64,
-        max_live: usize,
-    ) -> Result<()> {
-        self.ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 1)
-            .await
     }
 
     async fn ensure_live_snapshot_limit(

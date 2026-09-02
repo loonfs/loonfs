@@ -112,7 +112,7 @@ pub mod cache {
     };
     pub use crate::namespace::status::{
         load_deleted_namespace_diagnostics, load_namespace, load_namespace_diagnostics,
-        load_namespace_flush_basis, NamespaceFlushBasis,
+        load_namespace_flush_basis, NamespaceFlushBasis, NamespaceStorageDiagnostics,
     };
 }
 

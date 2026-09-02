@@ -1,12 +1,11 @@
 //! Reads namespace state and storage diagnostics.
 
-use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control_snapshot::{load_control_snapshot, load_head_and_retention_floor};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
-use loonfs_api::{ChangeSeq, ManifestNo, Namespace, NamespaceDiagnostics, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, Namespace, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 /// Whether a namespace carries visible commits its basis manifest does not
@@ -17,7 +16,17 @@ pub struct NamespaceFlushBasis {
     pub has_unflushed_wal_tail: bool,
 }
 
-/// Namespace diagnostics before the WAL tail is counted.
+/// Namespace storage diagnostics that do not require checkpoint enumeration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceStorageDiagnostics {
+    pub namespace_id: NamespaceId,
+    pub head_seq: ChangeSeq,
+    pub retention_floor_seq: ChangeSeq,
+    pub current_manifest_no: Option<ManifestNo>,
+    pub wal_tail_segments: u64,
+}
+
+/// Namespace head state needed for storage diagnostics.
 struct LoadedHeadBasis {
     head: HeadState,
     current_manifest_no: Option<ManifestNo>,
@@ -43,21 +52,12 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     }
     // An unflushed fork measures its WAL tail from the fork point.
     let (current_manifest_no, basis_head_seq) = match basis.manifest() {
-        Some(manifest) => {
-            let envelope = load_namespace_manifest_envelope(
-                store,
-                &manifest.owner_namespace_id,
-                &manifest.manifest_object_id,
-            )
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
-            let own_manifest_no = basis
+        Some(manifest) => (
+            basis
                 .is_owned_by(expected_namespace_id)
-                .then_some(manifest.manifest_no);
-            (own_manifest_no, envelope.payload.head_seq)
-        }
+                .then_some(manifest.manifest_no),
+            manifest.manifest_head_seq,
+        ),
         None => (None, ChangeSeq(0)),
     };
     Ok(LoadedHeadBasis {
@@ -97,7 +97,7 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
 pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceDiagnostics> {
+) -> Result<NamespaceStorageDiagnostics> {
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
     let wal_tail_segments = count_visible_wal_tail_segments(&WalChainLoadRequest {
         namespace_id: expected_namespace_id,
@@ -110,14 +110,12 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
-    Ok(NamespaceDiagnostics {
+    Ok(NamespaceStorageDiagnostics {
         namespace_id: loaded.head.namespace_id,
         head_seq: loaded.head.seq,
         retention_floor_seq: loaded.retention_floor_seq,
         current_manifest_no: loaded.current_manifest_no,
         wal_tail_segments,
-        live_snapshots: 0,
-        live_checkpoints: 0,
     })
 }
 
@@ -144,7 +142,7 @@ pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
 pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceDiagnostics> {
+) -> Result<NamespaceStorageDiagnostics> {
     let (head, retention_floor_seq) = load_head_and_retention_floor(store, expected_namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
@@ -154,13 +152,11 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
             "namespace `{expected_namespace_id}` is live; deleted diagnostics require a deleted namespace"
         )));
     }
-    Ok(NamespaceDiagnostics {
+    Ok(NamespaceStorageDiagnostics {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         retention_floor_seq,
         current_manifest_no: None,
         wal_tail_segments: 0,
-        live_snapshots: 0,
-        live_checkpoints: 0,
     })
 }
