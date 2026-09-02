@@ -758,8 +758,6 @@ pub enum CheckpointOwnerSummary {
     Snapshot {
         /// A label that does not need to be unique.
         name: String,
-        /// When the snapshot lease expires, in Unix milliseconds.
-        expires_at_ms: u64,
     },
 }
 
@@ -809,12 +807,11 @@ pub struct SnapshotSummary {
 
 impl SnapshotSummary {
     /// Converts a snapshot-owned checkpoint to a snapshot summary.
+    ///
+    /// Returns `None` for another owner. A snapshot owner always carries the
+    /// checkpoint's top-level `expires_at_ms`.
     pub fn from_checkpoint(checkpoint: Checkpoint) -> Option<Self> {
-        let CheckpointOwnerSummary::Snapshot {
-            name,
-            expires_at_ms,
-        } = checkpoint.owner
-        else {
+        let CheckpointOwnerSummary::Snapshot { name } = checkpoint.owner else {
             return None;
         };
         Some(Self {
@@ -823,7 +820,7 @@ impl SnapshotSummary {
             name,
             head_seq: checkpoint.checkpoint_seq,
             created_at_ms: checkpoint.created_at_ms,
-            expires_at_ms,
+            expires_at_ms: checkpoint.expires_at_ms?,
         })
     }
 }

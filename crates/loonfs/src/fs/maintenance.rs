@@ -188,8 +188,10 @@ impl FsAdmin {
                         diagnostics.live_checkpoints =
                             diagnostics.live_checkpoints.saturating_add(1);
                     }
-                    loonfs_api::CheckpointOwnerSummary::Snapshot { expires_at_ms, .. }
-                        if expires_at_ms > now_ms =>
+                    loonfs_api::CheckpointOwnerSummary::Snapshot { .. }
+                        if checkpoint
+                            .expires_at_ms
+                            .is_some_and(|expiry| expiry > now_ms) =>
                     {
                         diagnostics.live_snapshots = diagnostics.live_snapshots.saturating_add(1);
                     }
@@ -804,11 +806,9 @@ impl FsAdmin {
                 .await
                 .map_err(RuntimeError::from)?;
             for checkpoint in page.items {
-                if matches!(
-                    checkpoint.owner,
-                    loonfs_api::CheckpointOwnerSummary::Snapshot { expires_at_ms, .. }
-                        if expires_at_ms > now_ms
-                ) {
+                if SnapshotSummary::from_checkpoint(checkpoint)
+                    .is_some_and(|snapshot| snapshot.expires_at_ms > now_ms)
+                {
                     live_with_additional = live_with_additional.saturating_add(1);
                     if live_with_additional > max_live {
                         return Err(quota_error());

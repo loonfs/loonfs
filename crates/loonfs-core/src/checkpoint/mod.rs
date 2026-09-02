@@ -94,13 +94,9 @@ fn checkpoint_summary(
         } => loonfs_api::CheckpointOwnerSummary::Fork {
             target_namespace_id,
         },
-        loonfs_api::wire::control::CheckpointOwner::Snapshot {
-            name,
-            expires_at_ms,
-        } => loonfs_api::CheckpointOwnerSummary::Snapshot {
-            name,
-            expires_at_ms,
-        },
+        loonfs_api::wire::control::CheckpointOwner::Snapshot { name, .. } => {
+            loonfs_api::CheckpointOwnerSummary::Snapshot { name }
+        }
     };
     loonfs_api::Checkpoint {
         namespace_id: record.namespace_id,

@@ -1244,7 +1244,7 @@ fn openapi_names_tagged_one_of_alternatives() {
     let snapshot_owner = schemas
         .get("CheckpointOwnerSnapshot")
         .expect("snapshot checkpoint-owner schema");
-    assert!(required_fields(snapshot_owner).contains("expires_at_ms"));
+    assert!(!required_fields(snapshot_owner).contains("expires_at_ms"));
 }
 
 /// Responses that flatten a Rust enum, and the fields their envelope adds to

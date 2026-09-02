@@ -3,10 +3,10 @@
 #![allow(clippy::panic)]
 
 use crate::common::http_split_support::test_config;
-use crate::common::{collect_checkpoints, start_server};
+use crate::common::start_server;
 use loonfs_api::{
-    ApiError, ChangeSeq, CheckpointOwnerSummary, CreateCheckpointRequest, ListSnapshotsResponse,
-    ReleaseSnapshotResponse, SnapshotSummary,
+    ApiError, ChangeSeq, CreateCheckpointRequest, ListSnapshotsResponse, ReleaseSnapshotResponse,
+    SnapshotSummary,
 };
 use loonfs_server::MaintenanceMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
@@ -354,16 +354,34 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
     assert_eq!(status, 400);
     assert!(error.message.contains("checkpoint release operation"));
 
-    let checkpoints = collect_checkpoints(&harness.client, &namespace)
-        .await
-        .expect("list checkpoints");
-    assert_eq!(checkpoints.checkpoints.len(), 2);
-    assert!(checkpoints.checkpoints.iter().any(|item| {
-        matches!(
-            &item.owner,
-            CheckpointOwnerSummary::Snapshot { name, .. } if name == "brief"
+    let checkpoints: serde_json::Value = retry_result_on_macos_teardown_einval(|| {
+        decode_response(
+            raw_agent()
+                .get(&format!(
+                    "{}/v0/admin/namespaces/{}/checkpoints",
+                    harness.server_url, namespace
+                ))
+                .set("authorization", "Bearer test-token")
+                .call(),
         )
-    }));
+    })
+    .expect("list checkpoints");
+    let checkpoints = checkpoints["checkpoints"]
+        .as_array()
+        .expect("checkpoint list is an array");
+    assert_eq!(checkpoints.len(), 2);
+    let listed_snapshot = checkpoints
+        .iter()
+        .find(|item| item["owner"]["kind"] == "snapshot")
+        .expect("snapshot checkpoint is listed");
+    assert_eq!(
+        listed_snapshot["owner"],
+        serde_json::json!({"kind": "snapshot", "name": "brief"})
+    );
+    assert_eq!(
+        listed_snapshot["expires_at_ms"],
+        serde_json::json!(snapshot.expires_at_ms)
+    );
     assert_eq!(
         list_snapshots(&harness.server_url, namespace.as_str())
             .expect("list live snapshots")
