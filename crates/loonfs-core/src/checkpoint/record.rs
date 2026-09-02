@@ -12,7 +12,8 @@ use crate::control_object::{
     ControlObjectLoadError, LoadedControl,
 };
 use crate::control_update::{
-    create_control_object_under_generated_id, retry_while_contended, CasAttempt,
+    create_control_object_under_generated_id, retry_while_contended, settle_control_write,
+    CasAttempt, WriteEvidence,
 };
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::FORK_CHECKPOINT_LEASE_MS;
@@ -159,27 +160,38 @@ pub(crate) async fn release_inspected_checkpoint_record<S: ObjectStore + ?Sized>
     let mut next = loaded.state;
     next.status = CheckpointStatus::Released { released_at_ms };
     let encoded = encode_checkpoint_record(&next)?;
-    match store
-        .compare_and_swap(object_key, &expected_etag, encoded)
-        .await
-    {
-        Ok(_) => Ok(CheckpointRelease::Released),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CheckpointRelease::LostRace),
-        Err(error @ ObjectStoreError::Transport { .. }) => {
+    let settled = settle_control_write(
+        match store
+            .compare_and_swap(object_key, &expected_etag, encoded)
+            .await
+        {
+            Ok(_) => CasAttempt::Settled(CheckpointRelease::Released),
+            Err(ObjectStoreError::PreconditionFailed { .. }) => {
+                CasAttempt::Contended(CheckpointRelease::LostRace)
+            }
+            Err(error @ ObjectStoreError::Transport { .. }) => CasAttempt::Ambiguous(error, ()),
+            Err(error) => return Err(CoreError::store(object_key, &error)),
+        },
+        |_, ()| async {
             match load_checkpoint_record_at_key(store, object_key).await {
                 Ok(current) if current.state.status != (CheckpointStatus::Active {}) => {
-                    Ok(CheckpointRelease::Released)
+                    Ok(WriteEvidence::Landed(CheckpointRelease::Released))
                 }
-                Ok(current) if current.etag != expected_etag => Ok(CheckpointRelease::LostRace),
-                Ok(_) => Err(CoreError::store(object_key, &error)),
+                Ok(current) if current.etag != expected_etag => {
+                    Ok(WriteEvidence::Lost(CheckpointRelease::LostRace))
+                }
+                Ok(_) => Ok(WriteEvidence::Unknown),
                 Err(ControlObjectLoadError::MissingObject { .. }) => {
-                    Ok(CheckpointRelease::Released)
+                    Ok(WriteEvidence::Landed(CheckpointRelease::Released))
                 }
-                Err(load_error) => Err(CoreError::ControlObjectLoad(load_error)),
+                Err(error) => Err(CoreError::ControlObjectLoad(error)),
             }
-        }
-        Err(error) => Err(CoreError::store(object_key, &error)),
-    }
+        },
+    )
+    .await?;
+    Ok(match settled {
+        Ok(outcome) | Err(outcome) => outcome,
+    })
 }
 
 /// Releases a checkpoint record, retrying CAS conflicts.
@@ -190,26 +202,28 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     released_at_ms: u64,
 ) -> Result<()> {
     let object_key = &checkpoint_record(namespace_id, checkpoint_id);
-    let released = retry_while_contended(|| async move {
-        let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id)
-            .await?
-            .filter(|loaded| loaded.state.status == (CheckpointStatus::Active {}))
-        else {
-            // Reaped or released underneath us: either way no active pin
-            // stands under this id, which is what the release asked for.
-            return Ok::<_, CoreError>(CasAttempt::Settled(()));
-        };
-        Ok(
-            match release_inspected_checkpoint_record(store, object_key, loaded, released_at_ms)
+    retry_while_contended(
+        || async move {
+            let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id)
                 .await?
-            {
-                CheckpointRelease::Released => CasAttempt::Settled(()),
-                CheckpointRelease::LostRace => CasAttempt::Contended,
-            },
-        )
-    })
-    .await?;
-    released.ok_or_else(|| CoreError::contention_exhausted(object_key))
+                .filter(|loaded| loaded.state.status == (CheckpointStatus::Active {}))
+            else {
+                return Ok::<_, CoreError>(CasAttempt::Settled(()));
+            };
+            Ok(
+                match release_inspected_checkpoint_record(store, object_key, loaded, released_at_ms)
+                    .await?
+                {
+                    CheckpointRelease::Released => CasAttempt::Settled(()),
+                    CheckpointRelease::LostRace => {
+                        CasAttempt::Contended(CoreError::contention_exhausted(object_key))
+                    }
+                },
+            )
+        },
+        |_, ()| async { Ok(WriteEvidence::Unknown) },
+    )
+    .await?
 }
 
 /// Renews a fork checkpoint immediately before installing its target.
@@ -224,81 +238,129 @@ pub(crate) async fn renew_fork_checkpoint_for_install<S: ObjectStore + ?Sized>(
     now_ms: u64,
 ) -> Result<u64> {
     let object_key = &checkpoint_record(source_namespace_id, checkpoint_id);
-    let unavailable = &|reason: String| {
-        CoreError::CheckpointUnavailable(format!(
-            "fork of `{source_namespace_id}` into `{expected_target_namespace_id}` cannot renew \
-             its source checkpoint `{checkpoint_id}`: {reason}"
-        ))
-    };
-    let renewed = retry_while_contended(|| async move {
-        let Some(loaded) =
-            load_checkpoint_record(store, source_namespace_id, checkpoint_id).await?
-        else {
-            return Err(unavailable("the record is gone".to_owned()));
-        };
-        let mut next = loaded.state;
-        if next.status != (CheckpointStatus::Active {}) {
-            return Err(unavailable(format!("the record is `{}`", next.status)));
-        }
-        let CheckpointOwner::Fork {
-            target_namespace_id,
-            expires_at_ms,
-        } = &mut next.owner
-        else {
-            return Err(unavailable("the record is not fork-owned".to_owned()));
-        };
-        if target_namespace_id != expected_target_namespace_id {
-            return Err(unavailable(format!(
-                "the record pins target `{target_namespace_id}`"
-            )));
-        }
-        let later_expiry = expires_at_ms
-            .checked_add(1)
-            .ok_or_else(|| unavailable("the lease expiry cannot be extended".to_owned()))?;
-        *expires_at_ms = later_expiry.max(now_ms.saturating_add(FORK_CHECKPOINT_LEASE_MS));
-        let renewed_expiry = *expires_at_ms;
-        let encoded = encode_checkpoint_record(&next)?;
-        match store
-            .compare_and_swap(object_key, &loaded.etag, encoded)
-            .await
-        {
-            Ok(_) => Ok(CasAttempt::Settled(renewed_expiry)),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
-            Err(error @ ObjectStoreError::Transport { .. }) => {
-                let Some(current) =
-                    load_checkpoint_record(store, source_namespace_id, checkpoint_id).await?
-                else {
-                    return Err(unavailable("the record is gone".to_owned()));
-                };
-                if current.state.status != (CheckpointStatus::Active {}) {
-                    return Err(unavailable(format!(
-                        "the record is `{}`",
-                        current.state.status
-                    )));
+    retry_while_contended(
+        || async move {
+            let Some(loaded) =
+                load_checkpoint_record(store, source_namespace_id, checkpoint_id).await?
+            else {
+                return Err(fork_checkpoint_unavailable(
+                    source_namespace_id,
+                    checkpoint_id,
+                    expected_target_namespace_id,
+                    "the record is gone".to_owned(),
+                ));
+            };
+            let current_expiry = inspect_fork_record(
+                &loaded.state,
+                source_namespace_id,
+                checkpoint_id,
+                expected_target_namespace_id,
+            )?;
+            let later_expiry = current_expiry.checked_add(1).ok_or_else(|| {
+                fork_checkpoint_unavailable(
+                    source_namespace_id,
+                    checkpoint_id,
+                    expected_target_namespace_id,
+                    "the lease expiry cannot be extended".to_owned(),
+                )
+            })?;
+            let renewed_expiry = later_expiry.max(now_ms.saturating_add(FORK_CHECKPOINT_LEASE_MS));
+            let mut next = loaded.state;
+            next.owner = CheckpointOwner::Fork {
+                target_namespace_id: expected_target_namespace_id.clone(),
+                expires_at_ms: renewed_expiry,
+            };
+            let encoded = encode_checkpoint_record(&next)?;
+            match store
+                .compare_and_swap(object_key, &loaded.etag, encoded)
+                .await
+            {
+                Ok(_) => Ok(CasAttempt::Settled(renewed_expiry)),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
+                    CoreError::contention_exhausted(object_key),
+                )),
+                Err(error @ ObjectStoreError::Transport { .. }) => {
+                    Ok(CasAttempt::Ambiguous(error, renewed_expiry))
                 }
-                let CheckpointOwner::Fork {
-                    target_namespace_id,
-                    expires_at_ms,
-                } = current.state.owner
-                else {
-                    return Err(unavailable("the record is not fork-owned".to_owned()));
-                };
-                if &target_namespace_id != expected_target_namespace_id {
-                    return Err(unavailable(format!(
-                        "the record pins target `{target_namespace_id}`"
-                    )));
-                }
-                if expires_at_ms >= renewed_expiry {
-                    Ok(CasAttempt::Settled(expires_at_ms))
-                } else {
-                    Err(CoreError::store(object_key, &error))
-                }
+                Err(error) => Err(CoreError::store(object_key, &error)),
             }
-            Err(error) => Err(CoreError::store(object_key, &error)),
-        }
-    })
-    .await?;
-    renewed.ok_or_else(|| CoreError::contention_exhausted(object_key))
+        },
+        |_, renewed_expiry| async move {
+            let Some(current) =
+                load_checkpoint_record(store, source_namespace_id, checkpoint_id).await?
+            else {
+                return Err(fork_checkpoint_unavailable(
+                    source_namespace_id,
+                    checkpoint_id,
+                    expected_target_namespace_id,
+                    "the record is gone".to_owned(),
+                ));
+            };
+            let expires_at_ms = inspect_fork_record(
+                &current.state,
+                source_namespace_id,
+                checkpoint_id,
+                expected_target_namespace_id,
+            )?;
+            if expires_at_ms >= renewed_expiry {
+                Ok(WriteEvidence::Landed(expires_at_ms))
+            } else {
+                Ok(WriteEvidence::Lost(CoreError::contention_exhausted(
+                    object_key,
+                )))
+            }
+        },
+    )
+    .await?
+}
+
+fn inspect_fork_record(
+    state: &CheckpointRecordState,
+    source_namespace_id: &NamespaceId,
+    checkpoint_id: &CheckpointId,
+    expected_target_namespace_id: &NamespaceId,
+) -> Result<u64> {
+    if state.status != (CheckpointStatus::Active {}) {
+        return Err(fork_checkpoint_unavailable(
+            source_namespace_id,
+            checkpoint_id,
+            expected_target_namespace_id,
+            format!("the record is `{}`", state.status),
+        ));
+    }
+    let CheckpointOwner::Fork {
+        target_namespace_id,
+        expires_at_ms,
+    } = &state.owner
+    else {
+        return Err(fork_checkpoint_unavailable(
+            source_namespace_id,
+            checkpoint_id,
+            expected_target_namespace_id,
+            "the record is not fork-owned".to_owned(),
+        ));
+    };
+    if target_namespace_id != expected_target_namespace_id {
+        return Err(fork_checkpoint_unavailable(
+            source_namespace_id,
+            checkpoint_id,
+            expected_target_namespace_id,
+            format!("the record pins target `{target_namespace_id}`"),
+        ));
+    }
+    Ok(*expires_at_ms)
+}
+
+fn fork_checkpoint_unavailable(
+    source_namespace_id: &NamespaceId,
+    checkpoint_id: &CheckpointId,
+    expected_target_namespace_id: &NamespaceId,
+    reason: String,
+) -> CoreError {
+    CoreError::CheckpointUnavailable(format!(
+        "fork of `{source_namespace_id}` into `{expected_target_namespace_id}` cannot renew its \
+         source checkpoint `{checkpoint_id}`: {reason}"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

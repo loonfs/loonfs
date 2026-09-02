@@ -831,7 +831,7 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
         .await
         .expect("reconcile the durable snapshot record");
 
-    assert_eq!(store.attempts(), 2);
+    assert_eq!(store.attempts(), 1);
     let listed = collect_checkpoints(&fs.admin, &namespace_id)
         .await
         .expect("list checkpoints");

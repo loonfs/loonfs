@@ -13,8 +13,8 @@ use loonfs_api::wire::control::HeadState;
 use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_namespace_read_anchor, load_snapshot_read_basis,
-    CheckpointReadBasis, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
-    MetadataBasis, VerifiedNamespaceCatalogEntry,
+    CheckpointReadBasis, ControlObjectLoadError, LoadedControl, MetadataBasis,
+    VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
 use loonfs_objectstore::keys::wal_head;
@@ -30,7 +30,7 @@ pub(crate) struct RuntimeControlCache {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedControl<T> {
-    pub(crate) identity: ControlObjectIdentity,
+    pub(crate) etag: String,
     pub(crate) state: T,
 }
 
@@ -234,7 +234,7 @@ impl ReadCore {
             .cached_namespace_head(namespace_id);
         if let Some(head) = cached {
             match self
-                .cached_control_identity_matches(&wal_head(namespace_id), &head.head.identity)
+                .cached_control_identity_matches(&wal_head(namespace_id), &head.head.etag)
                 .await
             {
                 Ok(true) => return Ok(head),
@@ -287,7 +287,7 @@ impl ReadCore {
     async fn cached_control_identity_matches(
         &self,
         object_key: &str,
-        identity: &ControlObjectIdentity,
+        expected_etag: &str,
     ) -> std::result::Result<bool, ControlObjectLoadError> {
         let metadata = self
             .store()
@@ -308,7 +308,7 @@ impl ReadCore {
                 class: StoreFailureClass::Other,
             });
         };
-        Ok(etag == identity.etag)
+        Ok(etag == expected_etag)
     }
 
     pub(crate) fn control_cache_enabled(&self) -> bool {
@@ -327,7 +327,7 @@ impl ReadCore {
     ) -> RuntimeReadContext {
         RuntimeReadContext {
             head: anchor.head.state.clone(),
-            head_etag: anchor.head.identity.etag.clone(),
+            head_etag: anchor.head.etag.clone(),
             basis: anchor.basis.clone(),
             segment_cache: Arc::clone(&self.inner.metadata_segment_cache),
             tail_cache: Arc::clone(&self.inner.wal_tail_projection_cache),
@@ -403,9 +403,7 @@ impl ReadCore {
     ) {
         let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
             head: CachedControl {
-                identity: ControlObjectIdentity {
-                    etag: pinned.head_etag,
-                },
+                etag: pinned.head_etag,
                 state: pinned.head,
             },
             basis: pinned.basis,
@@ -467,9 +465,7 @@ impl ReadCore {
             namespace_id,
             CachedNamespaceAnchor {
                 head: CachedControl {
-                    identity: ControlObjectIdentity {
-                        etag: state.head_etag.clone(),
-                    },
+                    etag: state.head_etag.clone(),
                     state: state.head,
                 },
                 basis: state.basis,
@@ -517,10 +513,12 @@ impl ReadCore {
     }
 }
 
-fn cached_anchor((head, basis): (LoadedHeadControl, MetadataBasis)) -> CachedNamespaceAnchor {
+fn cached_anchor(
+    (head, basis): (LoadedControl<HeadState>, MetadataBasis),
+) -> CachedNamespaceAnchor {
     CachedNamespaceAnchor {
         head: CachedControl {
-            identity: head.identity,
+            etag: head.etag,
             state: head.state,
         },
         basis,

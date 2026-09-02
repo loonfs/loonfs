@@ -5,9 +5,10 @@ use super::load::{ensure_root_matches_manifest, load_verified_manifest_segments}
 use super::runs::MAX_MAINTENANCE_SEGMENT_IO;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
-use crate::control_update::{retry_while_contended, CasAttempt};
+use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
+use crate::namespace::basis::namespace_birth_seq;
 use crate::namespace::control::{
     load_head_object, load_metadata_root_object_if_present, load_wal_floor_object,
 };
@@ -111,9 +112,15 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     // Grep tolerates retention gaps by checkpointed rebootstrap, so its
     // independent watermark never holds the core WAL floor back.
     let target_floor = manifest_segments.manifest().payload.head_seq;
-    let current_floor = resolve_retention_floor_seq(store, &head)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
+    let initial_floor = match load_wal_floor_object(store, namespace_id).await {
+        Ok(loaded) => Some(loaded),
+        Err(ControlObjectLoadError::MissingObject { .. }) => None,
+        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
+    };
+    let current_floor = initial_floor.as_ref().map_or_else(
+        || namespace_birth_seq(&head),
+        |loaded| loaded.state.floor_seq,
+    );
     if current_floor >= target_floor {
         // Already advanced, so the idempotent re-invocation writes nothing.
         return Ok(AdvanceRetentionResponse {
@@ -128,52 +135,69 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
 
     // Monotonic floor publication: never decrease. The first advance
     // creates the object, because create and fork write no floor.
-    let object_key = &loonfs_objectstore::keys::wal_floor(namespace_id);
-    let advanced = retry_while_contended(|| async move {
-        let loaded = match load_wal_floor_object(store, namespace_id).await {
-            Ok(loaded) => Some(loaded),
-            Err(ControlObjectLoadError::MissingObject { .. }) => None,
-            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
-        };
-        let published_floor = loaded.as_ref().map(|loaded| loaded.state.floor_seq);
-        if let Some(floor_seq) = published_floor.filter(|floor_seq| *floor_seq >= target_floor) {
-            return Ok(CasAttempt::Settled(floor_seq));
-        }
-        let next = WalFloorState {
-            namespace_id: namespace_id.clone(),
-            floor_seq: target_floor,
-            updated_at_ms: context.now_ms,
-        };
-        let encoded =
-            encode_control_state(ControlObjectKind::WalFloor, &next).map_err(|error| {
-                CoreError::Codec {
-                    object_key: object_key.clone(),
-                    message: error.to_string(),
+    let object_key = loonfs_objectstore::keys::wal_floor(namespace_id);
+    let mut first_floor = Some(initial_floor);
+    let advanced =
+        retry_while_contended(
+            || {
+                let first = first_floor.take();
+                async {
+                    let loaded = match first {
+                        Some(loaded) => loaded,
+                        None => match load_wal_floor_object(store, namespace_id).await {
+                            Ok(loaded) => Some(loaded),
+                            Err(ControlObjectLoadError::MissingObject { .. }) => None,
+                            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
+                        },
+                    };
+                    if let Some(floor_seq) = loaded
+                        .as_ref()
+                        .map(|loaded| loaded.state.floor_seq)
+                        .filter(|floor_seq| *floor_seq >= target_floor)
+                    {
+                        return Ok(CasAttempt::Settled(floor_seq));
+                    }
+                    let next = WalFloorState {
+                        namespace_id: namespace_id.clone(),
+                        floor_seq: target_floor,
+                        updated_at_ms: context.now_ms,
+                    };
+                    let encoded = encode_control_state(ControlObjectKind::WalFloor, &next)
+                        .map_err(|error| CoreError::Codec {
+                            object_key: object_key.clone(),
+                            message: error.to_string(),
+                        })?;
+                    let published = match &loaded {
+                        Some(loaded) => {
+                            store
+                                .compare_and_swap(&object_key, &loaded.etag, Bytes::from(encoded))
+                                .await
+                        }
+                        None => store.put_if_absent(&object_key, Bytes::from(encoded)).await,
+                    };
+                    match published {
+                        Ok(_) => Ok(CasAttempt::Settled(target_floor)),
+                        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(
+                            CasAttempt::Contended(CoreError::contention_exhausted(&object_key)),
+                        ),
+                        Err(error @ ObjectStoreError::Transport { .. }) => {
+                            Ok(CasAttempt::Ambiguous(error, ()))
+                        }
+                        Err(error) => Err(CoreError::store(&object_key, &error)),
+                    }
                 }
-            })?;
-        let published = match &loaded {
-            Some(loaded) => {
-                store
-                    .compare_and_swap(object_key, &loaded.etag, Bytes::from(encoded))
-                    .await
-            }
-            // The retention floor is mutable control state, so its first publication is a conditional create.
-            None => store.put_if_absent(object_key, Bytes::from(encoded)).await,
-        };
-        match published {
-            Ok(_) => Ok(CasAttempt::Settled(target_floor)),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended),
-            Err(error @ ObjectStoreError::Transport { .. }) => {
+            },
+            |_, ()| async {
                 match load_floor_at_or_above(store, namespace_id, target_floor).await? {
-                    Some(floor_seq) => Ok(CasAttempt::Settled(floor_seq)),
-                    None => Err(CoreError::store(object_key, &error)),
+                    Some(floor_seq) => Ok(WriteEvidence::Landed(floor_seq)),
+                    None => Ok(WriteEvidence::Lost(CoreError::contention_exhausted(
+                        &object_key,
+                    ))),
                 }
-            }
-            Err(error) => Err(CoreError::store(object_key, &error)),
-        }
-    })
-    .await?;
+            },
+        )
+        .await?;
     Ok(AdvanceRetentionResponse {
-        retention_floor_seq: advanced.ok_or_else(|| CoreError::contention_exhausted(object_key))?,
+        retention_floor_seq: advanced?,
     })
 }

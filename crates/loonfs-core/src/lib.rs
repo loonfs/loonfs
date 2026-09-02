@@ -122,14 +122,13 @@ pub mod control {
     pub use crate::checkpoint::{
         load_checkpoint_read_basis, load_snapshot_read_basis, CheckpointReadBasis,
     };
-    pub use crate::control_object::ControlObjectLoadError;
+    pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::namespace::catalog::{
         load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
     };
     pub use crate::namespace::control::{
         load_namespace_checkpoint_record_control, load_namespace_head_control,
-        load_namespace_metadata_root_control, load_namespace_read_anchor, ControlObjectIdentity,
-        LoadedHeadControl, LoadedMetadataRootControl,
+        load_namespace_metadata_root_control, load_namespace_read_anchor,
     };
     pub use crate::namespace::MetadataBasis;
 }

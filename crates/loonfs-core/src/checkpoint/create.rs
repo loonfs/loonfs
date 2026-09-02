@@ -21,7 +21,6 @@ use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
 use loonfs_api::{Checkpoint, CheckpointId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
 use super::load::append_rows_to_metadata;
@@ -56,70 +55,71 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     validate_checkpoint_owner(&owner)?;
     let timer = &StdMonotonicTimer::default();
     let owner = &owner;
-    let saw_root_cas_race = &AtomicBool::new(false);
-    let created = retry_while_contended(|| async move {
-        let basis = match try_flush_wal(store, namespace_id, context, timer).await? {
-            TryFlushWal::Settled(basis) => basis,
-            TryFlushWal::RaceLost => {
-                saw_root_cas_race.store(true, Ordering::Relaxed);
-                return Ok(CasAttempt::Contended);
-            }
-        };
-
-        let checkpoint_id = CheckpointId::generate();
-        let record = CheckpointRecordState {
-            checkpoint_id: checkpoint_id.clone(),
-            namespace_id: namespace_id.clone(),
-            manifest: basis.manifest.clone(),
-            head_commit_id: basis.head_commit_id.clone(),
-            created_at_ms: context.now_ms,
-            owner: owner.clone(),
-            status: CheckpointStatus::Active {},
-        };
-        let verify_started_ms = timer.monotonic_now_ms();
-        write_checkpoint_record(store, &record).await?;
-
-        let verification = match verify_checkpoint_basis(store, &record).await {
-            Ok(verification) => verification,
-            Err(error) => {
-                // Cleanup is best effort on an error and must not replace its
-                // original classification.
-                if let Err(cleanup_error) =
-                    release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms)
-                        .await
-                {
-                    tracing::warn!(
-                        namespace_id = %namespace_id,
-                        checkpoint_id = %checkpoint_id,
-                        original_error = %error,
-                        cleanup_error = %cleanup_error,
-                        "failed to release a checkpoint record after basis verification failed"
-                    );
+    let created = retry_while_contended(
+        || async move {
+            let basis = match try_flush_wal(store, namespace_id, context, timer).await? {
+                TryFlushWal::Settled(basis) => basis,
+                TryFlushWal::RaceLost => {
+                    return Ok(CasAttempt::Contended(CoreError::HeadPublish(
+                        CommitHeadPublishError::StaleHead,
+                    )))
                 }
-                return Err(error);
+            };
+
+            let checkpoint_id = CheckpointId::generate();
+            let record = CheckpointRecordState {
+                checkpoint_id: checkpoint_id.clone(),
+                namespace_id: namespace_id.clone(),
+                manifest: basis.manifest.clone(),
+                head_commit_id: basis.head_commit_id.clone(),
+                created_at_ms: context.now_ms,
+                owner: owner.clone(),
+                status: CheckpointStatus::Active {},
+            };
+            let verify_started_ms = timer.monotonic_now_ms();
+            write_checkpoint_record(store, &record).await?;
+
+            let verification = match verify_checkpoint_basis(store, &record).await {
+                Ok(verification) => verification,
+                Err(error) => {
+                    // Cleanup is best effort on an error and must not replace its
+                    // original classification.
+                    if let Err(cleanup_error) = release_checkpoint_record(
+                        store,
+                        namespace_id,
+                        &checkpoint_id,
+                        context.now_ms,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            namespace_id = %namespace_id,
+                            checkpoint_id = %checkpoint_id,
+                            original_error = %error,
+                            cleanup_error = %cleanup_error,
+                            "failed to release a checkpoint record after basis verification failed"
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
+                <= CHECKPOINT_VERIFY_BUDGET_MS;
+            if verification == CheckpointBasisVerification::Verified && within_budget {
+                return Ok(CasAttempt::Settled(super::checkpoint_summary(record)));
             }
-        };
-        let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
-            <= CHECKPOINT_VERIFY_BUDGET_MS;
-        if verification == CheckpointBasisVerification::Verified && within_budget {
-            return Ok(CasAttempt::Settled(super::checkpoint_summary(record)));
-        }
 
-        // Overrunning the budget counts as verification failure: the record
-        // may have raced the grace window, so it must not stand as a root.
-        release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms).await?;
-        Ok(CasAttempt::Contended)
-    })
+            // Overrunning the budget counts as verification failure: the record
+            // may have raced the grace window, so it must not stand as a root.
+            release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms).await?;
+            Ok(CasAttempt::Contended(CoreError::CheckpointUnavailable(
+                "checkpoint publication retry exhausted".to_owned(),
+            )))
+        },
+        |_, ()| async { Ok(crate::control_update::WriteEvidence::Unknown) },
+    )
     .await?;
-
-    match (created, saw_root_cas_race.load(Ordering::Relaxed)) {
-        (Some(checkpoint), _) => Ok(checkpoint),
-        // Root contention is retryable; other exhaustion means no basis verified.
-        (None, true) => Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead)),
-        (None, false) => Err(CoreError::CheckpointUnavailable(
-            "checkpoint publication retry exhausted".to_owned(),
-        )),
-    }
+    created
 }
 
 fn validate_checkpoint_owner(owner: &CheckpointOwner) -> Result<()> {

@@ -329,7 +329,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         )),
         ManifestPublicationOutcome::CoveredByCurrent(_)
         | ManifestPublicationOutcome::PredecessorChanged(_)
-        | ManifestPublicationOutcome::RootCasRaceLost => {
+        | ManifestPublicationOutcome::Installable => {
             Ok(report(namespace_id, MetadataReorganizeOutcome::Superseded))
         }
     }

@@ -178,8 +178,8 @@ pub mod downloads {
 pub mod control {
     pub use loonfs_core::control::{
         load_namespace_catalog_entry, load_namespace_head_control,
-        load_namespace_metadata_root_control, ControlObjectLoadError, LoadedHeadControl,
-        LoadedMetadataRootControl, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
+        load_namespace_metadata_root_control, ControlObjectLoadError, LoadedControl,
+        NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
     };
 }
 

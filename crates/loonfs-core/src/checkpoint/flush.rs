@@ -17,7 +17,7 @@ use super::runs::{flatten_manifest_segments, MetadataLsmPolicy, CHECKPOINT_BASE_
 use super::scan::VerifiedMetadataSegments;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
-use crate::control_update::{retry_while_contended, CasAttempt};
+use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
@@ -86,22 +86,26 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<FlushWalResponse> {
-    let flushed = retry_while_contended(|| async move {
-        Result::Ok(
-            match try_flush_wal(store, namespace_id, context, timer).await? {
-                TryFlushWal::Settled(basis) => CasAttempt::Settled(FlushWalResponse {
-                    namespace_id: namespace_id.clone(),
-                    target_head_seq: basis.target_head_seq,
-                    manifest_no: basis.root_after_manifest_no,
-                    manifest_head_seq: basis.root_after_head_seq,
-                    outcome: basis.outcome,
-                }),
-                TryFlushWal::RaceLost => CasAttempt::Contended,
-            },
-        )
-    })
-    .await?;
-    flushed.ok_or(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
+    retry_while_contended(
+        || async move {
+            Result::Ok(
+                match try_flush_wal(store, namespace_id, context, timer).await? {
+                    TryFlushWal::Settled(basis) => CasAttempt::Settled(FlushWalResponse {
+                        namespace_id: namespace_id.clone(),
+                        target_head_seq: basis.target_head_seq,
+                        manifest_no: basis.root_after_manifest_no,
+                        manifest_head_seq: basis.root_after_head_seq,
+                        outcome: basis.outcome,
+                    }),
+                    TryFlushWal::RaceLost => CasAttempt::Contended(CoreError::HeadPublish(
+                        CommitHeadPublishError::StaleHead,
+                    )),
+                },
+            )
+        },
+        |_, ()| async { Ok(WriteEvidence::Unknown) },
+    )
+    .await?
 }
 
 /// One flush attempt against one fresh projection.
@@ -200,7 +204,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         ManifestPublicationOutcome::PredecessorChanged(_) => {
             return Ok(TryFlushWal::RaceLost);
         }
-        ManifestPublicationOutcome::RootCasRaceLost => return Ok(TryFlushWal::RaceLost),
+        ManifestPublicationOutcome::Installable => return Ok(TryFlushWal::RaceLost),
     };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
         manifest: manifest_ref_for(namespace_id, &manifest),

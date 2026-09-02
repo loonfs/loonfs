@@ -24,6 +24,11 @@ pub(super) enum ForkCheckpointSweep {
     NotAnActiveFork,
 }
 
+pub(super) enum MissingBasisCheckpointSweep {
+    Released,
+    Retained,
+}
+
 /// Releases an active, non-fork checkpoint whose basis manifest is still
 /// missing after the grace period.
 pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
@@ -32,23 +37,25 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     key: &str,
     grace_window_ms: u64,
     context: &MutationContext,
-) -> Result<bool> {
+) -> Result<MissingBasisCheckpointSweep> {
     let loaded = load_checkpoint_record_at_key(store, key).await;
     let loaded = match loaded {
         Ok(loaded) => loaded,
-        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(false),
+        Err(ControlObjectLoadError::MissingObject { .. }) => {
+            return Ok(MissingBasisCheckpointSweep::Retained)
+        }
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let record = loaded.state;
     if record.status != (CheckpointStatus::Active {}) {
-        return Ok(false);
+        return Ok(MissingBasisCheckpointSweep::Retained);
     }
     // Fork checkpoints remain until their target namespace is deleted.
     if matches!(record.owner, CheckpointOwner::Fork { .. }) {
-        return Ok(false);
+        return Ok(MissingBasisCheckpointSweep::Retained);
     }
     if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
-        return Ok(false);
+        return Ok(MissingBasisCheckpointSweep::Retained);
     }
     let manifest_key = metadata_manifest_object(namespace_id, &record.manifest.manifest_object_id);
     if store
@@ -57,10 +64,10 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
         .map_err(|error| CoreError::store(&manifest_key, &error))?
         .is_some()
     {
-        return Ok(false);
+        return Ok(MissingBasisCheckpointSweep::Retained);
     }
     release_checkpoint_record(store, namespace_id, &record.checkpoint_id, context.now_ms).await?;
-    Ok(true)
+    Ok(MissingBasisCheckpointSweep::Released)
 }
 
 /// Rechecks a fork checkpoint and releases it if its target no longer uses it.

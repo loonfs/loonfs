@@ -7,6 +7,7 @@
 
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
+use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, StoreFailureClass};
 use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::control::load_head_object;
@@ -168,39 +169,48 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
             message: error.to_string(),
         }
     })?;
-    // The namespace head is mutable control state, so installation must be a conditional create.
-    match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
-        Ok(_) => Ok(NamespaceHeadInstall::Landed),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            let existing = match load_head_object(store, namespace_id).await {
-                Ok(loaded) => loaded.state,
-                // An unreadable head still occupies the id: report the
-                // corruption rather than a lifecycle answer this attempt
-                // cannot support.
-                Err(error) => return Err(CoreError::ControlObjectLoad(error)),
-            };
-            if existing.status == (NamespaceStatus::Deleted {}) {
-                return Ok(NamespaceHeadInstall::Deleted);
-            }
-            Ok(NamespaceHeadInstall::Exists)
-        }
-        // The create may have reached the provider before its acknowledgment
-        // was lost. The immutable identity fields distinguish this attempt's
-        // installed head from a concurrent winner even after later head
-        // updates. An immediate precondition failure above remains a plain
-        // conflict because it carries no evidence that this attempt wrote.
-        Err(error @ ObjectStoreError::Transport { .. }) => {
-            let existing = match load_head_object(store, namespace_id).await {
-                Ok(loaded) => loaded.state,
-                Err(ControlObjectLoadError::MissingObject { .. }) => {
-                    return Err(CoreError::store(&object_key, &error))
+    retry_while_contended(
+        || async {
+            match store
+                .put_if_absent(&object_key, Bytes::copy_from_slice(&bytes))
+                .await
+            {
+                Ok(_) => Ok(CasAttempt::Settled(NamespaceHeadInstall::Landed)),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => {
+                    let existing = load_head_object(store, namespace_id)
+                        .await
+                        .map_err(CoreError::ControlObjectLoad)?
+                        .state;
+                    let outcome = if existing.status == (NamespaceStatus::Deleted {}) {
+                        NamespaceHeadInstall::Deleted
+                    } else {
+                        NamespaceHeadInstall::Exists
+                    };
+                    Ok(CasAttempt::Settled(outcome))
                 }
-                Err(load_error) => return Err(CoreError::ControlObjectLoad(load_error)),
-            };
-            Ok(classify_ambiguous_namespace_install(head, &existing))
-        }
-        Err(error) => Err(CoreError::store(&object_key, &error)),
-    }
+                Err(error @ ObjectStoreError::Transport { .. }) => {
+                    Ok(CasAttempt::Ambiguous(error, ()))
+                }
+                Err(error) => Err(CoreError::store(&object_key, &error)),
+            }
+        },
+        |error, ()| {
+            let failed = CoreError::store(&object_key, error);
+            async move {
+                match load_head_object(store, namespace_id).await {
+                    Ok(loaded) => Ok(WriteEvidence::Landed(classify_ambiguous_namespace_install(
+                        head,
+                        &loaded.state,
+                    ))),
+                    Err(ControlObjectLoadError::MissingObject { .. }) => {
+                        Ok(WriteEvidence::Lost(failed))
+                    }
+                    Err(error) => Err(CoreError::ControlObjectLoad(error)),
+                }
+            }
+        },
+    )
+    .await?
 }
 
 /// Classifies the authoritative head after an ambiguous conditional create.

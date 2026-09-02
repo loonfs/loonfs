@@ -2,6 +2,7 @@
 //! advance `metadata/root.json` by monotonic compare-and-swap.
 
 use super::error::ManifestLoadError;
+use crate::control_update::{settle_control_write, CasAttempt, WriteEvidence};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_metadata_root_object_if_present;
@@ -17,14 +18,14 @@ use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 /// The result of trying to publish a manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ManifestPublicationOutcome {
+    /// The candidate may still replace the current root.
+    Installable,
     /// The candidate is the current root.
     Published(MetadataRootState),
     /// The current root already covers the candidate's state.
     CoveredByCurrent(MetadataRootState),
     /// The expected predecessor changed without covering the candidate.
     PredecessorChanged(MetadataRootState),
-    /// The root changed during the compare-and-swap and should be retried.
-    RootCasRaceLost,
 }
 
 #[tracing::instrument(
@@ -126,9 +127,9 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
         )
         .await;
     };
-    match root_transition(&loaded.state, &candidate, expected_predecessor.as_ref()) {
-        RootTransition::InstallAgainstCurrent => {}
-        transition => return Ok(outcome_from(loaded.state, transition)),
+    match classify_root(&loaded.state, &candidate, expected_predecessor.as_ref()) {
+        ManifestPublicationOutcome::Installable => {}
+        outcome => return Ok(outcome),
     }
     ensure_legal_successor(namespace_id, &candidate, &loaded.state.manifest)?;
     let next = MetadataRootState {
@@ -157,60 +158,46 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             )
             .await
         }
-        // Re-read the root to resolve an unknown write outcome.
         Err(error @ ObjectStoreError::Transport { .. }) => {
-            match classify_current_root(
-                store,
-                namespace_id,
-                &candidate,
-                expected_predecessor.as_ref(),
+            settle_control_write::<_, CoreError, (), CoreError, _, _>(
+                CasAttempt::Ambiguous(error, ()),
+                |_, ()| async {
+                    match classify_current_root(
+                        store,
+                        namespace_id,
+                        &candidate,
+                        expected_predecessor.as_ref(),
+                    )
+                    .await?
+                    {
+                        ManifestPublicationOutcome::Installable => Ok(WriteEvidence::Unknown),
+                        outcome => Ok(WriteEvidence::Landed(outcome)),
+                    }
+                },
             )
             .await?
-            {
-                ManifestPublicationOutcome::RootCasRaceLost => {
-                    Err(CoreError::store(&loaded.object_key, &error))
-                }
-                outcome => Ok(outcome),
-            }
         }
         Err(error) => Err(CoreError::store(&loaded.object_key, &error)),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RootTransition {
-    InstallAgainstCurrent,
-    Published,
-    CoveredByCurrent,
-    PredecessorChanged,
-}
-
 /// A candidate may replace only the predecessor it was built from.
-fn root_transition(
+fn classify_root(
     root: &MetadataRootState,
     candidate: &ManifestRef,
     expected_predecessor: Option<&ManifestObjectId>,
-) -> RootTransition {
+) -> ManifestPublicationOutcome {
     if root.manifest == *candidate {
-        return RootTransition::Published;
+        return ManifestPublicationOutcome::Published(root.clone());
     }
     if root_supersedes_candidate(root, candidate) {
-        return RootTransition::CoveredByCurrent;
+        return ManifestPublicationOutcome::CoveredByCurrent(root.clone());
     }
     match expected_predecessor {
         Some(predecessor) if root.manifest.manifest_object_id == *predecessor => {
-            RootTransition::InstallAgainstCurrent
+            ManifestPublicationOutcome::Installable
         }
-        _ => RootTransition::PredecessorChanged,
-    }
-}
-
-fn outcome_from(root: MetadataRootState, transition: RootTransition) -> ManifestPublicationOutcome {
-    match transition {
-        RootTransition::InstallAgainstCurrent => ManifestPublicationOutcome::RootCasRaceLost,
-        RootTransition::Published => ManifestPublicationOutcome::Published(root),
-        RootTransition::CoveredByCurrent => ManifestPublicationOutcome::CoveredByCurrent(root),
-        RootTransition::PredecessorChanged => ManifestPublicationOutcome::PredecessorChanged(root),
+        _ => ManifestPublicationOutcome::PredecessorChanged(root.clone()),
     }
 }
 
@@ -225,10 +212,13 @@ async fn classify_current_root<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?
     else {
-        return Ok(ManifestPublicationOutcome::RootCasRaceLost);
+        return Ok(ManifestPublicationOutcome::Installable);
     };
-    let transition = root_transition(&loaded.state, candidate, expected_predecessor);
-    Ok(outcome_from(loaded.state, transition))
+    Ok(classify_root(
+        &loaded.state,
+        candidate,
+        expected_predecessor,
+    ))
 }
 
 /// Rejects a candidate that does not advance its predecessor.
@@ -280,14 +270,23 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
             classify_current_root(store, namespace_id, candidate, expected_predecessor).await
         }
         Err(error @ ObjectStoreError::Transport { .. }) => {
-            match classify_current_root(store, namespace_id, candidate, expected_predecessor)
-                .await?
-            {
-                ManifestPublicationOutcome::RootCasRaceLost => {
-                    Err(CoreError::store(&object_key, &error))
-                }
-                outcome => Ok(outcome),
-            }
+            settle_control_write::<_, CoreError, (), CoreError, _, _>(
+                CasAttempt::Ambiguous(error, ()),
+                |_, ()| async {
+                    match classify_current_root(
+                        store,
+                        namespace_id,
+                        candidate,
+                        expected_predecessor,
+                    )
+                    .await?
+                    {
+                        ManifestPublicationOutcome::Installable => Ok(WriteEvidence::Unknown),
+                        outcome => Ok(WriteEvidence::Landed(outcome)),
+                    }
+                },
+            )
+            .await?
         }
         Err(error) => Err(CoreError::store(&object_key, &error)),
     }

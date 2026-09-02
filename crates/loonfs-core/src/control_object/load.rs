@@ -7,12 +7,13 @@ use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LoadedControl<T> {
-    pub(crate) object_key: String,
-    pub(crate) etag: String,
-    pub(crate) state: T,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadedControl<T> {
+    pub object_key: String,
+    pub etag: String,
+    pub state: T,
 }
 
 pub(crate) enum EmbeddedIdentityMismatch {

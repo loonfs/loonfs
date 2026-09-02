@@ -7,6 +7,7 @@ use super::config::{GcConfig, GcPolicy};
 use super::cursor::{CandidateFamily, GcCursor};
 use super::fork_checkpoints::{
     maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
+    MissingBasisCheckpointSweep,
 };
 use super::live_set::{collect_live_set, LiveSet, LiveSetCollection, SweepStep, SweepVerifier};
 use super::reap::{
@@ -348,7 +349,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
     }
 
     async fn process_missing_basis_checkpoint(&mut self, key: &str) -> Result<()> {
-        if release_missing_basis_checkpoint(
+        match release_missing_basis_checkpoint(
             self.store,
             self.namespace_id,
             key,
@@ -357,9 +358,12 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         )
         .await?
         {
-            self.report.released_checkpoints.missing_basis += 1;
-        } else {
-            self.report.retain(RetainedReason::CheckpointNotReleasable);
+            MissingBasisCheckpointSweep::Released => {
+                self.report.released_checkpoints.missing_basis += 1;
+            }
+            MissingBasisCheckpointSweep::Retained => {
+                self.report.retain(RetainedReason::CheckpointNotReleasable);
+            }
         }
         Ok(())
     }

@@ -3780,7 +3780,7 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
         matches!(
             &error,
             CoreError::InvalidCheckpointRequest(message)
-                if message.contains("owned by a snapshot")
+                if message.contains("is a snapshot")
         ),
         "expected invalid checkpoint request, got {error:?}"
     );

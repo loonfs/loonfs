@@ -119,6 +119,8 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
         // the job is alive and owns its prefix. This pass keeps every object
         // under it.
         Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CompactionPrefixOwner::LiveJob),
+        // An ambiguous claim is left to a later collector, which reads the
+        // lease afresh and finishes whatever landed.
         Err(error) => Err(CoreError::store(&object_key, &error)),
     }
 }
@@ -239,6 +241,8 @@ impl<'a> CompactionLease<'a> {
                 );
                 Ok(LeaseHold::Fenced)
             }
+            // An unconfirmed heartbeat has no etag for the next fenced write,
+            // so the job ends here.
             Err(error) => Err(CoreError::store(&self.object_key, &error)),
         }
     }

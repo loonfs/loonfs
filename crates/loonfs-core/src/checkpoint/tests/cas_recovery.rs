@@ -869,7 +869,7 @@ async fn root_cas_conflict_reports_a_race() {
     .await
     .expect("root publication should report CAS contention");
 
-    assert_eq!(outcome, ManifestPublicationOutcome::RootCasRaceLost);
+    assert_eq!(outcome, ManifestPublicationOutcome::Installable);
 }
 
 #[tokio::test]
