@@ -1,5 +1,4 @@
-//! Pagination: page-size policy, typed page envelopes, and the opaque
-//! cursors each paginated endpoint round-trips.
+//! Page-size policy, page envelopes, and opaque cursors for paginated endpoints.
 
 use crate::capability::{LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX};
 use crate::{ChangeSeq, InodeId, NameKey, NamespaceId, RevisionNo};
@@ -133,10 +132,7 @@ pub enum LimitError {
     },
 }
 
-/// Typed request envelope for internal runtime/core page methods.
-///
-/// This is not a direct wire response type. HTTP handlers parse public query
-/// fields into this shape after validating `limit` and decoding `cursor`.
+/// A typed page request for internal runtime and core methods.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageRequest<C> {
     /// Enforced page size.
@@ -145,10 +141,7 @@ pub struct PageRequest<C> {
     pub cursor: Option<C>,
 }
 
-/// Typed result envelope for internal runtime/core page methods.
-///
-/// This is not a direct wire response type. HTTP handlers encode
-/// `next_cursor` into the public response envelope.
+/// A typed page result for internal runtime and core methods.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page<T, C> {
     /// Returned items.
@@ -157,28 +150,14 @@ pub struct Page<T, C> {
     pub next_cursor: Option<C>,
 }
 
-/// Cursor for one directory listing position.
+/// A cursor that resumes one directory listing after `last_name_key`.
 ///
-/// Directory pagination advances in canonical `name_key` order. The cursor
-/// is an ordering resume for live reads: any head at or past `head_seq` serves
-/// the next page, resuming strictly after `last_name_key` — the same
-/// forward-only drift grep cursors tolerate. A cursor minted by a snapshot
-/// read also carries `snapshot_id` and can resume only against that snapshot.
-///
-/// HTTP clients must pass the URL namespace and the directory target — the
-/// `path` parameter, or the inode ID in the route for inode-addressed listing
-/// — on every page. Snapshot clients must also repeat `snapshot_id`. Runtime
-/// and server code resolve that target at the selected view and reject a
-/// cursor with a different directory or snapshot identity.
+/// Snapshot cursors can resume only against the same snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
-    /// Live snapshot that minted this cursor, if any.
-    ///
-    /// The omitted form preserves version-1 live cursors. A snapshot read may
-    /// accept an omitted value only when `head_seq` exactly matches its pinned
-    /// head, then stamps the snapshot id into the next cursor.
+    /// The snapshot that issued this cursor, or `None` for a live read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<crate::CheckpointId>,
     /// Directory inode resolved at `head_seq`.
@@ -193,12 +172,7 @@ impl PageCursor for DirectoryPageCursor {
     const KIND: &'static str = "directory";
 }
 
-/// Cursor for one file revision listing position.
-///
-/// Revision pagination advances in newest-first revision order for one file
-/// inode. Like directory and grep cursors, it is an ordering resume that
-/// tolerates forward head drift; it includes the minting head plus the last
-/// returned row's complete ordering identity so ties stay unambiguous.
+/// A cursor that resumes a newest-first revision listing for one file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRevisionsPageCursor {
     /// Head sequence the issuing page was evaluated at.
@@ -217,14 +191,7 @@ impl PageCursor for FileRevisionsPageCursor {
     const KIND: &'static str = "file_revisions";
 }
 
-/// Cursor for one trash listing position.
-///
-/// Trash pagination advances oldest deletion first, in ascending
-/// `(deletion_seq, root_inode_id)` order — the order the derived
-/// active-deletion family is keyed in. Like every cursor, it is an ordering
-/// resume tolerating forward head drift: the next page evaluates at whatever
-/// head is loaded and continues strictly after the deletion generation named
-/// here.
+/// A cursor that resumes an oldest-first trash listing after one deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrashPageCursor {
     /// Head sequence the issuing page was evaluated at.
@@ -239,24 +206,16 @@ impl PageCursor for TrashPageCursor {
     const KIND: &'static str = "trash";
 }
 
-/// Cursor for one content-search (grep) snapshot.
-///
-/// Matches advance in ascending `(inode_id, byte_offset)` order: candidate
-/// files by durable inode identity, match positions within a file by byte
-/// offset. The cursor resumes strictly after the last returned match.
+/// A cursor that resumes content search after one `(inode_id, byte_offset)` position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepPageCursor {
     /// Sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
     /// Inode of the last candidate the issuing page finished scanning.
     pub last_inode_id: InodeId,
-    /// Byte offset of the last returned match within that file, or
-    /// `u64::MAX` when the file was fully scanned (budget stops and
-    /// matchless candidates resume at the next inode).
+    /// The last match offset, or `u64::MAX` when the file was fully scanned.
     pub last_byte_offset: u64,
-    /// Fingerprint of the request (pattern, flags, scope) that issued the
-    /// cursor; a cursor replayed under a different request is rejected
-    /// instead of silently skipping results.
+    /// The fingerprint of the pattern, flags, and scope that issued the cursor.
     pub fingerprint: u64,
 }
 
@@ -264,11 +223,7 @@ impl PageCursor for GrepPageCursor {
     const KIND: &'static str = "grep";
 }
 
-/// One paginated endpoint's cursor.
-///
-/// Cursors are opaque to clients: hex-encoded JSON carrying the endpoint's
-/// [`KIND`](Self::KIND) and the format version, so a cursor replayed against
-/// the wrong endpoint or an older build is rejected rather than misread.
+/// A serializable cursor with an endpoint discriminator.
 pub trait PageCursor: Serialize + serde::de::DeserializeOwned {
     /// Frozen endpoint discriminator written into the encoded cursor.
     const KIND: &'static str;
@@ -324,15 +279,7 @@ pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, PageCursorError> {
     Ok(envelope.cursor)
 }
 
-/// A cursor that resumes an enumeration of one namespace's own keyspace.
-///
-/// Maintenance passes walk keys rather than rows, and their cursors are
-/// enumeration shortcuts and nothing else: a pass re-reads whatever
-/// authorizes the work it does, whatever position it resumed from, so a
-/// cursor that is lost or refused costs a repeated walk and never a wrong
-/// decision. What the binding buys is that a token minted for another
-/// namespace, another job, or another key family is refused instead of
-/// quietly skipping the keys between here and wherever it points.
+/// A cursor bound to one namespace keyspace.
 pub trait NamespaceCursor: PageCursor {
     /// Namespace whose keyspace this cursor walks.
     fn namespace_id(&self) -> &NamespaceId;
@@ -367,8 +314,7 @@ pub fn decode_namespace_cursor<C: NamespaceCursor>(
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum NamespaceCursorError {
-    /// Not a cursor this enumeration issued: unreadable, or from another
-    /// endpoint, job, or cursor version.
+    /// The cursor is unreadable or belongs to another endpoint, job, or version.
     #[error(transparent)]
     Malformed(#[from] PageCursorError),
     /// A cursor for a different namespace than the one replaying it.

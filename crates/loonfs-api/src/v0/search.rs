@@ -1,5 +1,4 @@
-//! Content search (grep) request and response shapes: the `query/v0`
-//! plane's first operation (API spec, "Content search").
+//! Content search requests and responses for the v0 HTTP API.
 
 use crate::{AbsolutePath, ChangeSeq, CheckpointId, InodeId, NamespaceId, RevisionNo, RunNo};
 use serde::{Deserialize, Serialize};
@@ -8,29 +7,22 @@ use xxhash_rust::xxh64::xxh64;
 /// One content-search request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepRequest {
-    /// The pattern, in the Rust `regex` crate's dialect (no backreferences
-    /// or lookaround). Its UTF-8 encoding must be at most 1024 bytes.
-    /// Patterns that require no literal bytes are rejected with
-    /// `query_unindexable` unless `allow_scan` is set.
+    /// The Rust `regex` pattern, without backreferences or lookaround, limited to
+    /// 1,024 UTF-8 bytes and requiring `allow_scan` when it has no required literal
+    /// bytes.
     pub pattern: String,
-    /// Match case-insensitively. Verification is exact; the index remains
-    /// consulted through its case-folded grams.
+    /// Whether matching ignores case.
     pub case_insensitive: bool,
-    /// Restrict matches to files under this complete absolute path, resolved
-    /// to a directory inode before candidates are filtered.
+    /// The absolute directory path that limits matching to its descendants.
     pub path_prefix: Option<AbsolutePath>,
-    /// Resume cursor from a previous page. The cursor resumes strictly
-    /// after the last candidate the issuing page finished scanning and is
-    /// bound to that page's request; each page is evaluated against the
-    /// namespace head at page time.
+    /// The cursor from the previous page, bound to that request and evaluated against
+    /// the current namespace head.
     pub cursor: Option<String>,
-    /// When the unindexed tail exceeds the scan budget or crosses an
-    /// undelete that requires an index rebuild, return indexed-only results
-    /// (reported via `tail_scanned: false`) instead of failing with
-    /// `index_lagging`.
+    /// Whether index lag returns indexed-only results with `tail_scanned: false`
+    /// instead of `index_lagging`.
     pub allow_stale: bool,
-    /// Permit a capped exhaustive scan when the pattern yields no required
-    /// grams. Refused beyond the server's scan budget.
+    /// Whether patterns without required literal bytes may use a scan capped by the
+    /// server's budget.
     pub allow_scan: bool,
 }
 
@@ -87,45 +79,33 @@ pub struct GrepMatch {
 pub struct GrepResponse {
     /// Namespace searched.
     pub namespace_id: NamespaceId,
-    /// Sequence this page was evaluated at. Pages are evaluated against
-    /// the namespace head at page time; the cursor is an ordering resume,
-    /// not a snapshot pin.
+    /// The namespace head sequence used to evaluate this page.
     pub head_seq: ChangeSeq,
     /// Commits at or below this sequence were answered from the index.
     pub built_through_seq: ChangeSeq,
-    /// True when revisions after `built_through_seq` were scanned
-    /// exhaustively; false only when `allow_stale` skipped them.
+    /// Whether revisions after `built_through_seq` were scanned exhaustively.
     pub tail_scanned: bool,
-    /// Matches in ascending `(inode_id, byte_offset)` order. A page may
-    /// return fewer matches than its limit and still carry a cursor: the
-    /// per-page verified-candidate budget bounds how much content one
-    /// request reads, whatever the plan's false-positive rate.
+    /// The matches in ascending `(inode_id, byte_offset)` order.
     pub matches: Vec<GrepMatch>,
     /// Present when another page follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
 
-/// Where a namespace's grep index is in its lifecycle.
+/// The grep index lifecycle for a namespace.
 ///
-/// Each status contains only the fields valid for that lifecycle state.
-/// `Backfilling` reports its target and current position. `Active` reports
-/// how far the index has been built. Clients should treat a namespace as
-/// searchable only when the index is `Active`.
+/// A namespace is searchable only when the lifecycle is `Active`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GrepIndexLifecycle {
     /// No index is maintained for this namespace.
     Disabled,
-    /// The initial walk over a pinned checkpoint is running. Nothing is
-    /// searchable yet.
+    /// An initial scan of a pinned checkpoint that is not yet searchable.
     Backfilling {
-        /// Namespace sequence the pinned checkpoint captured. Reaching it
-        /// is what completes the backfill.
+        /// The namespace sequence that completes the backfill when reached.
         target_seq: ChangeSeq,
-        /// Inode the walk resumes strictly after. Absent before the first
-        /// page.
+        /// The inode after which the scan resumes, or `None` before the first page.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -139,13 +119,12 @@ pub enum GrepIndexLifecycle {
         /// Checkpoint pinning the state being walked.
         checkpoint_id: CheckpointId,
     },
-    /// The index follows the change feed. Commits at or below the watermark
-    /// are searchable.
+    /// An index following the change feed through its searchable watermark.
     Active {
         /// Sequence of the commit at the index cursor.
         built_through_seq: ChangeSeq,
-        /// Offset of the next change event within `built_through_seq`, or
-        /// zero when the whole commit is represented.
+        /// The next change-event offset within `built_through_seq`, or zero when the
+        /// whole commit is indexed.
         #[serde(default, skip_serializing_if = "is_zero")]
         next_event_index: u32,
     },
@@ -175,8 +154,7 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
-/// The namespace's grep-index lifecycle and its cheap bookkeeping (admin
-/// plane).
+/// The administrative status of a namespace's grep index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepIndex {
@@ -196,13 +174,10 @@ pub struct GrepIndex {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GrepGcRequest {
-    /// Reads this pass may spend before returning with a `next_cursor`.
-    /// Omit to take the same per-pass default the runtime's own collection
-    /// takes.
+    /// The maximum reads for this pass, or `None` for the server default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_objects: Option<u64>,
-    /// Opaque resume token returned as `next_cursor` by an earlier pass
-    /// against the same namespace.
+    /// The opaque `next_cursor` returned by an earlier pass for the same namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }

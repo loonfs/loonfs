@@ -1,61 +1,43 @@
-//! The wire error registry: every stable machine-readable error code and
-//! its caller-action category.
+//! Stable machine-readable error codes and their caller-action categories.
 
 use std::fmt;
 
-/// Broad error category for caller or operator action.
-///
-/// Each kind implies one served HTTP status (`status_for_error_kind` in
-/// `loonfs-server`); a code's kind and its documented status in the API spec
-/// must agree in spirit, and the server's spec-table sync test enforces the
-/// composition exactly.
+/// The broad caller or operator action required for an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
     /// Fix the request before retrying.
     InvalidRequest,
-    /// The request was not authorized. Fix credentials before retrying.
+    /// The request is unauthorized and needs different credentials.
     Unauthorized,
-    /// The request body exceeds the deployment's size limit for this
-    /// operation. Send a smaller payload (for uploads, prefer `direct_put`);
-    /// retrying unchanged will not succeed.
+    /// The request body exceeds the operation's size limit and must be smaller.
     ContentTooLarge,
-    /// The backing object store rejected the deployment's credentials. The
-    /// operator must fix the credentials or bucket policy before retrying.
+    /// The object store rejected credentials that the operator must fix.
     StoragePermissionDenied,
-    /// The deployment does not implement this operation. Gate on the
-    /// capability document instead of retrying.
+    /// The deployment does not implement the operation and clients must check its capabilities.
     NotSupported,
-    /// The requested object does not exist. Refresh state or choose another target.
+    /// The requested object does not exist and requires another target or refreshed state.
     NotFound,
-    /// The path routes somewhere, but not for this HTTP method. Fix the
-    /// request; retrying unchanged will not succeed.
+    /// The route does not accept this HTTP method.
     MethodNotAllowed,
-    /// The target was deleted and its id is permanently retired. Do not
-    /// retry; choose another target.
+    /// The target was deleted and its ID is permanently retired.
     Gone,
-    /// The create target already exists. Pick another id or treat this as idempotent.
+    /// The create target already exists and requires another ID unless the request is idempotent.
     AlreadyExists,
-    /// The request raced with current namespace state, or a caller-supplied
-    /// precondition (base revision, expected head) no longer holds. Re-read
-    /// fresh state, re-plan, and retry if desired.
+    /// The request conflicts with current namespace state and requires refreshed state
+    /// before retrying.
     Conflict,
-    /// The server cancelled work that exceeded its configured request
-    /// deadline. Reconcile any mutation before deciding whether to retry.
+    /// The server cancelled work after its deadline, requiring mutation
+    /// reconciliation before retrying.
     DeadlineExceeded,
-    /// Status grouping for conditions served as unavailable.
-    ///
-    /// This kind is not a retry predicate: some grouped conditions require
-    /// maintenance before another attempt can succeed. Use
-    /// [`ErrorCode::retryable_without_operator_action`] for that decision.
+    /// An unavailable condition that may require retry or maintenance.
     Unavailable,
-    /// The operation may have committed: its acknowledgment was lost. Retry
-    /// with the same commit id or reconcile against namespace state; do not
-    /// assume failure.
+    /// The operation may have committed and requires retry with the same commit ID or
+    /// reconciliation.
     OutcomeUnknown,
-    /// Durable state is malformed. Treat this as operator or repair work.
+    /// Durable state is malformed and requires operator repair.
     DataCorruption,
-    /// LoonFS hit an internal failure. Capture details and report it.
+    /// LoonFS encountered an internal failure that should be reported with details.
     Internal,
 }
 
@@ -69,12 +51,9 @@ macro_rules! error_codes {
     (@count) => { 0 };
     (@count $head:ident $($tail:ident)*) => { 1 + error_codes!(@count $($tail)*) };
     ($($variant:ident => $wire:literal),+ $(,)?) => {
-        /// Stable machine-readable error reason.
+        /// A stable machine-readable error reason.
         ///
-        /// This is the complete registry of `code` values carried by
-        /// [`ApiError`](crate::ApiError) bodies and embedded errors. Codes are
-        /// permanent once released: the API spec documents each code's meaning and HTTP
-        /// status, and clients must tolerate codes they do not recognize.
+        /// Clients must tolerate unrecognized codes.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #[non_exhaustive]
         pub enum ErrorCode {

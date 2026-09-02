@@ -1,16 +1,4 @@
-//! The v0 HTTP protocol shapes.
-//!
-//! Every v0 request and response type is available from this module. Common
-//! types are also re-exported from the crate root. The submodules group types
-//! by API area:
-//!
-//! - `operations` — namespace lifecycle, path-oriented filesystem
-//!   operations, file revisions, maintenance, and the `ApiError` body.
-//! - `reads` — authoritative read results (stat/list entries, file bytes).
-//! - `commits` — commit results and the change feed.
-//! - `search` — content search and grep-index administration.
-//! - `uploads` — upload sessions and direct-put access.
-//! - `downloads` — direct-get download grants.
+//! Request and response shapes for the v0 HTTP API.
 //!
 mod commits;
 mod downloads;

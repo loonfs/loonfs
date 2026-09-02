@@ -1,7 +1,4 @@
-//! The commit shapes for the v0 HTTP API: the envelope every
-//! commit resolves to, and the ordered feed of semantic filesystem events
-//! those commits produce. Path-oriented request shapes live in
-//! [`super::operations`].
+//! Commit responses and change-feed shapes for the v0 HTTP API.
 
 use crate::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
@@ -9,37 +6,26 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Result of one commit.
-///
-/// Every commit resolves to this envelope — path-oriented operations and
-/// explicit commits, embedded or remote. The commit id is the caller's
-/// reconciliation handle: resubmitting the same request with the same id
-/// replays this result instead of committing twice.
-///
-/// The response includes the same attribution and events as
-/// [`CommittedChange`], including IDs created by the commit.
+/// The result of one commit, including its attribution and filesystem events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CommitResponse {
     /// Namespace that changed.
     pub namespace_id: NamespaceId,
-    /// Idempotency key the commit landed under: caller-supplied, or
-    /// generated on the caller's behalf when the request carried none.
+    /// The idempotency key for the commit.
     pub commit_id: CommitId,
     /// Sequence number where the commit became visible.
     pub committed_seq: ChangeSeq,
     /// Actor responsible for the commit, as supplied by the application.
     pub committed_by: crate::ActorRef,
-    /// Wall-clock stamp of the commit, in Unix milliseconds.
-    /// Observational: `committed_seq` is the order.
+    /// The commit time in Unix milliseconds; `committed_seq` defines commit order.
     pub committed_at_ms: u64,
-    /// Caller annotation, omitted when absent and carrying no filesystem
-    /// semantics.
+    /// The optional caller annotation for the commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
-    /// Semantic filesystem events in commit order. This is omitted only when
-    /// replaying a commit whose WAL history is no longer retained.
+    /// The filesystem events in commit order, or `None` when replaying a commit
+    /// without retained WAL history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub events: Option<Vec<FilesystemChange>>,
@@ -77,16 +63,9 @@ pub struct DirectoryBinding {
     pub display_name: DisplayName,
 }
 
-/// One semantic filesystem change inside a commit.
+/// One filesystem change within a commit.
 ///
-/// A commit's events are the operations it applied, in the order it applied
-/// them. One request operation can apply several: creating missing parent
-/// directories, or replacing a file by moving over it, each produce an event
-/// per directory created or file replaced. So a request with three
-/// operations may report more than three events, and the events stay in
-/// request order. Events name inodes and their parent-directory bindings
-/// rather than full paths; a consumer that needs paths can stat the inode or
-/// maintain its own binding projection from this feed.
+/// One request operation can produce multiple changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -142,8 +121,7 @@ pub enum FilesystemChange {
         /// Content of the first revision.
         content_ref: ContentRef,
     },
-    /// A file received a new current revision — a put over an existing
-    /// file, or a revision restore (one durable fact for both).
+    /// A file received a new current revision from a put or revision restore.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeContentChanged"))]
     ContentChanged {
         /// File inode whose history advanced.
@@ -189,8 +167,7 @@ pub enum FilesystemChange {
         /// Opaque identifier for the binding created by this event.
         binding_generation: String,
     },
-    /// A file or directory subtree was deleted. Use the enclosing change's
-    /// `committed_seq` as `deletion_seq` when restoring it.
+    /// A file or directory subtree was deleted.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
     Deleted {
         /// Inode at the root of the deleted subtree.
@@ -240,9 +217,8 @@ pub enum FilesystemChange {
         inode_id: InodeId,
         /// New attribute revision for that inode.
         attributes_revision_no: AttributeRevisionNo,
-        /// The inode's complete attribute map after the update, so a consumer
-        /// projects it without reading anything back. An empty map is the
-        /// cleared state.
+        /// The inode's complete attribute map after the update, including an empty map
+        /// when all attributes were cleared.
         attributes: Attributes,
     },
 }
@@ -257,15 +233,12 @@ pub struct CommittedChange {
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
     pub committed_by: crate::ActorRef,
-    /// Wall-clock stamp of the commit, in Unix milliseconds.
-    /// Observational: `committed_seq` is the order.
+    /// The commit time in Unix milliseconds; `committed_seq` defines commit order.
     pub committed_at_ms: u64,
     /// Caller annotation, omitted when absent and carrying no filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Semantic filesystem events for this commit, in the order the commit
-    /// applied them. One request operation may produce more than one event
-    /// (see [`FilesystemChange`]).
+    /// The filesystem events for this commit in commit order.
     pub events: Vec<FilesystemChange>,
 }
 

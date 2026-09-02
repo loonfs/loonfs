@@ -1,8 +1,4 @@
-//! Request/response shapes for the v0 HTTP API's operation endpoints:
-//! namespace lifecycle (create/fork/status/delete), path-oriented filesystem
-//! operations, file revisions, maintenance (checkpoint/retention), and the
-//! shared [`ApiError`] body. Explicit commits and the change feed live in
-//! [`super::commits`]; read-result shapes live in [`super::reads`].
+//! Operation requests and responses for the v0 HTTP API.
 
 use super::ContentToken;
 use crate::{
@@ -17,41 +13,26 @@ use std::collections::BTreeMap;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "openapi", schema(as = ErrorResponse))]
 pub struct ApiError {
-    /// Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)
-    /// registry.
-    ///
-    /// Carried as a string so clients keep working when a newer server
-    /// introduces a code they do not know; use
-    /// [`ErrorCode::parse`](crate::ErrorCode::parse) for typed access.
+    /// The stable machine-readable error code as a string.
     pub code: String,
-    /// For `not_supported` errors, the capability-document feature key the
-    /// client should reconcile against.
+    /// The capability feature key for a `not_supported` error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature: Option<String>,
     /// Human-readable error message.
     pub message: String,
-    /// Identifies the invalid input. Body fields use JSON Pointer paths;
-    /// query and path parameters use their names; CLI errors use the flag or
-    /// argument as written.
+    /// The invalid JSON Pointer, parameter name, CLI flag, or CLI argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
-    /// Correlation id the server assigned to the failed request; the same
-    /// value is sent as the `x-request-id` response header.
+    /// The request correlation ID also sent in the `x-request-id` response header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    /// Structured context for the code, present when the failure carries
-    /// machine-usable identity (API spec, "Standard error contract"). Boxed
-    /// so the rare detailed error does not widen every error-carrying result.
+    /// The optional machine-readable context for the error code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub details: Option<Box<ErrorDetails>>,
 }
 
-/// Optional machine-readable details for an [`ApiError`].
-///
-/// Clients make retry decisions from the error code and use these fields for
-/// relevant identifiers such as commit ids, writer epochs, and revisions.
-/// Fields may be absent and clients must ignore fields they do not use.
+/// Optional machine-readable identifiers and state for an [`ApiError`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ErrorDetails {
@@ -59,24 +40,14 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub commit_id: Option<CommitId>,
-    /// Sequence at which that commit id already landed. Present when the
-    /// failure was decided against a durable commit receipt, which is what
-    /// holds the sequence; absent when nothing has committed under the id
-    /// yet and two live requests are simply claiming it at once.
+    /// The sequence where this commit ID already landed, when recorded by a durable receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub committed_seq: Option<ChangeSeq>,
-    /// Semantic identity of the mutation that already landed under that
-    /// commit id, from the same receipt as `committed_seq` and present
-    /// exactly when it is. A retry recomputes this value from the request it
-    /// just made — see
-    /// [`put_retry_fingerprint`](crate::put_retry_fingerprint) — and equality
-    /// is what proves the two are the same request.
+    /// The fingerprint of the mutation that landed under `commit_id`, present with `committed_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed_fingerprint: Option<String>,
-    /// Position, in the request's operation list, of the operation that
-    /// failed. A commit applies all of its operations or none of them, so
-    /// this names the one that stopped the whole request.
+    /// The index of the failed operation in the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_index: Option<u32>,
     /// Epoch the failing writer session held when it was displaced.
@@ -87,13 +58,10 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_writer_epoch: Option<WriterEpoch>,
-    /// Writer id recorded by the current epoch's acquirer, when the head
-    /// recorded one.
+    /// The writer ID recorded for the current epoch, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_writer: Option<String>,
-    /// Unix milliseconds at which the current epoch's acquirer took it, when
-    /// the head recorded one. Writer ids are process labels, so two runs on
-    /// one machine can share one; the stamp is what tells them apart.
+    /// The Unix-millisecond time when the current writer acquired its epoch, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_acquired_at_ms: Option<u64>,
     /// Inode the failed precondition or operation targeted.
@@ -161,13 +129,11 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_deletion_seq: Option<ChangeSeq>,
-    /// Head sequence a namespace delete required the namespace to still be
-    /// at.
+    /// The head sequence required by a namespace delete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_head_seq: Option<ChangeSeq>,
-    /// Head sequence the namespace was actually at, which is what a caller
-    /// that still means to delete it retries against.
+    /// The actual namespace head sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_head_seq: Option<ChangeSeq>,
@@ -231,8 +197,7 @@ pub struct NamespaceDiagnostics {
 pub struct DeleteNamespaceResponse {
     /// Namespace whose history ended.
     pub namespace_id: NamespaceId,
-    /// The head's last committed sequence; the delete linearized
-    /// immediately after it, so this is where history ended.
+    /// The final committed sequence before the namespace was deleted.
     pub head_seq: ChangeSeq,
 }
 
@@ -244,8 +209,7 @@ pub enum DestinationBehavior {
     /// Fail if the destination path already exists.
     #[default]
     NoReplace,
-    /// Replace the current file at the destination; only a file
-    /// destination can be replaced.
+    /// Replace the current destination file.
     Replace,
 }
 
@@ -263,8 +227,7 @@ pub enum DeleteDirectoryBehavior {
 
 /// One filesystem operation.
 ///
-/// Unknown fields are rejected so a misspelled concurrency guard cannot be ignored.
-/// Fieldless variants must use empty braces so serde rejects unexpected fields.
+/// Unknown fields are rejected, and fieldless variants require empty objects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -277,8 +240,8 @@ pub enum FilesystemOperation {
     CreateDirectory {
         /// Absolute destination path, rejected when invalid or already bound.
         path: AbsolutePath,
-        /// Also create missing ancestor directories (the same auto-create
-        /// `put_file` performs). The final component must still be new.
+        /// Whether to create missing ancestor directories while requiring the final
+        /// component to be new.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         parents: bool,
     },
@@ -324,7 +287,7 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_revision_no: Option<RevisionNo>,
     },
-    /// Create a file under an existing parent inode. The name must be unused.
+    /// Create a file with an unused name under an existing parent inode.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationPutFileByInode")
@@ -368,9 +331,7 @@ pub enum FilesystemOperation {
         /// Whether a non-empty directory may be tombstoned recursively.
         #[serde(default)]
         behavior: DeleteDirectoryBehavior,
-        /// When set, the delete applies only if the path still resolves to
-        /// this inode; a raced rebinding fails the request instead of
-        /// deleting (and reporting a recovery handle for) the wrong inode.
+        /// The inode that the path must still resolve to before deletion.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -493,10 +454,7 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_destination_revision_no: Option<RevisionNo>,
     },
-    /// Restore a deleted file or subtree.
-    ///
-    /// `inode_id` and `deletion_seq` identify one exact deletion. A stale
-    /// sequence returns `not_deleted` and cannot undo a later deletion.
+    /// Restore the deletion identified by `inode_id` and `deletion_seq`.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUndelete"))]
     Undelete {
         /// Deleted inode to make reachable again.
@@ -508,11 +466,7 @@ pub enum FilesystemOperation {
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
         deletion_seq: ChangeSeq,
-        /// Optional destination for the restored inode.
-        ///
-        /// When absent, the inode is rebound to the parent and name recorded by the
-        /// deletion. Parent identity, rather than an old path string, keeps this
-        /// correct after ancestor renames.
+        /// The restore destination, or `None` to use the recorded binding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         path: Option<AbsolutePath>,
@@ -536,20 +490,14 @@ pub enum FilesystemOperation {
     UpdateAttributes {
         /// Absolute path that must resolve to a visible file or directory.
         path: AbsolutePath,
-        /// Attributes to write. Each key replaces whatever the inode
-        /// currently holds under it; keys the inode holds and this map does
-        /// not name are left alone.
+        /// The attributes to write, replacing values for matching keys and leaving
+        /// other keys unchanged.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         set: BTreeMap<AttributeKey, AttributeValue>,
-        /// Attribute keys to remove.
-        ///
-        /// A list preserves duplicate entries so validation can report them instead
-        /// of silently deduplicating the request.
+        /// The attribute keys to remove, including duplicates that validation must reject.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remove: Vec<AttributeKey>,
-        /// When set, the update applies only if the path still resolves to
-        /// this inode; a raced rebinding fails the request instead of
-        /// writing attributes onto the wrong inode.
+        /// The inode that the path must still resolve to before the update.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -560,11 +508,7 @@ pub enum FilesystemOperation {
             schema(schema_with = crate::public_inode_id::schema)
         )]
         expected_inode_id: Option<InodeId>,
-        /// When set, the update applies only while the inode's attribute
-        /// revision is still this one. Absent means the update is applied
-        /// over whatever revision is current; either way the write carries
-        /// its own revision guard, so a concurrent update never merges
-        /// silently.
+        /// The attribute revision that must still be current before the update.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_attributes_revision_no: Option<AttributeRevisionNo>,
@@ -592,14 +536,9 @@ impl FilesystemOperation {
     }
 }
 
-/// A request to commit one or more filesystem operations.
+/// A request to commit one or more filesystem operations atomically in order.
 ///
-/// Operations run in order and either all succeed or none are committed. A
-/// request with one operation uses the same fingerprint rules as a batch.
-///
-/// Unknown fields are rejected here for the same reason they are on
-/// [`FilesystemOperation`]: the fields a typo can hide are the ones that
-/// decide whether the commit is guarded at all.
+/// Unknown fields are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -608,18 +547,13 @@ pub struct CommitRequest {
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
     pub actor: crate::ActorRef,
-    /// Caller annotation recorded on the commit and reported by the change
-    /// feed. Part of the commit's identity: reusing `commit_id` with a
-    /// different message is a `commit_id_reuse_conflict`, exactly as it is
-    /// for an explicit commit.
+    /// The caller annotation that forms part of the commit identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Proofs for any new external content refs introduced by this request.
-    /// One proof covers every operation that names its content ref.
+    /// The proofs for new external content references in this request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_tokens: Vec<ContentToken>,
-    /// Ordered operations to apply. Must be non-empty; they commit all
-    /// together or not at all.
+    /// The non-empty ordered operations to commit atomically.
     pub operations: Vec<FilesystemOperation>,
 }
 
@@ -658,8 +592,7 @@ pub struct FileRevision {
     pub committed_seq: ChangeSeq,
     /// Commit ID for this revision.
     pub commit_id: CommitId,
-    /// Wall-clock stamp of the commit that created this revision, in Unix
-    /// milliseconds. Observational: `committed_seq` is the order.
+    /// The commit time in Unix milliseconds; `committed_seq` defines commit order.
     pub committed_at_ms: u64,
     /// Actor responsible for this revision, as supplied by the application.
     pub committed_by: crate::ActorRef,
@@ -694,11 +627,9 @@ pub struct ListFileRevisionsResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateCheckpointRequest {
-    /// Label recorded on the checkpoint record. A label, not a key: several
-    /// records may carry the same name over different bases.
+    /// The non-unique label recorded on the checkpoint.
     pub name: String,
-    /// Optional lifetime; the server computes the record's expiry from its
-    /// own clock. Absent means the pin holds until explicitly released.
+    /// The checkpoint lifetime in milliseconds, or `None` for an explicit release only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
 }
@@ -741,15 +672,13 @@ pub enum CheckpointOwnerSummary {
     /// An operator-created pin, released by id or by its own expiry.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerUser"))]
     User {
-        /// The label the creator recorded. Not a key: several records may
-        /// carry one label over different bases.
+        /// The non-unique label recorded by the creator.
         name: String,
     },
-    /// A fork target keeping its source basis alive for the length of one
-    /// fork attempt.
+    /// A fork target retaining its source basis for one fork attempt.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerFork"))]
     Fork {
-        /// Namespace whose continued existence keeps this pin standing.
+        /// The target namespace whose existence retains this checkpoint.
         target_namespace_id: NamespaceId,
     },
     /// An application-created read view.
@@ -760,7 +689,7 @@ pub enum CheckpointOwnerSummary {
     },
 }
 
-/// One checkpoint resource, reported from what its durable record carries.
+/// One checkpoint resource described by its durable record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Checkpoint {
@@ -772,11 +701,7 @@ pub struct Checkpoint {
     pub owner: CheckpointOwnerSummary,
     /// Time the checkpoint record was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// When garbage collection may release the record without being asked,
-    /// in Unix milliseconds. Absent means the pin holds until it is
-    /// released. An instant already in the past is a record whose expiry
-    /// has passed and which no collection pass has reached yet: it is still
-    /// a root, so it is still listed.
+    /// The automatic release time in Unix milliseconds, or `None` until an explicit release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
     /// Sequence covered by the checkpoint's pinned basis.
@@ -830,8 +755,7 @@ impl SnapshotSummary {
 pub struct ListCheckpointsResponse {
     /// Namespace the records belong to.
     pub namespace_id: NamespaceId,
-    /// Active records in ascending checkpoint-id order. Released records are
-    /// omitted even if garbage collection has not deleted them yet.
+    /// The active records in ascending checkpoint ID order.
     pub checkpoints: Vec<Checkpoint>,
     /// Opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -870,12 +794,11 @@ pub enum FlushWalOutcome {
     AlreadyCurrent,
     /// This call published a new manifest and advanced the root to it.
     Published,
-    /// Another publisher updated the root first, so this call's manifest is
-    /// not referenced by the root.
+    /// Another publisher updated the root before this call could reference its manifest.
     RootAdvanced,
 }
 
-/// Result of one WAL flush: what the metadata root references afterward.
+/// The metadata root state after one WAL flush.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FlushWalResponse {
@@ -891,82 +814,54 @@ pub struct FlushWalResponse {
     pub outcome: FlushWalOutcome,
 }
 
-/// Optional overrides for one garbage-collection pass. Absent fields use
-/// the server's conservative defaults.
+/// Optional overrides for one garbage-collection pass.
 ///
-/// Every field is optional, so a typo would take the default instead of the
-/// override the caller asked for. Unknown fields are rejected so a misspelled
-/// `max_objects` fails loudly rather than running an unbounded pass.
+/// Unknown fields are rejected.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GcRequest {
-    /// Objects younger than this are never deleted, reachable or not. The
-    /// window has a derived safety floor (publication budgets plus provider
-    /// deadlines); a smaller value is rejected as `invalid_request`.
+    /// The minimum object age for deletion in milliseconds, which must meet the
+    /// server's advertised safety floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// Maximum objects this invocation may read or decide. Omit to retain
-    /// the run-to-completion behavior.
-    ///
-    /// A completed upload session past its reclamation grace makes the pass
-    /// read every live manifest and retained WAL segment to find out
-    /// whether anything still references its content, and that read is
-    /// charged here like any other. A budget too small to finish it does
-    /// not stall the pass: the session is retained, the response sets
-    /// `content_reclamation_deferred`, and the sweep carries on through
-    /// everything else. What a chronically small budget costs is content
-    /// left unreclaimed, not progress. Give a pass at least as many objects
-    /// as the namespace has live manifests and retained segments for that
-    /// content to come back.
+    /// The maximum objects this pass may inspect, or `None` to run to completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_objects: Option<u64>,
-    /// Opaque resume token returned as `next_cursor` by an earlier pass
-    /// against the same namespace.
+    /// The opaque `next_cursor` returned by an earlier pass for the same namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
 
-/// Candidates inspected but not deleted by one GC pass.
+/// The candidates inspected but not deleted by one garbage-collection pass.
 ///
-/// Every field is present, including zero counts. The fields sum to
-/// `retained_candidates` in [`GcResponse`].
-///
-/// An object inspected by multiple passes is counted once per pass.
+/// Every field is present and contributes to [`GcResponse::retained_candidates`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RetainedCandidates {
     /// Candidates found reachable during the final check before deletion.
     pub referenced: u64,
-    /// Unreachable, but younger than the grace window by the object's own
-    /// provider timestamp. A later pass deletes it.
+    /// Unreachable candidates younger than the grace window by their provider timestamps.
     pub within_grace_window: u64,
-    /// Unreachable candidates with no provider timestamp. Their age is
-    /// unknown, so the pass keeps them.
+    /// Unreachable candidates without provider timestamps.
     pub no_provider_timestamp: u64,
-    /// Unreachable candidates that cannot be checked against a manifest old
-    /// enough to cover the grace window.
+    /// Unreachable candidates without a reference manifest old enough to cover the grace window.
     pub no_reference_manifest: u64,
-    /// Candidates kept because root resolution failed. The response also
-    /// sets `retention_degraded`.
+    /// Candidates retained because root resolution failed.
     pub degraded_roots: u64,
-    /// Unrecognized keys in a family scanned by GC. These keys are never
-    /// deleted.
+    /// Unrecognized keys retained from object families scanned by garbage collection.
     pub unrecognized_key: u64,
     /// Checkpoint records that could not be safely released or deleted.
     pub checkpoint_not_releasable: u64,
     /// Upload sessions still protected by a lease or grace window.
     pub upload_session_window: u64,
-    /// Upload sessions kept because the pass could not determine whether
-    /// they were safe to delete.
+    /// Upload sessions whose deletion safety could not be determined.
     pub upload_session_undecided: u64,
-    /// Completed sessions skipped because the reference scan exceeded
-    /// `max_objects`. The response also sets `content_reclamation_deferred`.
+    /// Completed sessions retained because their reference scan exceeded `max_objects`.
     pub content_scan_deferred: u64,
 }
 
-/// Objects deleted by one GC pass, grouped by object family. Every field is
-/// present, including zero counts.
+/// Object counts deleted by one garbage-collection pass, grouped by family.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeletedObjectCounts {
@@ -980,9 +875,8 @@ pub struct DeletedObjectCounts {
     pub checkpoint_records: u64,
     /// Upload-session control objects deleted after the reap window.
     pub upload_sessions: u64,
-    /// Content objects deleted after their completed upload session passed
-    /// the reclamation grace period and no reachable data referenced them.
-    /// Cleanup of abandoned sessions is not counted here.
+    /// Unreferenced content objects deleted after their completed sessions passed the
+    /// reclamation grace period.
     pub content_objects: u64,
 }
 
@@ -1006,25 +900,17 @@ impl DeletedObjectCounts {
     }
 }
 
-/// Checkpoint records released by one GC pass, grouped by reason.
-///
-/// Releasing a record stops it from pinning data. A later pass may delete the
-/// record after its grace window and count that under
-/// [`DeletedObjectCounts::checkpoint_records`].
+/// Checkpoint record counts released by one garbage-collection pass, grouped by reason.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ReleasedCheckpointCounts {
-    /// Fork-owned records released because their target namespace is
-    /// provably gone.
+    /// Fork-owned records released because their target namespaces are gone.
     pub fork: u64,
-    /// User-owned records released because their expiry passed, or because
-    /// they sit on a terminally deleted namespace.
+    /// User-owned records released after expiry or terminal namespace deletion.
     pub expired: u64,
-    /// Active records released because their basis manifest is verifiably
-    /// gone.
+    /// Active records released because their basis manifests are gone.
     pub missing_basis: u64,
-    /// Snapshot-owned records released because their expiry passed, or
-    /// because they sit on a terminally deleted namespace.
+    /// Snapshot-owned records released after expiry or terminal namespace deletion.
     pub snapshot: u64,
 }
 
@@ -1044,10 +930,7 @@ impl ReleasedCheckpointCounts {
     }
 }
 
-/// Result of one mark-and-sweep garbage-collection pass.
-///
-/// Deletion counts are grouped by object family. Checkpoint releases and
-/// retained candidates are grouped by reason.
+/// The result of one mark-and-sweep garbage-collection pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GcResponse {
@@ -1055,30 +938,23 @@ pub struct GcResponse {
     pub namespace_id: NamespaceId,
     /// Objects the pass deleted, split by object family.
     pub deleted: DeletedObjectCounts,
-    /// Checkpoint records the pass released, split by the reason each one
-    /// was released.
+    /// The checkpoint records released by the pass, grouped by reason.
     pub released_checkpoints: ReleasedCheckpointCounts,
-    /// Candidates retained at delete time (grace window, missing
-    /// timestamps, or reachable from the fresh root set).
+    /// The number of candidates retained at deletion time.
     pub retained_candidates: u64,
     /// `retained_candidates` grouped by reason.
     pub retained: RetainedCandidates,
     /// True when ambiguous roots suppressed manifest/segment deletion.
     pub retention_degraded: bool,
-    /// True when `max_objects` was too small to build the complete reference
-    /// set required for completed-content reclamation.
+    /// Whether `max_objects` prevented a complete reference scan for content reclamation.
     pub content_reclamation_deferred: bool,
-    /// True when the pass reached `max_objects` before it finished. Use
-    /// `next_cursor` to continue or run again with a larger limit.
+    /// Whether the pass reached `max_objects` before completion.
     pub budget_exhausted: bool,
-    /// Opaque resume token when more candidates remain. It is valid only for
-    /// the same namespace.
+    /// The opaque resume token for remaining candidates in the same namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    /// Earliest known time when a retained upload session may become
-    /// reclaimable. This covers open-session leases and grace periods for
-    /// aborted or completed sessions. It only reflects candidates inspected
-    /// by this pass, so absence does not mean no future work remains.
+    /// The earliest known reclamation time for an upload session inspected by this
+    /// pass, in Unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_reclamation_at_ms: Option<u64>,
 }
@@ -1111,9 +987,7 @@ impl GcResponse {
     }
 }
 
-/// The reason one candidate was retained, as the sweep site knows it. Each
-/// variant is the field of [`RetainedCandidates`] it counts into, where the
-/// reason itself is described.
+/// The reason one candidate was retained and the corresponding [`RetainedCandidates`] field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetainedReason {
     /// Counts into [`RetainedCandidates::referenced`].
@@ -1224,7 +1098,7 @@ impl RetainedCandidates {
     }
 }
 
-/// Selects retention-floor advancement. This request has no options yet.
+/// An option-free request that selects retention-floor advancement.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -1238,30 +1112,22 @@ pub struct AdvanceRetentionResponse {
     pub retention_floor_seq: ChangeSeq,
 }
 
-/// One explicit maintenance step: the actions it selects, and nothing more.
+/// The actions selected for one explicit maintenance step.
 ///
-/// Selection is presence. Each field names one independent action, and a
-/// step runs exactly the ones the body carries — a request that selects
-/// nothing is rejected rather than quietly doing nothing. Unknown fields are
-/// rejected for the same reason: a misspelled selector would leave its action
-/// unrun, and the caller would read the empty report as "there was nothing to
-/// do".
+/// The request must select at least one action, and unknown fields are rejected.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceStepRequest {
-    /// Flush the visible WAL tail into metadata segments, then run one bounded
-    /// reorganization step.
+    /// The optional WAL flush and bounded metadata reorganization action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub metadata_maintenance: Option<MetadataMaintenanceRequest>,
-    /// Advance the retention floor to the flushed manifest head. Include this
-    /// field to select the action.
+    /// The optional action that advances the retention floor to the flushed manifest head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention: Option<AdvanceRetentionRequest>,
-    /// Run one bounded mark-and-sweep garbage-collection pass. Omit this
-    /// field to skip garbage collection.
+    /// The optional bounded mark-and-sweep garbage-collection action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub gc: Option<GcRequest>,
@@ -1272,9 +1138,7 @@ pub struct MaintenanceStepRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetadataMaintenanceRequest {
-    /// Flush the visible WAL tail once it reaches this many segments.
-    /// Absent uses the server's default threshold; zero, and any value above
-    /// the write-rejection threshold, are rejected as `invalid_request`.
+    /// The WAL-tail threshold for flushing, or `None` for the server default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wal_tail_segments: Option<u64>,
 }
@@ -1291,26 +1155,21 @@ pub enum WalFlushStepOutcome {
         /// Sequence covered by the published manifest.
         manifest_head_seq: ChangeSeq,
     },
-    /// The step did not update the root because it already referenced a
-    /// different manifest.
+    /// The step did not update a root that already referenced another manifest.
     AlreadyPublished {
         /// Sequence this step attempted to flush through.
         attempted_seq: ChangeSeq,
         /// Manifest the root currently references.
         current_manifest_no: ManifestNo,
     },
-    /// Concurrent updates prevented every attempt from publishing. Nothing
-    /// was flushed, and a later step can try again.
+    /// Concurrent updates prevented every publication attempt.
     RetriesExhausted {
         /// Head sequence observed before the step ran.
         observed_head_seq: ChangeSeq,
     },
 }
 
-/// What the metadata-reorganization part of a maintenance step did.
-///
-/// Deliberately coarse: the run counts and byte budgets a reorganization
-/// consumes are engine policy, not a wire contract.
+/// The outcome of the metadata-reorganization part of a maintenance step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -1319,32 +1178,21 @@ pub enum ReorganizeStepOutcome {
     NotNeeded,
     /// One family group was merged and a manifest published.
     UnitPublished,
-    /// A group has outgrown one step, and this step started the background
-    /// streaming compaction that rebuilds it. The step published nothing;
-    /// the job publishes once, when it finishes.
+    /// The step started a background streaming compaction for an oversized group.
     CompactionStarted,
-    /// A job for this namespace is already running, so this step started
-    /// none. One runs at a time per namespace; a later step plans this group
-    /// again.
+    /// A compaction job is already running for this namespace.
     CompactionRunning,
-    /// This step's job holds the namespace's slot and is waiting for a
-    /// process compaction permit. It starts when one frees; nothing is
-    /// needed to make it.
+    /// This namespace's compaction job is waiting for a process permit.
     CompactionAtCapacity,
-    /// A group needs a streaming compaction and this handle schedules no
-    /// background work, so nothing will run one until an operator does. The
-    /// self-hosting guide names the call.
+    /// A group requires a streaming compaction that an operator must schedule.
     CompactionRequired,
-    /// Another publisher updated the metadata root first. This step's
-    /// manifest is unreferenced, and a later step can retry the merge.
+    /// Another publisher updated the metadata root before this step could reference its manifest.
     RootAdvanced,
 }
 
-/// Result of one explicit maintenance step.
+/// The result of one explicit maintenance step.
 ///
-/// One report per action the request selected, and none for an action it
-/// did not: an absent field means "not selected", never "ran and found
-/// nothing to do". The latter is what the outcomes inside a report say.
+/// Each field is present only when the request selected its action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MaintenanceStepResponse {
@@ -1376,25 +1224,19 @@ pub struct MetadataMaintenanceResponse {
     pub reorganize: ReorganizeStepOutcome,
 }
 
-/// Options for one store contract probe. Empty today; a body is still sent
-/// so later options do not change the shape of the request. An option this
-/// build does not know is rejected rather than ignored, so a caller never
-/// believes it selected something.
+/// An empty request for one store contract probe.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct StoreProbeRequest {}
 
-/// What one store contract probe observed, check by check.
+/// The ordered results from one store contract probe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct StoreProbeResponse {
-    /// Label the server minted for this run. It scopes the objects the run
-    /// wrote, so it identifies the run in provider logs too.
+    /// The server-generated label for this probe run and its objects.
     pub run_id: String,
-    /// Every check the run performed, in the order it performed them. A
-    /// failed check lives here rather than in an error: the probe answered
-    /// the question, and the answer is that the store is wrong.
+    /// The check results in execution order.
     pub checks: Vec<StoreProbeCheckResult>,
 }
 
@@ -1406,8 +1248,7 @@ pub struct StoreProbeCheckResult {
     pub name: String,
     /// What the store did.
     pub outcome: StoreProbeCheckOutcome,
-    /// What was expected and what happened instead. Present only on
-    /// `failed`.
+    /// The expected and actual behavior for a failed check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -1419,12 +1260,9 @@ pub struct StoreProbeCheckResult {
 pub enum StoreProbeCheckOutcome {
     /// The store behaved as the contract requires.
     Passed,
-    /// The store declares it cannot do this at all. Only the optional
-    /// capabilities answer this way, and it is an answer rather than a
-    /// fault.
+    /// The store does not support this optional capability.
     Unsupported,
-    /// The store did something the contract forbids, or the operation
-    /// failed outright.
+    /// The store violated the contract or the operation failed.
     Failed,
 }
 
