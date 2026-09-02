@@ -10,8 +10,8 @@ use crate::checkpoint::{
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::{
-    LeafRevisionPrefetch, MetadataState, MetadataView, MetadataViewSession, ResolvedVisiblePath,
-    RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
+    binding_generation, LeafRevisionPrefetch, MetadataState, MetadataView, MetadataViewSession,
+    ResolvedVisiblePath, RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -556,7 +556,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     inode_id,
                     last_revision_no: last.revision_no,
                     last_committed_seq: last.committed_seq,
-                    last_revision_delta_index: last.revision_delta_index,
+                    last_revision_delta_index: last.delta_index,
                 });
         let revisions = revision_records
             .into_iter()
@@ -898,7 +898,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 created_at_ms: child.inode.created_at_ms,
                 parent_inode_id: Some(child.binding.parent_inode_id),
                 display_name: child.binding.display_name.to_string(),
-                binding_generation: Some(child.binding.generation()),
+                binding_generation: Some(binding_generation(&child.binding)),
             },
             attributes,
         )

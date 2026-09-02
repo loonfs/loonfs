@@ -1842,7 +1842,7 @@ fn wal_delta_wire_tags_match_spec_names() {
 
 /// A delete by path: the tombstone records the binding it removed.
 fn sample_tombstone_set_row() -> MetadataRow {
-    MetadataRow::Tombstone {
+    MetadataRow::Tombstone(loonfs_api::wire::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
         generation: TombstoneGeneration {
             seq: ChangeSeq(8),
@@ -1859,12 +1859,12 @@ fn sample_tombstone_set_row() -> MetadataRow {
         },
         deleted_at_ms: 4_000,
         deleted_by: actor(),
-    }
+    })
 }
 
 /// The undelete that cancels it, naming the exact generation it revokes.
 fn sample_tombstone_revoke_row() -> MetadataRow {
-    MetadataRow::Tombstone {
+    MetadataRow::Tombstone(loonfs_api::wire::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
         generation: TombstoneGeneration {
             seq: ChangeSeq(9),
@@ -1879,14 +1879,14 @@ fn sample_tombstone_revoke_row() -> MetadataRow {
         },
         deleted_at_ms: 4_100,
         deleted_by: actor(),
-    }
+    })
 }
 
 /// The active-deletion row the materializer derives from the set above. It
 /// carries the deletion's stamp and the binding the trash entry renders, both
 /// copied from the tombstone event.
 fn sample_active_deletion_listed_row() -> MetadataRow {
-    MetadataRow::ActiveDeletion {
+    MetadataRow::ActiveDeletion(loonfs_api::wire::manifest::ActiveDeletionRecord {
         root_inode_id: InodeId(5),
         deletion_seq: ChangeSeq(8),
         action: ActiveDeletionRowAction::Listed {
@@ -1899,26 +1899,26 @@ fn sample_active_deletion_listed_row() -> MetadataRow {
                     .expect("valid display name"),
             },
         },
-    }
+    })
 }
 
 /// The active-deletion row the materializer derives from the revoke above. It
 /// repeats the deletion's sequence rather than the undelete's, so the two rows
 /// share a key prefix, and its rank sorts it ahead of the row it removes.
 fn sample_active_deletion_removed_row() -> MetadataRow {
-    MetadataRow::ActiveDeletion {
+    MetadataRow::ActiveDeletion(loonfs_api::wire::manifest::ActiveDeletionRecord {
         root_inode_id: InodeId(5),
         deletion_seq: ChangeSeq(8),
         action: ActiveDeletionRowAction::Removed {
             revocation_seq: ChangeSeq(9),
         },
-    }
+    })
 }
 
 /// An attribute revision that cleared the map. The empty map has an encoding
 /// of its own, so the sample carries a row that states it.
 fn sample_cleared_attributes_row() -> MetadataRow {
-    MetadataRow::AttributesRevision {
+    MetadataRow::AttributesRevision(loonfs_api::wire::manifest::AttributesRevisionRecord {
         inode_id: InodeId(2),
         attributes_revision_no: AttributeRevisionNo(3),
         committed_seq: ChangeSeq(7),
@@ -1927,12 +1927,12 @@ fn sample_cleared_attributes_row() -> MetadataRow {
         updated_by: actor(),
         updated_at_ms: 7_000,
         attributes: Attributes::default(),
-    }
+    })
 }
 
 /// An attribute revision that states a populated map.
 fn sample_populated_attributes_row() -> MetadataRow {
-    MetadataRow::AttributesRevision {
+    MetadataRow::AttributesRevision(loonfs_api::wire::manifest::AttributesRevisionRecord {
         inode_id: InodeId(5),
         attributes_revision_no: AttributeRevisionNo(2),
         committed_seq: ChangeSeq(5),
@@ -1941,44 +1941,44 @@ fn sample_populated_attributes_row() -> MetadataRow {
         updated_by: actor(),
         updated_at_ms: 5_000,
         attributes: sample_attributes(),
-    }
+    })
 }
 
 fn sample_commit_receipt_row() -> MetadataRow {
-    MetadataRow::CommitReceipt {
+    MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
         commit_id: commit_id(),
         committed_by: actor(),
         semantic_commit_fingerprint: "fp:golden".to_owned(),
         committed_seq: ChangeSeq(9),
         committed_at_ms: 9_000,
         message: None,
-    }
+    })
 }
 
 fn sample_inode_rows() -> [MetadataRow; 2] {
     [
-        MetadataRow::Inode {
+        MetadataRow::Inode(loonfs_api::wire::manifest::InodeRecord {
             inode_id: InodeId(1),
             inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(1),
             commit_id: commit_id(),
             created_by: actor(),
             created_at_ms: 1_000,
-        },
-        MetadataRow::Inode {
+        }),
+        MetadataRow::Inode(loonfs_api::wire::manifest::InodeRecord {
             inode_id: InodeId(2),
             inode_kind: InodeKind::File,
             created_seq: ChangeSeq(3),
             commit_id: commit_id(),
             created_by: actor(),
             created_at_ms: 3_000,
-        },
+        }),
     ]
 }
 
 fn sample_revision_rows() -> [MetadataRow; 2] {
     [
-        MetadataRow::FileRevision {
+        MetadataRow::FileRevision(loonfs_api::wire::manifest::RevisionRecord {
             inode_id: InodeId(2),
             revision_no: RevisionNo(1),
             committed_seq: ChangeSeq(3),
@@ -1987,8 +1987,8 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             committed_by: actor(),
             delta_index: 0,
             content_ref: sample_content_ref(),
-        },
-        MetadataRow::FileRevision {
+        }),
+        MetadataRow::FileRevision(loonfs_api::wire::manifest::RevisionRecord {
             inode_id: InodeId(2),
             revision_no: RevisionNo(2),
             committed_seq: ChangeSeq(4),
@@ -1997,7 +1997,7 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             committed_by: actor(),
             delta_index: 0,
             content_ref: sample_crc_content_ref(),
-        },
+        }),
     ]
 }
 
@@ -2024,15 +2024,15 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
         sample_cleared_attributes_row(),
         sample_populated_attributes_row(),
         sample_commit_receipt_row(),
-        MetadataRow::DirentryBind {
+        MetadataRow::DirentryBind(loonfs_api::wire::manifest::DirentryBindRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs"),
             display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(3),
             bind_delta_index: 0,
-        },
-        MetadataRow::DirentryBind {
+        }),
+        MetadataRow::DirentryBind(loonfs_api::wire::manifest::DirentryBindRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
             display_name: loonfs_api::DisplayName::parse("docs-archive")
@@ -2040,8 +2040,8 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             child_inode_id: InodeId(5),
             bind_seq: ChangeSeq(6),
             bind_delta_index: 0,
-        },
-        MetadataRow::DirentryUnbind {
+        }),
+        MetadataRow::DirentryUnbind(loonfs_api::wire::manifest::DirentryUnbindRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
             display_name: loonfs_api::DisplayName::parse("Docs-Archive")
@@ -2051,7 +2051,7 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             bind_delta_index: 0,
             unbind_seq: ChangeSeq(8),
             unbind_delta_index: 0,
-        },
+        }),
     ];
     rows.extend(sample_inode_rows());
     rows.extend(sample_revision_rows());
@@ -2431,18 +2431,18 @@ fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
 fn provenance_rows_reject_every_missing_required_field() {
     let cases = [
         (
-            MetadataRow::Inode {
+            MetadataRow::Inode(loonfs_api::wire::manifest::InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(3),
                 commit_id: commit_id(),
                 created_by: actor(),
                 created_at_ms: 3_000,
-            },
+            }),
             &["commit_id", "created_by", "created_at_ms"][..],
         ),
         (
-            MetadataRow::FileRevision {
+            MetadataRow::FileRevision(loonfs_api::wire::manifest::RevisionRecord {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(3),
@@ -2451,7 +2451,7 @@ fn provenance_rows_reject_every_missing_required_field() {
                 committed_by: actor(),
                 delta_index: 0,
                 content_ref: sample_content_ref(),
-            },
+            }),
             &["commit_id", "committed_by"][..],
         ),
         (sample_tombstone_set_row(), &["commit_id", "deleted_by"][..]),
@@ -2461,14 +2461,14 @@ fn provenance_rows_reject_every_missing_required_field() {
             &["commit_id", "updated_by", "updated_at_ms"][..],
         ),
         (
-            MetadataRow::CommitReceipt {
+            MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
                 commit_id: commit_id(),
                 committed_by: actor(),
                 semantic_commit_fingerprint: "v1:sha256:receipt".to_owned(),
                 committed_seq: ChangeSeq(9),
                 committed_at_ms: 9_000,
                 message: None,
-            },
+            }),
             &["committed_by"][..],
         ),
     ];
@@ -2476,7 +2476,10 @@ fn provenance_rows_reject_every_missing_required_field() {
     for (row, required_fields) in cases {
         // The active-deletion row states its attribution inside `action`;
         // every other row states it at the top level.
-        let nested_in_action = matches!(row, MetadataRow::ActiveDeletion { .. });
+        let nested_in_action = matches!(
+            row,
+            MetadataRow::ActiveDeletion(loonfs_api::wire::manifest::ActiveDeletionRecord { .. })
+        );
         for required_field in required_fields {
             let mut encoded = row_cbor(&row);
             let map = if nested_in_action {
@@ -2501,16 +2504,18 @@ fn provenance_rows_reject_every_missing_required_field() {
 
 #[test]
 fn attribute_rows_reject_the_retired_tagged_value_shape() {
-    let mut row = row_cbor(&MetadataRow::AttributesRevision {
-        inode_id: InodeId(2),
-        attributes_revision_no: AttributeRevisionNo(1),
-        committed_seq: ChangeSeq(5),
-        commit_id: commit_id(),
-        delta_index: 0,
-        updated_by: actor(),
-        updated_at_ms: 5_000,
-        attributes: sample_attributes(),
-    });
+    let mut row = row_cbor(&MetadataRow::AttributesRevision(
+        loonfs_api::wire::manifest::AttributesRevisionRecord {
+            inode_id: InodeId(2),
+            attributes_revision_no: AttributeRevisionNo(1),
+            committed_seq: ChangeSeq(5),
+            commit_id: commit_id(),
+            delta_index: 0,
+            updated_by: actor(),
+            updated_at_ms: 5_000,
+            attributes: sample_attributes(),
+        },
+    ));
     let owner = cbor_entry(cbor_entry(&mut row, "attributes"), "owner");
     *owner = ciborium::Value::Map(vec![
         (
@@ -2529,16 +2534,18 @@ fn attribute_rows_reject_the_retired_tagged_value_shape() {
 
 #[test]
 fn attribute_rows_reject_a_map_over_its_limits() {
-    let mut row = row_cbor(&MetadataRow::AttributesRevision {
-        inode_id: InodeId(2),
-        attributes_revision_no: AttributeRevisionNo(1),
-        committed_seq: ChangeSeq(5),
-        commit_id: commit_id(),
-        delta_index: 0,
-        updated_by: actor(),
-        updated_at_ms: 5_000,
-        attributes: sample_attributes(),
-    });
+    let mut row = row_cbor(&MetadataRow::AttributesRevision(
+        loonfs_api::wire::manifest::AttributesRevisionRecord {
+            inode_id: InodeId(2),
+            attributes_revision_no: AttributeRevisionNo(1),
+            committed_seq: ChangeSeq(5),
+            commit_id: commit_id(),
+            delta_index: 0,
+            updated_by: actor(),
+            updated_at_ms: 5_000,
+            attributes: sample_attributes(),
+        },
+    ));
     let owner = cbor_entry(cbor_entry(&mut row, "attributes"), "owner");
     *owner = ciborium::Value::from("v".repeat(loonfs_api::MAX_ATTRIBUTE_VALUE_BYTES + 1));
 
@@ -2583,14 +2590,14 @@ fn sst_block_filter_matches_golden_bytes_and_answers() {
     assert_matches_golden("sst_block_filter.v1.bin", stored);
     let filter = decode_filter_block(stored, &built.filter).expect("decode filter");
     assert!(filter.may_contain(
-        &MetadataRow::Inode {
+        &MetadataRow::Inode(loonfs_api::wire::manifest::InodeRecord {
             inode_id: InodeId(1),
             inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(1),
             commit_id: commit_id(),
             created_by: actor(),
             created_at_ms: 1_000,
-        }
+        })
         .row_key()
     ));
     assert!(!filter.may_contain("inode-99999999999999999999"));

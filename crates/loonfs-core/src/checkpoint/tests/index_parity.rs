@@ -348,7 +348,11 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     );
     assert!(!receipts.is_empty());
     for row in &receipts {
-        if let MetadataRow::CommitReceipt { committed_seq, .. } = row {
+        if let MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
+            committed_seq,
+            ..
+        }) = row
+        {
             assert!(
                 *committed_seq >= floor,
                 "receipt below floor survived: {committed_seq:?}"
@@ -357,7 +361,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     }
     assert!(receipts.iter().any(|row| matches!(
         row,
-        MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq == floor
+        MetadataRow::CommitReceipt (crate::metadata::CommitReceiptRecord { committed_seq, .. }) if *committed_seq == floor
     )));
 
     let revisions = manifest_rows_for_family(
@@ -368,11 +372,11 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     let checksum_two = Checksum::sha256(b"alpha two\n");
     assert!(revisions.iter().any(|row| matches!(
         row,
-        MetadataRow::FileRevision { content_ref, .. } if content_ref.checksum == checksum_one
+        MetadataRow::FileRevision (crate::metadata::RevisionRecord { content_ref, .. }) if content_ref.checksum == checksum_one
     )));
     assert!(revisions.iter().any(|row| matches!(
         row,
-        MetadataRow::FileRevision { content_ref, .. } if content_ref.checksum == checksum_two
+        MetadataRow::FileRevision (crate::metadata::RevisionRecord { content_ref, .. }) if content_ref.checksum == checksum_two
     )));
     let index_rows = manifest_rows_for_family(
         &materialized.metadata_state,
@@ -386,7 +390,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     );
     assert!(!binds.iter().any(|row| matches!(
         row,
-        MetadataRow::DirentryBind { display_name, .. } if display_name.as_str() == "tmp.txt"
+        MetadataRow::DirentryBind (crate::metadata::DirentryBindRecord { display_name, .. }) if display_name.as_str() == "tmp.txt"
     )));
     let unbinds = manifest_rows_for_family(
         &materialized.metadata_state,
@@ -412,23 +416,27 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
 #[test]
 fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     use std::collections::BTreeMap;
-    let bind = |seq: u64, delta: u32| MetadataRow::DirentryBind {
-        parent_inode_id: InodeId(1),
-        name_key: NameKey::parse("docs").expect("valid name key"),
-        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-        child_inode_id: InodeId(2),
-        bind_seq: ChangeSeq(seq),
-        bind_delta_index: delta,
+    let bind = |seq: u64, delta: u32| {
+        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+            parent_inode_id: InodeId(1),
+            name_key: NameKey::parse("docs").expect("valid name key"),
+            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(seq),
+            bind_delta_index: delta,
+        })
     };
-    let unbind = |bind_seq: u64, delta: u32, unbind_seq: u64| MetadataRow::DirentryUnbind {
-        parent_inode_id: InodeId(1),
-        name_key: NameKey::parse("docs").expect("valid name key"),
-        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-        child_inode_id: InodeId(2),
-        bind_seq: ChangeSeq(bind_seq),
-        bind_delta_index: delta,
-        unbind_seq: ChangeSeq(unbind_seq),
-        unbind_delta_index: 0,
+    let unbind = |bind_seq: u64, delta: u32, unbind_seq: u64| {
+        MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
+            parent_inode_id: InodeId(1),
+            name_key: NameKey::parse("docs").expect("valid name key"),
+            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(bind_seq),
+            bind_delta_index: delta,
+            unbind_seq: ChangeSeq(unbind_seq),
+            unbind_delta_index: 0,
+        })
     };
     let mut rows = BTreeMap::new();
     // bind at seq 1 is visible at the floor (1); the rename that supersedes
@@ -453,15 +461,17 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
 #[test]
 fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     use std::collections::BTreeMap;
-    let bind = |delta: u32| MetadataRow::DirentryBind {
-        parent_inode_id: InodeId(1),
-        name_key: NameKey::parse("docs").expect("valid name key"),
-        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-        child_inode_id: InodeId(2),
-        bind_seq: ChangeSeq(1),
-        bind_delta_index: delta,
+    let bind = |delta: u32| {
+        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+            parent_inode_id: InodeId(1),
+            name_key: NameKey::parse("docs").expect("valid name key"),
+            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(1),
+            bind_delta_index: delta,
+        })
     };
-    let unbind = MetadataRow::DirentryUnbind {
+    let unbind = MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
         parent_inode_id: InodeId(1),
         name_key: NameKey::parse("docs").expect("valid name key"),
         display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
@@ -470,7 +480,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         bind_delta_index: 0,
         unbind_seq: ChangeSeq(1),
         unbind_delta_index: 1,
-    };
+    });
     let mut rows = BTreeMap::new();
     rows.insert(ApiMetadataRowFamily::DirentryBinds, vec![bind(0), bind(2)]);
     rows.insert(
@@ -491,10 +501,10 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         assert_eq!(kept.len(), 1);
         assert!(matches!(
             kept[0],
-            MetadataRow::DirentryBind {
+            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
                 bind_delta_index: 2,
                 ..
-            }
+            })
         ));
     }
     assert!(rows[&ApiMetadataRowFamily::DirentryUnbinds].is_empty());
@@ -503,13 +513,15 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
 #[test]
 fn drop_pass_refuses_superseded_bind_without_unbind() {
     use std::collections::BTreeMap;
-    let bind = |delta: u32| MetadataRow::DirentryBind {
-        parent_inode_id: InodeId(1),
-        name_key: NameKey::parse("docs").expect("valid name key"),
-        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-        child_inode_id: InodeId(2),
-        bind_seq: ChangeSeq(1),
-        bind_delta_index: delta,
+    let bind = |delta: u32| {
+        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+            parent_inode_id: InodeId(1),
+            name_key: NameKey::parse("docs").expect("valid name key"),
+            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(1),
+            bind_delta_index: delta,
+        })
     };
     let mut rows = BTreeMap::new();
     rows.insert(ApiMetadataRowFamily::DirentryBinds, vec![bind(0), bind(1)]);
@@ -544,7 +556,7 @@ async fn bounded_subset_rebuild_rejects_divergent_revision_index() {
     let (_, mut manifest, mut revision_index_rows) =
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     let first = revision_index_rows.first_mut().expect("revision index row");
-    if let MetadataRow::FileRevision { content_ref, .. } = first {
+    if let MetadataRow::FileRevision(crate::metadata::RevisionRecord { content_ref, .. }) = first {
         content_ref.content_id = ContentId::generate();
     }
     rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
@@ -1070,7 +1082,7 @@ async fn manifest_rejects_a_revision_desc_index_that_disagrees_with_its_family()
             |rows| {
                 let extra = rows.first().expect("revision index row").clone();
                 rows.push(match extra {
-                    MetadataRow::FileRevision {
+                    MetadataRow::FileRevision(crate::metadata::RevisionRecord {
                         inode_id,
                         revision_no,
                         committed_seq,
@@ -1079,7 +1091,7 @@ async fn manifest_rejects_a_revision_desc_index_that_disagrees_with_its_family()
                         committed_by,
                         delta_index,
                         content_ref,
-                    } => MetadataRow::FileRevision {
+                    }) => MetadataRow::FileRevision(crate::metadata::RevisionRecord {
                         inode_id,
                         revision_no: loonfs_api::RevisionNo(revision_no.0 + 100),
                         committed_seq,
@@ -1088,7 +1100,7 @@ async fn manifest_rejects_a_revision_desc_index_that_disagrees_with_its_family()
                         committed_by,
                         delta_index,
                         content_ref,
-                    },
+                    }),
                     other => other,
                 });
             },
@@ -1098,7 +1110,11 @@ async fn manifest_rejects_a_revision_desc_index_that_disagrees_with_its_family()
             "changed content ref",
             |rows| {
                 let first = rows.first_mut().expect("revision index row");
-                if let MetadataRow::FileRevision { content_ref, .. } = first {
+                if let MetadataRow::FileRevision(crate::metadata::RevisionRecord {
+                    content_ref,
+                    ..
+                }) = first
+                {
                     content_ref.content_id = ContentId::generate();
                 }
             },

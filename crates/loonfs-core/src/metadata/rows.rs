@@ -1,16 +1,14 @@
-//! Metadata row records plus the append and accounting plumbing that keeps
-//! [`MetadataState`]'s derived indexes and decoded-size totals in step with
-//! its append-only rows.
+//! Metadata state plus the append and accounting logic that keeps its
+//! indexes and decoded-size totals in step with its rows.
 
 use super::indexes::MetadataIndexes;
-use crate::binding_generation::BindingGeneration;
-use loonfs_api::wire::manifest::{lookup_keys, DeletedDirentry, TombstoneGeneration};
-use loonfs_api::{
-    ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName,
-    InodeId, InodeKind, NameKey, RevisionNo,
+use crate::checkpoint::DecodedRowWeight;
+use loonfs_api::wire::manifest::{
+    ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord, CommitReceiptRecord,
+    DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
+    SubtreeTombstoneRecord, TombstoneRowAction,
 };
-use serde::{Deserialize, Serialize};
-use std::mem::size_of;
+use loonfs_api::{ActorRef, ChangeSeq, CommitId, InodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataState {
@@ -40,96 +38,6 @@ impl Default for MetadataState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InodeRecord {
-    pub inode_id: InodeId,
-    pub inode_kind: InodeKind,
-    pub created_seq: ChangeSeq,
-    /// Commit ID associated with this row.
-    pub commit_id: CommitId,
-    pub created_by: ActorRef,
-    /// Time the inode was created, in Unix milliseconds. `created_seq`
-    /// determines order.
-    pub created_at_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DirentryBindRecord {
-    pub parent_inode_id: InodeId,
-    pub name_key: NameKey,
-    pub display_name: DisplayName,
-    pub child_inode_id: InodeId,
-    pub bind_seq: ChangeSeq,
-    pub bind_delta_index: u32,
-}
-
-impl DirentryBindRecord {
-    pub(crate) fn generation(&self) -> BindingGeneration {
-        BindingGeneration {
-            bind_seq: self.bind_seq,
-            bind_delta_index: self.bind_delta_index,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DirentryUnbindRecord {
-    pub parent_inode_id: InodeId,
-    pub name_key: NameKey,
-    /// User-facing spelling the retired binding carried: while the unbind
-    /// row is retained, it is the durable home of a deleted name.
-    pub display_name: DisplayName,
-    pub child_inode_id: InodeId,
-    pub bind_seq: ChangeSeq,
-    pub bind_delta_index: u32,
-    pub unbind_seq: ChangeSeq,
-    pub unbind_delta_index: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RevisionRecord {
-    pub inode_id: InodeId,
-    pub revision_no: RevisionNo,
-    pub committed_seq: ChangeSeq,
-    /// Commit ID associated with this row.
-    pub commit_id: CommitId,
-    /// Observational wall-clock stamp of the owning commit; never a
-    /// validity input — `committed_seq` is the order.
-    pub committed_at_ms: u64,
-    pub committed_by: ActorRef,
-    pub revision_delta_index: u32,
-    pub content_ref: ContentRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubtreeTombstoneRecord {
-    pub root_inode_id: InodeId,
-    /// This event's own generation: the delete's committed position for a
-    /// `Set`, the undelete's for a `Revoke`.
-    pub generation: TombstoneGeneration,
-    /// Commit ID associated with this row.
-    pub commit_id: CommitId,
-    /// Wall-clock stamp of the recording commit.
-    pub deleted_at_ms: u64,
-    pub deleted_by: ActorRef,
-    /// Event action. The newest generation determines whether the deletion is
-    /// active.
-    pub action: SubtreeTombstoneAction,
-}
-
-/// The tombstone family's event vocabulary — an explicit state machine
-/// instead of a boolean, so every reader matches exhaustively and a revoke
-/// names the exact deletion generation it cancels.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SubtreeTombstoneAction {
-    /// The subtree rooted here is deleted. The tombstone row is immortal, so
-    /// this is where the removed binding lives after unbind rows age out.
-    Set { deleted_direntry: DeletedDirentry },
-    /// The deletion recorded at `target` is revoked. Validation guarantees
-    /// the target was the active generation when the revoke committed.
-    Revoke { target: TombstoneGeneration },
-}
-
 /// The newest-event-wins active-tombstone rule, shared by every aggregation
 /// site: among records at or below `visible_seq`, the newest generation
 /// speaks for the root — a `Set` newest means that deletion is active, a
@@ -150,36 +58,7 @@ pub(crate) fn active_tombstone_from_records(
         .into_iter()
         .filter(|tombstone| tombstone.generation.seq <= visible_seq)
         .max_by_key(|tombstone| tombstone.generation)
-        .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set { .. }))
-}
-
-/// One row of the derived `ActiveDeletions` family: the current-state view of
-/// a single deletion generation.
-///
-/// Nothing appends these — [`active_deletion_from_tombstone`] derives one from
-/// every tombstone event, so the family is a projection of the tombstone
-/// family and never a second source of truth.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ActiveDeletionRecord {
-    pub(crate) root_inode_id: InodeId,
-    /// The deletion's committed sequence. Together with `root_inode_id` this
-    /// is the handle `undelete` addresses and the trash entry renders.
-    pub(crate) deletion_seq: ChangeSeq,
-    pub(crate) action: ActiveDeletionAction,
-}
-
-/// Data stored for one active-deletion generation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ActiveDeletionAction {
-    /// The deletion is recoverable, and the trash lists it with these
-    /// details.
-    Listed {
-        deleted_at_ms: u64,
-        deleted_by: ActorRef,
-        deleted_direntry: DeletedDirentry,
-    },
-    /// An undelete cancelled the deletion, so the listing skips the key.
-    Removed { revocation_seq: ChangeSeq },
+        .filter(|tombstone| matches!(tombstone.action, TombstoneRowAction::Set { .. }))
 }
 
 /// Converts a tombstone event into its derived `ActiveDeletions` row. A `set`
@@ -195,56 +74,41 @@ pub(crate) fn active_deletion_from_tombstone(
     tombstone: &SubtreeTombstoneRecord,
 ) -> ActiveDeletionRecord {
     match &tombstone.action {
-        SubtreeTombstoneAction::Set { deleted_direntry } => ActiveDeletionRecord {
+        TombstoneRowAction::Set { deleted_direntry } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
             deletion_seq: tombstone.generation.seq,
-            action: ActiveDeletionAction::Listed {
+            action: ActiveDeletionRowAction::Listed {
                 deleted_at_ms: tombstone.deleted_at_ms,
                 deleted_by: tombstone.deleted_by.clone(),
                 deleted_direntry: deleted_direntry.clone(),
             },
         },
-        SubtreeTombstoneAction::Revoke { target } => ActiveDeletionRecord {
+        TombstoneRowAction::Revoke { target } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
             deletion_seq: target.seq,
-            action: ActiveDeletionAction::Removed {
+            action: ActiveDeletionRowAction::Removed {
                 revocation_seq: tombstone.generation.seq,
             },
         },
     }
 }
 
-impl ActiveDeletionRecord {
-    /// This row's durable key, which is also its position in the trash
-    /// listing's order.
-    pub(crate) fn row_key(&self) -> String {
-        lookup_keys::active_deletion_row_key(
-            self.deletion_seq,
-            self.root_inode_id,
-            match &self.action {
-                ActiveDeletionAction::Listed { .. } => lookup_keys::ACTIVE_DELETION_RANK_LISTED,
-                ActiveDeletionAction::Removed { .. } => lookup_keys::ACTIVE_DELETION_RANK_REMOVED,
-            },
-        )
-    }
-
-    /// The deletion this row lists, or `None` when the row is an undelete's
-    /// removal marker.
-    pub(crate) fn into_recoverable(self) -> Option<RecoverableDeletion> {
-        match self.action {
-            ActiveDeletionAction::Listed {
-                deleted_at_ms,
-                deleted_by,
-                deleted_direntry,
-            } => Some(RecoverableDeletion {
-                root_inode_id: self.root_inode_id,
-                deletion_seq: self.deletion_seq,
-                deleted_at_ms,
-                deleted_by,
-                deleted_direntry,
-            }),
-            ActiveDeletionAction::Removed { .. } => None,
-        }
+pub(crate) fn recoverable_deletion_from_active_record(
+    record: ActiveDeletionRecord,
+) -> Option<RecoverableDeletion> {
+    match record.action {
+        ActiveDeletionRowAction::Listed {
+            deleted_at_ms,
+            deleted_by,
+            deleted_direntry,
+        } => Some(RecoverableDeletion {
+            root_inode_id: record.root_inode_id,
+            deletion_seq: record.deletion_seq,
+            deleted_at_ms,
+            deleted_by,
+            deleted_direntry,
+        }),
+        ActiveDeletionRowAction::Removed { .. } => None,
     }
 }
 
@@ -257,42 +121,6 @@ pub(crate) struct RecoverableDeletion {
     pub(crate) deleted_by: ActorRef,
     /// The binding the delete removed and an in-place undelete restores.
     pub(crate) deleted_direntry: DeletedDirentry,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitReceiptRecord {
-    pub commit_id: CommitId,
-    pub committed_by: ActorRef,
-    pub semantic_commit_fingerprint: String,
-    pub committed_seq: ChangeSeq,
-    /// Observational wall-clock stamp of the commit; never a validity
-    /// input — `committed_seq` is the order.
-    pub committed_at_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-/// One inode's complete attribute map at one revision.
-///
-/// The record is whole state, so a reader takes the newest one for an inode
-/// and needs nothing older. An inode with no record is at revision 0 with an
-/// empty map, which is why nothing is written until a caller writes an
-/// attribute.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttributesRevisionRecord {
-    pub inode_id: InodeId,
-    pub attributes_revision_no: AttributeRevisionNo,
-    pub committed_seq: ChangeSeq,
-    /// Commit ID associated with this row.
-    pub commit_id: CommitId,
-    pub delta_index: u32,
-    pub updated_by: ActorRef,
-    /// Time of the attribute update, in Unix milliseconds. `committed_seq`
-    /// determines order.
-    pub updated_at_ms: u64,
-    /// The inode's attributes after this update. An empty map is the cleared
-    /// state, not an absent record.
-    pub attributes: Attributes,
 }
 
 impl MetadataState {
@@ -384,43 +212,43 @@ impl MetadataState {
 
     pub(crate) fn push_inode_record(&mut self, record: InodeRecord) {
         self.indexes.record_inode(&record);
-        self.record_row_weight(inode_decoded_bytes(&record));
+        self.record_row_weight(record.decoded_weight());
         self.inodes.push(record);
     }
 
     pub(crate) fn push_direntry_bind_record(&mut self, record: DirentryBindRecord) {
         self.indexes.record_bind(&record);
-        self.record_row_weight(direntry_bind_decoded_bytes(&record));
+        self.record_row_weight(record.decoded_weight());
         self.direntry_binds.push(record);
     }
 
     pub(crate) fn push_direntry_unbind_record(&mut self, record: DirentryUnbindRecord) {
         self.indexes.record_unbind(&record);
-        self.record_row_weight(direntry_unbind_decoded_bytes(&record));
+        self.record_row_weight(record.decoded_weight());
         self.direntry_unbinds.push(record);
     }
 
     pub(crate) fn push_revision_record(&mut self, record: RevisionRecord) {
         self.indexes.record_revision(&record);
-        self.record_row_weight(revision_decoded_bytes(&record));
+        self.record_row_weight(record.decoded_weight());
         self.revisions.push(record);
     }
 
     pub(crate) fn push_subtree_tombstone_record(&mut self, record: SubtreeTombstoneRecord) {
         self.indexes.record_tombstone(&record);
-        self.record_row_weight(subtree_tombstone_decoded_bytes(&record));
+        self.record_row_weight(record.decoded_weight());
         self.subtree_tombstones.push(record);
     }
 
     pub(crate) fn push_commit_receipt_record(&mut self, record: CommitReceiptRecord) {
         self.indexes.record_commit_receipt(&record);
-        self.record_row_weight(commit_receipt_decoded_bytes(&record));
+        self.record_row_weight(record.decoded_weight());
         self.commit_receipts.push(record);
     }
 
     pub(crate) fn push_attributes_revision_record(&mut self, record: AttributesRevisionRecord) {
         self.indexes.record_attributes_revision(&record);
-        self.record_row_weight(attributes_revision_decoded_bytes(&record));
+        self.record_row_weight(record.decoded_weight());
         self.attributes_revisions.push(record);
     }
 
@@ -485,111 +313,17 @@ fn metadata_row_count(state: &MetadataState) -> usize {
 }
 
 fn metadata_decoded_bytes(state: &MetadataState) -> usize {
-    state
-        .inodes
-        .iter()
-        .map(inode_decoded_bytes)
-        .sum::<usize>()
-        .saturating_add(
-            state
-                .direntry_binds
-                .iter()
-                .map(direntry_bind_decoded_bytes)
-                .sum::<usize>(),
-        )
-        .saturating_add(
-            state
-                .direntry_unbinds
-                .iter()
-                .map(direntry_unbind_decoded_bytes)
-                .sum::<usize>(),
-        )
-        .saturating_add(
-            state
-                .revisions
-                .iter()
-                .map(revision_decoded_bytes)
-                .sum::<usize>(),
-        )
-        .saturating_add(
-            state
-                .subtree_tombstones
-                .iter()
-                .map(subtree_tombstone_decoded_bytes)
-                .sum::<usize>(),
-        )
-        .saturating_add(
-            state
-                .commit_receipts
-                .iter()
-                .map(commit_receipt_decoded_bytes)
-                .sum::<usize>(),
-        )
-        .saturating_add(
-            state
-                .attributes_revisions
-                .iter()
-                .map(attributes_revision_decoded_bytes)
-                .sum::<usize>(),
-        )
-}
-
-fn inode_decoded_bytes(record: &InodeRecord) -> usize {
-    size_of::<InodeRecord>()
-        + record.commit_id.as_str().len()
-        + actor_ref_decoded_bytes(&record.created_by)
-}
-
-fn subtree_tombstone_decoded_bytes(record: &SubtreeTombstoneRecord) -> usize {
-    size_of::<SubtreeTombstoneRecord>()
-        + record.commit_id.as_str().len()
-        + actor_ref_decoded_bytes(&record.deleted_by)
-}
-
-fn direntry_bind_decoded_bytes(record: &DirentryBindRecord) -> usize {
-    size_of::<DirentryBindRecord>()
-        + record.name_key.as_str().len()
-        + record.display_name.as_str().len()
-}
-
-fn direntry_unbind_decoded_bytes(record: &DirentryUnbindRecord) -> usize {
-    size_of::<DirentryUnbindRecord>() + record.name_key.as_str().len()
-}
-
-fn revision_decoded_bytes(record: &RevisionRecord) -> usize {
-    size_of::<RevisionRecord>()
-        + record.commit_id.as_str().len()
-        + actor_ref_decoded_bytes(&record.committed_by)
-        + content_ref_decoded_bytes(&record.content_ref)
-}
-
-fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
-    size_of::<CommitReceiptRecord>()
-        + record.commit_id.as_str().len()
-        + actor_ref_decoded_bytes(&record.committed_by)
-        + record.semantic_commit_fingerprint.len()
-        + record.message.as_ref().map_or(0, String::len)
-}
-
-/// The record's struct plus the key and value bytes its map owns. Attribute
-/// maps are caller-sized, so the map's own bytes are what this row weighs.
-fn attributes_revision_decoded_bytes(record: &AttributesRevisionRecord) -> usize {
-    size_of::<AttributesRevisionRecord>()
-        + record.commit_id.as_str().len()
-        + actor_ref_decoded_bytes(&record.updated_by)
-        + record.attributes.logical_bytes()
-}
-
-fn actor_ref_decoded_bytes(actor: &ActorRef) -> usize {
-    actor.kind.as_str().len() + actor.id.as_str().len()
-}
-
-fn content_ref_decoded_bytes(content_ref: &ContentRef) -> usize {
-    size_of::<ContentRef>() + content_ref_evidence_bytes(content_ref)
-}
-
-/// Heap bytes a content reference owns beyond its struct: the identity and
-/// the checksum strings.
-pub(crate) fn content_ref_evidence_bytes(content_ref: &ContentRef) -> usize {
-    content_ref.content_id.as_str().len() + content_ref.checksum.value.len()
+    fn total<R: DecodedRowWeight>(records: &[R]) -> usize {
+        records
+            .iter()
+            .map(DecodedRowWeight::decoded_weight)
+            .fold(0, usize::saturating_add)
+    }
+    total(&state.inodes)
+        .saturating_add(total(&state.direntry_binds))
+        .saturating_add(total(&state.direntry_unbinds))
+        .saturating_add(total(&state.revisions))
+        .saturating_add(total(&state.subtree_tombstones))
+        .saturating_add(total(&state.commit_receipts))
+        .saturating_add(total(&state.attributes_revisions))
 }

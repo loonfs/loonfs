@@ -1017,13 +1017,5 @@ struct DirentryBindPageCandidate {
 }
 
 fn direntry_bind_row_key(record: &DirentryBindRecord) -> String {
-    MetadataRow::DirentryBind {
-        parent_inode_id: record.parent_inode_id,
-        name_key: record.name_key.clone(),
-        display_name: record.display_name.clone(),
-        child_inode_id: record.child_inode_id,
-        bind_seq: record.bind_seq,
-        bind_delta_index: record.bind_delta_index,
-    }
-    .row_key_for_family(MetadataRowFamily::DirentryBinds)
+    MetadataRow::DirentryBind(record.clone()).row_key_for_family(MetadataRowFamily::DirentryBinds)
 }

@@ -47,14 +47,14 @@ pub(super) fn unbinding_at_or_below_floor(
     row: &MetadataRow,
     retention_floor_seq: ChangeSeq,
 ) -> Option<BindingGeneration> {
-    let MetadataRow::DirentryUnbind {
+    let MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
         parent_inode_id,
         name_key,
         bind_seq,
         bind_delta_index,
         unbind_seq,
         ..
-    } = row
+    }) = row
     else {
         return None;
     };
@@ -79,13 +79,13 @@ pub(super) fn bind_survives_frozen_floor(
     retention_floor_seq: ChangeSeq,
     unbound_at_floor: &BTreeSet<BindingGeneration>,
 ) -> bool {
-    let MetadataRow::DirentryBind {
+    let MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
         parent_inode_id,
         name_key,
         bind_seq,
         bind_delta_index,
         ..
-    } = row
+    }) = row
     else {
         return true;
     };

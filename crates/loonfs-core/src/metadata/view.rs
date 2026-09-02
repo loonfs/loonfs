@@ -10,10 +10,10 @@ use super::visibility::{self, MetadataVisibilityReads};
 use crate::checkpoint::VerifiedMetadataSegments;
 use crate::error::CoreError;
 use crate::metadata::{
-    active_deletion_from_tombstone, unbind_matches_binding, ActiveDeletionRecord,
-    AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, MetadataState, RecoverableDeletion, ResolvedVisiblePath, RevisionRecord,
-    SubtreeTombstoneRecord,
+    active_deletion_from_tombstone, recoverable_deletion_from_active_record,
+    unbind_matches_binding, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
+    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, RecoverableDeletion,
+    ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::lookup_keys;
@@ -875,7 +875,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             }
             last_row_key = Some(row_key);
             let generation = (record.deletion_seq, record.root_inode_id);
-            match record.into_recoverable() {
+            match recoverable_deletion_from_active_record(record) {
                 None => removed_generation = Some(generation),
                 Some(deletion) if removed_generation != Some(generation) => entries.push(deletion),
                 Some(_) => {}
@@ -1025,11 +1025,7 @@ fn attributes_order_key(
 }
 
 fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, loonfs_api::ChangeSeq, u32) {
-    (
-        record.revision_no,
-        record.committed_seq,
-        record.revision_delta_index,
-    )
+    (record.revision_no, record.committed_seq, record.delta_index)
 }
 
 fn revision_is_after_position_desc(

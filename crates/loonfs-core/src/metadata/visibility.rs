@@ -9,6 +9,7 @@ use super::queries::{ResolvedVisiblePath, VisiblePathError};
 use super::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
+use crate::binding_generation::BindingGeneration;
 use futures::FutureExt;
 use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use std::collections::BTreeSet;
@@ -53,10 +54,14 @@ impl<'a> From<&'a DirentryUnbindRecord> for BindingIdentity<'a> {
     }
 }
 
-impl DirentryBindRecord {
-    /// True iff `self` and `other` describe the same binding event.
-    pub(crate) fn same_binding(&self, other: &DirentryBindRecord) -> bool {
-        BindingIdentity::from(self) == BindingIdentity::from(other)
+pub(crate) fn same_binding(left: &DirentryBindRecord, right: &DirentryBindRecord) -> bool {
+    BindingIdentity::from(left) == BindingIdentity::from(right)
+}
+
+pub(crate) fn binding_generation(record: &DirentryBindRecord) -> BindingGeneration {
+    BindingGeneration {
+        bind_seq: record.bind_seq,
+        bind_delta_index: record.bind_delta_index,
     }
 }
 
@@ -291,7 +296,7 @@ pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
         );
         return Ok(None);
     };
-    if !latest_binding.same_binding(&direntry) {
+    if !same_binding(&latest_binding, &direntry) {
         trace_absent_leg(
             AbsentVisibilityLeg::BindingSuperseded,
             parent_inode_id,
@@ -485,7 +490,7 @@ where
         current_absolute_path =
             join_display_path(&current_absolute_path, direntry.display_name.as_str());
         current_display_name = direntry.display_name.to_string();
-        current_binding_generation = Some(direntry.generation());
+        current_binding_generation = Some(binding_generation(&direntry));
     }
 
     let inode = reads

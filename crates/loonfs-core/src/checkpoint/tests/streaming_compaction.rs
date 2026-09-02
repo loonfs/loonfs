@@ -415,11 +415,11 @@ async fn undelete_newest_deletion<S: ObjectStore + ?Sized>(
     let (root_inode_id, deletion_seq) = rows[&ApiMetadataRowFamily::ActiveDeletions]
         .iter()
         .filter_map(|row| match row {
-            MetadataRow::ActiveDeletion {
+            MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
                 root_inode_id,
                 deletion_seq,
                 action: ActiveDeletionRowAction::Listed { .. },
-            } => Some((*root_inode_id, *deletion_seq)),
+            }) => Some((*root_inode_id, *deletion_seq)),
             _ => None,
         })
         .max_by_key(|(_, deletion_seq)| *deletion_seq)
@@ -1203,7 +1203,7 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
     let reverse_rows_at_or_below_floor = before[&ApiMetadataRowFamily::DirentryChildBinds]
         .iter()
         .filter(|row| {
-            matches!(row, MetadataRow::DirentryBind { bind_seq, .. } if *bind_seq <= frozen_floor_seq)
+            matches!(row, MetadataRow::DirentryBind (crate::metadata::DirentryBindRecord { bind_seq, .. }) if *bind_seq <= frozen_floor_seq)
         })
         .count() as u64;
     assert!(
@@ -1760,24 +1760,28 @@ async fn install_synthetic_bindings_base(
         let scrambled = index.wrapping_mul(2_654_435_761) % count;
         let name = format!("g{scrambled:012}");
         let delta = u32::try_from(index).expect("test generation counts are small");
-        binds.push(MetadataRow::DirentryBind {
-            parent_inode_id: parent,
-            name_key: NameKey::parse(&name).expect("name key"),
-            display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
-            child_inode_id: InodeId(100_000 + index),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: delta,
-        });
-        unbinds.push(MetadataRow::DirentryUnbind {
-            parent_inode_id: parent,
-            name_key: NameKey::parse(&name).expect("name key"),
-            display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
-            child_inode_id: InodeId(100_000 + index),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: delta,
-            unbind_seq: ChangeSeq(2),
-            unbind_delta_index: delta,
-        });
+        binds.push(MetadataRow::DirentryBind(
+            crate::metadata::DirentryBindRecord {
+                parent_inode_id: parent,
+                name_key: NameKey::parse(&name).expect("name key"),
+                display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+                child_inode_id: InodeId(100_000 + index),
+                bind_seq: ChangeSeq(1),
+                bind_delta_index: delta,
+            },
+        ));
+        unbinds.push(MetadataRow::DirentryUnbind(
+            crate::metadata::DirentryUnbindRecord {
+                parent_inode_id: parent,
+                name_key: NameKey::parse(&name).expect("name key"),
+                display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+                child_inode_id: InodeId(100_000 + index),
+                bind_seq: ChangeSeq(1),
+                bind_delta_index: delta,
+                unbind_seq: ChangeSeq(2),
+                unbind_delta_index: delta,
+            },
+        ));
     }
 
     let mut manifest = load_current_manifest_segments(store, namespace_id)
@@ -2527,12 +2531,14 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     ] {
         for row in &before[&family] {
             match row {
-                MetadataRow::DirentryBind {
-                    parent_inode_id, ..
-                }
-                | MetadataRow::DirentryUnbind {
-                    parent_inode_id, ..
-                } => *rows_per_parent.entry(*parent_inode_id).or_default() += 1,
+                MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+                    parent_inode_id,
+                    ..
+                })
+                | MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
+                    parent_inode_id,
+                    ..
+                }) => *rows_per_parent.entry(*parent_inode_id).or_default() += 1,
                 _ => {}
             }
         }
@@ -2701,7 +2707,7 @@ fn unbinds_at_or_below(
     rows[&ApiMetadataRowFamily::DirentryUnbinds]
         .iter()
         .filter(|row| {
-            matches!(row, MetadataRow::DirentryUnbind { unbind_seq, .. } if *unbind_seq <= floor_seq)
+            matches!(row, MetadataRow::DirentryUnbind (crate::metadata::DirentryUnbindRecord { unbind_seq, .. }) if *unbind_seq <= floor_seq)
         })
         .count()
 }

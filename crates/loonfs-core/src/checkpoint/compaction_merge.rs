@@ -261,18 +261,18 @@ mod tests {
     use loonfs_api::{ChangeSeq, DisplayName, InodeId, NameKey};
 
     fn bind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryBind {
+        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
             display_name: DisplayName::parse(name).expect("display name"),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(bind_seq),
             bind_delta_index: 0,
-        }
+        })
     }
 
     fn unbind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryUnbind {
+        MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
             display_name: DisplayName::parse(name).expect("display name"),
@@ -281,7 +281,7 @@ mod tests {
             bind_delta_index: 0,
             unbind_seq: ChangeSeq(bind_seq + 1),
             unbind_delta_index: 0,
-        }
+        })
     }
 
     /// The grouping the bindings cluster merges by.

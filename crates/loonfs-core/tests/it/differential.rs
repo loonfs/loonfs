@@ -7,7 +7,7 @@ use loonfs_api::{
     CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_core::metadata::{
-    MetadataState as CoreMetadataState, SubtreeTombstoneAction as CoreTombstoneAction,
+    MetadataState as CoreMetadataState, TombstoneRowAction as CoreTombstoneAction,
 };
 use loonfs_model::metadata::{
     MetadataState as ModelMetadataState, SubtreeTombstoneAction as ModelTombstoneAction,
@@ -537,7 +537,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     revision.commit_id.clone(),
                     revision.committed_at_ms,
                     revision.committed_by.clone(),
-                    revision.revision_delta_index,
+                    revision.delta_index,
                     revision.content_ref.content_id.clone(),
                 )
             })

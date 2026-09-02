@@ -674,7 +674,7 @@ mod tests {
     use crate::{ChangeSeq, InodeId, InodeKind};
 
     fn inode_row(inode_id: u64) -> (String, String, MetadataRow) {
-        let row = MetadataRow::Inode {
+        let row = MetadataRow::Inode(crate::manifest::InodeRecord {
             inode_id: InodeId(inode_id),
             inode_kind: InodeKind::File,
             created_seq: ChangeSeq(inode_id),
@@ -682,7 +682,7 @@ mod tests {
                 .expect("valid commit id"),
             created_by: crate::ActorRef::loonfs_system(),
             created_at_ms: inode_id,
-        };
+        });
         let key = row.row_key();
         (key.clone(), key, row)
     }
