@@ -300,7 +300,7 @@ pub async fn app(
         .grep
         .mode
         .serves_grep()
-        .then(|| Arc::new(GrepService::with_block_cache(Arc::clone(&grep_block_cache))));
+        .then(|| Arc::new(GrepService::new(Arc::clone(&grep_block_cache))));
     let grep_maintenance = if maintains_grep_index {
         let grep_worker = grep_worker
             .as_ref()

@@ -144,7 +144,7 @@ impl ReadCore {
                 instruments.metadata_segment_cache_observer(),
             ))
         });
-        let wal_tail_projection_cache = Arc::new(WalTailProjectionCache::with_observer(
+        let wal_tail_projection_cache = Arc::new(WalTailProjectionCache::new(
             WalTailProjectionCacheConfig {
                 max_entries: config.runtime_cache.max_cached_namespaces,
                 max_rows: config.runtime_cache.max_cached_wal_tail_projection_rows,

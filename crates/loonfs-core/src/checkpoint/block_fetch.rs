@@ -441,15 +441,7 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
         None => fetch().await?,
     };
     memo.record(&cache_key, &block);
-    match block {
-        DecodedMetadataSegmentBlock::Index { entries, .. } => Ok(entries),
-        DecodedMetadataSegmentBlock::Filter { .. }
-        | DecodedMetadataSegmentBlock::Data { .. }
-        | DecodedMetadataSegmentBlock::Manifest { .. } => Err(segment_codec_error(
-            &metadata_segment_object_key(descriptor),
-            "cache returned a non-index block for an index key",
-        )),
-    }
+    block.into_index(&metadata_segment_object_key(descriptor))
 }
 
 /// Loads a segment's bloom filter block: the cheap pre-index check a lookup
@@ -519,13 +511,5 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         None => fetch().await?,
     };
     memo.record(&cache_key, &block);
-    match block {
-        DecodedMetadataSegmentBlock::Filter { filter, .. } => Ok(filter),
-        DecodedMetadataSegmentBlock::Index { .. }
-        | DecodedMetadataSegmentBlock::Data { .. }
-        | DecodedMetadataSegmentBlock::Manifest { .. } => Err(segment_codec_error(
-            &metadata_segment_object_key(descriptor),
-            "cache returned a non-filter block",
-        )),
-    }
+    block.into_filter(&metadata_segment_object_key(descriptor))
 }

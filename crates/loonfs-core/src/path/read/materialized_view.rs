@@ -748,18 +748,18 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             "loonfs.phase",
             phase = "list_page_build_entries",
             list_page_children_returned = children.len() as u64,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[0] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[1] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[2] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[3] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[4] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[5] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[6] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[7] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[8] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[9] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[10] } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[11] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[0].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[1].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[2].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[3].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[4].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[5].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[6].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[7].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[8].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[9].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[10].0 } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[11].0 } = tracing::field::Empty,
         );
         let entries = async {
             // A projected page reads every child's attributes as one wave,
@@ -825,13 +825,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         // as a file; only the projection decides whether the read happens.
         let attributes = match attributes {
             AttributeInclusion::Include => {
-                let (revision_no, attributes, updated_by, updated_at_ms) =
-                    session.attributes_of_visible(resolved.inode_id).await?;
+                let projection = session.attributes_of_visible(resolved.inode_id).await?;
                 Some(AttributesProjection {
-                    attributes_revision_no: revision_no,
-                    attributes_updated_by: updated_by,
-                    attributes_updated_at_ms: updated_at_ms,
-                    attributes,
+                    attributes_revision_no: projection.revision_no,
+                    attributes_updated_by: projection.updated_by,
+                    attributes_updated_at_ms: projection.updated_at_ms,
+                    attributes: projection.attributes,
                 })
             }
             AttributeInclusion::Omit => None,

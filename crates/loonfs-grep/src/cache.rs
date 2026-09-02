@@ -3,90 +3,23 @@
 use crate::codec::IndexRow;
 use crate::root::GrepManifestState;
 use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
-use loonfs::{DecodedBlock, DecodedBlockCache, DecodedBlockCacheObserver};
-use loonfs_api::wire::sst_blocks::{
-    DecodedDataBlock, SegmentFilter, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
+use loonfs::{
+    DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver, DecodedBlockWeight,
+    DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
 };
+use loonfs_api::wire::sst_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use std::sync::Arc;
 
 /// Default decoded-byte budget for cached grep manifests and segment blocks.
 pub const DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES: usize = 4_096 * DEFAULT_TARGET_BLOCK_BYTES;
 
 /// Grep's cache for decoded manifests and segment blocks.
-pub type GrepBlockCache = DecodedBlockCache<GrepBlockCacheKey, DecodedGrepBlock>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum GrepBlockKind {
-    Manifest,
-    Filter,
-    Index,
-    Data,
-}
-
-/// Identifies a cached grep block.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct GrepBlockCacheKey {
-    /// Immutable cache identity. Manifest entries use `payload_checksum`;
-    /// segment blocks use `object_checksum`.
-    pub(crate) identity: String,
-    pub(crate) block_kind: GrepBlockKind,
-    pub(crate) block_offset: u64,
-}
+pub type GrepBlockCache = DecodedBlockCache<SegmentCacheKey, DecodedGrepBlock>;
 
 /// A decoded grep block.
-#[derive(Debug, Clone)]
-pub enum DecodedGrepBlock {
-    Manifest {
-        state: Arc<GrepManifestState>,
-        decoded_bytes: usize,
-    },
-    Filter {
-        filter: Arc<SegmentFilter>,
-        decoded_bytes: usize,
-    },
-    Index {
-        entries: Arc<Vec<SegmentIndexEntry>>,
-        decoded_bytes: usize,
-    },
-    Data {
-        block: Arc<DecodedDataBlock<IndexRow>>,
-        decoded_bytes: usize,
-    },
-}
-
-impl DecodedGrepBlock {
-    pub(crate) fn filter(self) -> Option<Arc<SegmentFilter>> {
-        match self {
-            Self::Filter { filter, .. } => Some(filter),
-            Self::Manifest { .. } | Self::Index { .. } | Self::Data { .. } => None,
-        }
-    }
-
-    pub(crate) fn index(self) -> Option<Arc<Vec<SegmentIndexEntry>>> {
-        match self {
-            Self::Index { entries, .. } => Some(entries),
-            Self::Manifest { .. } | Self::Filter { .. } | Self::Data { .. } => None,
-        }
-    }
-
-    pub(crate) fn data(self) -> Option<Arc<DecodedDataBlock<IndexRow>>> {
-        match self {
-            Self::Data { block, .. } => Some(block),
-            Self::Manifest { .. } | Self::Filter { .. } | Self::Index { .. } => None,
-        }
-    }
-}
-
-impl DecodedBlock for DecodedGrepBlock {
-    fn decoded_bytes(&self) -> usize {
-        match self {
-            Self::Manifest { decoded_bytes, .. }
-            | Self::Filter { decoded_bytes, .. }
-            | Self::Index { decoded_bytes, .. }
-            | Self::Data { decoded_bytes, .. } => *decoded_bytes,
-        }
-    }
-}
+pub type DecodedGrepBlock = DecodedSegmentBlock<IndexRow, Arc<GrepManifestState>>;
+pub(crate) type GrepBlockKind = SegmentBlockKind;
+pub type GrepBlockCacheKey = SegmentCacheKey;
 
 struct GrepBlockCacheMetrics {
     hits: Arc<dyn CounterHandle>,
@@ -126,10 +59,10 @@ pub fn new_grep_block_cache(
     max_decoded_bytes: usize,
     recorder: &dyn MetricsRecorder,
 ) -> GrepBlockCache {
-    GrepBlockCache::with_observer(
-        max_decoded_bytes,
-        Some(Arc::new(GrepBlockCacheMetrics::register(recorder))),
-    )
+    GrepBlockCache::new(DecodedBlockCacheConfig {
+        observer: Some(Arc::new(GrepBlockCacheMetrics::register(recorder))),
+        ..DecodedBlockCacheConfig::with_max_decoded_bytes(max_decoded_bytes)
+    })
 }
 
 impl DecodedBlockCacheObserver for GrepBlockCacheMetrics {
@@ -145,7 +78,7 @@ impl DecodedBlockCacheObserver for GrepBlockCacheMetrics {
         self.inserts.increment(1);
     }
 
-    fn evict(&self) {
+    fn evict(&self, _weight: DecodedBlockWeight) {
         self.evictions.increment(1);
     }
 }
@@ -196,10 +129,10 @@ mod tests {
     #[test]
     fn cache_activity_reaches_the_metrics_recorder() {
         let recorder = DefaultMetricsRecorder::new();
-        let cache = GrepBlockCache::with_observer(
-            1_000,
-            Some(Arc::new(GrepBlockCacheMetrics::register(&recorder))),
-        );
+        let cache = GrepBlockCache::new(loonfs::DecodedBlockCacheConfig {
+            observer: Some(Arc::new(GrepBlockCacheMetrics::register(&recorder))),
+            ..loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(1_000)
+        });
         cache.insert(key("a"), block(600));
         cache.insert(key("b"), block(600));
         assert!(cache.get(&key("a")).is_none());
@@ -234,7 +167,9 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_loads_of_one_key_run_one_underlying_load() {
-        let cache = GrepBlockCache::new(1_000);
+        let cache = GrepBlockCache::new(loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
+            1_000,
+        ));
         let loads = AtomicUsize::new(0);
         let cache_key = key("a");
         let first = cache.get_or_load(&cache_key, || async {

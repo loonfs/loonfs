@@ -50,7 +50,7 @@ impl ServiceHarness {
             store,
             namespace_id,
             reader,
-            service: GrepService::new(),
+            service: GrepService::default(),
         }
     }
 

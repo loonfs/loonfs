@@ -206,17 +206,19 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
     );
 
     assert_eq!(metadata_state.indexed_seq(), ChangeSeq(2));
-    assert!(metadata_state.inode_at_head(InodeId(2)).is_some());
+    assert!(metadata_state
+        .inode_at_seq(InodeId(2), metadata_state.indexed_seq())
+        .is_some());
     assert_eq!(
         metadata_state
-            .visible_child_at_head(InodeId(1), &name_key("docs"))
+            .visible_child(InodeId(1), &name_key("docs"), metadata_state.indexed_seq(),)
             .expect("docs visible")
             .child_inode_id,
         InodeId(2)
     );
     assert_eq!(
         metadata_state
-            .current_parent_binding_for_child_at_head(InodeId(2))
+            .current_parent_binding_for_child(InodeId(2), metadata_state.indexed_seq())
             .expect("parent binding")
             .parent_inode_id,
         InodeId(1)
@@ -238,10 +240,10 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         }],
     );
     assert!(metadata_state
-        .visible_child_at_head(InodeId(1), &name_key("docs"))
+        .visible_child(InodeId(1), &name_key("docs"), metadata_state.indexed_seq(),)
         .is_none());
     assert!(metadata_state
-        .current_parent_binding_for_child_at_head(InodeId(2))
+        .current_parent_binding_for_child(InodeId(2), metadata_state.indexed_seq())
         .is_none());
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
@@ -258,11 +260,15 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         }],
     );
     assert!(metadata_state
-        .visible_child_at_head(InodeId(1), &name_key("docs"))
+        .visible_child(InodeId(1), &name_key("docs"), metadata_state.indexed_seq(),)
         .is_none());
     assert_eq!(
         metadata_state
-            .visible_child_at_head(InodeId(1), &name_key("renamed"))
+            .visible_child(
+                InodeId(1),
+                &name_key("renamed"),
+                metadata_state.indexed_seq(),
+            )
             .expect("renamed visible")
             .child_inode_id,
         InodeId(2)
@@ -280,11 +286,15 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         }],
     );
     assert!(metadata_state
-        .visible_child_at_head(InodeId(1), &name_key("renamed"))
+        .visible_child(
+            InodeId(1),
+            &name_key("renamed"),
+            metadata_state.indexed_seq(),
+        )
         .is_none());
     assert_eq!(
         metadata_state
-            .covering_subtree_tombstone_at_head(InodeId(3))
+            .covering_subtree_tombstone(InodeId(3), metadata_state.indexed_seq())
             .expect("descendant tombstone")
             .root_inode_id,
         InodeId(2)
@@ -347,13 +357,17 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
 
     assert_eq!(
         metadata_state
-            .visible_child_at_head(InodeId(1), &name_key("report"))
+            .visible_child(
+                InodeId(1),
+                &name_key("report"),
+                metadata_state.indexed_seq(),
+            )
             .expect("latest child")
             .child_inode_id,
         InodeId(3)
     );
     assert!(metadata_state
-        .current_parent_binding_for_child_at_head(InodeId(2))
+        .current_parent_binding_for_child(InodeId(2), metadata_state.indexed_seq())
         .is_none());
 }
 
@@ -853,15 +867,15 @@ fn queries_above_indexed_seq_match_at_head_results() {
     );
     assert_eq!(
         state.visible_child(InodeId(1), &name_key("contested"), beyond_head),
-        state.visible_child_at_head(InodeId(1), &name_key("contested")),
+        state.visible_child(InodeId(1), &name_key("contested"), state.indexed_seq(),),
     );
     assert_eq!(
         state.current_parent_binding_for_child(InodeId(2), beyond_head),
-        state.current_parent_binding_for_child_at_head(InodeId(2)),
+        state.current_parent_binding_for_child(InodeId(2), state.indexed_seq()),
     );
     assert_eq!(
         state.visible_inode(InodeId(3), beyond_head),
-        state.visible_inode_at_head(InodeId(3)),
+        state.visible_inode(InodeId(3), state.indexed_seq()),
     );
 }
 

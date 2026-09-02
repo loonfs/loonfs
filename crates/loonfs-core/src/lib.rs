@@ -98,17 +98,19 @@ pub mod time;
 /// runtime owns these caches and their statistics.
 pub mod cache {
     pub use crate::block_cache::{
-        DecodedBlock, DecodedBlockCache, DecodedBlockCacheObserver, DecodedBlockCacheStats,
+        DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
+        DecodedBlockCacheStats, DecodedBlockWeight, DecodedSegmentBlock, SegmentBlockKind,
+        SegmentCacheKey,
     };
     pub use crate::recency::Recency;
 
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataSegmentCache,
-        MetadataSegmentCacheConfig, MetadataSegmentCacheObserver, MetadataSegmentCacheStats,
-        StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
-        StoredMetadataBlockKind, WalTailProjectionCache, WalTailProjectionCacheConfig,
-        WalTailProjectionCacheKey, WalTailProjectionCacheObserver, WalTailProjectionCacheStats,
-        DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+        MetadataSegmentCacheConfig, MetadataSegmentCacheStats, StoredMetadataBlockCache,
+        StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
+        WalTailProjectionCache, WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
+        WalTailProjectionCacheStats, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+        DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{
         load_deleted_namespace_diagnostics, load_namespace, load_namespace_diagnostics,

@@ -76,15 +76,7 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         None => fetch().await?,
     };
     memo.record(&cache_key, &block);
-    match block {
-        DecodedMetadataSegmentBlock::Data { block, .. } => Ok(block),
-        DecodedMetadataSegmentBlock::Index { .. }
-        | DecodedMetadataSegmentBlock::Filter { .. }
-        | DecodedMetadataSegmentBlock::Manifest { .. } => Err(segment_codec_error(
-            &metadata_segment_object_key(descriptor),
-            "cache returned a non-data block for a data key",
-        )),
-    }
+    block.into_data(&metadata_segment_object_key(descriptor))
 }
 
 pub(super) fn decoded_data_cache_block(block: DecodedDataBlock) -> DecodedMetadataSegmentBlock {

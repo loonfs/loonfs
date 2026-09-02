@@ -4,7 +4,6 @@
 //! fetching row data. Other checkpoint modules load blocks. Full
 //! materialization is available only in tests.
 
-use super::block_fetch::segment_codec_error;
 pub(super) use super::block_load::SessionBlockMemo;
 use super::cache::{
     DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, MetadataSegmentCache,
@@ -263,8 +262,7 @@ pub(crate) async fn load_verified_manifest_segments<'a, S: ObjectStore + ?Sized>
         validate_manifest(&manifest_key, &manifest.payload)?;
         let scan_runs = Arc::new(runs_in_reorganization_order(&manifest.payload));
         Ok(DecodedMetadataSegmentBlock::Manifest {
-            manifest: Arc::new(manifest),
-            scan_runs,
+            manifest: (Arc::new(manifest), scan_runs),
             // The entry retains the envelope plus its scan-ordered run list.
             decoded_bytes: manifest_bytes.len().saturating_mul(2),
         })
@@ -280,21 +278,7 @@ pub(crate) async fn load_verified_manifest_segments<'a, S: ObjectStore + ?Sized>
         }
         None => fetch().await?,
     };
-    let (manifest, scan_runs) = match decoded {
-        DecodedMetadataSegmentBlock::Manifest {
-            manifest,
-            scan_runs,
-            ..
-        } => (manifest, scan_runs),
-        DecodedMetadataSegmentBlock::Index { .. }
-        | DecodedMetadataSegmentBlock::Filter { .. }
-        | DecodedMetadataSegmentBlock::Data { .. } => {
-            return Err(segment_codec_error(
-                &manifest_key,
-                "cache returned a non-manifest entry for a manifest key",
-            ));
-        }
-    };
+    let (manifest, scan_runs) = decoded.into_manifest(&manifest_key)?;
     let segments = VerifiedMetadataSegments {
         store,
         segment_cache,

@@ -1,25 +1,25 @@
 //! At-head indexes over the in-memory metadata rows, maintained
 //! incrementally as deltas apply so head reads skip the row scans.
 
-use super::visibility::{same_binding, unbind_matches_binding};
+use super::visibility::{same_binding, unbind_matches_binding, BindingIdentity};
 use super::{
     AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
     InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataIndexes {
     indexed_seq: ChangeSeq,
     inode_by_id: HashMap<InodeId, InodeRecord>,
-    active_child_by_parent_name: BTreeMap<(InodeId, NameKey), DirentryBindRecord>,
+    active_child_by_parent_name: HashMap<(InodeId, NameKey), DirentryBindRecord>,
     /// Latest bind ever recorded per (parent, name), kept even after the
     /// binding is unbound. Tombstone-ancestry checks need to see dead
     /// bindings, which the active map deliberately drops.
     latest_bind_by_parent_name: HashMap<(InodeId, NameKey), DirentryBindRecord>,
     active_parent_by_child: HashMap<InodeId, DirentryBindRecord>,
-    unbound_binding_keys: HashSet<BindingKey>,
+    unbound_binding_keys: HashSet<BindingIdentity>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
     commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
 }
@@ -29,7 +29,7 @@ impl Default for MetadataIndexes {
         Self {
             indexed_seq: ChangeSeq(0),
             inode_by_id: HashMap::new(),
-            active_child_by_parent_name: BTreeMap::new(),
+            active_child_by_parent_name: HashMap::new(),
             latest_bind_by_parent_name: HashMap::new(),
             active_parent_by_child: HashMap::new(),
             unbound_binding_keys: HashSet::new(),
@@ -51,12 +51,18 @@ impl MetadataIndexes {
         let mut latest_by_child = HashMap::<InodeId, DirentryBindRecord>::new();
         for bind in &state.direntry_binds {
             indexes.indexed_seq = indexes.indexed_seq.max(bind.bind_seq);
-            replace_if_newer_bind(
+            replace_if_newer(
                 &mut latest_by_parent_name,
                 (bind.parent_inode_id, bind.name_key.clone()),
                 bind.clone(),
+                bind_order_key,
             );
-            replace_if_newer_bind(&mut latest_by_child, bind.child_inode_id, bind.clone());
+            replace_if_newer(
+                &mut latest_by_child,
+                bind.child_inode_id,
+                bind.clone(),
+                bind_order_key,
+            );
         }
 
         for unbind in &state.direntry_unbinds {
@@ -154,7 +160,7 @@ impl MetadataIndexes {
 
     pub(super) fn is_unbound(&self, record: &DirentryBindRecord) -> bool {
         self.unbound_binding_keys
-            .contains(&BindingKey::from_bind(record))
+            .contains(&BindingIdentity::from(record))
     }
 
     pub(super) fn record_inode(&mut self, record: &InodeRecord) {
@@ -191,23 +197,32 @@ impl MetadataIndexes {
                 .is_none_or(|existing| bind_order_key(record) >= bind_order_key(existing)),
             "binds for one (parent, name) must be recorded in append order"
         );
-        replace_if_newer_bind(
+        replace_if_newer(
             &mut self.latest_bind_by_parent_name,
             parent_name_key.clone(),
             record.clone(),
+            bind_order_key,
         );
 
         if let Some(previous_child_at_name) =
             self.active_child_by_parent_name.remove(&parent_name_key)
         {
-            remove_active_parent_if_same(&mut self.active_parent_by_child, &previous_child_at_name);
+            remove_if_same_binding(
+                &mut self.active_parent_by_child,
+                previous_child_at_name.child_inode_id,
+                &previous_child_at_name,
+            );
         }
 
         if let Some(previous_parent_for_child) =
             self.active_parent_by_child.remove(&record.child_inode_id)
         {
-            remove_active_child_if_same(
+            remove_if_same_binding(
                 &mut self.active_child_by_parent_name,
+                (
+                    previous_parent_for_child.parent_inode_id,
+                    previous_parent_for_child.name_key.clone(),
+                ),
                 &previous_parent_for_child,
             );
         }
@@ -223,7 +238,7 @@ impl MetadataIndexes {
     pub(super) fn record_unbind(&mut self, record: &DirentryUnbindRecord) {
         self.indexed_seq = self.indexed_seq.max(record.unbind_seq);
         self.unbound_binding_keys
-            .insert(BindingKey::from_unbind(record));
+            .insert(BindingIdentity::from(record));
 
         let parent_name_key = (record.parent_inode_id, record.name_key.clone());
         if self
@@ -251,19 +266,21 @@ impl MetadataIndexes {
 
     pub(super) fn record_tombstone(&mut self, record: &SubtreeTombstoneRecord) {
         self.indexed_seq = self.indexed_seq.max(record.generation.seq);
-        replace_if_newer_tombstone(
+        replace_if_newer(
             &mut self.tombstone_by_root,
             record.root_inode_id,
             record.clone(),
+            tombstone_order_key,
         );
     }
 
     pub(super) fn record_commit_receipt(&mut self, record: &CommitReceiptRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
-        replace_if_newer_receipt(
+        replace_if_newer(
             &mut self.commit_receipt_by_id,
             record.commit_id.clone(),
             record.clone(),
+            |receipt| receipt.committed_seq,
         );
     }
 
@@ -275,104 +292,31 @@ impl MetadataIndexes {
     }
 }
 
-/// Owned hash-key twin of [`super::visibility::BindingIdentity`]: the same
-/// five identity fields, owned so unbound binding events can live in a
-/// `HashSet`. Not a comparison rule of its own — membership tests through it
-/// are identity comparisons by construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct BindingKey {
-    parent_inode_id: InodeId,
-    name_key: NameKey,
-    child_inode_id: InodeId,
-    bind_seq: ChangeSeq,
-    bind_delta_index: u32,
-}
-
-impl BindingKey {
-    fn from_bind(record: &DirentryBindRecord) -> Self {
-        Self {
-            parent_inode_id: record.parent_inode_id,
-            name_key: record.name_key.clone(),
-            child_inode_id: record.child_inode_id,
-            bind_seq: record.bind_seq,
-            bind_delta_index: record.bind_delta_index,
-        }
-    }
-
-    fn from_unbind(record: &DirentryUnbindRecord) -> Self {
-        Self {
-            parent_inode_id: record.parent_inode_id,
-            name_key: record.name_key.clone(),
-            child_inode_id: record.child_inode_id,
-            bind_seq: record.bind_seq,
-            bind_delta_index: record.bind_delta_index,
-        }
-    }
-}
-
-fn replace_if_newer_bind<K>(
-    map: &mut HashMap<K, DirentryBindRecord>,
-    key: K,
-    record: DirentryBindRecord,
-) where
+fn replace_if_newer<K, V, O>(map: &mut HashMap<K, V>, key: K, value: V, order: impl Fn(&V) -> O)
+where
     K: Eq + std::hash::Hash,
+    O: Ord,
 {
     let should_replace = map
         .get(&key)
-        .is_none_or(|existing| bind_order_key(&record) > bind_order_key(existing));
+        .is_none_or(|existing| order(&value) > order(existing));
     if should_replace {
-        map.insert(key, record);
+        map.insert(key, value);
     }
 }
 
-fn replace_if_newer_receipt(
-    map: &mut HashMap<CommitId, CommitReceiptRecord>,
-    key: CommitId,
-    record: CommitReceiptRecord,
-) {
-    let should_replace = map
-        .get(&key)
-        .is_none_or(|existing| record.committed_seq > existing.committed_seq);
-    if should_replace {
-        map.insert(key, record);
-    }
-}
-
-fn replace_if_newer_tombstone(
-    map: &mut HashMap<InodeId, SubtreeTombstoneRecord>,
-    key: InodeId,
-    record: SubtreeTombstoneRecord,
-) {
-    let should_replace = map
-        .get(&key)
-        .is_none_or(|existing| tombstone_order_key(&record) > tombstone_order_key(existing));
-    if should_replace {
-        map.insert(key, record);
-    }
-}
-
-fn remove_active_parent_if_same(
-    active_parent_by_child: &mut HashMap<InodeId, DirentryBindRecord>,
+fn remove_if_same_binding<K>(
+    map: &mut HashMap<K, DirentryBindRecord>,
+    key: K,
     record: &DirentryBindRecord,
-) {
-    if active_parent_by_child
-        .get(&record.child_inode_id)
-        .is_some_and(|active| same_binding(active, record))
-    {
-        active_parent_by_child.remove(&record.child_inode_id);
-    }
-}
-
-fn remove_active_child_if_same(
-    active_child_by_parent_name: &mut BTreeMap<(InodeId, NameKey), DirentryBindRecord>,
-    record: &DirentryBindRecord,
-) {
-    let key = (record.parent_inode_id, record.name_key.clone());
-    if active_child_by_parent_name
+) where
+    K: Eq + std::hash::Hash,
+{
+    if map
         .get(&key)
         .is_some_and(|active| same_binding(active, record))
     {
-        active_child_by_parent_name.remove(&key);
+        map.remove(&key);
     }
 }
 

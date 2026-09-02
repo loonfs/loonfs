@@ -614,6 +614,11 @@ pub mod lookup_keys {
     pub(super) const COMMIT_RECEIPT_ROW_PREFIX: &str = "commit-receipt-";
     pub(super) const ATTRIBUTE_ROW_PREFIX: &str = "attribute-";
 
+    /// Builds the exclusive lower bound after `row_key`.
+    pub fn after_row_key(row_key: &str) -> String {
+        format!("{row_key}\0")
+    }
+
     /// Builds an inode row key.
     pub fn inode_key(inode_id: InodeId) -> String {
         format!("{INODE_ROW_PREFIX}{:020}", inode_id.0)
@@ -621,7 +626,7 @@ pub mod lookup_keys {
 
     /// Builds a scan bound immediately after an inode row.
     pub fn inode_key_after(inode_id: InodeId) -> String {
-        format!("{}\0", inode_key(inode_id))
+        after_row_key(&inode_key(inode_id))
     }
 
     /// Builds the prefix for directory bindings under one parent.
@@ -783,10 +788,11 @@ pub mod lookup_keys {
 
     /// Builds a trash scan bound after one deletion generation.
     pub fn active_deletion_key_after(deletion_seq: ChangeSeq, root_inode_id: InodeId) -> String {
-        format!(
-            "{}\0",
-            active_deletion_row_key(deletion_seq, root_inode_id, ACTIVE_DELETION_RANK_LISTED)
-        )
+        after_row_key(&active_deletion_row_key(
+            deletion_seq,
+            root_inode_id,
+            ACTIVE_DELETION_RANK_LISTED,
+        ))
     }
 
     /// Builds the Bloom filter probe for one commit ID.

@@ -2,6 +2,7 @@
 //! lookups shared across a publish batch's candidates, plus the cache key
 //! types and the shared-row handle its hits return.
 
+use super::visibility::BindingIdentity;
 use super::{DirentryBindRecord, DirentryUnbindRecord, InodeRecord, SubtreeTombstoneRecord};
 use loonfs_api::{InodeId, NameKey};
 use std::collections::HashMap;
@@ -25,7 +26,7 @@ pub(super) struct DurableVisibilityCacheInner {
     pub(super) inodes: HashMap<InodeId, Option<InodeRecord>>,
     pub(super) binds_for_parent_name: HashMap<ParentNameCacheKey, Arc<Vec<DirentryBindRecord>>>,
     pub(super) binds_for_child: HashMap<InodeId, Arc<Vec<DirentryBindRecord>>>,
-    pub(super) unbinds_for_binding: HashMap<BindingCacheKey, Arc<Vec<DirentryUnbindRecord>>>,
+    pub(super) unbinds_for_binding: HashMap<BindingIdentity, Arc<Vec<DirentryUnbindRecord>>>,
     pub(super) tombstones_for_root: HashMap<InodeId, Arc<Vec<SubtreeTombstoneRecord>>>,
     hits: u64,
     misses: u64,
@@ -100,39 +101,4 @@ impl DurableVisibilityCache {
 pub(super) struct ParentNameCacheKey {
     pub(super) parent_inode_id: InodeId,
     pub(super) name_key: NameKey,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct BindingCacheKey {
-    pub(super) parent_inode_id: InodeId,
-    pub(super) name_key: NameKey,
-    child_inode_id: InodeId,
-    bind_seq: loonfs_api::ChangeSeq,
-    bind_delta_index: u32,
-}
-
-impl From<&DirentryBindRecord> for BindingCacheKey {
-    fn from(record: &DirentryBindRecord) -> Self {
-        Self {
-            parent_inode_id: record.parent_inode_id,
-            name_key: record.name_key.clone(),
-            child_inode_id: record.child_inode_id,
-            bind_seq: record.bind_seq,
-            bind_delta_index: record.bind_delta_index,
-        }
-    }
-}
-
-/// An unbind carries the identity of the binding event it revokes, so it
-/// keys the same cache slot as that binding.
-impl From<&DirentryUnbindRecord> for BindingCacheKey {
-    fn from(record: &DirentryUnbindRecord) -> Self {
-        Self {
-            parent_inode_id: record.parent_inode_id,
-            name_key: record.name_key.clone(),
-            child_inode_id: record.child_inode_id,
-            bind_seq: record.bind_seq,
-            bind_delta_index: record.bind_delta_index,
-        }
-    }
 }

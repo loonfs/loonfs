@@ -43,11 +43,14 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
         segment_cache: Arc::new(MetadataSegmentCache::new(
             MetadataSegmentCacheConfig::default(),
         )),
-        tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
-            max_entries: 4,
-            max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-            max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-        })),
+        tail_cache: Arc::new(WalTailProjectionCache::new(
+            WalTailProjectionCacheConfig {
+                max_entries: 4,
+                max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+                max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+            },
+            None,
+        )),
     }
 }
 

@@ -1,13 +1,13 @@
 //! Seq-gated reads over [`MetadataState`]: record lookups, visibility
 //! checks, and path resolution.
 //!
-//! Every seq-parameterized query routes to its `*_at_head` twin once
-//! `base_seq` reaches [`MetadataState::indexed_seq`], and to a historical
-//! row scan below it. The composite visibility decisions themselves live in
-//! [`super::visibility`]; this module only chooses which storage arm
-//! (historical scan or at-head index) answers the primitive lookups.
+//! Primitive reads use indexes at or above [`MetadataState::indexed_seq`]
+//! and scan historical rows below it. Composite visibility decisions live in
+//! [`super::visibility`].
 
-use super::visibility::{self, resolve_in_memory_read, unbind_matches_binding};
+use super::visibility::{
+    self, resolve_in_memory_read, unbind_matches_binding, MetadataVisibilityReads,
+};
 use super::{DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord};
 use crate::binding_generation::BindingGeneration;
 use loonfs_api::{AbsolutePath, ActorRef, ChangeSeq, InodeId, InodeKind, NameKey};
@@ -45,17 +45,14 @@ pub enum VisiblePathError {
 
 impl MetadataState {
     pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.inode_at_head(inode_id);
-        }
-        self.inode_at_seq_scan(inode_id, base_seq)
+        read_now(self.reads_at_seq(base_seq).find_inode(inode_id))
     }
 
-    pub(crate) fn inode_at_head(&self, inode_id: InodeId) -> Option<InodeRecord> {
-        self.indexes.inode(inode_id)
-    }
-
-    fn inode_at_seq_scan(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
+    pub(super) fn inode_at_seq_scan(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<InodeRecord> {
         self.inodes
             .iter()
             .find(|inode| inode.inode_id == inode_id && inode.created_seq <= base_seq)
@@ -64,19 +61,20 @@ impl MetadataState {
 
     /// Latest bind for `(parent, name)` at or before `base_seq`, regardless
     /// of whether it has since been unbound.
+    #[cfg(test)]
     pub(crate) fn bound_child_at_seq(
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.indexes.latest_bind(parent_inode_id, name_key);
-        }
-        self.bound_child_at_seq_scan(parent_inode_id, name_key, base_seq)
+        read_now(
+            self.reads_at_seq(base_seq)
+                .find_latest_bound_child(parent_inode_id, name_key),
+        )
     }
 
-    fn bound_child_at_seq_scan(
+    pub(super) fn bound_child_at_seq_scan(
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
@@ -98,20 +96,10 @@ impl MetadataState {
         child_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.current_parent_binding_for_child_at_head(child_inode_id);
-        }
-        read_now(visibility::current_parent_binding_for_child(
-            &mut self.reads_at_seq(base_seq),
-            child_inode_id,
-        ))
-    }
-
-    pub(crate) fn current_parent_binding_for_child_at_head(
-        &self,
-        child_inode_id: InodeId,
-    ) -> Option<DirentryBindRecord> {
-        self.indexes.active_parent_for_child(child_inode_id)
+        read_now(
+            self.reads_at_seq(base_seq)
+                .current_parent_binding_for_child(child_inode_id),
+        )
     }
 
     pub fn active_subtree_tombstone(
@@ -119,20 +107,13 @@ impl MetadataState {
         root_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<SubtreeTombstoneRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.active_subtree_tombstone_at_head(root_inode_id);
-        }
-        self.active_subtree_tombstone_scan(root_inode_id, base_seq)
+        read_now(
+            self.reads_at_seq(base_seq)
+                .find_active_subtree_tombstone(root_inode_id),
+        )
     }
 
-    pub(crate) fn active_subtree_tombstone_at_head(
-        &self,
-        root_inode_id: InodeId,
-    ) -> Option<SubtreeTombstoneRecord> {
-        self.indexes.active_tombstone(root_inode_id)
-    }
-
-    fn active_subtree_tombstone_scan(
+    pub(super) fn active_subtree_tombstone_scan(
         &self,
         root_inode_id: InodeId,
         base_seq: ChangeSeq,
@@ -151,38 +132,15 @@ impl MetadataState {
         inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<SubtreeTombstoneRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.covering_subtree_tombstone_at_head(inode_id);
-        }
         read_now(visibility::covering_subtree_tombstone(
             &mut self.reads_at_seq(base_seq),
-            inode_id,
-        ))
-    }
-
-    pub(crate) fn covering_subtree_tombstone_at_head(
-        &self,
-        inode_id: InodeId,
-    ) -> Option<SubtreeTombstoneRecord> {
-        read_now(visibility::covering_subtree_tombstone(
-            &mut self.reads_at_head(),
             inode_id,
         ))
     }
 
     pub fn visible_inode(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.visible_inode_at_head(inode_id);
-        }
         read_now(visibility::visible_inode(
             &mut self.reads_at_seq(base_seq),
-            inode_id,
-        ))
-    }
-
-    pub(crate) fn visible_inode_at_head(&self, inode_id: InodeId) -> Option<InodeRecord> {
-        read_now(visibility::visible_inode(
-            &mut self.reads_at_head(),
             inode_id,
         ))
     }
@@ -193,23 +151,8 @@ impl MetadataState {
         name_key: &NameKey,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.visible_child_at_head(parent_inode_id, name_key);
-        }
         read_now(visibility::visible_child(
             &mut self.reads_at_seq(base_seq),
-            parent_inode_id,
-            name_key,
-        ))
-    }
-
-    pub(crate) fn visible_child_at_head(
-        &self,
-        parent_inode_id: InodeId,
-        name_key: &NameKey,
-    ) -> Option<DirentryBindRecord> {
-        read_now(visibility::visible_child(
-            &mut self.reads_at_head(),
             parent_inode_id,
             name_key,
         ))
@@ -240,22 +183,16 @@ impl MetadataState {
             .cloned()
     }
 
+    #[cfg(test)]
     pub(crate) fn is_direntry_unbound_at_seq(
         &self,
         direntry: &DirentryBindRecord,
         base_seq: ChangeSeq,
     ) -> bool {
-        if base_seq >= self.indexed_seq() {
-            return self.is_direntry_unbound_at_head(direntry);
-        }
-        self.is_direntry_unbound_at_seq_scan(direntry, base_seq)
+        read_now(self.reads_at_seq(base_seq).is_binding_unbound(direntry))
     }
 
-    pub(crate) fn is_direntry_unbound_at_head(&self, direntry: &DirentryBindRecord) -> bool {
-        self.indexes.is_unbound(direntry)
-    }
-
-    fn is_direntry_unbound_at_seq_scan(
+    pub(super) fn is_direntry_unbound_at_seq_scan(
         &self,
         direntry: &DirentryBindRecord,
         base_seq: ChangeSeq,
@@ -271,23 +208,8 @@ impl MetadataState {
         new_parent_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> bool {
-        if base_seq >= self.indexed_seq() {
-            return self.would_create_directory_cycle_at_head(inode_id, new_parent_inode_id);
-        }
         read_now(visibility::would_create_directory_cycle(
             &mut self.reads_at_seq(base_seq),
-            inode_id,
-            new_parent_inode_id,
-        ))
-    }
-
-    pub(crate) fn would_create_directory_cycle_at_head(
-        &self,
-        inode_id: InodeId,
-        new_parent_inode_id: InodeId,
-    ) -> bool {
-        read_now(visibility::would_create_directory_cycle(
-            &mut self.reads_at_head(),
             inode_id,
             new_parent_inode_id,
         ))

@@ -83,15 +83,8 @@ struct MaterializedGrepIndexSnapshot {
 }
 
 impl GrepService {
-    /// Creates a service with a fresh default-sized block cache.
-    pub fn new() -> Self {
-        Self::with_block_cache(Arc::new(GrepBlockCache::new(
-            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-        )))
-    }
-
     /// Creates a service over a host-composed process-wide grep block cache.
-    pub fn with_block_cache(block_cache: Arc<GrepBlockCache>) -> Self {
+    pub fn new(block_cache: Arc<GrepBlockCache>) -> Self {
         Self { block_cache }
     }
 
@@ -137,13 +130,13 @@ impl GrepService {
                     .len()
                     .saturating_mul(2);
                 Ok(DecodedGrepBlock::Manifest {
-                    state,
+                    manifest: state,
                     decoded_bytes,
                 })
             })
             .await
         {
-            Ok(DecodedGrepBlock::Manifest { state, .. }) => state,
+            Ok(DecodedGrepBlock::Manifest { manifest, .. }) => manifest,
             Ok(
                 DecodedGrepBlock::Filter { .. }
                 | DecodedGrepBlock::Index { .. }
@@ -334,7 +327,11 @@ fn materialized_snapshot_from_state(
 
 impl Default for GrepService {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(GrepBlockCache::new(
+            loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
+                DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+            ),
+        )))
     }
 }
 
