@@ -8,7 +8,7 @@ use crate::config::{
     ACTOR_ID_ENV, ACTOR_KIND_ENV, NAMESPACE_ENV,
 };
 use crate::error::CliError;
-use crate::profiles::{default_namespace, resolve_profile};
+use crate::profiles::default_namespace;
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
 use loonfs_api::{ActorId, ActorKind, ActorRef, NamespaceId, SecretString};
 use loonfs_client::Client;
@@ -18,11 +18,6 @@ use std::sync::Arc;
 pub(crate) struct LoadedConfig {
     pub path: std::path::PathBuf,
     pub config: CliConfig,
-}
-
-pub(crate) struct ResolvedProfile {
-    pub profile_name: String,
-    pub target: ResolvedTarget,
 }
 
 pub(crate) struct ResolvedNamespace {
@@ -37,31 +32,9 @@ pub(crate) fn load_cli_config(config_path: &std::path::Path) -> Result<LoadedCon
     })
 }
 
-pub(crate) async fn resolve_target_profile(
-    config_path: &std::path::Path,
-    explicit_profile: Option<&str>,
-    no_retry: bool,
-) -> Result<ResolvedProfile, CliError> {
-    let loaded = load_cli_config(config_path)?;
-    resolve_target_profile_from_config(&loaded.config, explicit_profile, no_retry).await
-}
-
-pub(crate) async fn resolve_target_profile_from_config(
-    config: &CliConfig,
-    explicit_profile: Option<&str>,
-    no_retry: bool,
-) -> Result<ResolvedProfile, CliError> {
-    let (profile_name, profile) = resolve_profile(config, explicit_profile)?;
-    let target = ResolvedTarget::resolve(profile, no_retry).await?;
-    Ok(ResolvedProfile {
-        profile_name: profile_name.to_owned(),
-        target,
-    })
-}
-
 pub(crate) fn resolve_namespace(
-    config: &CliConfig,
-    explicit_profile: Option<&str>,
+    profile_name: &str,
+    profile: &ProfileConfig,
     explicit_namespace: Option<&str>,
 ) -> Result<ResolvedNamespace, CliError> {
     if let Some(namespace) = explicit_namespace {
@@ -75,7 +48,6 @@ pub(crate) fn resolve_namespace(
             namespace: parse_namespace_id(&namespace)?,
         });
     }
-    let (profile_name, profile) = resolve_profile(config, explicit_profile)?;
     let namespace =
         default_namespace(profile).ok_or_else(|| CliError::no_default_namespace(profile_name))?;
     Ok(ResolvedNamespace {

@@ -1669,7 +1669,7 @@ async fn runtime_created_state_is_readable_through_http() {
     assert_eq!(stat.size_bytes(), Some(18));
     let bytes = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("read file");
     assert_eq!(bytes, b"hello from runtime");
@@ -2565,7 +2565,7 @@ async fn the_proxied_upload_route_never_holds_the_whole_payload() {
     // And the bytes are the bytes.
     let read_back = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("read the streamed object back");
     assert_eq!(read_back, payload);
@@ -2896,7 +2896,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let client = Client::new(config_for_busy).expect("valid client config");
     let target = NamespacePath::parse("demo", "/note.txt").expect("target");
     assert_api_error(
-        client.get_file_bytes(&target).await,
+        client.get_file_bytes(&target, &Default::default()).await,
         503,
         "server_busy",
         Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
@@ -2948,7 +2948,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let client = Client::new(client_config).expect("valid client config");
     let target = NamespacePath::parse("demo", "/note.txt").expect("target");
     let bytes = client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("a freed slot admits the read");
     assert_eq!(bytes, b"bounded");
@@ -3079,7 +3079,10 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     .expect("valid client config");
     assert_api_error(
         client
-            .get_file_bytes(&NamespacePath::parse("demo", "/big.bin").expect("target"))
+            .get_file_bytes(
+                &NamespacePath::parse("demo", "/big.bin").expect("target"),
+                &Default::default(),
+            )
             .await,
         413,
         "content_too_large",
@@ -3099,7 +3102,10 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     );
     // Content inside the limit still reads through the same route.
     let bytes = client
-        .get_file_bytes(&NamespacePath::parse("demo", "/small.bin").expect("target"))
+        .get_file_bytes(
+            &NamespacePath::parse("demo", "/small.bin").expect("target"),
+            &Default::default(),
+        )
         .await
         .expect("small content fits under the limit");
     assert_eq!(bytes.len(), 8);
@@ -3391,7 +3397,7 @@ async fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
 
     let target = NamespacePath::parse(namespace_id.as_str(), "/core.txt").expect("core target");
     let bytes = client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("grep failure must not affect core reads");
     assert_eq!(bytes, b"core remains readable");
@@ -3566,9 +3572,8 @@ mod direct_download {
     use super::*;
     use crate::http::app_with_store_and_direct_transfers;
     use loonfs_api::{
-        v0::{CompleteMultipartUploadRequest, UploadContentClaim},
-        Checksum, ChecksumAlgorithm, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
-        FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+        v0::UploadContentClaim, Checksum, ChecksumAlgorithm, RevisionNo,
+        FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
         LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     };
     use loonfs_objectstore::presign::{
@@ -3907,14 +3912,14 @@ mod direct_download {
         // The wall the audit found: this deployment let the file exist and
         // will not proxy it back.
         assert_api_error(
-            client.get_file_bytes(&target).await,
+            client.get_file_bytes(&target, &Default::default()).await,
             413,
             ErrorCode::ContentTooLarge.as_str(),
             None,
         );
 
         let grant = client
-            .create_download(&target, None)
+            .create_download(&target, &Default::default())
             .await
             .expect("download grant");
         assert_eq!(grant.path.as_str(), "/big.bin");
@@ -3974,7 +3979,7 @@ mod direct_download {
             .expect("seed revision 1");
 
         let grant = client
-            .create_download(&target, None)
+            .create_download(&target, &Default::default())
             .await
             .expect("grant for revision 1");
         assert_eq!(grant.revision_no, RevisionNo(1));
@@ -3994,7 +3999,13 @@ mod direct_download {
         // And asking for the old revision by number resolves to the same
         // object the earlier grant named.
         let pinned = client
-            .create_download(&target, Some(RevisionNo(1)))
+            .create_download(
+                &target,
+                &loonfs_client::DownloadOptions {
+                    revision_no: Some(RevisionNo(1)),
+                    snapshot_id: None,
+                },
+            )
             .await
             .expect("grant for a prior revision");
         assert_eq!(pinned.revision_no, RevisionNo(1));
@@ -4018,7 +4029,7 @@ mod direct_download {
             .expect("seed a file");
 
         let error = client
-            .create_download(&target, None)
+            .create_download(&target, &Default::default())
             .await
             .expect_err("a deployment with no issuer cannot grant reads");
         match &error {
@@ -4060,7 +4071,7 @@ mod direct_download {
         // The proxied read it does serve is untouched.
         assert_eq!(
             client
-                .get_file_bytes(&target)
+                .get_file_bytes(&target, &Default::default())
                 .await
                 .expect("proxied read of a file under the cap"),
             b"small enough to proxy"
@@ -4121,10 +4132,10 @@ mod direct_download {
             .expect("begin direct put");
 
         let error = client
-            .complete_multipart_upload(
+            .complete_upload(
                 &namespace_id,
                 begin.upload_id(),
-                &CompleteMultipartUploadRequest {
+                &loonfs_api::v0::CompleteUploadRequest::DirectMultipart {
                     content: UploadContentClaim {
                         size_bytes: 5,
                         checksum: Checksum::sha256(b"hello"),
@@ -4189,7 +4200,7 @@ mod direct_download {
             .expect("a large file goes straight to object storage under a crc32c claim");
 
         let grant = client
-            .create_download(&target, None)
+            .create_download(&target, &Default::default())
             .await
             .expect("download grant");
         assert_eq!(
@@ -4242,7 +4253,7 @@ mod direct_download {
         // It came home through the grant, byte for byte, which proves the
         // object the presigned write created is the one the commit named.
         let grant = client
-            .create_download(&target, None)
+            .create_download(&target, &Default::default())
             .await
             .expect("download grant");
         assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);

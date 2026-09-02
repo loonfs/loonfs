@@ -31,6 +31,11 @@ pub(crate) fn non_empty_env(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+pub(crate) fn absolute_env_path(name: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::var_os(name)?);
+    path.is_absolute().then_some(path)
+}
+
 const CONFIG_FILE_NAME: &str = "config.toml";
 /// Directory under `$XDG_CONFIG_HOME`.
 const XDG_CONFIG_SUBDIR: &str = "loonfs";
@@ -314,7 +319,7 @@ pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocat
     if let Some(path) = flag {
         return Ok(ConfigLocation::at(path.to_path_buf(), ConfigSource::Flag));
     }
-    if let Some(path) = non_empty_env_path(CONFIG_PATH_ENV) {
+    if let Some(path) = non_empty_env(CONFIG_PATH_ENV).map(PathBuf::from) {
         return Ok(ConfigLocation::at(path, ConfigSource::Env));
     }
     default_config_location()
@@ -327,7 +332,7 @@ pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocat
 /// file remains active until a file exists at the XDG path.
 fn default_config_location() -> Result<ConfigLocation, CliError> {
     let legacy = legacy_config_path();
-    let Some(xdg_dir) = xdg_config_home() else {
+    let Some(xdg_dir) = absolute_env_path("XDG_CONFIG_HOME") else {
         let path = legacy.ok_or_else(|| {
             CliError::invalid_config(format!(
                 "unable to determine the home directory; name the config file with \
@@ -347,22 +352,9 @@ fn default_config_location() -> Result<ConfigLocation, CliError> {
     }
 }
 
-/// `XDG_CONFIG_HOME` when it names an absolute directory. The XDG spec
-/// calls an empty or relative value invalid, and ignoring it keeps a stray
-/// relative value from making the config file follow the working directory.
-fn xdg_config_home() -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var_os("XDG_CONFIG_HOME")?);
-    path.is_absolute().then_some(path)
-}
-
 fn legacy_config_path() -> Option<PathBuf> {
-    let home = non_empty_env_path("HOME")?;
+    let home = absolute_env_path("HOME")?;
     Some(home.join(LEGACY_CONFIG_SUBDIR).join(CONFIG_FILE_NAME))
-}
-
-fn non_empty_env_path(name: &str) -> Option<PathBuf> {
-    let value = std::env::var_os(name)?;
-    (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
 pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {

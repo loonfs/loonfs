@@ -45,11 +45,16 @@ pub async fn main() -> ExitCode {
         return render_parse_failure(&error);
     }
     let runtime = args::RuntimeBehavior::detect(&cli);
+    let output_format = if runtime.json {
+        render::OutputFormat::Json
+    } else {
+        render::OutputFormat::Human
+    };
 
     // Boxing keeps the public entrypoint's future shallow for downstream binaries.
     let result = Box::pin(commands::run(cli, runtime)).await;
     match result {
-        Ok(output) => match render::render_success(&output, runtime.json) {
+        Ok(output) => match render::render_success(&output, output_format) {
             // A recursive transfer renders its per-item outcomes as success
             // data but still exits nonzero when any item failed.
             Ok(()) if output.data.reports_failures() => ExitCode::FAILURE,
@@ -61,12 +66,12 @@ pub async fn main() -> ExitCode {
                     mode: output.mode,
                     error: Box::new(error::CliError::io(err)),
                 };
-                let _ = render::render_error(&failure, runtime.json);
+                let _ = render::render_error(&failure, output_format);
                 ExitCode::FAILURE
             }
         },
         Err(failure) => {
-            let _ = render::render_error(&failure, runtime.json);
+            let _ = render::render_error(&failure, output_format);
             ExitCode::FAILURE
         }
     }

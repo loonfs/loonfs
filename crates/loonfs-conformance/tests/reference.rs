@@ -5,10 +5,10 @@
 use bytes::Bytes;
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompleteUploadRequest,
-    ContentToken, CreateSnapshotRequest, ExtendSnapshotRequest, FilesystemChange,
-    ListChangesResponse, ListSnapshotsResponse, ReleaseSnapshotResponse, SnapshotSummary,
-    UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
+    BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, ContentToken,
+    CreateSnapshotRequest, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
+    ListSnapshotsResponse, ReleaseSnapshotResponse, SnapshotSummary, UploadContentClaim,
+    UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
     ActorRef, ApiError, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
@@ -382,7 +382,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     assert_eq!(stat.content_ref(), Some(&content_ref));
     let readback = harness
         .client
-        .get_file_bytes(&spec)
+        .get_file_bytes(&spec, &Default::default())
         .await
         .expect("read direct PUT file");
     assert_eq!(readback, payload);
@@ -488,7 +488,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     }
     completed_parts.sort_by_key(|part| part.part_number);
     let whole_checksum = Checksum::compute(checksum_algorithm, &payload);
-    let completion_request = CompleteMultipartUploadRequest {
+    let completion_request = CompleteUploadRequest::DirectMultipart {
         content: UploadContentClaim {
             size_bytes: payload.len() as u64,
             checksum: whole_checksum.clone(),
@@ -497,14 +497,14 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     };
     let first = harness
         .client
-        .complete_multipart_upload(&namespace, &upload_id, &completion_request)
+        .complete_upload(&namespace, &upload_id, &completion_request)
         .await
         .expect("complete multipart upload");
     let first_content_ref = first.content_ref().expect("multipart content ref").clone();
     let first_completed_at_ms = completed_at_ms(&first.status);
     let replayed = harness
         .client
-        .complete_multipart_upload(&namespace, &upload_id, &completion_request)
+        .complete_upload(&namespace, &upload_id, &completion_request)
         .await
         .expect("replay multipart completion");
     assert_eq!(replayed.namespace_id, first.namespace_id);
@@ -530,7 +530,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
     let readback = harness
         .client
-        .get_file_bytes(&spec)
+        .get_file_bytes(&spec, &Default::default())
         .await
         .expect("read multipart file");
     assert_eq!(readback, payload);
@@ -655,7 +655,7 @@ async fn run_download(harness: &Harness, case: &Case) {
         .expect("stat download file");
     let grant = harness
         .client
-        .create_download(&spec, None)
+        .create_download(&spec, &Default::default())
         .await
         .expect("begin direct download");
     assert_eq!(stat.content_ref(), Some(&grant.content_ref));
@@ -1049,7 +1049,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&file_path)
+            .get_file_bytes(&file_path, &Default::default())
             .await
             .expect("read revised file"),
         request.revised_content_utf8.as_bytes()
@@ -1146,7 +1146,10 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .list_changes(
             &namespace,
             ChangeSeq(expected.moved_committed_seq - 1),
-            Some(1),
+            &loonfs_client::ListChangesOptions {
+                limit: Some(1),
+                snapshot_id: None,
+            },
         )
         .await
         .expect("list inode-mutations changes");
@@ -1795,7 +1798,11 @@ async fn run_changes(harness: &Harness, case: &Case) {
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
     let feed = harness
         .client
-        .list_changes(&namespace, ChangeSeq(request.after_seq), None)
+        .list_changes(
+            &namespace,
+            ChangeSeq(request.after_seq),
+            &Default::default(),
+        )
         .await
         .expect("list changes");
     assert_eq!(feed.changes.len(), expected.change_count);
@@ -1890,7 +1897,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let grant = harness
         .client
-        .create_download(&upload_path, None)
+        .create_download(&upload_path, &Default::default())
         .await
         .expect("begin end-to-end download");
     let streamed = stream_grant(&harness.client, &grant).await;
@@ -1928,7 +1935,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), None)
+        .list_changes(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("list end-to-end changes before remove");
     assert_eq!(changes.changes.len(), expected.change_count - 1);
@@ -1943,7 +1950,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), None)
+        .list_changes(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("list complete end-to-end changes");
     assert_eq!(changes.changes.len(), expected.change_count);

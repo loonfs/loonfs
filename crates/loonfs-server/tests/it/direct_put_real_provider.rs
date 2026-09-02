@@ -8,9 +8,8 @@ use futures::StreamExt;
 use loonfs_api::{
     options::DirectMultipartUploadOptions,
     v0::{
-        BeginUploadResponse, CompleteMultipartUploadRequest, CompleteUploadRequest,
-        ObjectTransferAccess, UploadContentClaim, UploadMode, UploadPartChecksumClaim,
-        UploadSessionStatus,
+        BeginUploadResponse, CompleteUploadRequest, ObjectTransferAccess, UploadContentClaim,
+        UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
     },
     ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse,
     DestinationBehavior, FilesystemOperation, NamespaceId,
@@ -221,7 +220,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
 
     let loaded = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("read file");
     assert_eq!(loaded, bytes);
@@ -246,7 +245,7 @@ async fn assert_direct_get_returns_the_written_bytes(
     );
 
     let grant = client
-        .create_download(target, None)
+        .create_download(target, &Default::default())
         .await
         .expect("begin download");
     let ObjectTransferAccess::PresignedUrl { method, .. } = &grant.access;
@@ -275,7 +274,7 @@ async fn assert_direct_get_capability_serves_ranges(
     bytes: &[u8],
 ) {
     let grant = client
-        .create_download(target, None)
+        .create_download(target, &Default::default())
         .await
         .expect("begin download for ranged reads");
     let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
@@ -800,7 +799,7 @@ async fn assert_gcs_read_capability_serves_ranges_and_resumes(
 
     let grant = harness
         .client
-        .create_download(&target, None)
+        .create_download(&target, &Default::default())
         .await
         .expect("begin download");
     let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
@@ -886,7 +885,7 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
 
     let grant = harness
         .client
-        .create_download(&target, None)
+        .create_download(&target, &Default::default())
         .await
         .expect("an object past the read cap is served by grant");
     let mut received = Vec::new();
@@ -901,7 +900,10 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
     // `get_file_bytes` is the plain proxied read with no fallback, so this
     // asks the proxy directly rather than re-running the ladder.
     expect_client_rejection(
-        harness.client.get_file_bytes(&target).await,
+        harness
+            .client
+            .get_file_bytes(&target, &Default::default())
+            .await,
         "proxied read of an object past the read cap",
     );
 }
@@ -1062,7 +1064,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
 
     // The claim rides with the completion, and the identity comes back with
     // the answer: the client never named the object it wrote.
-    let request = CompleteMultipartUploadRequest {
+    let request = CompleteUploadRequest::DirectMultipart {
         content: UploadContentClaim {
             size_bytes: payload.len() as u64,
             checksum: whole_object.clone(),
@@ -1071,7 +1073,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     };
     let complete = harness
         .client
-        .complete_multipart_upload(&namespace_id, &upload_id, &request)
+        .complete_upload(&namespace_id, &upload_id, &request)
         .await
         .expect("complete the multipart upload");
     assert_eq!(complete.mode, UploadMode::DirectMultipart);
@@ -1094,7 +1096,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // used. Both reconcile from the durable session and the object.
     let replayed = harness
         .client
-        .complete_multipart_upload(&namespace_id, &upload_id, &request)
+        .complete_upload(&namespace_id, &upload_id, &request)
         .await
         .expect("a lost completion is answered, not failed");
     assert_eq!(replayed.mode, UploadMode::DirectMultipart);
@@ -1136,7 +1138,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // these bytes.
     let loaded = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("read the assembled file");
     assert_eq!(loaded, payload);
@@ -1145,7 +1147,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // symmetry this deployment owes.
     let grant = harness
         .client
-        .create_download(&target, None)
+        .create_download(&target, &Default::default())
         .await
         .expect("begin download of the assembled object");
     let mut received = Vec::new();
@@ -1238,7 +1240,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&from_file)
+            .get_file_bytes(&from_file, &Default::default())
             .await
             .expect("read the file back"),
         payload,
@@ -1263,7 +1265,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&piped)
+            .get_file_bytes(&piped, &Default::default())
             .await
             .expect("read the piped payload back"),
         payload,

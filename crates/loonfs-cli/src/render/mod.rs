@@ -1,6 +1,7 @@
 //! Renders command outcomes as human-readable text or `--json`.
 
 mod human;
+mod human_admin;
 mod json;
 mod summaries;
 
@@ -13,8 +14,7 @@ use crate::config::ConfigSource;
 use crate::error::CliError;
 use loonfs_api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
 use loonfs_api::{
-    AttributeValue, CheckpointOwnerSummary, GcResponse, NamespaceId, ReorganizeStepOutcome,
-    WalFlushStepOutcome,
+    AttributeValue, CheckpointOwnerSummary, GcResponse, NamespaceId, WalFlushStepOutcome,
 };
 use serde::Serialize;
 use std::io::{self, Write};
@@ -25,8 +25,14 @@ pub(crate) use summaries::{
     gc_pass_line, store_probe_summary_line, store_probe_verdict, StoreProbeVerdict,
 };
 
-pub(crate) fn render_success(output: &CommandOutput, json_mode: bool) -> io::Result<()> {
-    if json_mode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputFormat {
+    Human,
+    Json,
+}
+
+pub(crate) fn render_success(output: &CommandOutput, format: OutputFormat) -> io::Result<()> {
+    if format == OutputFormat::Json {
         let body = json_success(output)?;
         let mut stdout = io::stdout().lock();
         stdout.write_all(body.as_bytes())?;
@@ -53,9 +59,9 @@ pub(crate) fn render_success(output: &CommandOutput, json_mode: bool) -> io::Res
     Ok(())
 }
 
-pub(crate) fn render_error(failure: &CommandFailure, json_mode: bool) -> io::Result<()> {
+pub(crate) fn render_error(failure: &CommandFailure, format: OutputFormat) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
-    if json_mode {
+    if format == OutputFormat::Json {
         let body = json_error(failure)?;
         stderr.write_all(body.as_bytes())?;
         stderr.write_all(b"\n")?;
@@ -158,9 +164,7 @@ mod tests {
     fn rendered_remote_error(server_boundary: &str) -> serde_json::Value {
         let body: loonfs_api::ApiError =
             serde_json::from_str(server_boundary).expect("server boundary is valid JSON");
-        let error = CliError::from(crate::backend_error::BackendError::from(
-            ClientError::from_api_error(400, body),
-        ));
+        let error = CliError::from(ClientError::from_api_error(400, body));
         let failure = CommandFailure {
             kind: CommandKind::ConfigShow,
             profile: Some("remote".to_owned()),
@@ -199,9 +203,9 @@ mod tests {
             kind: CommandKind::ConfigShow,
             profile: Some("embedded".to_owned()),
             mode: Some("embedded".to_owned()),
-            error: Box::new(CliError::from(crate::backend_error::map_runtime_error(
+            error: Box::new(crate::backend_error::map_runtime_error(
                 poison_permission_runtime_error(),
-            ))),
+            )),
         };
         let embedded_human = human_error(&embedded_failure.error);
         let embedded_json = json_error(&embedded_failure).expect("embedded JSON error renders");
@@ -227,9 +231,7 @@ mod tests {
             kind: CommandKind::ConfigShow,
             profile: Some("remote".to_owned()),
             mode: Some("remote".to_owned()),
-            error: Box::new(CliError::from(crate::backend_error::BackendError::from(
-                ClientError::from_api_error(503, body),
-            ))),
+            error: Box::new(CliError::from(ClientError::from_api_error(503, body))),
         };
         let remote_human = human_error(&remote_failure.error);
         let remote_json = json_error(&remote_failure).expect("remote JSON error renders");
@@ -497,9 +499,7 @@ mod tests {
             kind: CommandKind::ConfigShow,
             profile: Some("default".to_owned()),
             mode: Some("remote".to_owned()),
-            error: Box::new(CliError::from(
-                crate::backend_error::BackendError::client_error("connection refused"),
-            )),
+            error: Box::new(CliError::client_error("connection refused")),
         };
         assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
             &json_error(&failure).expect("json error renders")
@@ -602,13 +602,11 @@ mod tests {
             "request_id": "req_remote"
         }"#;
         let remote = rendered_remote_error(remote_boundary);
-        let embedded_error = CliError::from(
-            crate::backend_error::BackendError::new(
-                loonfs_api::ErrorCode::InvalidRequest.as_str(),
-                "limit must be greater than zero",
-            )
-            .with_param("limit"),
-        );
+        let embedded_error = CliError::new(
+            loonfs_api::ErrorCode::InvalidRequest.as_str(),
+            "limit must be greater than zero",
+        )
+        .with_param("limit");
         let embedded_failure = CommandFailure {
             kind: CommandKind::ConfigShow,
             profile: Some("embedded".to_owned()),

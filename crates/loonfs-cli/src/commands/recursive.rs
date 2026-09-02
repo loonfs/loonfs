@@ -107,29 +107,6 @@ fn joined_remote(root: &str, components: &[String]) -> String {
     }
 }
 
-fn output(
-    kind: CommandKind,
-    context: &CommandContext,
-    source: String,
-    destination: String,
-    tally: TreeTally,
-    head_drift: Option<ListingHeadDrift>,
-) -> CommandOutput {
-    CommandOutput {
-        kind,
-        profile: Some(context.profile_name.clone()),
-        mode: Some(context.mode.clone()),
-        data: CommandData::TreeTransfer {
-            source,
-            destination,
-            files: tally.files,
-            directories: tally.directories,
-            head_drift,
-            failures: tally.failures,
-        },
-    }
-}
-
 /// Uploads a local directory tree. File uploads create their parent
 /// directories, so this function creates directories only for empty subtrees.
 pub(crate) async fn run_put_tree(
@@ -168,7 +145,7 @@ pub(crate) async fn run_put_tree(
             &spec,
             &CreateDirectoryOptions {
                 commit: CommitOptions {
-                    actor: context.actor.clone(),
+                    actor: context.actor().clone(),
                     commit_id: None,
                     message: message.clone(),
                 },
@@ -180,7 +157,7 @@ pub(crate) async fn run_put_tree(
             Ok(RemoteDirectoryOutcome::Created(_)) => DirectoryOutcome::Created,
             Ok(RemoteDirectoryOutcome::AlreadyExists { .. }) => DirectoryOutcome::AlreadyExists,
             Err(error) => {
-                tally.fail(remote, error.into());
+                tally.fail(remote, error);
                 continue;
             }
         };
@@ -197,7 +174,7 @@ pub(crate) async fn run_put_tree(
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Put,
-        format!("{}:{}", context.namespace, remote_root),
+        format!("{}:{}", context.namespace(), remote_root),
     ));
     progress.expect(tree_bytes(&files), Some(files.len() as u64));
     let outcomes = futures::stream::iter(files.into_iter().map(|job| {
@@ -229,7 +206,7 @@ pub(crate) async fn run_put_tree(
                 &PutFileOptions {
                     behavior,
                     commit: CommitOptions {
-                        actor: context.actor.clone(),
+                        actor: context.actor().clone(),
                         commit_id: None,
                         message,
                     },
@@ -262,13 +239,16 @@ pub(crate) async fn run_put_tree(
         }
     }
 
-    Ok(output(
+    Ok(context.output(
         kind,
-        context,
-        local_root.display().to_string(),
-        format!("{}:{}", context.namespace, remote_root),
-        tally,
-        None,
+        CommandData::TreeTransfer {
+            source: local_root.display().to_string(),
+            destination: format!("{}:{}", context.namespace(), remote_root),
+            files: tally.files,
+            directories: tally.directories,
+            head_drift: None,
+            failures: tally.failures,
+        },
     ))
 }
 
@@ -310,7 +290,7 @@ pub(crate) async fn run_get_tree(
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Get,
-        format!("{}:{}", context.namespace, remote_root),
+        format!("{}:{}", context.namespace(), remote_root),
     ));
     progress.expect(tree_bytes(&listing.files), Some(listing.files.len() as u64));
     let outcomes = futures::stream::iter(listing.files.into_iter().map(|job| {
@@ -368,13 +348,16 @@ pub(crate) async fn run_get_tree(
         }
     }
 
-    Ok(output(
+    Ok(context.output(
         kind,
-        context,
-        format!("{}:{}", context.namespace, remote_root),
-        local_root.display().to_string(),
-        tally,
-        head_drift,
+        CommandData::TreeTransfer {
+            source: format!("{}:{}", context.namespace(), remote_root),
+            destination: local_root.display().to_string(),
+            files: tally.files,
+            directories: tally.directories,
+            head_drift,
+            failures: tally.failures,
+        },
     ))
 }
 
@@ -414,7 +397,7 @@ pub(crate) async fn run_copy_tree(
             &spec,
             &CreateDirectoryOptions {
                 commit: CommitOptions {
-                    actor: context.actor.clone(),
+                    actor: context.actor().clone(),
                     commit_id: None,
                     message: message.clone(),
                 },
@@ -426,7 +409,7 @@ pub(crate) async fn run_copy_tree(
             Ok(RemoteDirectoryOutcome::Created(_)) => DirectoryOutcome::Created,
             Ok(RemoteDirectoryOutcome::AlreadyExists { .. }) => DirectoryOutcome::AlreadyExists,
             Err(error) => {
-                tally.fail(remote, error.into());
+                tally.fail(remote, error);
                 continue;
             }
         };
@@ -469,7 +452,7 @@ pub(crate) async fn run_copy_tree(
                     &loonfs_client::CopyOptions {
                         behavior,
                         commit: CommitOptions {
-                            actor: context.actor.clone(),
+                            actor: context.actor().clone(),
                             commit_id: None,
                             message: message.clone(),
                         },
@@ -478,8 +461,7 @@ pub(crate) async fn run_copy_tree(
                     },
                 )
                 .await
-                .map(|_| spec_target(&to))
-                .map_err(CliError::from);
+                .map(|_| spec_target(&to));
             (job.remote, result)
         }
     }))
@@ -498,13 +480,16 @@ pub(crate) async fn run_copy_tree(
         }
     }
 
-    Ok(output(
+    Ok(context.output(
         kind,
-        context,
-        format!("{}:{}", context.namespace, source_root),
-        format!("{}:{}", context.namespace, destination_root),
-        tally,
-        head_drift,
+        CommandData::TreeTransfer {
+            source: format!("{}:{}", context.namespace(), source_root),
+            destination: format!("{}:{}", context.namespace(), destination_root),
+            files: tally.files,
+            directories: tally.directories,
+            head_drift,
+            failures: tally.failures,
+        },
     ))
 }
 
@@ -513,11 +498,8 @@ fn parse_remote(
     path: &str,
     param: &str,
 ) -> Result<NamespacePath, CliError> {
-    NamespacePath::parse(context.namespace.as_str(), path).map_err(|error| {
-        crate::backend_error::BackendError::from(error)
-            .with_invalid_request_param(param)
-            .into()
-    })
+    NamespacePath::parse(context.namespace().as_str(), path)
+        .map_err(|error| crate::error::CliError::from(error).with_invalid_request_param(param))
 }
 
 fn spec_target(spec: &NamespacePath) -> String {
@@ -733,8 +715,8 @@ mod tests {
         let context = CommandContext {
             profile_name: "default".to_owned(),
             mode: "embedded".to_owned(),
-            namespace: namespace.clone(),
-            actor: loonfs_test_support::test_actor(),
+            namespace: Some(namespace.clone()),
+            actor: Some(loonfs_test_support::test_actor()),
             target: ResolvedTarget::Embedded(Box::new(target)),
         };
         context

@@ -37,6 +37,13 @@ impl TransportRetryPolicy {
 /// the caller forever.
 pub(crate) const IO_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendPolicy {
+    Once,
+    Retry,
+    RetryUnbounded,
+}
+
 /// Provides elapsed time from a monotonic clock for the total retry limit.
 pub(crate) trait MonotonicTimer: std::fmt::Debug + Send + Sync {
     fn monotonic_now_ms(&self) -> u64;
@@ -152,31 +159,7 @@ impl Client {
         &self,
         request: WireRequest,
         body: Option<&Req>,
-    ) -> Result<Resp>
-    where
-        Req: serde::Serialize,
-        Resp: serde::de::DeserializeOwned,
-    {
-        self.request_json_inner(request, body, true).await
-    }
-
-    pub(crate) async fn request_json_once<Req, Resp>(
-        &self,
-        request: WireRequest,
-        body: Option<&Req>,
-    ) -> Result<Resp>
-    where
-        Req: serde::Serialize,
-        Resp: serde::de::DeserializeOwned,
-    {
-        self.request_json_inner(request, body, false).await
-    }
-
-    async fn request_json_inner<Req, Resp>(
-        &self,
-        request: WireRequest,
-        body: Option<&Req>,
-        retry: bool,
+        policy: SendPolicy,
     ) -> Result<Resp>
     where
         Req: serde::Serialize,
@@ -196,31 +179,16 @@ impl Client {
             Some(_) => request.header("content-type", "application/json"),
             None => request,
         };
-        let bytes = if retry {
-            self.call_with_transport_retry(&request, body.as_ref())
-                .await?
-        } else {
-            self.call_once(&request, body.as_ref()).await?
-        };
+        let bytes = self.call(&request, body.as_ref(), policy).await?.bytes;
         serde_json::from_slice(&bytes).map_err(|err| ClientError::Json(err.to_string()))
     }
 
     pub(crate) async fn request_bytes(&self, url: &str) -> Result<Vec<u8>> {
         let request = self.get(url);
-        self.call_content_with_transport_retry(&request, None).await
-    }
-
-    /// Sends one request without retrying. Callers use this path when an
-    /// ambiguous success cannot be reconciled through durable replay state.
-    pub(crate) async fn call_once(
-        &self,
-        request: &WireRequest,
-        body: Option<&Bytes>,
-    ) -> Result<Vec<u8>> {
-        self.send(request, body, None)
-            .await
-            .map(|response| response.bytes)
-            .map_err(|attempt| attempt.error)
+        Ok(self
+            .call(&request, None, SendPolicy::RetryUnbounded)
+            .await?
+            .bytes)
     }
 
     /// Sends a streaming request body exactly once.
@@ -284,64 +252,29 @@ impl Client {
             .boxed())
     }
 
-    /// Retries eligible network and server errors with exponential backoff.
-    ///
-    /// Callers use this only for reads, replay-safe commits, and idempotent
-    /// operations. Lifecycle changes and upload-session creation use
-    /// [`Self::call_once`] so an ambiguous success is visible. Conditions that
-    /// require maintenance, such as `maintenance_required` or `index_lagging`,
-    /// are not retried.
-    pub(crate) async fn call_with_transport_retry(
+    pub(crate) async fn call(
         &self,
         request: &WireRequest,
         body: Option<&Bytes>,
-    ) -> Result<Vec<u8>> {
-        self.call_with_transport_retry_headers(request, body)
-            .await
-            .map(|response| response.bytes)
-    }
-
-    /// Retries a content transfer using the attempt limit but no total time
-    /// limit.
-    ///
-    /// A transfer can exceed the normal 90-second retry limit while data is
-    /// still moving. The 60-second inactivity timeout and attempt limit still
-    /// bound stalled or repeatedly failing transfers.
-    pub(crate) async fn call_content_with_transport_retry(
-        &self,
-        request: &WireRequest,
-        body: Option<&Bytes>,
-    ) -> Result<Vec<u8>> {
-        self.call_content_with_transport_retry_headers(request, body)
-            .await
-            .map(|response| response.bytes)
-    }
-
-    /// Same as [`Self::call_with_transport_retry`], but also returns response
-    /// headers.
-    pub(crate) async fn call_with_transport_retry_headers(
-        &self,
-        request: &WireRequest,
-        body: Option<&Bytes>,
+        policy: SendPolicy,
     ) -> Result<WireResponse> {
-        let deadline =
-            OperationDeadline::start(self.timer.as_ref(), self.transport_retry.operation_deadline);
-        self.call_with_transport_retry_inner(request, body, Some(deadline))
-            .await
+        match policy {
+            SendPolicy::Once => self
+                .send(request, body, None)
+                .await
+                .map_err(|attempt| attempt.error),
+            SendPolicy::Retry => {
+                let deadline = OperationDeadline::start(
+                    self.timer.as_ref(),
+                    self.transport_retry.operation_deadline,
+                );
+                self.send_with_retry(request, body, Some(deadline)).await
+            }
+            SendPolicy::RetryUnbounded => self.send_with_retry(request, body, None).await,
+        }
     }
 
-    /// Same as [`Self::call_content_with_transport_retry`], but also returns
-    /// response headers. Multipart uploads use this to read the part ETag.
-    pub(crate) async fn call_content_with_transport_retry_headers(
-        &self,
-        request: &WireRequest,
-        body: Option<&Bytes>,
-    ) -> Result<WireResponse> {
-        self.call_with_transport_retry_inner(request, body, None)
-            .await
-    }
-
-    async fn call_with_transport_retry_inner(
+    async fn send_with_retry(
         &self,
         request: &WireRequest,
         body: Option<&Bytes>,
@@ -481,6 +414,7 @@ impl Client {
 
 /// One served response: the body, plus the headers for the call that needs
 /// them.
+#[derive(Debug)]
 pub(crate) struct WireResponse {
     headers: reqwest::header::HeaderMap,
     pub(crate) bytes: Vec<u8>,
@@ -602,26 +536,37 @@ async fn transport_retry_pause(backoff: Duration) {
     tokio::time::sleep(backoff).await;
 }
 
-pub(crate) fn append_optional_pagination_query(
-    url: &mut String,
-    has_query: &mut bool,
-    limit: Option<u32>,
-    cursor: Option<&str>,
-) {
-    if let Some(limit) = limit {
-        append_query_param(url, has_query, "limit", &limit.to_string());
-    }
-    if let Some(cursor) = cursor {
-        append_query_param(url, has_query, "cursor", cursor);
-    }
+pub(crate) struct QueryBuilder {
+    url: String,
+    has_query: bool,
 }
 
-pub(crate) fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value: &str) {
-    url.push(if *has_query { '&' } else { '?' });
-    *has_query = true;
-    url.push_str(name);
-    url.push('=');
-    url.push_str(&urlencoding::encode(value));
+impl QueryBuilder {
+    pub(crate) fn new(url: String) -> Self {
+        let has_query = url.contains('?');
+        Self { url, has_query }
+    }
+
+    pub(crate) fn push(&mut self, name: &str, value: impl std::fmt::Display) {
+        self.url.push(if self.has_query { '&' } else { '?' });
+        self.has_query = true;
+        self.url.push_str(name);
+        self.url.push('=');
+        self.url.push_str(&urlencoding::encode(&value.to_string()));
+    }
+
+    pub(crate) fn pagination(&mut self, limit: Option<u32>, cursor: Option<&str>) {
+        if let Some(limit) = limit {
+            self.push("limit", limit);
+        }
+        if let Some(cursor) = cursor {
+            self.push("cursor", cursor);
+        }
+    }
+
+    pub(crate) fn finish(self) -> String {
+        self.url
+    }
 }
 
 #[cfg(test)]
@@ -905,7 +850,11 @@ mod tests {
         let transport = test_transport::failures(1);
 
         client
-            .call_with_transport_retry(&client.get("http://example.invalid/control"), None)
+            .call(
+                &client.get("http://example.invalid/control"),
+                None,
+                SendPolicy::Retry,
+            )
             .await
             .expect_err("the spent deadline must preserve the first failure");
 
@@ -917,12 +866,16 @@ mod tests {
         let client = deadline_client();
         let transport = test_transport::failure_then_success(b"content".to_vec());
 
-        let bytes = client
-            .call_content_with_transport_retry(&client.get("http://example.invalid/content"), None)
+        let response = client
+            .call(
+                &client.get("http://example.invalid/content"),
+                None,
+                SendPolicy::RetryUnbounded,
+            )
             .await
             .expect("the count-bounded content retry succeeds");
 
-        assert_eq!(bytes, b"content");
+        assert_eq!(response.bytes, b"content");
         assert!(transport.attempts() >= 2, "{}", transport.attempts());
     }
 }

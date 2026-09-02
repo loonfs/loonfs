@@ -124,7 +124,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
 
     let remote_changes = harness
         .client
-        .list_changes(&remote_ns, ChangeSeq(0), None)
+        .list_changes(&remote_ns, ChangeSeq(0), &Default::default())
         .await
         .expect("remote changes");
     assert_eq!(remote_changes.changes.len(), 1, "{remote_changes:?}");
@@ -139,7 +139,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         assert_eq!(
             harness
                 .client
-                .get_file_bytes(&spec)
+                .get_file_bytes(&spec, &Default::default())
                 .await
                 .expect("batch file readable"),
             bytes
@@ -283,7 +283,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     // The response is the feed's row for that commit, field for field.
     let feed = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), None)
+        .list_changes(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("changes");
     assert_eq!(feed.changes.len(), 1, "{feed:?}");

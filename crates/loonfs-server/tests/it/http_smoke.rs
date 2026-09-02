@@ -101,7 +101,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
     }
     let read = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect_err("reads observe the deleted namespace");
     match read {
@@ -302,7 +302,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 
     let bytes = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("read file");
     assert_eq!(bytes, b"hello over http\n");
@@ -377,7 +377,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&clone_path)
+            .get_file_bytes(&clone_path, &Default::default())
             .await
             .expect("read clone"),
         b"base\n"
@@ -395,7 +395,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&clone_path)
+            .get_file_bytes(&clone_path, &Default::default())
             .await
             .expect("read clone after source write"),
         b"base\n"
@@ -410,7 +410,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&source_path)
+            .get_file_bytes(&source_path, &Default::default())
             .await
             .expect("read source"),
         b"source-after-fork\n"
@@ -418,7 +418,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&clone_path)
+            .get_file_bytes(&clone_path, &Default::default())
             .await
             .expect("read clone"),
         b"clone-after-fork\n"
@@ -426,7 +426,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     match harness
         .client
-        .list_changes(&namespace_id("clone"), ChangeSeq(0), None)
+        .list_changes(&namespace_id("clone"), ChangeSeq(0), &Default::default())
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
@@ -434,7 +434,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     }
     let clone_changes = harness
         .client
-        .list_changes(&namespace_id("clone"), ChangeSeq(1), None)
+        .list_changes(&namespace_id("clone"), ChangeSeq(1), &Default::default())
         .await
         .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);

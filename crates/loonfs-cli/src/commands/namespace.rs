@@ -1,6 +1,9 @@
 //! `loonfs namespace` commands: create, show, fork, and delete.
 
-use super::context::{fail, fail_for, parse_public_ordinal_arg};
+use super::context::{
+    fail, fail_for, parse_public_ordinal_arg, resolve_profile_context,
+    resolve_profile_context_from_config,
+};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, CurrentArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
@@ -10,10 +13,7 @@ use crate::config::mutate_config;
 use crate::error::CliError;
 use crate::profiles::set_default_namespace;
 use crate::prompt::prompt_line;
-use crate::resolve::{
-    load_cli_config, parse_namespace_id, resolve_namespace, resolve_target_profile,
-    resolve_target_profile_from_config,
-};
+use crate::resolve::{load_cli_config, parse_namespace_id, resolve_namespace};
 use std::path::Path;
 
 // --- namespace ---
@@ -42,33 +42,28 @@ async fn run_namespace_show(
     let explicit_profile = args.target.profile.profile.as_deref();
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let resolved = resolve_target_profile_from_config(
+    let (mut context, profile) = resolve_profile_context_from_config(
+        kind,
         &loaded.config,
         explicit_profile,
         args.target.request.no_retry,
     )
-    .await
-    .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
+    .await?;
     let explicit_namespace = args
         .namespace_id
         .as_deref()
         .or(args.target.namespace.as_deref());
-    let namespace_id = resolve_namespace(&loaded.config, explicit_profile, explicit_namespace)
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?
+    let namespace_id = resolve_namespace(&context.profile_name, profile, explicit_namespace)
+        .map_err(|error| context.fail(kind, error))?
         .namespace;
-    let namespace = resolved
+    context.namespace = Some(namespace_id);
+    let namespace = context
         .target
-        .get_namespace(&namespace_id)
+        .get_namespace(context.namespace())
         .await
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(mode),
-        data: CommandData::NamespaceStatus(namespace),
-    })
+    Ok(context.output(kind, CommandData::NamespaceStatus(namespace)))
 }
 
 async fn run_namespace_create(
@@ -77,25 +72,18 @@ async fn run_namespace_create(
     args: NamespaceCreateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
-        .await
-        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
+    let context =
+        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
     let namespace_id = parse_namespace_id(&args.namespace_id)
         .map_err(|error| error.with_param("namespace_id"))
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
-    let namespace = resolved
+        .map_err(|error| context.fail(kind, error))?;
+    let namespace = context
         .target
         .create_namespace(&namespace_id)
         .await
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(mode),
-        data: CommandData::NamespaceStatus(namespace),
-    })
+    Ok(context.output(kind, CommandData::NamespaceStatus(namespace)))
 }
 
 async fn run_namespace_delete(
@@ -105,30 +93,26 @@ async fn run_namespace_delete(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
-        .await
-        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
+    let context =
+        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
     let namespace_id = parse_namespace_id(&args.namespace_id)
         .map_err(|error| error.with_param("namespace_id"))
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
     let expected_head_seq = args
         .expected_head_seq
         .map(|value| {
             parse_public_ordinal_arg("--expected-head-seq", value, loonfs_api::ChangeSeq::parse)
         })
         .transpose()
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
 
     if !args.yes {
         // Without a terminal (or under --no-input / --json) there is no
         // prompt to answer; say what is required instead of surfacing the
         // prompt machinery's i/o error.
         if !runtime.interactive {
-            return Err(fail(
+            return Err(context.fail(
                 kind,
-                Some(resolved.profile_name),
-                Some(mode),
                 CliError::non_interactive_input_required(
                     "deleting a namespace requires confirmation: pass --yes, or run \
                      interactively to confirm at the prompt",
@@ -141,12 +125,10 @@ async fn run_namespace_delete(
             "deleting `{}` is permanent and retires the id; type the namespace id to confirm",
             args.namespace_id
         ))
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
         if typed.trim() != args.namespace_id {
-            return Err(fail(
+            return Err(context.fail(
                 kind,
-                Some(resolved.profile_name),
-                Some(mode),
                 CliError::invalid_request(format!(
                     "confirmation `{typed}` does not match namespace id `{}`",
                     args.namespace_id
@@ -155,18 +137,13 @@ async fn run_namespace_delete(
         }
     }
 
-    let response = resolved
+    let response = context
         .target
         .delete_namespace(&namespace_id, expected_head_seq)
         .await
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(mode),
-        data: CommandData::NamespaceDeleted(response),
-    })
+    Ok(context.output(kind, CommandData::NamespaceDeleted(response)))
 }
 
 async fn run_namespace_fork(
@@ -175,28 +152,21 @@ async fn run_namespace_fork(
     args: NamespaceForkArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
-        .await
-        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
+    let context =
+        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
     let source_namespace_id = parse_namespace_id(&args.source)
         .map_err(|error| error.with_param("source"))
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
     let new_namespace_id = parse_namespace_id(&args.new_namespace_id)
         .map_err(|error| error.with_param("new_namespace_id"))
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
-    let namespace = resolved
+        .map_err(|error| context.fail(kind, error))?;
+    let namespace = context
         .target
         .fork_namespace(&source_namespace_id, &new_namespace_id)
         .await
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(mode),
-        data: CommandData::NamespaceStatus(namespace),
-    })
+    Ok(context.output(kind, CommandData::NamespaceStatus(namespace)))
 }
 
 pub(crate) async fn run_namespace_use(
@@ -207,35 +177,35 @@ pub(crate) async fn run_namespace_use(
     let explicit_profile = args.profile.profile.as_deref();
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let resolved =
-        resolve_target_profile_from_config(&loaded.config, explicit_profile, args.request.no_retry)
-            .await
-            .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
+    let (context, _) = resolve_profile_context_from_config(
+        kind,
+        &loaded.config,
+        explicit_profile,
+        args.request.no_retry,
+    )
+    .await?;
     let namespace_id = parse_namespace_id(&args.namespace_id)
         .map_err(|error| error.with_param("namespace"))
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
 
-    resolved
+    context
         .target
         .get_namespace(&namespace_id)
         .await
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
 
     mutate_config(&loaded.path, |config| {
-        set_default_namespace(config, &resolved.profile_name, &args.namespace_id)
+        set_default_namespace(config, &context.profile_name, &args.namespace_id)
     })
-    .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+    .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
+    Ok(context.output(
         kind,
-        profile: Some(resolved.profile_name.clone()),
-        mode: Some(mode),
-        data: CommandData::DefaultNamespace {
-            profile: resolved.profile_name,
+        CommandData::DefaultNamespace {
+            profile: context.profile_name.clone(),
             namespace: args.namespace_id,
         },
-    })
+    ))
 }
 
 pub(crate) async fn run_namespace_current(
@@ -253,7 +223,7 @@ pub(crate) async fn run_namespace_current(
     // `current` is a status command, so an unset namespace is returned as
     // `null`. Environment selection still takes precedence over the profile
     // default.
-    let namespace = match resolve_namespace(&loaded.config, explicit_profile, None) {
+    let namespace = match resolve_namespace(profile_name, profile, None) {
         Ok(resolved) => Some(resolved.namespace.to_string()),
         Err(error) if error.is_no_default_namespace() => None,
         Err(error) => return Err(fail_for(kind, profile_name, &mode, error)),

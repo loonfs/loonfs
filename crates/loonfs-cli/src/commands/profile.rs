@@ -4,10 +4,11 @@ use super::context::fail;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::profile_config::{
     apply_update_flags, apply_update_interactive, build_profile_from_create_spec,
-    create_profile_spec_from_create, has_update_flags,
+    create_profile_spec_from_create, has_update_flags, profile_update_spec,
+    validate_update_provider,
 };
 use crate::args::{
-    CommandKind, ProfileCommand, ProfileCreateCommand, ProfileUpdateArgs, RuntimeBehavior,
+    CommandKind, ProfileCommand, ProfileCreateCommand, ProfileUpdateCommand, RuntimeBehavior,
 };
 use crate::config::{
     load_config, load_config_for_repair, load_config_if_exists, mutate_config, save_config_table,
@@ -58,7 +59,9 @@ pub(crate) fn run_profile_command(
                 data: CommandData::Profile(redacted),
             })
         }
-        ProfileCommand::Update(args) => run_profile_update(kind, config_path, *args, runtime),
+        ProfileCommand::Update { provider } => {
+            run_profile_update(kind, config_path, *provider, runtime)
+        }
         ProfileCommand::Delete { name } => run_profile_delete(kind, config_path, &name, runtime),
         ProfileCommand::Use { name } => run_profile_use(kind, config_path, &name),
     }
@@ -88,10 +91,11 @@ fn run_profile_create(
 fn run_profile_update(
     kind: CommandKind,
     config_path: &Path,
-    args: ProfileUpdateArgs,
+    command: ProfileUpdateCommand,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let name = args.name.clone();
+    let spec = profile_update_spec(command);
+    let name = spec.name.clone();
     let result = (|| -> Result<(String, ProfileConfig), CliError> {
         // The update is gathered before the lock: the interactive editor can
         // sit at a prompt for minutes, and holding the config lock across it
@@ -104,10 +108,11 @@ fn run_profile_update(
             .ok_or_else(|| CliError::profile_not_found(&name))?
             .clone();
 
-        let updated = if has_update_flags(&args) {
-            apply_update_flags(&name, existing, &args)?
+        let updated = if has_update_flags(&spec) {
+            apply_update_flags(&name, existing, &spec)?
         } else if runtime.interactive {
-            apply_update_interactive(existing)?
+            validate_update_provider(&name, &existing, &spec)?;
+            apply_update_interactive(&name, existing)?
         } else {
             return Err(CliError::non_interactive_input_required(
                 "update flags (e.g. --root, --bucket)",

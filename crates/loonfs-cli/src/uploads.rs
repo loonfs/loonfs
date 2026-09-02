@@ -1,5 +1,6 @@
 //! Local journals used to resume interrupted multipart uploads.
 
+use crate::config::absolute_env_path;
 use loonfs_api::v0::CompletedUploadPart;
 use loonfs_api::{Checksum, ChecksumAlgorithm, UploadId};
 use loonfs_client::{MultipartUploadJournal, MultipartUploadResume};
@@ -197,14 +198,6 @@ fn uploads_dir() -> Option<PathBuf> {
     }
     let home = absolute_env_path("HOME")?;
     Some(home.join(LEGACY_STATE_SUBDIR).join(UPLOADS_SUBDIR))
-}
-
-/// An environment variable naming an absolute directory. The XDG spec calls
-/// an empty or relative value invalid, and ignoring it keeps a stray
-/// relative value from making state follow the working directory.
-fn absolute_env_path(name: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var_os(name)?);
-    path.is_absolute().then_some(path)
 }
 
 #[cfg(test)]

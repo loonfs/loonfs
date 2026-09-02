@@ -59,60 +59,8 @@ enum ReorganizationStep {
     CompactionPlanned(loonfs_core::MetadataCompactionSpec),
 }
 
-/// Fetches active-checkpoint pages as needed.
-#[must_use]
-pub struct CheckpointsPager {
-    admin: FsAdmin,
-    namespace_id: NamespaceId,
-    request: PageRequest<CheckpointPageCursor>,
-    pending: Option<ListCheckpointsResponse>,
-    exhausted: bool,
-}
-
-impl CheckpointsPager {
-    /// Returns the next checkpoint page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<ListCheckpointsResponse>> {
-        if let Some(page) = self.pending.take() {
-            return Some(Ok(page));
-        }
-        if self.exhausted {
-            return None;
-        }
-        let page = self
-            .admin
-            .list_checkpoints_page_typed(&self.namespace_id, self.request.clone())
-            .await;
-        Some(page.and_then(|(mut page, next_cursor)| {
-            page.next_cursor = super::core::encode_next_cursor(next_cursor.as_ref())?;
-            self.exhausted = next_cursor.is_none();
-            self.request.cursor = next_cursor;
-            Ok(page)
-        }))
-    }
-
-    /// Returns at most `max_items` checkpoints.
-    ///
-    /// Unused checkpoints from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<Checkpoint>> {
-        let mut checkpoints = Vec::new();
-        while checkpoints.len() < max_items {
-            let Some(page) = self.next().await else {
-                break;
-            };
-            let mut page = page?;
-            let take = (max_items - checkpoints.len()).min(page.checkpoints.len());
-            if take < page.checkpoints.len() {
-                let remaining = page.checkpoints.split_off(take);
-                checkpoints.extend(page.checkpoints);
-                page.checkpoints = remaining;
-                self.pending = Some(page);
-                break;
-            }
-            checkpoints.extend(page.checkpoints);
-        }
-        Ok(checkpoints)
-    }
-}
+/// A pager over active checkpoints.
+pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, RuntimeError>;
 
 impl FsAdmin {
     /// A mutating engine under this handle's actor identity.
@@ -851,13 +799,26 @@ impl FsAdmin {
         namespace_id: &NamespaceId,
         request: PageRequest<CheckpointPageCursor>,
     ) -> CheckpointsPager {
-        CheckpointsPager {
-            admin: self.clone(),
-            namespace_id: namespace_id.clone(),
-            request,
-            pending: None,
-            exhausted: false,
-        }
+        let cursor = request.cursor.as_ref().map(|cursor| {
+            loonfs_api::encode_cursor(cursor).expect("typed checkpoint cursor should encode")
+        });
+        let limit = request.limit;
+        let admin = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let admin = admin.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                let cursor = cursor
+                    .as_deref()
+                    .map(loonfs_api::decode_cursor)
+                    .transpose()
+                    .map_err(|error| crate::CoreError::InvalidCursor(error.to_string()))?;
+                admin
+                    .list_checkpoints_page(&namespace_id, PageRequest { limit, cursor })
+                    .await
+            }
+        })
     }
 
     /// Lists one page of active checkpoints in ascending id order. The cursor

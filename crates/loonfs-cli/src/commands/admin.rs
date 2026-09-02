@@ -1,9 +1,9 @@
 //! `loonfs admin` commands: checkpoints, retention, GC, indexes, and the
 //! change feed.
 
-use super::context::{fail, fail_for, parse_public_ordinal_arg, resolve_command_context};
+use super::context::{parse_public_ordinal_arg, resolve_command_context, resolve_profile_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
-use super::pagination::{write_jsonl_page, PagePlan};
+use super::pagination::{collect_or_stream_pages, PagePlan, PagedListing};
 use crate::args::{
     AdminCheckpointArgs, AdminCheckpointCommand, AdminCheckpointListArgs,
     AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs, AdminIndexCommand, AdminIndexEnableArgs,
@@ -13,7 +13,7 @@ use crate::args::{
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
 use crate::render::{gc_pass_line, write_stderr_progress};
-use crate::resolve::{parse_namespace_id, resolve_target_profile};
+use crate::resolve::parse_namespace_id;
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
@@ -23,7 +23,7 @@ use loonfs_api::{
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
-use std::io::{self, BufWriter};
+use std::future::Future;
 use std::path::Path;
 
 // --- maintenance/admin plane ---
@@ -94,16 +94,11 @@ async fn run_admin_step(
     };
     let response = context
         .target
-        .run_maintenance(&context.namespace, request)
+        .run_maintenance(context.namespace(), request)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::MaintenanceStepped(response),
-    })
+    Ok(context.output(kind, CommandData::MaintenanceStepped(response)))
 }
 
 /// Runs garbage collection until it finishes unless `--max-objects` requests
@@ -118,49 +113,37 @@ async fn run_admin_gc(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let single_pass = args.max_objects.is_some();
-    let mut request = GcRequest {
-        grace_window_ms: args.grace_window_ms,
-        max_objects: Some(args.max_objects.unwrap_or(loonfs::DEFAULT_GC_MAX_OBJECTS)),
-        cursor: args.cursor,
-    };
-    let mut progress = PassProgress::new(runtime);
-    let mut response = None;
-    loop {
-        let pass = context
-            .target
-            .run_maintenance(
-                &context.namespace,
-                MaintenanceStepRequest {
-                    gc: Some(request.clone()),
-                    ..MaintenanceStepRequest::default()
-                },
-            )
-            .await
-            .map_err(|error| context.fail(kind, error))?
-            .gc
-            .expect("a step selecting collection reports its pass");
-        let next_cursor = pass.next_cursor.clone();
-        progress.pass_completed(gc_pass_line(&pass));
-        match &mut response {
-            Some(total) => accumulate_gc_response(total, pass),
-            None => response = Some(pass),
-        }
-        // A pass that hands back the cursor it was given ran out of budget
-        // before deciding anything, and would again; the summary's
-        // budget-exhausted line says why the drain stopped short.
-        if single_pass || next_cursor.is_none() || next_cursor == request.cursor {
-            break;
-        }
-        request.cursor = next_cursor;
-    }
-    let response = response.expect("GC loop should run at least once");
+    let max_objects = Some(args.max_objects.unwrap_or(loonfs::DEFAULT_GC_MAX_OBJECTS));
+    let response = run_cursor_passes(
+        PassProgress::new(runtime),
+        single_pass,
+        args.cursor,
+        |cursor| async {
+            Ok(context
+                .target
+                .run_maintenance(
+                    context.namespace(),
+                    MaintenanceStepRequest {
+                        gc: Some(GcRequest {
+                            grace_window_ms: args.grace_window_ms,
+                            max_objects,
+                            cursor,
+                        }),
+                        ..MaintenanceStepRequest::default()
+                    },
+                )
+                .await?
+                .gc
+                .expect("a step selecting collection reports its pass"))
+        },
+        |pass| pass.next_cursor.clone(),
+        gc_pass_line,
+        accumulate_gc_response,
+    )
+    .await
+    .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::GarbageCollected(response),
-    })
+    Ok(context.output(kind, CommandData::GarbageCollected(response)))
 }
 
 /// Holds the passes of a cursor loop until there are at least two of them.
@@ -210,6 +193,38 @@ impl PassProgress {
     }
 }
 
+async fn run_cursor_passes<R, F, Fut, N, D, A>(
+    mut progress: PassProgress,
+    single_pass: bool,
+    initial_cursor: Option<String>,
+    mut run_pass: F,
+    next_cursor: N,
+    describe: D,
+    accumulate: A,
+) -> Result<R, crate::error::CliError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<R, crate::error::CliError>>,
+    N: Fn(&R) -> Option<String>,
+    D: Fn(&R) -> String,
+    A: Fn(&mut R, R),
+{
+    let mut cursor = initial_cursor;
+    let first = run_pass(cursor.clone()).await?;
+    progress.pass_completed(describe(&first));
+    let mut total = first;
+    loop {
+        let next = next_cursor(&total);
+        if single_pass || next.is_none() || next == cursor {
+            return Ok(total);
+        }
+        cursor = next;
+        let pass = run_pass(cursor.clone()).await?;
+        progress.pass_completed(describe(&pass));
+        accumulate(&mut total, pass);
+    }
+}
+
 fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::GcResponse) {
     total.deleted.add(&pass.deleted);
     total.released_checkpoints.add(&pass.released_checkpoints);
@@ -241,16 +256,11 @@ async fn run_admin_checkpoint(
     };
     let response = context
         .target
-        .create_checkpoint(&context.namespace, request)
+        .create_checkpoint(context.namespace(), request)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::CheckpointCreated(response),
-    })
+    Ok(context.output(kind, CommandData::CheckpointCreated(response)))
 }
 
 async fn run_admin_checkpoint_list(
@@ -259,49 +269,25 @@ async fn run_admin_checkpoint_list(
     args: AdminCheckpointListArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let mut plan = PagePlan::new(&args.pagination);
-    let mut cursor = args.cursor.clone();
-    let mut response: Option<loonfs_api::ListCheckpointsResponse> = None;
-    let stdout = io::stdout();
-    let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
-    loop {
-        let page = context
-            .target
-            .list_checkpoints_page(&context.namespace, plan.request_size(), cursor.as_deref())
-            .await
-            .map_err(|error| context.fail(kind, error))?;
-        plan.record(page.checkpoints.len());
-        cursor = page.next_cursor.clone();
-        if args.pagination.jsonl {
-            write_jsonl_page(&mut stdout, &page.checkpoints)
-                .map_err(crate::error::CliError::io)
-                .map_err(|error| context.fail(kind, error))?;
-        } else if let Some(response) = response.as_mut() {
-            response.checkpoints.extend(page.checkpoints);
-            response.next_cursor = page.next_cursor;
-        } else {
-            response = Some(page);
-        }
-        if !plan.should_continue(cursor.is_some()) {
-            break;
-        }
-    }
-    if args.pagination.jsonl {
-        return Ok(CommandOutput {
-            kind,
-            profile: Some(context.profile_name),
-            mode: Some(context.mode),
-            data: CommandData::StreamedToStdout,
-        });
-    }
-    let response = response.expect("checkpoint loop should fetch at least one page");
+    let listing = collect_or_stream_pages(
+        PagePlan::new(&args.pagination),
+        args.pagination.cursor.clone(),
+        args.pagination.jsonl,
+        async |cursor, limit| {
+            context
+                .target
+                .list_checkpoints_page(context.namespace(), limit, cursor.as_deref())
+                .await
+        },
+        |_: &loonfs_api::ListCheckpointsResponse| {},
+    )
+    .await
+    .map_err(|error| context.fail(kind, error))?;
+    let PagedListing::Collected(response) = listing else {
+        return Ok(context.output(kind, CommandData::StreamedToStdout));
+    };
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::CheckpointsListed(response),
-    })
+    Ok(context.output(kind, CommandData::CheckpointsListed(response)))
 }
 
 async fn run_admin_checkpoint_release(
@@ -319,16 +305,11 @@ async fn run_admin_checkpoint_release(
     })?;
     let response = context
         .target
-        .release_checkpoint(&context.namespace, &checkpoint_id)
+        .release_checkpoint(context.namespace(), &checkpoint_id)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::CheckpointReleased(response),
-    })
+    Ok(context.output(kind, CommandData::CheckpointReleased(response)))
 }
 
 /// One metadata-upkeep pass at a threshold of one segment.
@@ -345,7 +326,7 @@ async fn run_admin_flush(
     let response = context
         .target
         .run_maintenance(
-            &context.namespace,
+            context.namespace(),
             MaintenanceStepRequest {
                 metadata_maintenance: Some(MetadataMaintenanceRequest {
                     max_wal_tail_segments: Some(1),
@@ -356,12 +337,7 @@ async fn run_admin_flush(
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::MaintenanceStepped(response),
-    })
+    Ok(context.output(kind, CommandData::MaintenanceStepped(response)))
 }
 
 async fn run_admin_retention_advance(
@@ -373,7 +349,7 @@ async fn run_admin_retention_advance(
     let response = context
         .target
         .run_maintenance(
-            &context.namespace,
+            context.namespace(),
             MaintenanceStepRequest {
                 retention: Some(AdvanceRetentionRequest::default()),
                 ..MaintenanceStepRequest::default()
@@ -382,12 +358,7 @@ async fn run_admin_retention_advance(
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::MaintenanceStepped(response),
-    })
+    Ok(context.output(kind, CommandData::MaintenanceStepped(response)))
 }
 
 /// Runs maintenance for explicitly assigned namespaces. The command runs
@@ -398,10 +369,8 @@ async fn run_admin_run(
     args: AdminRunArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
-        .await
-        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
+    let context =
+        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
     let namespaces = args
         .namespaces
         .iter()
@@ -409,11 +378,11 @@ async fn run_admin_run(
             parse_namespace_id(namespace).map_err(|error| error.with_param("--namespaces"))
         })
         .collect::<Result<BTreeSet<_>, _>>()
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
     // Sort and deduplicate assignments for stable execution and reporting.
     let namespaces: Vec<NamespaceId> = namespaces.into_iter().collect();
     let jobs = selected_jobs(&args.jobs);
-    let fail_here = |error| fail_for(kind, &resolved.profile_name, &mode, error);
+    let fail_here = |error| context.fail(kind, error);
 
     let job_names: Vec<String> = jobs.iter().map(|job| job.as_str().to_owned()).collect();
     let data = if args.drain {
@@ -421,7 +390,7 @@ async fn run_admin_run(
             max_steps: args.max_steps,
             deadline_ms: args.deadline_ms,
         };
-        let progress = resolved
+        let progress = context
             .target
             .drain_maintenance(&namespaces, &jobs, budget)
             .await
@@ -434,7 +403,7 @@ async fn run_admin_run(
             budget_exhausted: progress.budget_exhausted(),
         }
     } else {
-        resolved
+        context
             .target
             .host_maintenance(&namespaces, &jobs, args.poll_interval_ms, shutdown_signal())
             .await
@@ -445,12 +414,7 @@ async fn run_admin_run(
         }
     };
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(mode),
-        data,
-    })
+    Ok(context.output(kind, data))
 }
 
 /// Checks that the profile's object store supports the operations LoonFS
@@ -461,22 +425,15 @@ async fn run_admin_store_probe(
     args: AdminStoreProbeArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
-        .await
-        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
-    let response = resolved
+    let context =
+        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let response = context
         .target
         .probe_store()
         .await
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(mode),
-        data: CommandData::StoreProbed(response),
-    })
+    Ok(context.output(kind, CommandData::StoreProbed(response)))
 }
 
 /// Returns the selected jobs in a stable order without duplicates.
@@ -556,56 +513,30 @@ pub(crate) async fn run_admin_changes(
                 .with_param("--snapshot-id"),
             )
         })?;
-    let mut plan = PagePlan::new(&args.pagination);
-    let mut cursor = after_seq;
-    let mut response: Option<loonfs_api::v0::ListChangesResponse> = None;
-    let stdout = io::stdout();
-    let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
-    loop {
-        let page = context
-            .target
-            .list_changes(
-                &context.namespace,
-                cursor,
-                plan.request_size(),
-                snapshot_id.as_ref(),
-            )
-            .await
-            .map_err(|error| context.fail(kind, error))?;
-        plan.record(page.changes.len());
-        let next_after_seq = page.next_after_seq;
-        if args.pagination.jsonl {
-            write_jsonl_page(&mut stdout, &page.changes)
-                .map_err(crate::error::CliError::io)
-                .map_err(|error| context.fail(kind, error))?;
-        } else if let Some(response) = response.as_mut() {
-            response.through_seq = page.through_seq;
-            response.next_after_seq = page.next_after_seq;
-            response.changes.extend(page.changes);
-        } else {
-            response = Some(page);
-        }
-        if !plan.should_continue(next_after_seq.is_some()) {
-            break;
-        }
-        cursor = next_after_seq.expect("continuation was checked above");
-    }
-    if args.pagination.jsonl {
-        return Ok(CommandOutput {
-            kind,
-            profile: Some(context.profile_name),
-            mode: Some(context.mode),
-            data: CommandData::StreamedToStdout,
-        });
-    }
-    let response = response.expect("changes loop should fetch at least one page");
+    let listing = collect_or_stream_pages(
+        PagePlan::for_sequence(&args.pagination),
+        Some(after_seq),
+        args.pagination.jsonl,
+        async |cursor, limit| {
+            context
+                .target
+                .list_changes(
+                    context.namespace(),
+                    cursor.expect("change page collection should carry a sequence"),
+                    limit,
+                    snapshot_id.as_ref(),
+                )
+                .await
+        },
+        |_: &loonfs_api::v0::ListChangesResponse| {},
+    )
+    .await
+    .map_err(|error| context.fail(kind, error))?;
+    let PagedListing::Collected(response) = listing else {
+        return Ok(context.output(kind, CommandData::StreamedToStdout));
+    };
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::Changes(response),
-    })
+    Ok(context.output(kind, CommandData::Changes(response)))
 }
 
 /// Enables the index and, by default, waits for it to catch up to one fixed
@@ -622,7 +553,7 @@ async fn run_admin_index_enable(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
-        .enable_grep_index(&context.namespace)
+        .enable_grep_index(context.namespace())
         .await
         .map_err(|error| context.fail(kind, error))?;
     let target_seq = match (args.no_wait, &response.lifecycle) {
@@ -638,7 +569,7 @@ async fn run_admin_index_enable(
         (_, GrepIndexLifecycle::Active { .. }) => Some(
             context
                 .target
-                .get_namespace(&context.namespace)
+                .get_namespace(context.namespace())
                 .await
                 .map_err(|error| context.fail(kind, error))?
                 .head_seq,
@@ -649,7 +580,7 @@ async fn run_admin_index_enable(
             context
                 .target
                 .wait_for_grep_index(
-                    &context.namespace,
+                    context.namespace(),
                     target_seq,
                     StepBudget {
                         max_steps: args.max_steps,
@@ -664,24 +595,22 @@ async fn run_admin_index_enable(
     let response = if waited.is_some() {
         context
             .target
-            .get_grep_index(&context.namespace)
+            .get_grep_index(context.namespace())
             .await
             .map_err(|error| context.fail(kind, error))?
     } else {
         response
     };
 
-    Ok(CommandOutput {
+    Ok(context.output(
         kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::GrepIndexEnabled {
+        CommandData::GrepIndexEnabled {
             response,
             waited_for_seq: target_seq,
             steps: waited.as_ref().map_or(0, |waited| waited.steps),
             budget_exhausted: waited.is_some_and(|waited| !waited.reached),
         },
-    })
+    ))
 }
 
 async fn run_admin_index_status(
@@ -692,15 +621,10 @@ async fn run_admin_index_status(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
-        .get_grep_index(&context.namespace)
+        .get_grep_index(context.namespace())
         .await
         .map_err(|error| context.fail(kind, error))?;
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::GrepIndexStatus(response),
-    })
+    Ok(context.output(kind, CommandData::GrepIndexStatus(response)))
 }
 
 /// Collects the namespace's grep keyspace, looping the cursor exactly like
@@ -717,41 +641,36 @@ async fn run_admin_index_gc(
     // An omitted budget is left omitted: grep resolves it to the same
     // per-pass default the runtime uses, and one authority for that number
     // is what keeps a remote pass and an embedded one the same size.
-    let mut request = GrepGcRequest {
-        max_objects: args.max_objects,
-        cursor: args.cursor,
-    };
-    let mut progress = PassProgress::new(runtime);
-    let mut response: Option<loonfs_api::v0::GrepGcResponse> = None;
-    loop {
-        let pass = context
-            .target
-            .gc_grep_index(&context.namespace, &request)
-            .await
-            .map_err(|error| context.fail(kind, error))?;
-        let next_cursor = pass.next_cursor.clone();
-        progress.pass_completed(format!(
-            "{} deleted, {} retained",
-            pass.deleted_segments + pass.deleted_other_objects,
-            pass.retained_candidates
-        ));
-        match &mut response {
-            Some(total) => accumulate_grep_gc_response(total, pass),
-            None => response = Some(pass),
-        }
-        if single_pass || next_cursor.is_none() || next_cursor == request.cursor {
-            break;
-        }
-        request.cursor = next_cursor;
-    }
-    let response = response.expect("grep GC loop should run at least once");
+    let response = run_cursor_passes(
+        PassProgress::new(runtime),
+        single_pass,
+        args.cursor,
+        |cursor| async {
+            context
+                .target
+                .gc_grep_index(
+                    context.namespace(),
+                    &GrepGcRequest {
+                        max_objects: args.max_objects,
+                        cursor,
+                    },
+                )
+                .await
+        },
+        |pass| pass.next_cursor.clone(),
+        |pass| {
+            format!(
+                "{} deleted, {} retained",
+                pass.deleted_segments + pass.deleted_other_objects,
+                pass.retained_candidates
+            )
+        },
+        accumulate_grep_gc_response,
+    )
+    .await
+    .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::GrepIndexCollected(response),
-    })
+    Ok(context.output(kind, CommandData::GrepIndexCollected(response)))
 }
 
 fn accumulate_grep_gc_response(
@@ -774,15 +693,10 @@ async fn run_admin_index_disable(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
-        .disable_grep_index(&context.namespace)
+        .disable_grep_index(context.namespace())
         .await
         .map_err(|error| context.fail(kind, error))?;
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::GrepIndexDisabled(response),
-    })
+    Ok(context.output(kind, CommandData::GrepIndexDisabled(response)))
 }
 
 #[cfg(test)]

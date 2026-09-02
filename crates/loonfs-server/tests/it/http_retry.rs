@@ -186,7 +186,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     assert_eq!(entry.head_seq, first.committed_seq);
     let bytes = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("read file");
     assert_eq!(bytes, b"stable bytes\n");
@@ -315,7 +315,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), None)
+        .list_changes(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("list changes");
     let committed = changes
@@ -753,7 +753,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
 
     let bytes = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("read file");
     assert_eq!(
@@ -1034,7 +1034,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         .expect("stat host b file");
     assert_eq!(host_b_entry.head_seq.0, moved.committed_seq.0);
     let host_b_bytes = client_a
-        .get_file_bytes(&host_b_target)
+        .get_file_bytes(&host_b_target, &Default::default())
         .await
         .expect("read host b file");
     assert_eq!(host_b_bytes, b"host a\n");

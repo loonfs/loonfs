@@ -1,9 +1,8 @@
 //! Commands for viewing deployment capabilities and checking configuration.
 
-use super::context::{fail, fail_for};
+use super::context::resolve_profile_context;
 use super::output::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
 use crate::args::{CapabilitiesArgs, CommandKind, DoctorArgs};
-use crate::backend_error::BackendError;
 use crate::config::{
     load_config, non_empty_env, resolve_config_location, ConfigSource, ProfileConfig, StoreConfig,
     PROFILE_ENV,
@@ -11,23 +10,101 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::resolve_profile;
 use crate::render::{store_probe_summary_line, store_probe_verdict, StoreProbeVerdict};
-use crate::resolve::{resolve_namespace, resolve_target_profile, ResolvedTarget};
+use crate::resolve::{resolve_namespace, ResolvedTarget};
 use loonfs_api::v0::StoreProbeResponse;
 use loonfs_api::{CapabilityDocument, PROTOCOL_VERSION};
 use std::path::Path;
 
-pub(crate) const DOCTOR_CHECK_NAMES: [&str; 9] = [
-    "config",
-    "config_decode",
-    "profile",
-    "provider_config",
-    "connectivity",
-    "auth",
-    "health",
-    "capabilities",
-    "namespace",
-];
-pub(crate) const WRITE_CHECK_NAME: &str = "store_probe";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorCheckName {
+    Config,
+    ConfigDecode,
+    Profile,
+    ProviderConfig,
+    Connectivity,
+    Auth,
+    Health,
+    Capabilities,
+    Namespace,
+    StoreProbe,
+}
+
+impl DoctorCheckName {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::ConfigDecode => "config_decode",
+            Self::Profile => "profile",
+            Self::ProviderConfig => "provider_config",
+            Self::Connectivity => "connectivity",
+            Self::Auth => "auth",
+            Self::Health => "health",
+            Self::Capabilities => "capabilities",
+            Self::Namespace => "namespace",
+            Self::StoreProbe => "store_probe",
+        }
+    }
+
+    fn after(self) -> &'static [Self] {
+        match self {
+            Self::Config => &[
+                Self::ConfigDecode,
+                Self::Profile,
+                Self::ProviderConfig,
+                Self::Connectivity,
+                Self::Auth,
+                Self::Health,
+                Self::Capabilities,
+                Self::Namespace,
+                Self::StoreProbe,
+            ],
+            Self::ConfigDecode => &[
+                Self::Profile,
+                Self::ProviderConfig,
+                Self::Connectivity,
+                Self::Auth,
+                Self::Health,
+                Self::Capabilities,
+                Self::Namespace,
+                Self::StoreProbe,
+            ],
+            Self::Profile => &[
+                Self::ProviderConfig,
+                Self::Connectivity,
+                Self::Auth,
+                Self::Health,
+                Self::Capabilities,
+                Self::Namespace,
+                Self::StoreProbe,
+            ],
+            Self::ProviderConfig => &[
+                Self::Connectivity,
+                Self::Auth,
+                Self::Health,
+                Self::Capabilities,
+                Self::Namespace,
+                Self::StoreProbe,
+            ],
+            Self::Connectivity => &[
+                Self::Auth,
+                Self::Health,
+                Self::Capabilities,
+                Self::Namespace,
+                Self::StoreProbe,
+            ],
+            Self::Auth => &[
+                Self::Health,
+                Self::Capabilities,
+                Self::Namespace,
+                Self::StoreProbe,
+            ],
+            Self::Health => &[Self::Capabilities, Self::Namespace, Self::StoreProbe],
+            Self::Capabilities => &[Self::Namespace, Self::StoreProbe],
+            Self::Namespace => &[Self::StoreProbe],
+            Self::StoreProbe => &[],
+        }
+    }
+}
 
 pub(crate) async fn run_capabilities(
     kind: CommandKind,
@@ -35,22 +112,15 @@ pub(crate) async fn run_capabilities(
     args: CapabilitiesArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
-        .await
-        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
-    let document = resolved
+    let context =
+        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let document = context
         .target
         .get_capabilities()
         .await
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+        .map_err(|error| context.fail(kind, error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(mode),
-        data: CommandData::Capabilities(document),
-    })
+    Ok(context.output(kind, CommandData::Capabilities(document)))
 }
 
 /// Runs every available check and returns all results, including failures.
@@ -65,16 +135,16 @@ pub(crate) async fn run_doctor(
     let location = match resolve_config_location(config_flag) {
         Ok(location) => {
             checks.push(ok(
-                DOCTOR_CHECK_NAMES[0],
+                DoctorCheckName::Config,
                 config_resolution_message(&location),
             ));
             location
         }
         Err(error) => {
-            checks.push(failed(DOCTOR_CHECK_NAMES[0], error));
+            checks.push(failed(DoctorCheckName::Config, error));
             skip_remaining(
                 &mut checks,
-                1,
+                DoctorCheckName::Config,
                 args.write_check,
                 "config path resolution failed",
             );
@@ -85,14 +155,19 @@ pub(crate) async fn run_doctor(
     let config = match load_config(&location.path) {
         Ok(config) => {
             checks.push(ok(
-                DOCTOR_CHECK_NAMES[1],
+                DoctorCheckName::ConfigDecode,
                 format!("decoded and validated {}", location.path.display()),
             ));
             config
         }
         Err(error) => {
-            checks.push(failed(DOCTOR_CHECK_NAMES[1], error));
-            skip_remaining(&mut checks, 2, args.write_check, "config did not decode");
+            checks.push(failed(DoctorCheckName::ConfigDecode, error));
+            skip_remaining(
+                &mut checks,
+                DoctorCheckName::ConfigDecode,
+                args.write_check,
+                "config did not decode",
+            );
             return Ok(doctor_output(kind, None, None, checks));
         }
     };
@@ -101,7 +176,7 @@ pub(crate) async fn run_doctor(
     let (profile_name, profile) = match resolve_profile(&config, explicit_profile) {
         Ok((name, profile)) => {
             checks.push(ok(
-                DOCTOR_CHECK_NAMES[2],
+                DoctorCheckName::Profile,
                 format!(
                     "profile `{name}` selected via {}",
                     profile_selection_source(explicit_profile)
@@ -110,8 +185,13 @@ pub(crate) async fn run_doctor(
             (name.to_owned(), profile.clone())
         }
         Err(error) => {
-            checks.push(failed(DOCTOR_CHECK_NAMES[2], error));
-            skip_remaining(&mut checks, 3, args.write_check, "profile selection failed");
+            checks.push(failed(DoctorCheckName::Profile, error));
+            skip_remaining(
+                &mut checks,
+                DoctorCheckName::Profile,
+                args.write_check,
+                "profile selection failed",
+            );
             return Ok(doctor_output(
                 kind,
                 explicit_profile.map(ToOwned::to_owned),
@@ -124,14 +204,14 @@ pub(crate) async fn run_doctor(
 
     let mut target = match provider_check(&profile, args.target.request.no_retry).await {
         Ok((message, target)) => {
-            checks.push(ok(DOCTOR_CHECK_NAMES[3], message));
+            checks.push(ok(DoctorCheckName::ProviderConfig, message));
             target
         }
         Err(error) => {
-            checks.push(failed(DOCTOR_CHECK_NAMES[3], error));
+            checks.push(failed(DoctorCheckName::ProviderConfig, error));
             skip_remaining(
                 &mut checks,
-                4,
+                DoctorCheckName::ProviderConfig,
                 args.write_check,
                 "provider configuration is unusable",
             );
@@ -147,13 +227,13 @@ pub(crate) async fn run_doctor(
             .remote_connectivity()
             .await;
         checks.push(check_from_backend_result(
-            DOCTOR_CHECK_NAMES[4],
+            DoctorCheckName::Connectivity,
             "connected to the server",
             result,
         ));
     } else {
         checks.push(skipped(
-            DOCTOR_CHECK_NAMES[4],
+            DoctorCheckName::Connectivity,
             "embedded profiles do not use a network connection",
         ));
     }
@@ -167,15 +247,15 @@ pub(crate) async fn run_doctor(
             .await;
         checks.push(match &result {
             Ok(_) => ok(
-                DOCTOR_CHECK_NAMES[5],
+                DoctorCheckName::Auth,
                 "server accepted the capabilities request",
             ),
-            Err(error) => failed(DOCTOR_CHECK_NAMES[5], CliError::from(error.clone())),
+            Err(error) => failed(DoctorCheckName::Auth, error.clone()),
         });
         remote_capabilities = Some(result);
     } else {
         checks.push(skipped(
-            DOCTOR_CHECK_NAMES[5],
+            DoctorCheckName::Auth,
             "embedded profiles do not authenticate to a server",
         ));
     }
@@ -187,13 +267,13 @@ pub(crate) async fn run_doctor(
             .remote_health()
             .await;
         checks.push(check_from_backend_result(
-            DOCTOR_CHECK_NAMES[6],
+            DoctorCheckName::Health,
             "server health endpoint answered successfully",
             result,
         ));
     } else if local_root_is_missing(&profile) && !args.write_check {
         checks.push(skipped(
-            DOCTOR_CHECK_NAMES[6],
+            DoctorCheckName::Health,
             "local store root is missing; doctor did not create it",
         ));
     } else {
@@ -201,11 +281,11 @@ pub(crate) async fn run_doctor(
             Ok(resolved) => {
                 target = Some(resolved);
                 checks.push(ok(
-                    DOCTOR_CHECK_NAMES[6],
+                    DoctorCheckName::Health,
                     "opened the embedded object store without writing to it",
                 ));
             }
-            Err(error) => checks.push(failed(DOCTOR_CHECK_NAMES[6], error)),
+            Err(error) => checks.push(failed(DoctorCheckName::Health, error)),
         }
     }
 
@@ -215,30 +295,16 @@ pub(crate) async fn run_doctor(
         target.get_capabilities().await
     } else {
         checks.push(skipped(
-            DOCTOR_CHECK_NAMES[7],
+            DoctorCheckName::Capabilities,
             "embedded store was not opened",
         ));
-        namespace_check(
-            &mut checks,
-            &config,
-            explicit_profile,
-            args,
-            target.as_ref(),
-        )
-        .await;
+        namespace_check(&mut checks, &profile_name, &profile, args, target.as_ref()).await;
         append_write_check(&mut checks, args.write_check, target.as_ref()).await;
         return Ok(doctor_output(kind, Some(profile_name), Some(mode), checks));
     };
     checks.push(capability_document_check(capability_result));
 
-    namespace_check(
-        &mut checks,
-        &config,
-        explicit_profile,
-        args,
-        target.as_ref(),
-    )
-    .await;
+    namespace_check(&mut checks, &profile_name, &profile, args, target.as_ref()).await;
     append_write_check(&mut checks, args.write_check, target.as_ref()).await;
 
     Ok(doctor_output(kind, Some(profile_name), Some(mode), checks))
@@ -270,33 +336,36 @@ async fn provider_check(
 
 async fn namespace_check(
     checks: &mut Vec<DoctorCheck>,
-    config: &crate::config::CliConfig,
-    explicit_profile: Option<&str>,
+    profile_name: &str,
+    profile: &ProfileConfig,
     args: &DoctorArgs,
     target: Option<&ResolvedTarget>,
 ) {
-    let namespace =
-        match resolve_namespace(config, explicit_profile, args.target.namespace.as_deref()) {
-            Ok(resolved) => resolved.namespace,
-            Err(error) if error.is_no_default_namespace() => {
-                checks.push(skipped(DOCTOR_CHECK_NAMES[8], "no namespace is selected"));
-                return;
-            }
-            Err(error) => {
-                checks.push(failed(DOCTOR_CHECK_NAMES[8], error));
-                return;
-            }
-        };
+    let namespace = match resolve_namespace(profile_name, profile, args.target.namespace.as_deref())
+    {
+        Ok(resolved) => resolved.namespace,
+        Err(error) if error.is_no_default_namespace() => {
+            checks.push(skipped(
+                DoctorCheckName::Namespace,
+                "no namespace is selected",
+            ));
+            return;
+        }
+        Err(error) => {
+            checks.push(failed(DoctorCheckName::Namespace, error));
+            return;
+        }
+    };
     let Some(target) = target else {
         checks.push(skipped(
-            DOCTOR_CHECK_NAMES[8],
+            DoctorCheckName::Namespace,
             "the selected provider is unavailable",
         ));
         return;
     };
     let result = target.get_namespace(&namespace).await;
     checks.push(check_from_backend_result(
-        DOCTOR_CHECK_NAMES[8],
+        DoctorCheckName::Namespace,
         format!("namespace `{namespace}` is reachable"),
         result.map(|_| ()),
     ));
@@ -312,31 +381,31 @@ async fn append_write_check(
     }
     let Some(target) = target else {
         checks.push(skipped(
-            WRITE_CHECK_NAME,
+            DoctorCheckName::StoreProbe,
             "the selected provider is unavailable",
         ));
         return;
     };
     match target.probe_store().await {
         Ok(response) => checks.push(store_probe_check(response)),
-        Err(error) => checks.push(failed(WRITE_CHECK_NAME, CliError::from(error))),
+        Err(error) => checks.push(failed(DoctorCheckName::StoreProbe, error)),
     }
 }
 
-fn capability_document_check(result: Result<CapabilityDocument, BackendError>) -> DoctorCheck {
+fn capability_document_check(result: Result<CapabilityDocument, CliError>) -> DoctorCheck {
     let document = match result {
         Ok(document) => document,
-        Err(error) => return failed(DOCTOR_CHECK_NAMES[7], CliError::from(error)),
+        Err(error) => return failed(DoctorCheckName::Capabilities, error),
     };
     if let Err(error) = document.validate() {
         return failed_message(
-            DOCTOR_CHECK_NAMES[7],
+            DoctorCheckName::Capabilities,
             format!("capability document is not well-formed: {error}"),
         );
     }
     if document.protocol_version != PROTOCOL_VERSION {
         return failed_message(
-            DOCTOR_CHECK_NAMES[7],
+            DoctorCheckName::Capabilities,
             format!(
                 "server uses protocol `{}`, but this CLI expects `{PROTOCOL_VERSION}`",
                 document.protocol_version
@@ -344,7 +413,7 @@ fn capability_document_check(result: Result<CapabilityDocument, BackendError>) -
         );
     }
     ok(
-        DOCTOR_CHECK_NAMES[7],
+        DoctorCheckName::Capabilities,
         format!("capability document is valid and uses protocol `{PROTOCOL_VERSION}`"),
     )
 }
@@ -356,7 +425,7 @@ fn store_probe_check(response: StoreProbeResponse) -> DoctorCheck {
         StoreProbeVerdict::Passed => DoctorStatus::Ok,
     };
     DoctorCheck {
-        name: WRITE_CHECK_NAME.to_owned(),
+        name: DoctorCheckName::StoreProbe.as_str().to_owned(),
         status,
         message: store_probe_summary_line(&response),
         request_id: None,
@@ -395,19 +464,19 @@ fn profile_selection_source(explicit_profile: Option<&str>) -> &'static str {
 }
 
 fn check_from_backend_result<T>(
-    name: &str,
+    name: DoctorCheckName,
     success_message: impl Into<String>,
-    result: Result<T, BackendError>,
+    result: Result<T, CliError>,
 ) -> DoctorCheck {
     match result {
         Ok(_) => ok(name, success_message),
-        Err(error) => failed(name, CliError::from(error)),
+        Err(error) => failed(name, error),
     }
 }
 
-fn ok(name: &str, message: impl Into<String>) -> DoctorCheck {
+fn ok(name: DoctorCheckName, message: impl Into<String>) -> DoctorCheck {
     DoctorCheck {
-        name: name.to_owned(),
+        name: name.as_str().to_owned(),
         status: DoctorStatus::Ok,
         message: message.into(),
         request_id: None,
@@ -415,9 +484,9 @@ fn ok(name: &str, message: impl Into<String>) -> DoctorCheck {
     }
 }
 
-fn skipped(name: &str, message: impl Into<String>) -> DoctorCheck {
+fn skipped(name: DoctorCheckName, message: impl Into<String>) -> DoctorCheck {
     DoctorCheck {
-        name: name.to_owned(),
+        name: name.as_str().to_owned(),
         status: DoctorStatus::Skipped,
         message: message.into(),
         request_id: None,
@@ -425,9 +494,9 @@ fn skipped(name: &str, message: impl Into<String>) -> DoctorCheck {
     }
 }
 
-fn failed(name: &str, error: CliError) -> DoctorCheck {
+fn failed(name: DoctorCheckName, error: CliError) -> DoctorCheck {
     DoctorCheck {
-        name: name.to_owned(),
+        name: name.as_str().to_owned(),
         status: DoctorStatus::Failed,
         message: error.message,
         request_id: error.request_id,
@@ -435,9 +504,9 @@ fn failed(name: &str, error: CliError) -> DoctorCheck {
     }
 }
 
-fn failed_message(name: &str, message: impl Into<String>) -> DoctorCheck {
+fn failed_message(name: DoctorCheckName, message: impl Into<String>) -> DoctorCheck {
     DoctorCheck {
-        name: name.to_owned(),
+        name: name.as_str().to_owned(),
         status: DoctorStatus::Failed,
         message: message.into(),
         request_id: None,
@@ -445,15 +514,20 @@ fn failed_message(name: &str, message: impl Into<String>) -> DoctorCheck {
     }
 }
 
-fn skip_remaining(checks: &mut Vec<DoctorCheck>, first: usize, write_check: bool, reason: &str) {
+fn skip_remaining(
+    checks: &mut Vec<DoctorCheck>,
+    completed: DoctorCheckName,
+    write_check: bool,
+    reason: &str,
+) {
     checks.extend(
-        DOCTOR_CHECK_NAMES[first..]
+        completed
+            .after()
             .iter()
+            .copied()
+            .filter(|name| write_check || *name != DoctorCheckName::StoreProbe)
             .map(|name| skipped(name, reason)),
     );
-    if write_check {
-        checks.push(skipped(WRITE_CHECK_NAME, reason));
-    }
 }
 
 fn doctor_output(

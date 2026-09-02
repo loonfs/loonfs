@@ -4,6 +4,53 @@ use crate::config::NAMESPACE_ENV;
 use loonfs_api::ErrorCode;
 use serde::Serialize;
 
+macro_rules! cli_error_codes {
+    (@count) => { 0 };
+    (@count $head:ident $($tail:ident)*) => { 1 + cli_error_codes!(@count $($tail)*) };
+    ($($variant:ident => $value:literal),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum CliErrorCode {
+            $($variant,)+
+        }
+
+        impl CliErrorCode {
+            #[cfg(test)]
+            pub(crate) const ALL: [Self; cli_error_codes!(@count $($variant)+)] =
+                [$(Self::$variant,)+];
+
+            pub(crate) fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value,)+
+                }
+            }
+
+            fn parse(value: &str) -> Option<Self> {
+                match value {
+                    $($value => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+cli_error_codes! {
+    IoError => "io_error",
+    InvalidConfig => "invalid_config",
+    ProfileNotFound => "profile_not_found",
+    NoDefaultProfile => "no_default_profile",
+    NoDefaultNamespace => "no_default_namespace",
+    ProfileAlreadyExists => "profile_already_exists",
+    ConfigAlreadyExists => "config_already_exists",
+    NonInteractiveInputRequired => "non_interactive_input_required",
+    DestinationExists => "destination_exists",
+    InvalidUsage => "invalid_usage",
+    JsonNotSupportedForStreaming => "json_not_supported_for_streaming",
+    Cancelled => "cancelled",
+    ClientError => "client_error",
+    RuntimeError => "runtime_error",
+}
+
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
 ///
 /// `code` is either a shared API error code or a code local to the backend or
@@ -34,28 +81,12 @@ pub(crate) struct CliError {
     pub details: Option<Box<loonfs_api::ErrorDetails>>,
 }
 
-impl From<crate::backend_error::BackendError> for CliError {
-    /// Backend failures pass through verbatim because the value already
-    /// carries the registry or backend-local code, message, and any server
-    /// diagnostics this CLI reports.
-    fn from(error: crate::backend_error::BackendError) -> Self {
-        Self {
-            code: error.code,
-            feature: error.feature,
-            message: error.message,
-            param: error.param,
-            request_id: error.request_id,
-            details: error.details,
-        }
-    }
-}
-
 impl CliError {
     /// An `io_error` that names the file it concerns, so a failure inside a
     /// loop over many files stays attributable.
     pub(crate) fn io_for_path(path: &std::path::Path, error: std::io::Error) -> Self {
         Self::new(
-            "io_error",
+            CliErrorCode::IoError.as_str(),
             format!("i/o error for `{}`: {error}", path.display()),
         )
     }
@@ -72,11 +103,23 @@ impl CliError {
     }
 
     pub(crate) fn invalid_config(message: impl Into<String>) -> Self {
-        Self::new("invalid_config", message)
+        Self::new(CliErrorCode::InvalidConfig.as_str(), message)
     }
 
     pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidRequest.as_str(), message)
+    }
+
+    pub(crate) fn client_error(message: impl Into<String>) -> Self {
+        Self::new(CliErrorCode::ClientError.as_str(), message)
+    }
+
+    pub(crate) fn io_error(message: impl Into<String>) -> Self {
+        Self::new(CliErrorCode::IoError.as_str(), message)
+    }
+
+    pub(crate) fn runtime_error(message: impl Into<String>) -> Self {
+        Self::new(CliErrorCode::RuntimeError.as_str(), message)
     }
 
     pub(crate) fn with_param(mut self, param: impl Into<String>) -> Self {
@@ -84,20 +127,31 @@ impl CliError {
         self
     }
 
+    pub(crate) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
+        if self.code == ErrorCode::InvalidRequest.as_str() {
+            self.with_param(param)
+        } else {
+            self
+        }
+    }
+
     pub(crate) fn profile_not_found(name: &str) -> Self {
-        Self::new("profile_not_found", format!("profile `{name}` not found"))
+        Self::new(
+            CliErrorCode::ProfileNotFound.as_str(),
+            format!("profile `{name}` not found"),
+        )
     }
 
     pub(crate) fn no_default_profile() -> Self {
         Self::new(
-            "no_default_profile",
+            CliErrorCode::NoDefaultProfile.as_str(),
             "no default profile is set; use `profile use` or `--profile`",
         )
     }
 
     pub(crate) fn no_default_namespace(profile: &str) -> Self {
         Self::new(
-            "no_default_namespace",
+            CliErrorCode::NoDefaultNamespace.as_str(),
             format!(
                 "no default namespace is set for profile `{profile}`; use `--namespace`, `{NAMESPACE_ENV}`, or `loonfs use <namespace>`"
             ),
@@ -106,19 +160,19 @@ impl CliError {
 
     /// Whether namespace resolution found no configured default.
     pub(crate) fn is_no_default_namespace(&self) -> bool {
-        self.code == "no_default_namespace"
+        CliErrorCode::parse(&self.code) == Some(CliErrorCode::NoDefaultNamespace)
     }
 
     pub(crate) fn profile_already_exists(name: &str) -> Self {
         Self::new(
-            "profile_already_exists",
+            CliErrorCode::ProfileAlreadyExists.as_str(),
             format!("profile `{name}` already exists"),
         )
     }
 
     pub(crate) fn config_already_exists(path: &str) -> Self {
         Self::new(
-            "config_already_exists",
+            CliErrorCode::ConfigAlreadyExists.as_str(),
             format!(
                 "config file already exists at `{path}`. use `loonfs profile create` to create a new profile, `loonfs profile update` to modify an existing profile, or `loonfs profile use` to change the default profile"
             ),
@@ -128,7 +182,10 @@ impl CliError {
     /// Interactive input is required but unavailable; `requirement` says
     /// what to pass instead.
     pub(crate) fn non_interactive_input_required(requirement: impl Into<String>) -> Self {
-        Self::new("non_interactive_input_required", requirement)
+        Self::new(
+            CliErrorCode::NonInteractiveInputRequired.as_str(),
+            requirement,
+        )
     }
 
     pub(crate) fn non_interactive_field_required(field: &str) -> Self {
@@ -140,7 +197,7 @@ impl CliError {
 
     pub(crate) fn destination_exists(path: &std::path::Path) -> Self {
         Self::new(
-            "destination_exists",
+            CliErrorCode::DestinationExists.as_str(),
             format!(
                 "local file `{}` already exists; pass --force to overwrite",
                 path.display()
@@ -151,21 +208,47 @@ impl CliError {
     /// A command line rejected by the argument parser. Validation that runs
     /// after parsing uses `invalid_request` instead.
     pub(crate) fn invalid_usage(message: impl Into<String>) -> Self {
-        Self::new("invalid_usage", message)
+        Self::new(CliErrorCode::InvalidUsage.as_str(), message)
     }
 
     pub(crate) fn json_not_supported() -> Self {
         Self::new(
-            "json_not_supported_for_streaming",
+            CliErrorCode::JsonNotSupportedForStreaming.as_str(),
             "`--json` is not supported for this command",
         )
     }
 
     pub(crate) fn io(error: std::io::Error) -> Self {
-        Self::new("io_error", format!("i/o error: {error}"))
+        Self::new(
+            CliErrorCode::IoError.as_str(),
+            format!("i/o error: {error}"),
+        )
     }
 
     pub(crate) fn cancelled() -> Self {
-        Self::new("cancelled", "operation cancelled")
+        Self::new(CliErrorCode::Cancelled.as_str(), "operation cancelled")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CliErrorCode;
+
+    #[test]
+    fn cli_error_code_values_are_pinned() {
+        for code in CliErrorCode::ALL {
+            assert_eq!(code.as_str(), snake_case(&format!("{code:?}")));
+        }
+    }
+
+    fn snake_case(value: &str) -> String {
+        let mut result = String::with_capacity(value.len());
+        for (index, character) in value.chars().enumerate() {
+            if index > 0 && character.is_ascii_uppercase() {
+                result.push('_');
+            }
+            result.push(character.to_ascii_lowercase());
+        }
+        result
     }
 }

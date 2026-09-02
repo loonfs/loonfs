@@ -1,6 +1,5 @@
 //! Payload sources shared by embedded and remote `put` operations.
 
-use crate::backend_error::BackendError;
 use crate::error::CliError;
 use crate::progress::ProgressReporter;
 use futures::stream::StreamExt;
@@ -50,7 +49,7 @@ impl LocalPayload {
     pub(crate) async fn open_byte_stream(
         &self,
         progress: &Arc<ProgressReporter>,
-    ) -> Result<ByteStream, BackendError> {
+    ) -> Result<ByteStream, CliError> {
         Ok(as_object_store_stream(self.open_source(progress).await?))
     }
 
@@ -61,10 +60,10 @@ impl LocalPayload {
     pub(crate) async fn open_source(
         &self,
         progress: &Arc<ProgressReporter>,
-    ) -> Result<PayloadSource, BackendError> {
+    ) -> Result<PayloadSource, CliError> {
         let source = match self {
             Self::File { path, .. } => PayloadSource::open_file(path).await.map_err(|error| {
-                BackendError::io_error(format!("i/o error for `{}`: {error}", path.display()))
+                CliError::io_error(format!("i/o error for `{}`: {error}", path.display()))
             })?,
             Self::Stdin => PayloadSource::reader(tokio::io::stdin()),
         };
