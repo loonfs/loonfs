@@ -30,7 +30,10 @@ pub(super) enum CandidateAdmission {
 
 impl CandidateAdmission {
     fn independent(outcome: Result<ApiCommitResponse>) -> Self {
-        Self::Settled(BatchOutcomeSlot::SettledIndependent(outcome))
+        Self::Settled(BatchOutcomeSlot::Settled {
+            outcome,
+            depends_on_batch: false,
+        })
     }
 }
 
@@ -140,10 +143,10 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             validated,
             allocation,
         }),
-        Err(error) => {
-            session.discard_candidate(allocation);
-            CandidateAdmission::Settled(BatchOutcomeSlot::SettledContingent(Err(error)))
-        }
+        Err(error) => CandidateAdmission::Settled(BatchOutcomeSlot::Settled {
+            outcome: Err(error),
+            depends_on_batch: true,
+        }),
     }
 }
 

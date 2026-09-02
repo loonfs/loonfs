@@ -142,7 +142,7 @@ pub mod publish {
     pub use crate::commit_engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionState,
-        WalTailPolicy, WriterSessionState,
+        WriterSessionState,
     };
     pub use crate::path::write::{CommitRequest, FilesystemOperation};
     pub use crate::protocol::{PublishTailOptions, PublishTailWeight};

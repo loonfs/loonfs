@@ -168,44 +168,6 @@ impl CommitCandidate {
     }
 }
 
-/// Defines the WAL-tail thresholds for checkpointing and write rejection.
-/// Keeping both values in one policy prevents inconsistent configuration.
-///
-/// Reads do not depend on tail length. Writes are rejected only when
-/// maintenance has fallen behind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WalTailPolicy {
-    /// Visible WAL-tail length, in segments, at which a maintenance step
-    /// publishes a checkpoint. The step fires at or past this length.
-    pub checkpoint_at_segments: u64,
-    /// WAL-tail length at which all publish operations return
-    /// `maintenance_required` before adding another segment.
-    pub reject_writes_at_segments: u64,
-}
-
-impl WalTailPolicy {
-    /// The workspace policy: checkpoint at 32 segments, reject at the
-    /// longest tail the format admits.
-    pub const DEFAULT: Self = Self {
-        checkpoint_at_segments: 32,
-        reject_writes_at_segments: crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS,
-    };
-}
-
-impl Default for WalTailPolicy {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-// Checkpointing must begin before the write-rejection threshold so
-// maintenance can reduce the tail before writes are blocked.
-const _: () = assert!(
-    0 < WalTailPolicy::DEFAULT.checkpoint_at_segments
-        && WalTailPolicy::DEFAULT.checkpoint_at_segments
-            < WalTailPolicy::DEFAULT.reject_writes_at_segments,
-);
-
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
     pub results: Vec<Result<ApiCommitResponse>>,
@@ -429,7 +391,7 @@ impl NamespaceCommitEngine {
             }
         };
 
-        let reject_writes_at_segments = WalTailPolicy::DEFAULT.reject_writes_at_segments;
+        let reject_writes_at_segments = crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
         // `wal_tail_segments` is the tail this publish would extend, so
         // rejecting at the bound is what keeps the landed tail inside it.
         if projection.wal_tail_segments >= reject_writes_at_segments {

@@ -1,21 +1,17 @@
 //! The publish plan for one attribute update.
 
-use super::publish_path_planning::{
-    publish_binding_is_precondition, CompiledFilesystemOperation, PublishPathPlanningView,
-};
-use crate::commit::{
-    CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition, CommitValidationError,
-};
+use super::ensure_expected_inode;
+use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
+use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
-use crate::path::mutation_path::ensure_mutation_path;
+use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{
-    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, InodeId, NameKey,
-    ROOT_INODE_ID,
+    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, InodeId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) async fn plan_publish_update_attributes<S: ObjectStore + ?Sized>(
+pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     set: &BTreeMap<AttributeKey, AttributeValue>,
     remove: &[AttributeKey],
@@ -28,37 +24,11 @@ pub(super) async fn plan_publish_update_attributes<S: ObjectStore + ?Sized>(
 
     // Attributes belong to the resource, so a directory is as valid a target
     // as a file; nothing here looks at the inode kind.
-    let target = view
-        .metadata_state
-        .resolve_visible_path(absolute_path)
-        .await?;
-    // Planning happens under the publish lock, so this check is race-free,
-    // and it reports what the delete guard reports: a caller that resolved
-    // the path earlier writes to that exact inode or fails, never to a raced
-    // rebinding.
-    if let Some(expected) = expected_inode_id {
-        if target.inode_id != expected {
-            return Err(CommitValidationError::BindingPreconditionMismatch {
-                // The root is rejected above, so a resolved target always has
-                // a parent.
-                parent_inode_id: target.parent_inode_id.unwrap_or(ROOT_INODE_ID),
-                name_key: NameKey::for_display_name(
-                    &absolute_path
-                        .final_component()
-                        .expect("non-root mutation path should have a final component")
-                        .to_display_name(),
-                ),
-                expected_child_inode_id: expected,
-                actual_child_inode_id: target.inode_id,
-            }
-            .into());
-        }
-    }
+    let target = view.view.resolve_visible_path(absolute_path).await?;
+    ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
 
-    let (current_revision_no, current) = view
-        .metadata_state
-        .attributes_at_visible_seq(target.inode_id)
-        .await?;
+    let (current_revision_no, current) =
+        view.view.attributes_at_visible_seq(target.inode_id).await?;
     // A caller-supplied guard replaces the freshly-read revision in the op,
     // so commit validation rejects a raced update with the stale-attributes
     // error and its expected/actual details.
@@ -86,19 +56,13 @@ pub(super) async fn plan_publish_update_attributes<S: ObjectStore + ?Sized>(
     let attributes = Attributes::new(updated).map_err(|error| {
         CoreError::InvalidCommitRequest(format!("the resulting attribute map is invalid: {error}"))
     })?;
-    Ok(CompiledFilesystemOperation::new(
-        vec![ApiCommitOp::UpdateAttributes {
+    Ok(CompiledFilesystemOperation::new(vec![
+        CommitOp::UpdateAttributes {
             inode_id: target.inode_id,
             base_attributes_revision_no,
             attributes,
-        }],
-        vec![
-            publish_binding_is_precondition(view, &target).await?,
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: target.inode_id,
-            },
-        ],
-    ))
+        },
+    ]))
 }
 
 /// Rejects requests that do not describe one coherent update, each with a

@@ -1,48 +1,20 @@
 //! [`CommitHeadPublishError`]: failures of the segment PUT and head
 //! compare-and-swap.
 
-use loonfs_api::{ChangeSeq, NamespaceId, WriterEpoch};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CommitHeadPublishError {
     #[error("expected head etag must not be empty")]
     EmptyExpectedHeadEtag,
-    #[error("publish namespace mismatch: head `{head}`, plan `{plan}`")]
-    NamespaceMismatch {
-        head: NamespaceId,
-        plan: NamespaceId,
-    },
-    #[error("WAL segment namespace mismatch: head `{head}`, WAL `{wal}`")]
-    WalSegmentNamespaceMismatch { head: NamespaceId, wal: NamespaceId },
-    #[error("WAL segment writer epoch mismatch: expected `{expected}`, actual `{actual}`")]
-    WalSegmentWriterEpochMismatch {
-        expected: WriterEpoch,
-        actual: WriterEpoch,
-    },
-    #[error("WAL segment base head seq mismatch: expected `{expected}`, actual `{actual}`")]
-    WalSegmentBaseHeadSeqMismatch {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
-    },
-    #[error("WAL segment start seq mismatch: expected `{expected}`, actual `{actual}`")]
-    WalSegmentStartSeqMismatch {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
-    },
-    #[error("WAL segment end seq mismatch: expected `{expected}`, actual `{actual}`")]
-    WalSegmentEndSeqMismatch {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
+    #[error("wal segment does not connect at `{field}`: expected `{expected}`, actual `{actual}`")]
+    SegmentDoesNotConnect {
+        field: &'static str,
+        expected: String,
+        actual: String,
     },
     #[error("WAL segment contains no records")]
     EmptyWalSegment,
-    /// The successor head this publish built does not carry the
-    /// namespace's immutable identity forward. A construction bug, caught
-    /// before the compare-and-swap so it can never become durable.
-    #[error("{0}")]
-    HeadIdentityDrift(loonfs_api::wire::control::HeadIdentityDrift),
     #[error("sequence number cannot exceed 9007199254740991")]
     SeqOverflow,
     #[error("namespace head changed since the publish view was loaded")]

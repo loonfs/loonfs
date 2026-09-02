@@ -6,7 +6,7 @@
 //! chains where these constraints do not apply.
 
 use crate::checkpoint::ManifestLoadError;
-use crate::commit::{CommitHeadPublishError, CommitValidationError};
+use crate::commit::{CommitHeadPublishError, CommitOperand, CommitValidationError};
 use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
 use crate::metadata::VisiblePathError;
@@ -112,8 +112,6 @@ pub enum CoreError {
     ExpectedFile { path: String, kind: InodeKind },
     #[error("expected directory at `{path}` but found `{kind}`")]
     ExpectedDirectory { path: String, kind: InodeKind },
-    #[error("directory not empty `{0}`")]
-    DirectoryNotEmpty(String),
     #[error("cannot mutate root path")]
     RootMutationForbidden,
     #[error("{}", destination_exists_message(.path, .existing_display_name.as_deref()))]
@@ -433,7 +431,6 @@ impl CoreError {
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
-            CoreError::DirectoryNotEmpty(_) => ErrorCode::DirectoryNotEmpty,
             CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
             // Naming which operation stopped a batch says nothing new about
@@ -630,12 +627,7 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             actual_inode_id: Some(*actual_child_inode_id),
             ..ErrorDetails::default()
         }),
-        CommitValidationError::ReplaceFileBaseRevisionMismatch {
-            inode_id,
-            expected,
-            actual,
-        }
-        | CommitValidationError::RestoreRevisionBaseRevisionMismatch {
+        CommitValidationError::BaseRevisionMismatch {
             inode_id,
             expected,
             actual,
@@ -645,7 +637,10 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             actual_revision_no: *actual,
             ..ErrorDetails::default()
         }),
-        CommitValidationError::UndeleteInodeMissing { inode_id }
+        CommitValidationError::InodeMissing {
+            operand: CommitOperand::UndeleteTarget,
+            inode_id,
+        }
         | CommitValidationError::UndeleteTargetNotDeleted { inode_id } => Some(ErrorDetails {
             inode_id: Some(*inode_id),
             ..ErrorDetails::default()
@@ -681,7 +676,10 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             actual_attributes_revision_no: Some(*actual),
             ..ErrorDetails::default()
         }),
-        CommitValidationError::UpdateAttributesInodeMissing { inode_id } => Some(ErrorDetails {
+        CommitValidationError::InodeMissing {
+            operand: CommitOperand::AttributeTarget,
+            inode_id,
+        } => Some(ErrorDetails {
             inode_id: Some(*inode_id),
             ..ErrorDetails::default()
         }),
@@ -804,10 +802,7 @@ fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> Error
 
 fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode {
     match error {
-        CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
-        | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. } => {
-            ErrorCode::StaleRevision
-        }
+        CommitValidationError::BaseRevisionMismatch { .. } => ErrorCode::StaleRevision,
         CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
             ErrorCode::RevisionNotFound
         }
@@ -820,55 +815,21 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         // stored rows contradict themselves — a live binding under a
         // tombstone — which is repair work, not something a caller can fix by
         // re-reading and retrying.
-        CommitValidationError::CreateUnderSubtreeTombstone { .. }
-        | CommitValidationError::ReplaceFileUnderSubtreeTombstone { .. }
-        | CommitValidationError::RestoreRevisionUnderSubtreeTombstone { .. }
-        | CommitValidationError::DeleteFileCoveredByTombstone { .. }
-        | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
-        | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
-        | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. }
-        | CommitValidationError::UpdateAttributesUnderSubtreeTombstone { .. } => {
-            ErrorCode::NamespaceCorrupt
-        }
+        CommitValidationError::TargetUnderSubtreeTombstone { .. } => ErrorCode::NamespaceCorrupt,
         // The revision guard every attribute update carries, whether or not
         // the caller stated an expectation. Both raise the same conflict.
         CommitValidationError::UpdateAttributesBaseRevisionMismatch { .. } => {
             ErrorCode::StaleAttributes
         }
-        CommitValidationError::UpdateAttributesInodeMissing { .. } => ErrorCode::PathNotFound,
         // Validation numbers the attribute revision, so running out of
         // numbers is a bug in this server rather than a caller mistake.
         CommitValidationError::UpdateAttributesRevisionOverflow { .. } => ErrorCode::ServerError,
-        CommitValidationError::CreateChildNameCollision { .. }
-        | CommitValidationError::NamePreconditionParentNotDirectory { .. }
+        CommitValidationError::NameTaken { .. }
+        | CommitValidationError::InodeWrongKind { .. }
         | CommitValidationError::BindingPreconditionMissing { .. }
-        | CommitValidationError::BindingPreconditionMismatch { .. }
-        | CommitValidationError::CreateParentNotDirectory { .. }
-        | CommitValidationError::ReplaceFileInodeNotFile { .. }
-        | CommitValidationError::RestoreRevisionInodeNotFile { .. }
-        | CommitValidationError::DeleteFileInodeNotFile { .. }
-        | CommitValidationError::RenameTargetParentNotDirectory { .. }
-        | CommitValidationError::RenameTargetNameCollision { .. }
-        | CommitValidationError::DeleteSubtreeRootNotDirectory { .. }
-        | CommitValidationError::DirectoryEmptyPreconditionInodeNotDirectory { .. } => {
-            ErrorCode::PathConflict
-        }
-        CommitValidationError::DirectoryEmptyPreconditionNotEmpty { .. } => {
-            ErrorCode::DirectoryNotEmpty
-        }
-        CommitValidationError::CreateParentMissing { .. }
-        | CommitValidationError::NamePreconditionParentMissing { .. }
-        | CommitValidationError::ReplaceFileInodeMissing { .. }
-        | CommitValidationError::RestoreRevisionInodeMissing { .. }
-        | CommitValidationError::DeleteFileInodeMissing { .. }
-        | CommitValidationError::RenameInodeMissing { .. }
-        | CommitValidationError::SourceBindingMissing { .. }
-        | CommitValidationError::RenameTargetParentMissing { .. }
-        | CommitValidationError::DeleteSubtreeRootMissing { .. }
-        | CommitValidationError::DirectoryEmptyPreconditionInodeMissing { .. } => {
-            ErrorCode::PathNotFound
-        }
-        CommitValidationError::UndeleteInodeMissing { .. } => ErrorCode::PathNotFound,
+        | CommitValidationError::BindingPreconditionMismatch { .. } => ErrorCode::PathConflict,
+        CommitValidationError::DirectoryNotEmpty { .. } => ErrorCode::DirectoryNotEmpty,
+        CommitValidationError::InodeMissing { .. } => ErrorCode::PathNotFound,
         // Both are "the deletion you named is not the live one": absent
         // entirely, or superseded by a newer generation. One code, with the
         // generations in the structured details.
@@ -876,9 +837,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         | CommitValidationError::UndeleteTargetsCurrentCommit { .. }
         | CommitValidationError::UndeleteGenerationMismatch { .. } => ErrorCode::NotDeleted,
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
-        CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidRequest,
-        CommitValidationError::ValidatedPreviewApplyFailed(_)
-        | CommitValidationError::RestoreRevisionOverflow { .. }
+        CommitValidationError::RestoreRevisionOverflow { .. }
         | CommitValidationError::ReplaceFileRevisionOverflow { .. }
         | CommitValidationError::OpIndexOverflow
         | CommitValidationError::DeltaIndexOverflow => ErrorCode::ServerError,
@@ -891,14 +850,8 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
         | CommitHeadPublishError::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
         CommitHeadPublishError::OutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
         CommitHeadPublishError::EmptyExpectedHeadEtag
-        | CommitHeadPublishError::NamespaceMismatch { .. }
-        | CommitHeadPublishError::WalSegmentNamespaceMismatch { .. }
-        | CommitHeadPublishError::WalSegmentWriterEpochMismatch { .. }
-        | CommitHeadPublishError::WalSegmentBaseHeadSeqMismatch { .. }
-        | CommitHeadPublishError::WalSegmentStartSeqMismatch { .. }
-        | CommitHeadPublishError::WalSegmentEndSeqMismatch { .. }
+        | CommitHeadPublishError::SegmentDoesNotConnect { .. }
         | CommitHeadPublishError::EmptyWalSegment
-        | CommitHeadPublishError::HeadIdentityDrift(_)
         | CommitHeadPublishError::SeqOverflow
         | CommitHeadPublishError::Codec { .. }
         | CommitHeadPublishError::Store { .. } => ErrorCode::ServerError,
@@ -1074,12 +1027,11 @@ mod tests {
         assert_eq!(details.committed_seq, None);
         assert_eq!(details.committed_fingerprint, None);
 
-        let stale =
-            CoreError::CommitValidation(CommitValidationError::ReplaceFileBaseRevisionMismatch {
-                inode_id: InodeId(7),
-                expected: RevisionNo(2),
-                actual: Some(RevisionNo(5)),
-            });
+        let stale = CoreError::CommitValidation(CommitValidationError::BaseRevisionMismatch {
+            inode_id: InodeId(7),
+            expected: RevisionNo(2),
+            actual: Some(RevisionNo(5)),
+        });
         let details = stale.details().expect("stale-revision details");
         assert_eq!(details.inode_id, Some(InodeId(7)));
         assert_eq!(details.expected_revision_no, Some(RevisionNo(2)));
@@ -1092,7 +1044,7 @@ mod tests {
         // A file with no revision at all reads as a sentence rather than
         // printing the absent value.
         let unversioned =
-            CoreError::CommitValidation(CommitValidationError::ReplaceFileBaseRevisionMismatch {
+            CoreError::CommitValidation(CommitValidationError::BaseRevisionMismatch {
                 inode_id: InodeId(7),
                 expected: RevisionNo(2),
                 actual: None,

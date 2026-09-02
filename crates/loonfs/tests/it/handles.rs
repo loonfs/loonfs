@@ -74,9 +74,8 @@ async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &Namespac
 /// Leaves the tail exactly at the write-stop bound: every write here is
 /// admitted, and the next one is not.
 async fn fill_wal_tail_to_write_stop(writer: &FsWriter, namespace_id: &NamespaceId) {
-    let writes =
-        u32::try_from(loonfs_core::publish::WalTailPolicy::DEFAULT.reject_writes_at_segments)
-            .expect("the WAL write-stop bound should fit in u32");
+    let writes = u32::try_from(loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS)
+        .expect("the WAL write-stop bound should fit in u32");
     for round in 0..writes {
         writer
             .put_file_bytes(

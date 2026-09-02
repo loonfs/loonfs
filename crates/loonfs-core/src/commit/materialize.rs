@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaterializedCommitDelta {
     pub semantic_op_index: u32,
-    pub delta_index: u32,
     pub wal_delta: WalDelta,
 }
 
@@ -304,22 +303,8 @@ fn push_delta(
     semantic_op_index: u32,
     wal_delta: WalDelta,
 ) {
-    let delta_index = wal_delta_index(&wal_delta);
     deltas.push(MaterializedCommitDelta {
         semantic_op_index,
-        delta_index,
         wal_delta,
     });
-}
-
-fn wal_delta_index(wal_delta: &WalDelta) -> u32 {
-    match wal_delta {
-        WalDelta::CreateInode { delta_index, .. }
-        | WalDelta::BindDirentry { delta_index, .. }
-        | WalDelta::UnbindDirentry { delta_index, .. }
-        | WalDelta::AppendFileRevision { delta_index, .. }
-        | WalDelta::TombstoneSubtree { delta_index, .. }
-        | WalDelta::RevokeSubtreeTombstone { delta_index, .. }
-        | WalDelta::AppendAttributesRevision { delta_index, .. } => *delta_index,
-    }
 }

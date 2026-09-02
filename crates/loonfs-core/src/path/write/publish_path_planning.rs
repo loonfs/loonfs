@@ -1,11 +1,10 @@
-//! Shared publish-planning preconditions and visible-ancestor walks.
+//! Shared path-planning checks and visible-ancestor walks.
 
 use crate::binding_generation::BindingGeneration;
-use crate::commit::{CandidateAllocation, PlannedOp};
-use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
+use crate::commit::{CandidateAllocation, CommitOp, ResolvedBinding};
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
-use crate::path::read::resolve_visible_inode;
+use crate::path::read;
 use loonfs_api::{
     AbsolutePath, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
     ROOT_INODE_ID,
@@ -20,54 +19,52 @@ pub(super) fn is_missing_visible_path(error: &CoreError) -> bool {
     )
 }
 
-/// One filesystem operation compiled into the commit operations it needs,
-/// plus the race checks that must hold before the first of them runs.
+pub(super) async fn require_vacant_path<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    path: &AbsolutePath,
+) -> Result<()> {
+    match view.view.resolve_visible_path(path).await {
+        Ok(existing) => Err(CoreError::DestinationExists {
+            path: path.as_str().to_owned(),
+            existing_display_name: Some(existing.display_name),
+        }),
+        Err(error) if is_missing_visible_path(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// One filesystem operation compiled into the commit operations it needs.
 pub(super) struct CompiledFilesystemOperation {
-    pub(super) ops: Vec<ApiCommitOp>,
-    pub(super) preconditions: Vec<ApiCommitPrecondition>,
+    pub(super) ops: Vec<CommitOp>,
 }
 
 impl CompiledFilesystemOperation {
-    pub(super) fn new(ops: Vec<ApiCommitOp>, preconditions: Vec<ApiCommitPrecondition>) -> Self {
-        Self { ops, preconditions }
-    }
-
-    /// Attaches the operation's race checks to the first commit operation it
-    /// compiles into. They describe the state this operation resolved
-    /// against, which is the state just before that first operation runs.
-    pub(crate) fn into_planned_ops(self) -> Vec<PlannedOp> {
-        let mut preconditions = Some(self.preconditions);
-        self.ops
-            .into_iter()
-            .map(|op| PlannedOp {
-                preconditions: preconditions.take().unwrap_or_default(),
-                op,
-            })
-            .collect()
+    pub(super) fn new(ops: Vec<CommitOp>) -> Self {
+        Self { ops }
     }
 }
 
 pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: &'a NamespaceId,
-    pub(super) metadata_state: &'a MetadataView<'view, 'store, S>,
+    pub(super) view: &'a MetadataView<'view, 'store, S>,
 }
 
-pub(super) async fn publish_resolve_visible_inode<S: ObjectStore + ?Sized>(
+pub(super) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     inode_id: InodeId,
 ) -> Result<ResolvedVisiblePath> {
-    let mut session = view.metadata_state.session();
+    let mut session = view.view.session();
     let mut ancestor_paths = HashMap::new();
-    resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
+    read::resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
         .await?
         .ok_or(CoreError::InodeNotFound(inode_id))
 }
 
-pub(super) async fn publish_resolve_visible_directory<S: ObjectStore + ?Sized>(
+pub(super) async fn resolve_visible_directory<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     inode_id: InodeId,
 ) -> Result<ResolvedVisiblePath> {
-    let resolved = publish_resolve_visible_inode(view, inode_id).await?;
+    let resolved = resolve_visible_inode(view, inode_id).await?;
     if resolved.inode_kind != InodeKind::Directory {
         return Err(CoreError::ExpectedDirectory {
             path: resolved.absolute_path,
@@ -77,31 +74,30 @@ pub(super) async fn publish_resolve_visible_directory<S: ObjectStore + ?Sized>(
     Ok(resolved)
 }
 
-pub(super) async fn publish_resolve_visible_child<S: ObjectStore + ?Sized>(
+pub(super) async fn resolve_visible_child<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
 ) -> Result<Option<ResolvedVisiblePath>> {
     let name_key = NameKey::for_display_name(display_name);
-    let Some(binding) = view
-        .metadata_state
-        .visible_child(parent_inode_id, &name_key)
-        .await?
-    else {
+    let Some(binding) = view.view.visible_child(parent_inode_id, &name_key).await? else {
         return Ok(None);
     };
-    publish_resolve_visible_inode(view, binding.child_inode_id)
+    resolve_visible_inode(view, binding.child_inode_id)
         .await
         .map(Some)
 }
 
-pub(super) fn publish_child_display_path(parent_path: &str, display_name: &DisplayName) -> String {
-    let separator = if parent_path.ends_with('/') { "" } else { "/" };
-    format!("{parent_path}{separator}{display_name}")
+pub(super) fn child_display_path(parent_path: &str, display_name: &DisplayName) -> String {
+    AbsolutePath::parse(parent_path)
+        .expect("resolved parent path should be absolute")
+        .join(display_name)
+        .as_str()
+        .to_owned()
 }
 
 /// Requires the binding generation supplied by the caller to still be current.
-pub(super) fn publish_check_binding_generation<S: ObjectStore + ?Sized>(
+pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
     expected_binding_generation: &str,
@@ -121,39 +117,29 @@ pub(super) fn publish_check_binding_generation<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-pub(super) async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
+pub(super) async fn source_binding<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
-) -> Result<ApiCommitPrecondition> {
+) -> Result<ResolvedBinding> {
     let parent_inode_id = resolved
         .parent_inode_id
         .ok_or(CoreError::RootMutationForbidden)?;
     let binding = view
-        .metadata_state
+        .view
         .current_parent_binding_for_child(resolved.inode_id)
         .await?
         .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.clone()))?;
     if binding.parent_inode_id != parent_inode_id {
         return Err(CoreError::PathNotFound(resolved.absolute_path.clone()));
     }
-    Ok(ApiCommitPrecondition::BindingIs {
+    Ok(ResolvedBinding {
         parent_inode_id,
         name_key: binding.name_key.clone(),
+        display_name: binding.display_name.clone(),
         child_inode_id: binding.child_inode_id,
         bind_seq: binding.bind_seq,
         bind_delta_index: binding.bind_delta_index,
     })
-}
-
-pub(super) fn publish_child_name_absent_precondition(
-    parent_inode_id: InodeId,
-    display_name: &DisplayName,
-) -> ApiCommitPrecondition {
-    let name_key = NameKey::for_display_name(display_name);
-    ApiCommitPrecondition::ChildNameAbsent {
-        parent_inode_id,
-        name_key,
-    }
 }
 
 /// Rejects planning through a *visible* path component covered by a subtree
@@ -167,7 +153,7 @@ pub(super) fn publish_child_name_absent_precondition(
 /// excludes a covered inode (`metadata::visibility`). Hitting one means the
 /// stored rows contradict themselves, so this reports corruption rather than
 /// a conflict a caller could resolve.
-pub(super) async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
+pub(super) async fn reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     absolute_path: &AbsolutePath,
 ) -> Result<()> {
@@ -177,17 +163,13 @@ pub(super) async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Si
     for component in absolute_path.components() {
         let display_name = component.to_display_name();
         let name_key = NameKey::for_display_name(&display_name);
-        let Some(bound_child) = view
-            .metadata_state
-            .visible_child(current_inode, &name_key)
-            .await?
-        else {
+        let Some(bound_child) = view.view.visible_child(current_inode, &name_key).await? else {
             return Ok(());
         };
         let visible_component = bound_child.display_name.clone();
         let visible_path = current_path.join(&visible_component);
         if let Some(tombstone) = view
-            .metadata_state
+            .view
             .covering_subtree_tombstone(bound_child.child_inode_id)
             .await?
         {
@@ -220,21 +202,21 @@ pub(super) enum ReplaceDestination {
 /// Resolves the shared move/copy destination rule: replacement accepts a
 /// distinct file, a move may respell its own binding, and everything else
 /// visible at the destination is a conflict.
-pub(super) async fn publish_resolve_replace_destination<S: ObjectStore + ?Sized>(
+pub(super) async fn resolve_replace_destination<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     to_path: &AbsolutePath,
     behavior: DestinationBehavior,
     source_inode_id: InodeId,
 ) -> Result<ReplaceDestination> {
-    let occupant = match view.metadata_state.resolve_visible_path(to_path).await {
+    let occupant = match view.view.resolve_visible_path(to_path).await {
         Ok(existing) => Some(existing),
         Err(error) if is_missing_visible_path(&error) => None,
         Err(error) => return Err(error),
     };
-    publish_classify_replace_destination(occupant, behavior, source_inode_id, to_path.as_str())
+    classify_replace_destination(occupant, behavior, source_inode_id, to_path.as_str())
 }
 
-pub(super) fn publish_classify_replace_destination(
+pub(super) fn classify_replace_destination(
     occupant: Option<ResolvedVisiblePath>,
     behavior: DestinationBehavior,
     source_inode_id: InodeId,
@@ -261,10 +243,10 @@ pub(super) fn publish_classify_replace_destination(
     })
 }
 
-pub(super) async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
+pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-    ops: &mut Vec<ApiCommitOp>,
+    ops: &mut Vec<CommitOp>,
     allocation: &mut CandidateAllocation,
 ) -> Result<InodeId> {
     let components = absolute_path.components();
@@ -278,13 +260,9 @@ pub(super) async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
         let display_name = component.to_display_name();
         let name_key = NameKey::for_display_name(&display_name);
         if !creating_missing_ancestors {
-            if let Some(child) = view
-                .metadata_state
-                .visible_child(current_inode, &name_key)
-                .await?
-            {
+            if let Some(child) = view.view.visible_child(current_inode, &name_key).await? {
                 let inode = view
-                    .metadata_state
+                    .view
                     .visible_inode(child.child_inode_id)
                     .await?
                     .ok_or_else(|| CoreError::PathNotFound(component.as_str().to_owned()))?;
@@ -300,7 +278,7 @@ pub(super) async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
         }
 
         let child_inode_id = allocation.allocate()?;
-        ops.push(ApiCommitOp::CreateDirectory {
+        ops.push(CommitOp::CreateDirectory {
             child_inode_id,
             parent_inode_id: current_inode,
             display_name,
@@ -310,7 +288,7 @@ pub(super) async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
     Ok(current_inode)
 }
 
-pub(super) async fn publish_resolve_parent_directory<S: ObjectStore + ?Sized>(
+pub(super) async fn resolve_parent_directory<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     absolute_path: &AbsolutePath,
 ) -> Result<InodeId> {
@@ -320,10 +298,7 @@ pub(super) async fn publish_resolve_parent_directory<S: ObjectStore + ?Sized>(
     if parent_path.is_root() {
         return Ok(ROOT_INODE_ID);
     }
-    let resolved = view
-        .metadata_state
-        .resolve_visible_path(&parent_path)
-        .await?;
+    let resolved = view.view.resolve_visible_path(&parent_path).await?;
     if resolved.inode_kind != InodeKind::Directory {
         return Err(CoreError::ExpectedDirectory {
             path: parent_path.as_str().to_owned(),

@@ -3,18 +3,82 @@
 
 use loonfs_api::{AttributeRevisionNo, ChangeSeq, InodeId, InodeKind, NameKey, RevisionNo};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommitOperand {
+    CreateParent,
+    RenameSource,
+    RenameTargetParent,
+    ReplaceTarget,
+    RestoreTarget,
+    DeleteTarget,
+    SubtreeRoot,
+    AttributeTarget,
+    UndeleteTarget,
+    EmptyDirectoryTarget,
+}
+
+impl fmt::Display for CommitOperand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::CreateParent => "create parent",
+            Self::RenameSource => "rename source",
+            Self::RenameTargetParent => "rename target parent",
+            Self::ReplaceTarget => "replace target",
+            Self::RestoreTarget => "restore target",
+            Self::DeleteTarget => "delete target",
+            Self::SubtreeRoot => "delete subtree root",
+            Self::AttributeTarget => "attribute update target",
+            Self::UndeleteTarget => "undelete target",
+            Self::EmptyDirectoryTarget => "empty directory target",
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum CommitValidationError {
-    #[error("name precondition parent inode `{parent_inode_id}` is missing")]
-    NamePreconditionParentMissing { parent_inode_id: InodeId },
+    #[error("{operand} inode `{inode_id}` is missing")]
+    InodeMissing {
+        operand: CommitOperand,
+        inode_id: InodeId,
+    },
     #[error(
-        "name precondition parent inode `{parent_inode_id}` is not a directory (found `{actual_kind}`)"
+        "{operand} inode `{inode_id}` has the wrong kind: expected `{expected}`, found `{actual}`"
     )]
-    NamePreconditionParentNotDirectory {
+    InodeWrongKind {
+        operand: CommitOperand,
+        inode_id: InodeId,
+        expected: InodeKind,
+        actual: InodeKind,
+    },
+    #[error(
+        "{operand} name `{name_key}` under parent inode `{parent_inode_id}` is taken by inode `{child_inode_id}`"
+    )]
+    NameTaken {
+        operand: CommitOperand,
         parent_inode_id: InodeId,
-        actual_kind: InodeKind,
+        name_key: NameKey,
+        child_inode_id: InodeId,
+    },
+    #[error(
+        "{operand} inode `{inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
+    )]
+    TargetUnderSubtreeTombstone {
+        operand: CommitOperand,
+        inode_id: InodeId,
+        root_inode_id: InodeId,
+        tombstone_seq: ChangeSeq,
+    },
+    #[error(
+        "base revision mismatch for inode `{inode_id}`: {}",
+        revision_mismatch(.expected, .actual)
+    )]
+    BaseRevisionMismatch {
+        inode_id: InodeId,
+        expected: RevisionNo,
+        actual: Option<RevisionNo>,
     },
     #[error(
         "binding precondition failed: name `{name_key}` is not bound under parent inode `{parent_inode_id}`"
@@ -32,133 +96,12 @@ pub enum CommitValidationError {
         expected_child_inode_id: InodeId,
         actual_child_inode_id: InodeId,
     },
-    #[error("directory-empty precondition inode `{inode_id}` is missing")]
-    DirectoryEmptyPreconditionInodeMissing { inode_id: InodeId },
-    #[error(
-        "directory-empty precondition inode `{inode_id}` is not a directory (found `{actual_kind}`)"
-    )]
-    DirectoryEmptyPreconditionInodeNotDirectory {
-        inode_id: InodeId,
-        actual_kind: InodeKind,
-    },
-    #[error("directory-empty precondition failed: directory inode `{inode_id}` is not empty")]
-    DirectoryEmptyPreconditionNotEmpty { inode_id: InodeId },
-    #[error("create parent inode `{parent_inode_id}` is missing")]
-    CreateParentMissing { parent_inode_id: InodeId },
-    #[error("create parent inode `{parent_inode_id}` is not a directory (found `{actual_kind}`)")]
-    CreateParentNotDirectory {
-        parent_inode_id: InodeId,
-        actual_kind: InodeKind,
-    },
-    #[error(
-        "create collides with existing name `{name_key}` under parent inode `{parent_inode_id}` (bound to inode `{child_inode_id}`)"
-    )]
-    CreateChildNameCollision {
-        parent_inode_id: InodeId,
-        name_key: NameKey,
-        child_inode_id: InodeId,
-    },
-    #[error("invalid display name: {reason}")]
-    InvalidDisplayName {
-        display_name: String,
-        reason: String,
-    },
-    #[error(
-        "create under parent inode `{parent_inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    CreateUnderSubtreeTombstone {
-        parent_inode_id: InodeId,
-        root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error("replace target file inode `{inode_id}` is missing")]
-    ReplaceFileInodeMissing { inode_id: InodeId },
-    #[error("replace target inode `{inode_id}` is not a file (found `{actual_kind}`)")]
-    ReplaceFileInodeNotFile {
-        inode_id: InodeId,
-        actual_kind: InodeKind,
-    },
-    #[error(
-        "replace base revision mismatch for inode `{inode_id}`: {}",
-        revision_mismatch(.expected, .actual)
-    )]
-    ReplaceFileBaseRevisionMismatch {
-        inode_id: InodeId,
-        expected: RevisionNo,
-        actual: Option<RevisionNo>,
-    },
-    #[error("restore target file inode `{inode_id}` is missing")]
-    RestoreRevisionInodeMissing { inode_id: InodeId },
-    #[error("restore target inode `{inode_id}` is not a file (found `{actual_kind}`)")]
-    RestoreRevisionInodeNotFile {
-        inode_id: InodeId,
-        actual_kind: InodeKind,
-    },
-    #[error(
-        "restore base revision mismatch for inode `{inode_id}`: {}",
-        revision_mismatch(.expected, .actual)
-    )]
-    RestoreRevisionBaseRevisionMismatch {
-        inode_id: InodeId,
-        expected: RevisionNo,
-        actual: Option<RevisionNo>,
-    },
+    #[error("directory inode `{inode_id}` is not empty")]
+    DirectoryNotEmpty { inode_id: InodeId },
     #[error("restore source revision `{source_revision_no}` not found for inode `{inode_id}`")]
     RestoreRevisionSourceRevisionMissing {
         inode_id: InodeId,
         source_revision_no: RevisionNo,
-    },
-    #[error(
-        "restore of inode `{inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    RestoreRevisionUnderSubtreeTombstone {
-        inode_id: InodeId,
-        root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error(
-        "replace of inode `{inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    ReplaceFileUnderSubtreeTombstone {
-        inode_id: InodeId,
-        root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error("delete target file inode `{inode_id}` is missing")]
-    DeleteFileInodeMissing { inode_id: InodeId },
-    #[error("delete target inode `{inode_id}` is not a file (found `{actual_kind}`)")]
-    DeleteFileInodeNotFile {
-        inode_id: InodeId,
-        actual_kind: InodeKind,
-    },
-    #[error(
-        "delete of file inode `{inode_id}` is already covered by subtree tombstone rooted at inode `{covering_root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    DeleteFileCoveredByTombstone {
-        inode_id: InodeId,
-        covering_root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error("rename source inode `{inode_id}` is missing")]
-    RenameInodeMissing { inode_id: InodeId },
-    #[error("source inode `{inode_id}` has no current binding")]
-    SourceBindingMissing { inode_id: InodeId },
-    #[error("rename target parent inode `{parent_inode_id}` is missing")]
-    RenameTargetParentMissing { parent_inode_id: InodeId },
-    #[error(
-        "rename target parent inode `{parent_inode_id}` is not a directory (found `{actual_kind}`)"
-    )]
-    RenameTargetParentNotDirectory {
-        parent_inode_id: InodeId,
-        actual_kind: InodeKind,
-    },
-    #[error(
-        "rename collides with existing name `{name_key}` under parent inode `{parent_inode_id}` (bound to inode `{child_inode_id}`)"
-    )]
-    RenameTargetNameCollision {
-        parent_inode_id: InodeId,
-        name_key: NameKey,
-        child_inode_id: InodeId,
     },
     #[error(
         "rename of directory inode `{inode_id}` into inode `{new_parent_inode_id}` would create a cycle"
@@ -167,41 +110,6 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
     },
-    #[error(
-        "rename of inode `{inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    RenameInodeUnderSubtreeTombstone {
-        inode_id: InodeId,
-        root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error(
-        "rename target parent inode `{parent_inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    RenameTargetParentUnderSubtreeTombstone {
-        parent_inode_id: InodeId,
-        root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error("delete subtree root inode `{root_inode_id}` is missing")]
-    DeleteSubtreeRootMissing { root_inode_id: InodeId },
-    #[error(
-        "delete subtree root inode `{root_inode_id}` is not a directory (found `{actual_kind}`)"
-    )]
-    DeleteSubtreeRootNotDirectory {
-        root_inode_id: InodeId,
-        actual_kind: InodeKind,
-    },
-    #[error(
-        "delete subtree root inode `{root_inode_id}` is already covered by subtree tombstone rooted at inode `{covering_root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    DeleteSubtreeRootCoveredByTombstone {
-        root_inode_id: InodeId,
-        covering_root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error("undelete target inode `{inode_id}` is missing")]
-    UndeleteInodeMissing { inode_id: InodeId },
     #[error("undelete target inode `{inode_id}` is not the root of a live deletion")]
     UndeleteTargetNotDeleted { inode_id: InodeId },
     #[error(
@@ -233,8 +141,6 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
     },
-    #[error("attribute update target inode `{inode_id}` is missing")]
-    UpdateAttributesInodeMissing { inode_id: InodeId },
     #[error(
         "attribute base revision mismatch for inode `{inode_id}`: expected revision {expected}, found revision {actual}"
     )]
@@ -244,34 +150,18 @@ pub enum CommitValidationError {
         actual: AttributeRevisionNo,
     },
     #[error(
-        "attribute update of inode `{inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    UpdateAttributesUnderSubtreeTombstone {
-        inode_id: InodeId,
-        root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error(
         "cannot update attributes for inode `{inode_id}` because revision `{base_attributes_revision_no}` is already at the maximum 9007199254740991"
     )]
     UpdateAttributesRevisionOverflow {
         inode_id: InodeId,
         base_attributes_revision_no: AttributeRevisionNo,
     },
-    #[error("validated preview apply failed: {0}")]
-    ValidatedPreviewApplyFailed(String),
     #[error("op index overflow")]
     OpIndexOverflow,
     #[error("delta index overflow")]
     DeltaIndexOverflow,
 }
 
-/// What a base-revision guard asked for against what it found, in words.
-///
-/// The revision it found is absent when the file carries no revision at all,
-/// and that case reads as a sentence rather than printing the `Option` — a
-/// message is for a person, while the same pair rides the wire as typed
-/// `expected_revision_no` and `actual_revision_no` details for a program.
 fn revision_mismatch(expected: &RevisionNo, actual: &Option<RevisionNo>) -> String {
     match actual {
         Some(actual) => format!("expected revision {expected}, found revision {actual}"),

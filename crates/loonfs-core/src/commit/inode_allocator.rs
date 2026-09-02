@@ -48,11 +48,6 @@ impl InodeAllocator {
         self.next = candidate.next;
         Ok(self.next)
     }
-
-    pub(crate) fn discard_candidate(&self, _candidate: CandidateAllocation) {
-        // Candidate allocation is forked state, so consuming it is the
-        // rollback: the authoritative batch position never moved.
-    }
 }
 
 impl CandidateAllocation {
@@ -98,7 +93,6 @@ mod tests {
 
         let mut rejected = allocator.begin_candidate();
         assert_eq!(rejected.allocate().expect("rejected create"), InodeId(3));
-        allocator.discard_candidate(rejected);
 
         let next = allocator.begin_candidate();
         assert_eq!(next.resulting_next_inode_id(), InodeId(3));
@@ -109,7 +103,6 @@ mod tests {
         let mut allocator = InodeAllocator::new(InodeId(2));
         let mut rejected = allocator.begin_candidate();
         assert_eq!(rejected.allocate().expect("rejected create"), InodeId(2));
-        allocator.discard_candidate(rejected);
 
         let mut accepted = allocator.begin_candidate();
         assert_eq!(accepted.allocate().expect("accepted create"), InodeId(2));
@@ -129,7 +122,6 @@ mod tests {
             first_attempt.allocate().expect("first id"),
             first_attempt.allocate().expect("second id"),
         ];
-        allocator.discard_candidate(first_attempt);
 
         let mut retry = allocator.begin_candidate();
         let retry_ids = [

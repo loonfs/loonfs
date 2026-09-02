@@ -7,35 +7,10 @@
 //! outside this crate constructs them.
 
 use loonfs_api::{
-    AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName, InodeId, NameKey,
-    RevisionNo,
+    AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName, InodeId, RevisionNo,
 };
 
-/// One planned inode-level operation together with the race checks that must
-/// hold immediately before it runs.
-///
-/// Checks are scoped to their operation rather than to the whole commit
-/// because a commit's operations observe each other: a check written against
-/// what operation `k` saw is only meaningful once operations `0..k` have been
-/// applied.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlannedOp {
-    /// Race checks evaluated immediately before [`Self::op`].
-    pub(crate) preconditions: Vec<CommitPrecondition>,
-    /// The operation itself.
-    pub(crate) op: CommitOp,
-}
-
-impl PlannedOp {
-    /// A planned operation with no race checks of its own.
-    #[cfg(test)]
-    pub(crate) fn unchecked(op: CommitOp) -> Self {
-        Self {
-            preconditions: Vec::new(),
-            op,
-        }
-    }
-}
+use super::ResolvedBinding;
 
 /// Semantic operation inside a planned commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,11 +65,15 @@ pub(crate) enum CommitOp {
         /// Visible file whose exact parent binding and subtree visibility are
         /// validated.
         inode_id: InodeId,
+        /// Exact parent binding observed during planning.
+        source_binding: ResolvedBinding,
     },
     /// Rename or move an inode.
     Rename {
         /// Visible inode whose current binding will be replaced.
         inode_id: InodeId,
+        /// Exact parent binding observed during planning.
+        source_binding: ResolvedBinding,
         /// Visible destination directory, which may equal the current parent.
         new_parent_inode_id: InodeId,
         /// Destination spelling, whose derived key must not name another
@@ -106,6 +85,10 @@ pub(crate) enum CommitOp {
         /// Visible non-root directory whose entire reachable subtree becomes
         /// tombstoned.
         root_inode_id: InodeId,
+        /// Exact parent binding observed during planning.
+        source_binding: ResolvedBinding,
+        /// Whether the root must have no visible children.
+        require_empty: bool,
     },
     /// Recover a deleted file or subtree: revoke the deletion recorded at
     /// `deletion_seq` (the delete's committed sequence, reported by the
@@ -137,47 +120,5 @@ pub(crate) enum CommitOp {
         base_attributes_revision_no: AttributeRevisionNo,
         /// The inode's complete attribute map after the update.
         attributes: Attributes,
-    },
-}
-
-/// Race check evaluated immediately before the operation that carries it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CommitPrecondition {
-    /// File inode is still at this revision.
-    InodeRevisionIs {
-        /// File inode whose visible revision is tested.
-        inode_id: InodeId,
-        /// Exact revision required at commit evaluation time.
-        revision_no: RevisionNo,
-    },
-    /// Inode ancestors have not been subtree-deleted.
-    AncestorsNotSubtreeDeleted {
-        /// Inode whose ancestor chain must contain no active tombstone.
-        inode_id: InodeId,
-    },
-    /// Directory child name is still absent.
-    ChildNameAbsent {
-        /// Visible directory in which absence is tested.
-        parent_inode_id: InodeId,
-        /// Canonical lookup key that must not have an active binding.
-        name_key: NameKey,
-    },
-    /// Directory binding is still exactly the binding the planner saw.
-    BindingIs {
-        /// Directory expected to own the observed binding.
-        parent_inode_id: InodeId,
-        /// Canonical name key of the observed binding.
-        name_key: NameKey,
-        /// Child identity expected at that name.
-        child_inode_id: InodeId,
-        /// Sequence that created the exact observed binding generation.
-        bind_seq: ChangeSeq,
-        /// Delta position that disambiguates the generation within `bind_seq`.
-        bind_delta_index: u32,
-    },
-    /// Directory is still empty.
-    DirectoryEmpty {
-        /// Visible directory that must have no active child bindings.
-        inode_id: InodeId,
     },
 }

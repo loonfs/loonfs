@@ -9,7 +9,6 @@
 mod identity;
 mod inode_allocator;
 mod materialize;
-mod metadata_overlay;
 mod ops;
 mod plan;
 mod publish;
@@ -21,13 +20,13 @@ pub use self::identity::CommitFingerprint;
 pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation, InodeAllocator};
 pub use self::materialize::MaterializedCommitDelta;
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
-pub(crate) use self::ops::{CommitOp, CommitPrecondition, PlannedOp};
+pub(crate) use self::ops::CommitOp;
 pub use self::plan::{CommitPlan, ResolvedBinding};
 pub(crate) use self::plan::{ValidatedCommitPlan, ValidatedOp};
 pub(crate) use self::publish::{
     prepare_commit_head_publish, publish_commit_head, PreparedCommitHeadPublish,
 };
 pub use self::publish_error::CommitHeadPublishError;
-pub use self::validate::CommitValidationError;
 pub(crate) use self::validate::{validate_ops, CommitNumbering, PublishValidationView};
+pub use self::validate::{CommitOperand, CommitValidationError};
 pub(crate) use self::wal_payload::wal_payload_from_materialized_commit;
