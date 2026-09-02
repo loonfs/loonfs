@@ -415,6 +415,39 @@ fn recursive_put_reuses_existing_directories_but_rejects_files() {
 }
 
 #[test]
+fn recursive_copy_accepts_existing_destination_directories() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let tree = harness.temp_dir.path().join("copy-tree");
+    fs::create_dir_all(tree.join("docs/nested")).expect("create nested directory");
+    fs::create_dir_all(tree.join("empty/inner")).expect("create empty directory");
+    fs::write(tree.join("docs/nested/b.txt"), b"beta").expect("write payload");
+    assert_success(&harness.run(&["put", "-r", tree.to_str().expect("utf-8 path"), "/src"]));
+
+    // Copying into an existing destination lands at `/dst/src`, and every
+    // directory the copy would create is already there; only the file is new.
+    assert_success(&harness.run(&["mkdir", "-p", "/dst/src/docs/nested"]));
+    assert_success(&harness.run(&["mkdir", "-p", "/dst/src/empty/inner"]));
+    let cp = harness.run(&["--json", "cp", "-r", "/src", "/dst"]);
+    assert_success(&cp);
+    let data = json_data(&cp);
+    assert_eq!(data["files"], 1, "{data}");
+    assert_eq!(
+        data["directories"], 0,
+        "existing directories are accepted, not created: {data}"
+    );
+    assert_eq!(
+        data["failures"].as_array().expect("failures").len(),
+        0,
+        "{data}"
+    );
+    assert_success(&harness.run(&["--json", "stat", "/dst/src/docs/nested/b.txt"]));
+}
+
+#[test]
 fn recursive_get_creates_an_absent_destination_root_in_both_modes() {
     let harness = Harness::new();
     harness.add_embedded_profile("embedded");
