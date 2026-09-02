@@ -212,6 +212,17 @@ impl SegmentBlocksBuilder {
         filter_key: &str,
         row: &R,
     ) -> Result<(), SstBlockCodecError> {
+        self.push_with_encoded_row(row_key, filter_key, row)
+            .map(drop)
+    }
+
+    /// Appends one row and returns its CBOR encoding.
+    pub fn push_with_encoded_row<R: Serialize>(
+        &mut self,
+        row_key: &str,
+        filter_key: &str,
+        row: &R,
+    ) -> Result<Vec<u8>, SstBlockCodecError> {
         if self.row_count > 0 && row_key < self.previous_key.as_str() {
             return Err(SstBlockCodecError::RowKeysOutOfOrder {
                 previous: self.previous_key.clone(),
@@ -249,7 +260,7 @@ impl SegmentBlocksBuilder {
         if self.entries.len() >= self.target_block_bytes {
             self.finish_data_block();
         }
-        Ok(())
+        Ok(row_bytes)
     }
 
     fn finish_data_block(&mut self) {

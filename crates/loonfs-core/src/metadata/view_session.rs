@@ -379,44 +379,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         let mut pending_child_ids: Vec<InodeId> = latest_binds
             .iter()
             .map(|direntry| direntry.child_inode_id)
-            .filter(|child_inode_id| {
-                !(self.inode_at_seq_cache.contains_key(child_inode_id)
-                    && self
-                        .latest_parent_binding_cache
-                        .contains_key(child_inode_id)
-                    && self.active_tombstone_cache.contains_key(child_inode_id))
-            })
             .collect();
         pending_child_ids.sort_unstable();
         pending_child_ids.dedup();
-        if pending_child_ids.is_empty() {
-            return Ok(());
-        }
-        self.counters.list_preload_child_lookups = self
-            .counters
-            .list_preload_child_lookups
-            .saturating_add(pending_child_ids.len() as u64);
+        self.preload_visibility(&pending_child_ids).await?;
 
-        let base = &self.base;
-        let lookups = futures::future::try_join_all(pending_child_ids.iter().map(
-            |&child_inode_id| async move {
-                let (inode, bindings, tombstones) = futures::try_join!(
-                    base.inode_at_seq(child_inode_id),
-                    base.direntry_binds_for_child(child_inode_id),
-                    base.tombstones_for_root(child_inode_id),
-                )?;
-                Ok::<_, CoreError>((child_inode_id, inode, bindings, tombstones))
-            },
-        ))
-        .await?;
-
-        for (child_inode_id, inode, bindings, tombstones) in lookups {
-            self.inode_at_seq_cache.insert(child_inode_id, inode);
-            let latest_binding = bindings
-                .iter()
-                .filter(|direntry| direntry.bind_seq <= visible_seq)
-                .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
-                .cloned();
+        for child_inode_id in pending_child_ids {
+            let latest_binding = self
+                .latest_parent_binding_cache
+                .get(&child_inode_id)
+                .cloned()
+                .flatten();
             if let Some(latest_binding) = &latest_binding {
                 // A child bound in this directory within the preloaded name
                 // range gets its unbind fact from the range scan; bindings
@@ -430,12 +403,59 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                     self.unbind_cache.entry(cache_key).or_insert(unbound);
                 }
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn preload_visibility(
+        &mut self,
+        inode_ids: &[InodeId],
+    ) -> Result<(), CoreError> {
+        let mut pending: Vec<InodeId> = inode_ids
+            .iter()
+            .copied()
+            .filter(|inode_id| {
+                !(self.inode_at_seq_cache.contains_key(inode_id)
+                    && self.latest_parent_binding_cache.contains_key(inode_id)
+                    && self.active_tombstone_cache.contains_key(inode_id))
+            })
+            .collect();
+        pending.sort_unstable();
+        pending.dedup();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.counters.list_preload_child_lookups = self
+            .counters
+            .list_preload_child_lookups
+            .saturating_add(pending.len() as u64);
+
+        let visible_seq = self.base.visible_seq();
+        let base = &self.base;
+        let lookups =
+            futures::future::try_join_all(pending.into_iter().map(|inode_id| async move {
+                let (inode, bindings, tombstones) = futures::try_join!(
+                    base.inode_at_seq(inode_id),
+                    base.direntry_binds_for_child(inode_id),
+                    base.tombstones_for_root(inode_id),
+                )?;
+                Ok::<_, CoreError>((inode_id, inode, bindings, tombstones))
+            }))
+            .await?;
+
+        for (inode_id, inode, bindings, tombstones) in lookups {
+            self.inode_at_seq_cache.insert(inode_id, inode);
+            let latest_binding = bindings
+                .iter()
+                .filter(|direntry| direntry.bind_seq <= visible_seq)
+                .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+                .cloned();
             self.latest_parent_binding_cache
-                .insert(child_inode_id, latest_binding);
+                .insert(inode_id, latest_binding);
             let active_tombstone =
                 super::rows::active_tombstone_from_records(tombstones.iter().cloned(), visible_seq);
             self.active_tombstone_cache
-                .insert(child_inode_id, active_tombstone);
+                .insert(inode_id, active_tombstone);
         }
         Ok(())
     }

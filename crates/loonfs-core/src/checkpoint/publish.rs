@@ -67,12 +67,10 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
                 message: source.public_message().into_owned(),
             }),
         ),
-        Err(_) => Err(MetadataProjectionLoadError::ManifestLoad(
+        Err(error) => Err(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::ReadManifest {
                 object_key: manifest_key,
-                message: loonfs_objectstore::ObjectStoreErrorClass::Other
-                    .public_message()
-                    .into_owned(),
+                message: error.to_string(),
             },
         )),
     }
@@ -160,7 +158,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             .await
         }
         // Re-read the root to resolve an unknown write outcome.
-        Err(error) => {
+        Err(error @ ObjectStoreError::Transport { .. }) => {
             match classify_current_root(
                 store,
                 namespace_id,
@@ -175,6 +173,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
                 outcome => Ok(outcome),
             }
         }
+        Err(error) => Err(CoreError::store(&loaded.object_key, &error)),
     }
 }
 

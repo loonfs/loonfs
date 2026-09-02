@@ -749,7 +749,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         first,
         CHECKPOINT_BASE_RUN_LEVEL,
         |family| manifest_rows_for_family(&materialization.metadata_state, family),
-        MetadataSegmentation::Full,
+        NonZeroUsize::MAX,
     )
     .await
     .expect("write malformed run segments");
@@ -766,7 +766,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
                 first,
             )
         },
-        MetadataSegmentation::Full,
+        NonZeroUsize::MAX,
     )
     .await
     .expect("write empty metadata run segments");

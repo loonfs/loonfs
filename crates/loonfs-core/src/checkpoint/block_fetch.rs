@@ -318,7 +318,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                 );
                 let decoded = decode_data_block(stored, &entry.block)
                     .map_err(|err| segment_codec_error(&object_key, err))?;
-                let block = decoded_data_cache_block(descriptor.family, decoded);
+                let block = decoded_data_cache_block(decoded);
                 publish_segment_block(
                     segment_cache,
                     memo,

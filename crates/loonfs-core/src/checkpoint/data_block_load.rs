@@ -15,9 +15,7 @@ use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, Metada
 use super::error::ManifestLoadError;
 use super::stored_block_cache::StoredMetadataBlockKind;
 use crate::metadata::content_ref_evidence_bytes;
-use loonfs_api::wire::manifest::{
-    ActiveDeletionRowAction, MetadataRow, MetadataRowFamily, MetadataSegmentRef,
-};
+use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -52,7 +50,7 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         )
         .await
         {
-            return Ok(decoded_data_cache_block(descriptor.family, decoded));
+            return Ok(decoded_data_cache_block(decoded));
         }
         let object_key = metadata_segment_object_key(descriptor);
         let bytes =
@@ -65,7 +63,6 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
             &bytes,
         );
         Ok(decoded_data_cache_block(
-            descriptor.family,
             decode_data_block(&bytes, &handle)
                 .map_err(|err| segment_codec_error(&object_key, err))?,
         ))
@@ -86,12 +83,9 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
     }
 }
 
-pub(super) fn decoded_data_cache_block(
-    family: MetadataRowFamily,
-    block: DecodedDataBlock,
-) -> DecodedMetadataSegmentBlock {
+pub(super) fn decoded_data_cache_block(block: DecodedDataBlock) -> DecodedMetadataSegmentBlock {
     DecodedMetadataSegmentBlock::Data {
-        decoded_bytes: decoded_manifest_block_weight(family, &block.rows),
+        decoded_bytes: decoded_manifest_block_weight(&block),
         block: Arc::new(block),
     }
 }
@@ -248,7 +242,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
         let cache_key =
             segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Data, handle.offset);
         let cache_block = DecodedMetadataSegmentBlock::Data {
-            decoded_bytes: decoded_manifest_block_weight(descriptor.family, &decoded.rows),
+            decoded_bytes: decoded_manifest_block_weight(&decoded),
             block: Arc::clone(&decoded),
         };
         memo.record(&cache_key, &cache_block);
@@ -266,19 +260,16 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     Ok(first_block.expect("a span should always hold at least one block"))
 }
 
-pub(super) fn decoded_manifest_block_weight(
-    family: MetadataRowFamily,
-    rows: &[MetadataRow],
-) -> usize {
+pub(super) fn decoded_manifest_block_weight(block: &DecodedDataBlock) -> usize {
     // Approximate decoded map/vector bookkeeping beyond owned row payloads.
     const BLOCK_ENTRY_OVERHEAD: usize = 64;
     const BLOCK_ALLOCATION_OVERHEAD: usize = 128;
-    let row_weight = rows
+    let row_weight = block
+        .rows
         .iter()
-        .map(|row| {
-            BLOCK_ENTRY_OVERHEAD
-                + row.row_key_for_family(family).len()
-                + decoded_manifest_row_weight(row)
+        .zip(&block.row_keys)
+        .map(|(row, row_key)| {
+            BLOCK_ENTRY_OVERHEAD + row_key.len() + decoded_manifest_row_weight(row)
         })
         .sum::<usize>();
     row_weight.saturating_add(BLOCK_ALLOCATION_OVERHEAD)
