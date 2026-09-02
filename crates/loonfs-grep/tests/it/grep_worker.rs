@@ -103,7 +103,7 @@ async fn new_query_page(
         .await
         .expect("new query reader");
     grep_with(
-        &GrepService::new(),
+        &GrepService::default(),
         &reader,
         store,
         namespace_id,

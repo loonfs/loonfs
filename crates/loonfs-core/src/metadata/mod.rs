@@ -33,7 +33,7 @@ pub(crate) use self::rows::{
 };
 #[cfg(test)]
 pub(crate) use self::view::InMemoryMetadataView;
-pub(crate) use self::view::MetadataView;
+pub(crate) use self::view::{AttributesProjection, MetadataView};
 pub(crate) use self::view_session::{
     LeafRevisionPrefetch, MetadataViewSession, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,

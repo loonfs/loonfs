@@ -7,16 +7,17 @@
 
 use super::runs::MetadataRunManifest;
 use super::stored_block_cache::StoredMetadataBlockCache;
-use crate::block_cache::{DecodedBlock, DecodedBlockCache, DecodedBlockCacheObserver};
+use crate::block_cache::{
+    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
+    DecodedBlockWeight, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
+};
 use crate::metadata::MetadataState;
-use crate::recency::Recency;
+use loonfs_api::wire::manifest::MetadataRow;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
-use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Default decoded-byte budget for metadata segment blocks. A value of zero
 /// disables the cache.
@@ -50,77 +51,20 @@ pub struct MetadataSegmentCacheStats {
     pub filter_false_positives: usize,
 }
 
-/// Receives metadata segment cache events for metrics.
-pub trait MetadataSegmentCacheObserver: Send + Sync + 'static {
-    fn hit(&self);
-    fn miss(&self);
-    fn insert(&self);
-    fn evict(&self);
-    fn filter_skip(&self);
-    fn filter_false_positive(&self);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum MetadataSegmentBlockKind {
-    Index,
-    Filter,
-    Data,
-    Manifest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct MetadataSegmentCacheKey {
-    /// The cached object's identity: a segment's object checksum for block
-    /// entries, or the manifest object key for manifest entries — both
-    /// immutable, so entries can never go stale.
-    pub(super) identity: String,
-    pub(super) block_kind: MetadataSegmentBlockKind,
-    pub(super) block_offset: u64,
-}
-
-/// One decoded, verified object the cache holds: a CRC-checked segment
-/// section (index, filter, or data) or a validated namespace manifest.
-/// Everything shares the cache and its byte budget; the key's `block_kind`
-/// and `block_offset` make collisions between kinds impossible. Data blocks
-/// hold metadata rows.
-#[derive(Debug, Clone)]
-pub(super) enum DecodedMetadataSegmentBlock {
-    Index {
-        entries: Arc<Vec<SegmentIndexEntry>>,
-        decoded_bytes: usize,
-    },
-    Filter {
-        filter: Arc<SegmentFilter>,
-        decoded_bytes: usize,
-    },
-    Data {
-        block: Arc<DecodedDataBlock>,
-        decoded_bytes: usize,
-    },
-    Manifest {
-        manifest: Arc<NamespaceManifestEnvelope>,
-        /// The manifest's `segments` grouped in scan order during validation.
-        /// Reusing this list avoids rebuilding it for every page.
-        scan_runs: Arc<Vec<MetadataRunManifest>>,
-        decoded_bytes: usize,
-    },
-}
-
-impl DecodedBlock for DecodedMetadataSegmentBlock {
-    fn decoded_bytes(&self) -> usize {
-        match self {
-            Self::Index { decoded_bytes, .. }
-            | Self::Filter { decoded_bytes, .. }
-            | Self::Data { decoded_bytes, .. }
-            | Self::Manifest { decoded_bytes, .. } => *decoded_bytes,
-        }
-    }
-}
+pub(super) type MetadataSegmentBlockKind = SegmentBlockKind;
+pub(super) type MetadataSegmentCacheKey = SegmentCacheKey;
+pub(super) type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
+    MetadataRow,
+    (
+        Arc<NamespaceManifestEnvelope>,
+        Arc<Vec<MetadataRunManifest>>,
+    ),
+>;
 
 pub struct MetadataSegmentCache {
     blocks: DecodedBlockCache<MetadataSegmentCacheKey, DecodedMetadataSegmentBlock>,
     stats: MetadataSegmentFilterStatsInner,
-    observer: Option<Arc<dyn MetadataSegmentCacheObserver>>,
+    observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     /// Optional node-local cache for encoded blocks. Keeping it with the
     /// decoded cache ensures callers use both cache tiers or neither tier.
     stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
@@ -143,42 +87,23 @@ struct MetadataSegmentFilterStatsInner {
     filter_false_positives: AtomicUsize,
 }
 
-struct MetadataSegmentCacheEvents(Arc<dyn MetadataSegmentCacheObserver>);
-
-impl DecodedBlockCacheObserver for MetadataSegmentCacheEvents {
-    fn hit(&self) {
-        self.0.hit();
-    }
-
-    fn miss(&self) {
-        self.0.miss();
-    }
-
-    fn insert(&self) {
-        self.0.insert();
-    }
-
-    fn evict(&self) {
-        self.0.evict();
-    }
-}
-
 impl MetadataSegmentCache {
     pub fn new(config: MetadataSegmentCacheConfig) -> Self {
         Self::with_stored_block_cache_and_observer(config, None, None)
     }
 
-    /// Creates a cache that reports activity to the optional `observer`.
     pub fn with_stored_block_cache_and_observer(
         config: MetadataSegmentCacheConfig,
         stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
-        observer: Option<Arc<dyn MetadataSegmentCacheObserver>>,
+        observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     ) -> Self {
-        let block_observer = observer.clone().map(|observer| {
-            Arc::new(MetadataSegmentCacheEvents(observer)) as Arc<dyn DecodedBlockCacheObserver>
-        });
         Self {
-            blocks: DecodedBlockCache::with_observer(config.max_decoded_bytes, block_observer),
+            blocks: DecodedBlockCache::new(DecodedBlockCacheConfig {
+                max_decoded_bytes: config.max_decoded_bytes,
+                max_rows: None,
+                max_entries: None,
+                observer: observer.clone(),
+            }),
             stats: MetadataSegmentFilterStatsInner::default(),
             observer,
             stored_block_cache,
@@ -269,16 +194,6 @@ pub struct WalTailProjectionCacheStats {
     pub cached_decoded_bytes: usize,
 }
 
-/// Receives WAL-tail projection cache events so they can be recorded as metrics.
-pub trait WalTailProjectionCacheObserver: Send + Sync + 'static {
-    fn hit(&self);
-    fn miss(&self);
-    fn insert(&self);
-    fn evict(&self, rows: usize, decoded_bytes: usize);
-    fn reject(&self, rows: usize, decoded_bytes: usize);
-    fn retained(&self, rows: usize, decoded_bytes: usize);
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WalTailProjectionCacheKey {
     pub namespace_id: NamespaceId,
@@ -288,16 +203,20 @@ pub struct WalTailProjectionCacheKey {
     pub head_etag: String,
 }
 
-/// Returns the row count and decoded size charged to the cache budgets.
-fn projection_weight(rows: &MetadataState) -> (usize, usize) {
-    (rows.row_count(), rows.decoded_bytes())
+impl DecodedBlock for Arc<MetadataState> {
+    fn weight(&self) -> DecodedBlockWeight {
+        DecodedBlockWeight {
+            bytes: self.decoded_bytes(),
+            rows: self.row_count(),
+        }
+    }
 }
 
 pub struct WalTailProjectionCache {
     config: WalTailProjectionCacheConfig,
-    inner: Mutex<WalTailProjectionCacheInner>,
-    stats: WalTailProjectionCacheStatsInner,
-    observer: Option<Arc<dyn WalTailProjectionCacheObserver>>,
+    observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
+    blocks: DecodedBlockCache<WalTailProjectionCacheKey, Arc<MetadataState>>,
+    rejection_stats: WalTailProjectionCacheRejectionStats,
 }
 
 impl std::fmt::Debug for WalTailProjectionCache {
@@ -305,226 +224,92 @@ impl std::fmt::Debug for WalTailProjectionCache {
         formatter
             .debug_struct("WalTailProjectionCache")
             .field("config", &self.config)
-            .field("inner", &self.inner)
-            .field("stats", &self.stats)
+            .field("blocks", &self.blocks)
+            .field("rejection_stats", &self.rejection_stats)
             .finish_non_exhaustive()
     }
 }
 
 #[derive(Debug, Default)]
-struct WalTailProjectionCacheInner {
-    entries: HashMap<WalTailProjectionCacheKey, WalTailProjectionCacheSlot>,
-    order: Recency<WalTailProjectionCacheKey>,
-    cached_rows: usize,
-    cached_decoded_bytes: usize,
-}
-
-#[derive(Debug)]
-struct WalTailProjectionCacheSlot {
-    rows: Arc<MetadataState>,
-    /// Recency stamp assigned on the most recent access. Recency records with
-    /// an older stamp for this key are ignored.
-    last_touch: u64,
-}
-
-#[derive(Debug, Default)]
-struct WalTailProjectionCacheStatsInner {
-    hits: AtomicUsize,
-    misses: AtomicUsize,
-    inserts: AtomicUsize,
-    evictions: AtomicUsize,
-    evicted_rows: AtomicUsize,
-    evicted_decoded_bytes: AtomicUsize,
+struct WalTailProjectionCacheRejectionStats {
     uncacheable_count: AtomicUsize,
     uncacheable_rows: AtomicUsize,
     uncacheable_decoded_bytes: AtomicUsize,
 }
 
 impl WalTailProjectionCache {
-    pub fn new(config: WalTailProjectionCacheConfig) -> Self {
-        Self::with_observer(config, None)
-    }
-
-    /// Creates a cache that reports activity to the optional `observer`.
-    pub fn with_observer(
+    pub fn new(
         config: WalTailProjectionCacheConfig,
-        observer: Option<Arc<dyn WalTailProjectionCacheObserver>>,
+        observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     ) -> Self {
+        let blocks = DecodedBlockCache::new(DecodedBlockCacheConfig {
+            max_decoded_bytes: config.max_decoded_bytes,
+            max_rows: Some(config.max_rows),
+            max_entries: Some(config.max_entries),
+            observer: observer.clone(),
+        });
         Self {
             config,
-            inner: Mutex::new(WalTailProjectionCacheInner::default()),
-            stats: WalTailProjectionCacheStatsInner::default(),
             observer,
+            blocks,
+            rejection_stats: WalTailProjectionCacheRejectionStats::default(),
         }
     }
 
     pub fn stats(&self) -> WalTailProjectionCacheStats {
-        let inner = self
-            .inner
-            .lock()
-            .expect("wal tail projection cache lock should not be poisoned");
+        let blocks = self.blocks.stats();
         WalTailProjectionCacheStats {
-            hits: self.stats.hits.load(Ordering::SeqCst),
-            misses: self.stats.misses.load(Ordering::SeqCst),
-            inserts: self.stats.inserts.load(Ordering::SeqCst),
-            evictions: self.stats.evictions.load(Ordering::SeqCst),
-            evicted_rows: self.stats.evicted_rows.load(Ordering::SeqCst),
-            evicted_decoded_bytes: self.stats.evicted_decoded_bytes.load(Ordering::SeqCst),
-            uncacheable_count: self.stats.uncacheable_count.load(Ordering::SeqCst),
-            uncacheable_rows: self.stats.uncacheable_rows.load(Ordering::SeqCst),
-            uncacheable_decoded_bytes: self.stats.uncacheable_decoded_bytes.load(Ordering::SeqCst),
-            cached_rows: inner.cached_rows,
-            cached_decoded_bytes: inner.cached_decoded_bytes,
+            hits: blocks.hits,
+            misses: blocks.misses,
+            inserts: blocks.inserts,
+            evictions: blocks.evictions,
+            evicted_rows: blocks.evicted_rows,
+            evicted_decoded_bytes: blocks.evicted_decoded_bytes,
+            uncacheable_count: self
+                .rejection_stats
+                .uncacheable_count
+                .load(Ordering::SeqCst),
+            uncacheable_rows: self.rejection_stats.uncacheable_rows.load(Ordering::SeqCst),
+            uncacheable_decoded_bytes: self
+                .rejection_stats
+                .uncacheable_decoded_bytes
+                .load(Ordering::SeqCst),
+            cached_rows: blocks.cached_rows,
+            cached_decoded_bytes: blocks.cached_decoded_bytes,
         }
     }
 
     pub fn get(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<MetadataState>> {
-        if self.config.max_entries == 0 {
-            return None;
-        }
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("wal tail projection cache lock should not be poisoned");
-        let Some(rows) = inner.entries.get(key).map(|slot| Arc::clone(&slot.rows)) else {
-            self.stats.misses.fetch_add(1, Ordering::SeqCst);
-            if let Some(observer) = &self.observer {
-                observer.miss();
-            }
-            return None;
-        };
-        inner.touch(key);
-        self.stats.hits.fetch_add(1, Ordering::SeqCst);
-        if let Some(observer) = &self.observer {
-            observer.hit();
-        }
-        Some(rows)
+        self.blocks.get(key)
     }
 
     pub fn insert(&self, key: WalTailProjectionCacheKey, rows: Arc<MetadataState>) {
         if self.config.max_entries == 0 {
             return;
         }
-        let (row_count, decoded_bytes) = projection_weight(&rows);
-        if row_count > self.config.max_rows || decoded_bytes > self.config.max_decoded_bytes {
-            self.stats.uncacheable_count.fetch_add(1, Ordering::SeqCst);
-            self.stats
+        let weight = rows.weight();
+        if weight.rows > self.config.max_rows || weight.bytes > self.config.max_decoded_bytes {
+            self.rejection_stats
+                .uncacheable_count
+                .fetch_add(1, Ordering::SeqCst);
+            self.rejection_stats
                 .uncacheable_rows
-                .fetch_add(row_count, Ordering::SeqCst);
-            self.stats
+                .fetch_add(weight.rows, Ordering::SeqCst);
+            self.rejection_stats
                 .uncacheable_decoded_bytes
-                .fetch_add(decoded_bytes, Ordering::SeqCst);
+                .fetch_add(weight.bytes, Ordering::SeqCst);
             if let Some(observer) = &self.observer {
-                observer.reject(row_count, decoded_bytes);
+                observer.reject(weight);
             }
             return;
         }
-
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("wal tail projection cache lock should not be poisoned");
-        if let Some(previous) = inner.entries.insert(
-            key.clone(),
-            WalTailProjectionCacheSlot {
-                rows,
-                last_touch: 0,
-            },
-        ) {
-            let (previous_rows, previous_bytes) = projection_weight(&previous.rows);
-            inner.cached_rows = inner.cached_rows.saturating_sub(previous_rows);
-            inner.cached_decoded_bytes = inner.cached_decoded_bytes.saturating_sub(previous_bytes);
-        }
-        inner.cached_rows = inner.cached_rows.saturating_add(row_count);
-        inner.cached_decoded_bytes = inner.cached_decoded_bytes.saturating_add(decoded_bytes);
-        inner.touch(&key);
-        self.stats.inserts.fetch_add(1, Ordering::SeqCst);
-        if let Some(observer) = &self.observer {
-            observer.insert();
-        }
-
-        while inner.entries.len() > self.config.max_entries
-            || inner.cached_rows > self.config.max_rows
-            || inner.cached_decoded_bytes > self.config.max_decoded_bytes
-        {
-            let WalTailProjectionCacheInner { entries, order, .. } = &mut *inner;
-            let Some(evicted) = order
-                .pop_oldest(|key, stamp| wal_tail_projection_slot_is_live(entries, key, stamp))
-            else {
-                break;
-            };
-            if let Some(previous) = entries.remove(&evicted) {
-                let (rows, bytes) = projection_weight(&previous.rows);
-                inner.cached_rows = inner.cached_rows.saturating_sub(rows);
-                inner.cached_decoded_bytes = inner.cached_decoded_bytes.saturating_sub(bytes);
-                self.stats.evictions.fetch_add(1, Ordering::SeqCst);
-                self.stats.evicted_rows.fetch_add(rows, Ordering::SeqCst);
-                self.stats
-                    .evicted_decoded_bytes
-                    .fetch_add(bytes, Ordering::SeqCst);
-                if let Some(observer) = &self.observer {
-                    observer.evict(rows, bytes);
-                }
-            }
-        }
-        if let Some(observer) = &self.observer {
-            observer.retained(inner.cached_rows, inner.cached_decoded_bytes);
-        }
+        self.blocks.insert(key, rows);
     }
 
     pub fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("wal tail projection cache lock should not be poisoned");
-        let keys = inner
-            .entries
-            .keys()
-            .filter(|key| &key.namespace_id == namespace_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            if let Some(previous) = inner.entries.remove(&key) {
-                let (rows, bytes) = projection_weight(&previous.rows);
-                inner.cached_rows = inner.cached_rows.saturating_sub(rows);
-                inner.cached_decoded_bytes = inner.cached_decoded_bytes.saturating_sub(bytes);
-                self.stats.evictions.fetch_add(1, Ordering::SeqCst);
-                self.stats.evicted_rows.fetch_add(rows, Ordering::SeqCst);
-                self.stats
-                    .evicted_decoded_bytes
-                    .fetch_add(bytes, Ordering::SeqCst);
-                if let Some(observer) = &self.observer {
-                    observer.evict(rows, bytes);
-                }
-            }
-        }
-        if let Some(observer) = &self.observer {
-            observer.retained(inner.cached_rows, inner.cached_decoded_bytes);
-        }
+        self.blocks
+            .invalidate(|key| &key.namespace_id == namespace_id);
     }
-}
-
-impl WalTailProjectionCacheInner {
-    fn touch(&mut self, key: &WalTailProjectionCacheKey) {
-        let stamp = self.order.touch(key);
-        if let Some(slot) = self.entries.get_mut(key) {
-            slot.last_touch = stamp;
-        }
-        let entries = &self.entries;
-        self.order.compact(entries.len(), |key, stamp| {
-            wal_tail_projection_slot_is_live(entries, key, stamp)
-        });
-    }
-}
-
-fn wal_tail_projection_slot_is_live(
-    entries: &HashMap<WalTailProjectionCacheKey, WalTailProjectionCacheSlot>,
-    key: &WalTailProjectionCacheKey,
-    stamp: u64,
-) -> bool {
-    entries
-        .get(key)
-        .is_some_and(|slot| slot.last_touch == stamp)
 }
 
 #[cfg(test)]
@@ -560,11 +345,14 @@ mod tests {
 
     #[test]
     fn row_attribution_and_timestamps_never_enter_projection_cache_keys() {
-        let cache = WalTailProjectionCache::new(WalTailProjectionCacheConfig {
-            max_entries: 1,
-            max_rows: 10,
-            max_decoded_bytes: 16 * 1024,
-        });
+        let cache = WalTailProjectionCache::new(
+            WalTailProjectionCacheConfig {
+                max_entries: 1,
+                max_rows: 10,
+                max_decoded_bytes: 16 * 1024,
+            },
+            None,
+        );
         let key = WalTailProjectionCacheKey {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             manifest_no: ManifestNo(7),

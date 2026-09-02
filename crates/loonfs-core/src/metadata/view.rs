@@ -2,11 +2,11 @@
 //! merged with the WAL tail, plus the caching session wide reads use.
 
 use super::durable_cache::{
-    BindingCacheKey, DurableVisibilityCache, ParentNameCacheKey, SharedRows,
+    DurableVisibilityCache, DurableVisibilityCacheInner, ParentNameCacheKey, SharedRows,
 };
 use super::manifest_index;
-use super::view_session::LeafRevisionPrefetch;
-use super::visibility::{self, MetadataVisibilityReads};
+use super::view_session::{latest_visible_bind, LeafRevisionPrefetch};
+use super::visibility::{self, BindingIdentity, MetadataVisibilityReads};
 use crate::checkpoint::VerifiedMetadataSegments;
 use crate::error::CoreError;
 use crate::metadata::{
@@ -25,7 +25,9 @@ use loonfs_api::{
 #[cfg(test)]
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 pub(super) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
@@ -58,15 +60,10 @@ impl ActiveDeletionScan {
         if page.len() < requested {
             self.exhausted = true;
         } else if let Some((last_row_key, _)) = page.last() {
-            self.lower_bound = format!("{last_row_key}\0");
+            self.lower_bound = lookup_keys::after_row_key(last_row_key);
         }
         self.buffered.extend(page);
     }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct MetadataSnapshot {
-    visible_seq: ChangeSeq,
 }
 
 pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
@@ -78,8 +75,16 @@ pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
 }
 
 pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
-    snapshot: MetadataSnapshot,
+    visible_seq: ChangeSeq,
     sources: MetadataSourceStack<'a, 'store, S>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttributesProjection {
+    pub(crate) revision_no: AttributeRevisionNo,
+    pub(crate) attributes: Attributes,
+    pub(crate) updated_by: Option<loonfs_api::ActorRef>,
+    pub(crate) updated_at_ms: Option<u64>,
 }
 
 #[cfg(test)]
@@ -109,7 +114,7 @@ impl<'a> InMemoryMetadataView<'a> {
         visible_seq: ChangeSeq,
     ) -> Self {
         Self {
-            snapshot: MetadataSnapshot { visible_seq },
+            visible_seq,
             sources: MetadataSourceStack {
                 overlay,
                 batch_accepted: None,
@@ -128,9 +133,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         wal_tail_rows: &'a MetadataState,
     ) -> Self {
         Self {
-            snapshot: MetadataSnapshot {
-                visible_seq: head.seq,
-            },
+            visible_seq: head.seq,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -151,9 +154,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         materialized_seq: ChangeSeq,
     ) -> Self {
         Self {
-            snapshot: MetadataSnapshot {
-                visible_seq: materialized_seq,
-            },
+            visible_seq: materialized_seq,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -171,7 +172,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         visible_seq: ChangeSeq,
     ) -> MetadataView<'view, 'store, S> {
         MetadataView {
-            snapshot: MetadataSnapshot { visible_seq },
+            visible_seq,
             sources: MetadataSourceStack {
                 overlay: Some(overlay),
                 batch_accepted: Some(batch_accepted),
@@ -183,7 +184,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     pub(super) fn visible_seq(&self) -> ChangeSeq {
-        self.snapshot.visible_seq
+        self.visible_seq
     }
 
     /// Attaches a cache for durable lookups performed during one batch.
@@ -221,6 +222,43 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 
     pub(super) fn manifest_segments(&self) -> Option<&'a VerifiedMetadataSegments<'store, S>> {
         self.sources.manifest
+    }
+
+    async fn shared_rows<T, K>(
+        &self,
+        select_map: fn(&mut DurableVisibilityCacheInner) -> &mut HashMap<K, Arc<Vec<T>>>,
+        key: K,
+        fetch: Pin<Box<dyn Future<Output = Result<Vec<T>, CoreError>> + Send + '_>>,
+        rows_of: fn(&MetadataState) -> &[T],
+        matches: impl Fn(&T) -> bool,
+    ) -> Result<SharedRows<T>, CoreError>
+    where
+        T: Clone,
+        K: Clone + Eq + std::hash::Hash,
+    {
+        let durable = if let Some(cached) = self
+            .sources
+            .durable_cache
+            .and_then(|cache| cache.get(select_map, &key))
+        {
+            cached
+        } else {
+            let mut durable = fetch.await?;
+            durable.extend(
+                self.durable_row_states()
+                    .flat_map(|state| rows_of(state).iter().filter(|row| matches(row)).cloned()),
+            );
+            let durable = Arc::new(durable);
+            if let Some(cache) = self.sources.durable_cache {
+                cache.insert(select_map, key, Arc::clone(&durable));
+            }
+            durable
+        };
+        let overlay = self
+            .overlay_states()
+            .flat_map(|state| rows_of(state).iter().filter(|row| matches(row)).cloned())
+            .collect();
+        Ok(SharedRows { durable, overlay })
     }
 }
 
@@ -445,27 +483,22 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn attributes_projection_at_visible_seq(
         &self,
         inode_id: InodeId,
-    ) -> Result<
-        (
-            AttributeRevisionNo,
-            Attributes,
-            Option<loonfs_api::ActorRef>,
-            Option<u64>,
-        ),
-        CoreError,
-    > {
+    ) -> Result<AttributesProjection, CoreError> {
         Ok(self
             .latest_attributes_revision(inode_id)
             .await?
-            .map(|record| {
-                (
-                    record.attributes_revision_no,
-                    record.attributes,
-                    Some(record.updated_by),
-                    Some(record.updated_at_ms),
-                )
+            .map(|record| AttributesProjection {
+                revision_no: record.attributes_revision_no,
+                attributes: record.attributes,
+                updated_by: Some(record.updated_by),
+                updated_at_ms: Some(record.updated_at_ms),
             })
-            .unwrap_or_else(|| (AttributeRevisionNo(0), Attributes::default(), None, None)))
+            .unwrap_or_else(|| AttributesProjection {
+                revision_no: AttributeRevisionNo(0),
+                attributes: Attributes::default(),
+                updated_by: None,
+                updated_at_ms: None,
+            }))
     }
 
     pub(crate) async fn find_commit_receipt(
@@ -509,11 +542,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
         let bindings = self.direntry_binds_for_child(child_inode_id).await?;
-        let latest = bindings
-            .iter()
-            .filter(|direntry| direntry.bind_seq <= self.visible_seq())
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
-            .cloned();
+        let latest = latest_visible_bind(bindings.iter(), self.visible_seq());
         Ok(latest)
     }
 
@@ -541,11 +570,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         let bindings = self
             .direntry_binds_for_parent_name(parent_inode_id, name_key)
             .await?;
-        let latest = bindings
-            .iter()
-            .filter(|direntry| direntry.bind_seq <= self.visible_seq())
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
-            .cloned();
+        let latest = latest_visible_bind(bindings.iter(), self.visible_seq());
         Ok(latest)
     }
 
@@ -581,146 +606,68 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             parent_inode_id,
             name_key: name_key.clone(),
         };
-        let durable = if let Some(cached) = self
-            .sources
-            .durable_cache
-            .and_then(|cache| cache.get(|inner| &mut inner.binds_for_parent_name, &cache_key))
-        {
-            cached
-        } else {
-            let mut durable = if let Some(segments) = self.manifest_segments() {
-                manifest_index::direntry_binds_for_parent_name(segments, parent_inode_id, name_key)
-                    .await?
-            } else {
-                Vec::new()
-            };
-            durable.extend(self.durable_row_states().flat_map(|state| {
-                state
-                    .direntry_binds()
-                    .iter()
-                    .filter(move |direntry| {
-                        direntry.parent_inode_id == parent_inode_id
-                            && direntry.name_key == *name_key
-                    })
-                    .cloned()
-            }));
-            let durable = Arc::new(durable);
-            if let Some(cache) = self.sources.durable_cache {
-                cache.insert(
-                    |inner| &mut inner.binds_for_parent_name,
-                    cache_key,
-                    Arc::clone(&durable),
-                );
-            }
-            durable
-        };
-        let overlay = self
-            .overlay_states()
-            .flat_map(|state| {
-                state
-                    .direntry_binds()
-                    .iter()
-                    .filter(move |direntry| {
-                        direntry.parent_inode_id == parent_inode_id
-                            && direntry.name_key == *name_key
-                    })
-                    .cloned()
-            })
-            .collect();
-        Ok(SharedRows { durable, overlay })
+        self.shared_rows(
+            |inner| &mut inner.binds_for_parent_name,
+            cache_key,
+            Box::pin(async {
+                if let Some(segments) = self.manifest_segments() {
+                    manifest_index::direntry_binds_for_parent_name(
+                        segments,
+                        parent_inode_id,
+                        name_key,
+                    )
+                    .await
+                } else {
+                    Ok(Vec::new())
+                }
+            }),
+            MetadataState::direntry_binds,
+            |direntry| {
+                direntry.parent_inode_id == parent_inode_id && direntry.name_key == *name_key
+            },
+        )
+        .await
     }
 
     pub(super) async fn direntry_binds_for_child(
         &self,
         child_inode_id: InodeId,
     ) -> Result<SharedRows<DirentryBindRecord>, CoreError> {
-        let durable = if let Some(cached) = self
-            .sources
-            .durable_cache
-            .and_then(|cache| cache.get(|inner| &mut inner.binds_for_child, &child_inode_id))
-        {
-            cached
-        } else {
-            let mut durable = if let Some(segments) = self.manifest_segments() {
-                manifest_index::direntry_binds_for_child(segments, child_inode_id).await?
-            } else {
-                Vec::new()
-            };
-            durable.extend(self.durable_row_states().flat_map(|state| {
-                state
-                    .direntry_binds()
-                    .iter()
-                    .filter(move |direntry| direntry.child_inode_id == child_inode_id)
-                    .cloned()
-            }));
-            let durable = Arc::new(durable);
-            if let Some(cache) = self.sources.durable_cache {
-                cache.insert(
-                    |inner| &mut inner.binds_for_child,
-                    child_inode_id,
-                    Arc::clone(&durable),
-                );
-            }
-            durable
-        };
-        let overlay = self
-            .overlay_states()
-            .flat_map(|state| {
-                state
-                    .direntry_binds()
-                    .iter()
-                    .filter(move |direntry| direntry.child_inode_id == child_inode_id)
-                    .cloned()
-            })
-            .collect();
-        Ok(SharedRows { durable, overlay })
+        self.shared_rows(
+            |inner| &mut inner.binds_for_child,
+            child_inode_id,
+            Box::pin(async {
+                if let Some(segments) = self.manifest_segments() {
+                    manifest_index::direntry_binds_for_child(segments, child_inode_id).await
+                } else {
+                    Ok(Vec::new())
+                }
+            }),
+            MetadataState::direntry_binds,
+            |direntry| direntry.child_inode_id == child_inode_id,
+        )
+        .await
     }
 
     pub(super) async fn direntry_unbinds_for_binding(
         &self,
         direntry: &DirentryBindRecord,
     ) -> Result<SharedRows<DirentryUnbindRecord>, CoreError> {
-        let cache_key = BindingCacheKey::from(direntry);
-        let durable = if let Some(cached) = self
-            .sources
-            .durable_cache
-            .and_then(|cache| cache.get(|inner| &mut inner.unbinds_for_binding, &cache_key))
-        {
-            cached
-        } else {
-            let mut durable = if let Some(segments) = self.manifest_segments() {
-                manifest_index::direntry_unbinds_for_binding(segments, direntry).await?
-            } else {
-                Vec::new()
-            };
-            durable.extend(self.durable_row_states().flat_map(|state| {
-                state
-                    .direntry_unbinds()
-                    .iter()
-                    .filter(move |unbind| unbind_matches_binding(unbind, direntry))
-                    .cloned()
-            }));
-            let durable = Arc::new(durable);
-            if let Some(cache) = self.sources.durable_cache {
-                cache.insert(
-                    |inner| &mut inner.unbinds_for_binding,
-                    cache_key,
-                    Arc::clone(&durable),
-                );
-            }
-            durable
-        };
-        let overlay = self
-            .overlay_states()
-            .flat_map(|state| {
-                state
-                    .direntry_unbinds()
-                    .iter()
-                    .filter(move |unbind| unbind_matches_binding(unbind, direntry))
-                    .cloned()
-            })
-            .collect();
-        Ok(SharedRows { durable, overlay })
+        let cache_key = BindingIdentity::from(direntry);
+        self.shared_rows(
+            |inner| &mut inner.unbinds_for_binding,
+            cache_key,
+            Box::pin(async {
+                if let Some(segments) = self.manifest_segments() {
+                    manifest_index::direntry_unbinds_for_binding(segments, direntry).await
+                } else {
+                    Ok(Vec::new())
+                }
+            }),
+            MetadataState::direntry_unbinds,
+            |unbind| unbind_matches_binding(unbind, direntry),
+        )
+        .await
     }
 
     fn row_latest_revision_for_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
@@ -888,46 +835,20 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         root_inode_id: InodeId,
     ) -> Result<SharedRows<SubtreeTombstoneRecord>, CoreError> {
-        let durable = if let Some(cached) = self
-            .sources
-            .durable_cache
-            .and_then(|cache| cache.get(|inner| &mut inner.tombstones_for_root, &root_inode_id))
-        {
-            cached
-        } else {
-            let mut durable = if let Some(segments) = self.manifest_segments() {
-                manifest_index::tombstones_for_root(segments, root_inode_id).await?
-            } else {
-                Vec::new()
-            };
-            durable.extend(self.durable_row_states().flat_map(|state| {
-                state
-                    .subtree_tombstones()
-                    .iter()
-                    .filter(move |tombstone| tombstone.root_inode_id == root_inode_id)
-                    .cloned()
-            }));
-            let durable = Arc::new(durable);
-            if let Some(cache) = self.sources.durable_cache {
-                cache.insert(
-                    |inner| &mut inner.tombstones_for_root,
-                    root_inode_id,
-                    Arc::clone(&durable),
-                );
-            }
-            durable
-        };
-        let overlay = self
-            .overlay_states()
-            .flat_map(|state| {
-                state
-                    .subtree_tombstones()
-                    .iter()
-                    .filter(move |tombstone| tombstone.root_inode_id == root_inode_id)
-                    .cloned()
-            })
-            .collect();
-        Ok(SharedRows { durable, overlay })
+        self.shared_rows(
+            |inner| &mut inner.tombstones_for_root,
+            root_inode_id,
+            Box::pin(async {
+                if let Some(segments) = self.manifest_segments() {
+                    manifest_index::tombstones_for_root(segments, root_inode_id).await
+                } else {
+                    Ok(Vec::new())
+                }
+            }),
+            MetadataState::subtree_tombstones,
+            |tombstone| tombstone.root_inode_id == root_inode_id,
+        )
+        .await
     }
 
     /// Every unbind for `parent_inode_id` with a name key in

@@ -14,7 +14,7 @@ use crate::metrics::{
 use crate::{
     GcResponse, MaintenanceJobId, MaintenanceStepConclusion, MetadataCompactionJobOutcome,
 };
-use loonfs_core::cache::{MetadataSegmentCacheObserver, WalTailProjectionCacheObserver};
+use loonfs_core::cache::{DecodedBlockCacheObserver, DecodedBlockWeight};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -213,7 +213,7 @@ impl RuntimeInstruments {
     /// Returns the metadata-segment cache metrics observer, if metrics are enabled.
     pub(crate) fn metadata_segment_cache_observer(
         &self,
-    ) -> Option<Arc<dyn MetadataSegmentCacheObserver>> {
+    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
         let observer = Arc::clone(&self.installed.as_ref()?.cache.metadata_segment);
         Some(observer)
     }
@@ -221,7 +221,7 @@ impl RuntimeInstruments {
     /// Returns the WAL-tail projection cache metrics observer, if metrics are enabled.
     pub(crate) fn wal_tail_projection_cache_observer(
         &self,
-    ) -> Option<Arc<dyn WalTailProjectionCacheObserver>> {
+    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
         let observer = Arc::clone(&self.installed.as_ref()?.cache.wal_tail_projection);
         Some(observer)
     }
@@ -716,7 +716,7 @@ impl MetadataSegmentCacheInstruments {
     }
 }
 
-impl MetadataSegmentCacheObserver for MetadataSegmentCacheInstruments {
+impl DecodedBlockCacheObserver for MetadataSegmentCacheInstruments {
     fn hit(&self) {
         self.hits.increment(1);
     }
@@ -729,7 +729,7 @@ impl MetadataSegmentCacheObserver for MetadataSegmentCacheInstruments {
         self.inserts.increment(1);
     }
 
-    fn evict(&self) {
+    fn evict(&self, _weight: DecodedBlockWeight) {
         self.evictions.increment(1);
     }
 
@@ -803,7 +803,7 @@ impl WalTailProjectionCacheInstruments {
     }
 }
 
-impl WalTailProjectionCacheObserver for WalTailProjectionCacheInstruments {
+impl DecodedBlockCacheObserver for WalTailProjectionCacheInstruments {
     fn hit(&self) {
         self.hits.increment(1);
     }
@@ -816,23 +816,23 @@ impl WalTailProjectionCacheObserver for WalTailProjectionCacheInstruments {
         self.inserts.increment(1);
     }
 
-    fn evict(&self, rows: usize, decoded_bytes: usize) {
+    fn evict(&self, weight: DecodedBlockWeight) {
         self.evictions.increment(1);
-        self.evicted_rows.increment(metric_count(rows));
+        self.evicted_rows.increment(metric_count(weight.rows));
         self.evicted_decoded_bytes
-            .increment(metric_count(decoded_bytes));
+            .increment(metric_count(weight.bytes));
     }
 
-    fn reject(&self, rows: usize, decoded_bytes: usize) {
+    fn reject(&self, weight: DecodedBlockWeight) {
         self.rejections.increment(1);
-        self.rejected_rows.increment(metric_count(rows));
+        self.rejected_rows.increment(metric_count(weight.rows));
         self.rejected_decoded_bytes
-            .increment(metric_count(decoded_bytes));
+            .increment(metric_count(weight.bytes));
     }
 
-    fn retained(&self, rows: usize, decoded_bytes: usize) {
-        self.retained_rows.set(metric_level(rows));
-        self.retained_decoded_bytes.set(metric_level(decoded_bytes));
+    fn retained(&self, weight: DecodedBlockWeight) {
+        self.retained_rows.set(metric_level(weight.rows));
+        self.retained_decoded_bytes.set(metric_level(weight.bytes));
     }
 }
 
@@ -1078,7 +1078,7 @@ mod tests {
         metadata.hit();
         metadata.miss();
         metadata.insert();
-        metadata.evict();
+        metadata.evict(DecodedBlockWeight::default());
         metadata.filter_skip();
         metadata.filter_false_positive();
 
@@ -1088,9 +1088,15 @@ mod tests {
         wal.hit();
         wal.miss();
         wal.insert();
-        wal.evict(7, 70);
-        wal.reject(11, 110);
-        wal.retained(13, 130);
+        wal.evict(DecodedBlockWeight { rows: 7, bytes: 70 });
+        wal.reject(DecodedBlockWeight {
+            rows: 11,
+            bytes: 110,
+        });
+        wal.retained(DecodedBlockWeight {
+            rows: 13,
+            bytes: 130,
+        });
 
         let snapshot = recorder.snapshot();
         for (name, labels, value) in [

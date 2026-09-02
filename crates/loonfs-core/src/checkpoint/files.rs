@@ -88,7 +88,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
         let family_exhausted = rows.len() < wave_rows;
         // Resume after the last scanned row, including rows filtered out below.
         match rows.last() {
-            Some((row_key, _)) => lower_bound = format!("{row_key}\0"),
+            Some((row_key, _)) => lower_bound = lookup_keys::after_row_key(row_key),
             None => break,
         }
         let inode_rows = rows

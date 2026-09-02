@@ -21,20 +21,20 @@ use std::future::Future;
 /// Unbind records carry the identity of the bind they revoke, so an unbind
 /// matches a bind through the same comparison. `display_name` is
 /// presentation, not identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BindingIdentity<'a> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BindingIdentity {
     pub(crate) parent_inode_id: InodeId,
-    pub(crate) name_key: &'a NameKey,
+    pub(crate) name_key: NameKey,
     pub(crate) child_inode_id: InodeId,
     pub(crate) bind_seq: ChangeSeq,
     pub(crate) bind_delta_index: u32,
 }
 
-impl<'a> From<&'a DirentryBindRecord> for BindingIdentity<'a> {
-    fn from(record: &'a DirentryBindRecord) -> Self {
+impl From<&DirentryBindRecord> for BindingIdentity {
+    fn from(record: &DirentryBindRecord) -> Self {
         Self {
             parent_inode_id: record.parent_inode_id,
-            name_key: &record.name_key,
+            name_key: record.name_key.clone(),
             child_inode_id: record.child_inode_id,
             bind_seq: record.bind_seq,
             bind_delta_index: record.bind_delta_index,
@@ -42,11 +42,11 @@ impl<'a> From<&'a DirentryBindRecord> for BindingIdentity<'a> {
     }
 }
 
-impl<'a> From<&'a DirentryUnbindRecord> for BindingIdentity<'a> {
-    fn from(record: &'a DirentryUnbindRecord) -> Self {
+impl From<&DirentryUnbindRecord> for BindingIdentity {
+    fn from(record: &DirentryUnbindRecord) -> Self {
         Self {
             parent_inode_id: record.parent_inode_id,
-            name_key: &record.name_key,
+            name_key: record.name_key.clone(),
             child_inode_id: record.child_inode_id,
             bind_seq: record.bind_seq,
             bind_delta_index: record.bind_delta_index,
@@ -532,47 +532,30 @@ pub(crate) fn resolve_in_memory_read<T>(future: impl Future<Output = T>) -> T {
         .expect("in-memory metadata visibility reads should never await")
 }
 
-/// [`MetadataState`] reads scoped to `base_seq`: each lookup scans rows at
-/// or below that seq.
-///
-/// The composite overrides route back through the seq-gated
-/// [`MetadataState`] composites so that reads at or above the indexed seq
-/// keep their at-head index fast paths. This matters for
-/// [`resolve_visible_path`], which is not itself seq-gated and resolves
-/// most paths at head.
-pub(super) struct MetadataStateAtSeqReads<'a> {
+/// [`MetadataState`] reads scoped to `base_seq`.
+pub(super) struct MetadataStateReads<'a> {
     state: &'a MetadataState,
     base_seq: ChangeSeq,
 }
 
-/// [`MetadataState`] reads answered by the at-head indexes.
-///
-/// The composite overrides reuse the index materializations
-/// (`visible_*_at_head`, `current_parent_binding_for_child_at_head`); the
-/// ancestor-walk composites are NOT overridden, so both walk rules run their
-/// canonical bodies over these index-backed steps.
-pub(super) struct MetadataStateAtHeadReads<'a> {
-    state: &'a MetadataState,
-}
-
 impl MetadataState {
-    pub(super) fn reads_at_seq(&self, base_seq: ChangeSeq) -> MetadataStateAtSeqReads<'_> {
-        MetadataStateAtSeqReads {
+    pub(super) fn reads_at_seq(&self, base_seq: ChangeSeq) -> MetadataStateReads<'_> {
+        MetadataStateReads {
             state: self,
             base_seq,
         }
     }
-
-    pub(super) fn reads_at_head(&self) -> MetadataStateAtHeadReads<'_> {
-        MetadataStateAtHeadReads { state: self }
-    }
 }
 
-impl MetadataVisibilityReads for MetadataStateAtSeqReads<'_> {
+impl MetadataVisibilityReads for MetadataStateReads<'_> {
     type Error = VisiblePathError;
 
     async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
-        Ok(self.state.inode_at_seq(inode_id, self.base_seq))
+        Ok(if self.base_seq >= self.state.indexed_seq() {
+            self.state.indexes.inode(inode_id)
+        } else {
+            self.state.inode_at_seq_scan(inode_id, self.base_seq)
+        })
     }
 
     async fn find_latest_bound_child(
@@ -580,121 +563,56 @@ impl MetadataVisibilityReads for MetadataStateAtSeqReads<'_> {
         parent_inode_id: InodeId,
         name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        Ok(self
-            .state
-            .bound_child_at_seq(parent_inode_id, name_key, self.base_seq))
+        Ok(if self.base_seq >= self.state.indexed_seq() {
+            self.state.indexes.latest_bind(parent_inode_id, name_key)
+        } else {
+            self.state
+                .bound_child_at_seq_scan(parent_inode_id, name_key, self.base_seq)
+        })
     }
 
     async fn find_latest_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        Ok(self
-            .state
-            .latest_parent_binding_for_child_at_seq(child_inode_id, self.base_seq))
+        Ok(self.state.latest_parent_binding_for_child_at_seq(
+            child_inode_id,
+            self.base_seq.min(self.state.indexed_seq()),
+        ))
     }
 
     async fn find_active_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
-        Ok(self
-            .state
-            .active_subtree_tombstone(root_inode_id, self.base_seq))
+        Ok(if self.base_seq >= self.state.indexed_seq() {
+            self.state.indexes.active_tombstone(root_inode_id)
+        } else {
+            self.state
+                .active_subtree_tombstone_scan(root_inode_id, self.base_seq)
+        })
     }
 
     async fn is_binding_unbound(
         &mut self,
         direntry: &DirentryBindRecord,
     ) -> Result<bool, Self::Error> {
-        Ok(self
-            .state
-            .is_direntry_unbound_at_seq(direntry, self.base_seq))
+        Ok(if self.base_seq >= self.state.indexed_seq() {
+            self.state.indexes.is_unbound(direntry)
+        } else {
+            self.state
+                .is_direntry_unbound_at_seq_scan(direntry, self.base_seq)
+        })
     }
 
     async fn current_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        Ok(self
-            .state
-            .current_parent_binding_for_child(child_inode_id, self.base_seq))
-    }
-
-    async fn covering_subtree_tombstone(
-        &mut self,
-        inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
-        Ok(self
-            .state
-            .covering_subtree_tombstone(inode_id, self.base_seq))
-    }
-
-    async fn visible_inode(
-        &mut self,
-        inode_id: InodeId,
-    ) -> Result<Option<InodeRecord>, Self::Error> {
-        Ok(self.state.visible_inode(inode_id, self.base_seq))
-    }
-
-    async fn visible_child(
-        &mut self,
-        parent_inode_id: InodeId,
-        name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        Ok(self
-            .state
-            .visible_child(parent_inode_id, name_key, self.base_seq))
-    }
-}
-
-impl MetadataVisibilityReads for MetadataStateAtHeadReads<'_> {
-    type Error = VisiblePathError;
-
-    async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
-        Ok(self.state.inode_at_head(inode_id))
-    }
-
-    async fn find_latest_bound_child(
-        &mut self,
-        parent_inode_id: InodeId,
-        name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        Ok(self.state.indexes.latest_bind(parent_inode_id, name_key))
-    }
-
-    async fn find_latest_parent_binding_for_child(
-        &mut self,
-        child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        // At head every row is at or below the indexed seq, so the seq-scan
-        // with `indexed_seq` as the bound is the honest latest-overall scan.
-        Ok(self
-            .state
-            .latest_parent_binding_for_child_at_seq(child_inode_id, self.state.indexed_seq()))
-    }
-
-    async fn find_active_subtree_tombstone(
-        &mut self,
-        root_inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
-        Ok(self.state.active_subtree_tombstone_at_head(root_inode_id))
-    }
-
-    async fn is_binding_unbound(
-        &mut self,
-        direntry: &DirentryBindRecord,
-    ) -> Result<bool, Self::Error> {
-        Ok(self.state.is_direntry_unbound_at_head(direntry))
-    }
-
-    async fn current_parent_binding_for_child(
-        &mut self,
-        child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        Ok(self
-            .state
-            .current_parent_binding_for_child_at_head(child_inode_id))
+        if self.base_seq >= self.state.indexed_seq() {
+            return Ok(self.state.indexes.active_parent_for_child(child_inode_id));
+        }
+        current_parent_binding_for_child(self, child_inode_id).await
     }
 
     async fn active_child_binding(
@@ -702,21 +620,9 @@ impl MetadataVisibilityReads for MetadataStateAtHeadReads<'_> {
         parent_inode_id: InodeId,
         name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        Ok(self.state.indexes.active_child(parent_inode_id, name_key))
-    }
-
-    async fn visible_inode(
-        &mut self,
-        inode_id: InodeId,
-    ) -> Result<Option<InodeRecord>, Self::Error> {
-        Ok(self.state.visible_inode_at_head(inode_id))
-    }
-
-    async fn visible_child(
-        &mut self,
-        parent_inode_id: InodeId,
-        name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        Ok(self.state.visible_child_at_head(parent_inode_id, name_key))
+        if self.base_seq >= self.state.indexed_seq() {
+            return Ok(self.state.indexes.active_child(parent_inode_id, name_key));
+        }
+        active_child_binding(self, parent_inode_id, name_key).await
     }
 }

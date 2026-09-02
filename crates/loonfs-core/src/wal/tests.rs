@@ -217,7 +217,7 @@ fn canonical_replay_advances_head_and_applies_metadata_rows() {
     assert_eq!(replayed.resulting_head.next_inode_id, InodeId(3));
     assert!(replayed
         .resulting_metadata_state
-        .inode_at_head(InodeId(2))
+        .inode_at_seq(InodeId(2), replayed.resulting_metadata_state.indexed_seq())
         .is_some());
     assert!(replayed
         .resulting_metadata_state

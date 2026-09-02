@@ -38,10 +38,10 @@ mod validate;
 
 pub use self::build::write_segments_in_waves;
 pub use self::cache::{
-    MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheObserver,
-    MetadataSegmentCacheStats, WalTailProjectionCache, WalTailProjectionCacheConfig,
-    WalTailProjectionCacheKey, WalTailProjectionCacheObserver, WalTailProjectionCacheStats,
-    DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+    MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheStats,
+    WalTailProjectionCache, WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
+    WalTailProjectionCacheStats, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
 pub use self::compaction_merge::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,

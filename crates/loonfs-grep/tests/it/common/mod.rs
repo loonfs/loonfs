@@ -40,12 +40,16 @@ impl GrepHost {
             .build()
             .await
             .expect("build admin");
-        let block_cache = Arc::new(GrepBlockCache::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES));
+        let block_cache = Arc::new(GrepBlockCache::new(
+            loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
+                DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+            ),
+        ));
         Self {
             store: store.clone(),
             reader: reader.clone(),
             admin: admin.clone(),
-            service: GrepService::with_block_cache(Arc::clone(&block_cache)),
+            service: GrepService::new(Arc::clone(&block_cache)),
             worker: GrepWorker::with_block_cache(
                 store.clone(),
                 reader,

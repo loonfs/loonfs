@@ -9,7 +9,9 @@ use crate::config::{
 };
 use crate::error::CliError;
 use crate::profiles::default_namespace;
-use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
+use loonfs::{
+    DecodedBlockCacheConfig, FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind,
+};
 use loonfs_api::{ActorId, ActorKind, ActorRef, NamespaceId, SecretString};
 use loonfs_client::Client;
 use loonfs_grep::{GrepBlockCache, GrepService, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
@@ -232,15 +234,16 @@ impl EmbeddedTarget {
             .build()
             .await
             .map_err(map_runtime_error)?;
-        let grep_block_cache =
-            Arc::new(GrepBlockCache::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES));
+        let grep_block_cache = Arc::new(GrepBlockCache::new(
+            DecodedBlockCacheConfig::with_max_decoded_bytes(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
+        ));
         let backend = EmbeddedBackend {
             writer,
             reader,
             admin,
             // Embedded mode composes grep itself: the runtime handles above
             // know nothing about it.
-            grep: GrepService::with_block_cache(Arc::clone(&grep_block_cache)),
+            grep: GrepService::new(Arc::clone(&grep_block_cache)),
             grep_block_cache,
         };
         Ok(Self { backend })

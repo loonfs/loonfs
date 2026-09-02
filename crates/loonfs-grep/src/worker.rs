@@ -232,7 +232,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             store,
             reader,
             admin,
-            Arc::new(GrepBlockCache::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES)),
+            Arc::new(GrepBlockCache::new(
+                loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
+                    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+                ),
+            )),
         )
     }
 

@@ -634,7 +634,7 @@ async fn validate_source_binding<S: ObjectStore + ?Sized>(
     };
     let expected_identity = BindingIdentity {
         parent_inode_id: expected.parent_inode_id,
-        name_key: &expected.name_key,
+        name_key: expected.name_key.clone(),
         child_inode_id: expected.child_inode_id,
         bind_seq: expected.bind_seq,
         bind_delta_index: expected.bind_delta_index,

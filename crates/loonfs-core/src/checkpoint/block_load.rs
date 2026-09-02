@@ -67,11 +67,7 @@ impl SegmentKeyRangeBlocks {
     }
 }
 
-/// Per-view memo of decoded blocks. Index, filter, and manifest entries stay
-/// for the view's lifetime, while data entries have a decoded-byte budget and
-/// leave in insertion order. This is a dedupe map, not an owner:
-/// [`SegmentKeyRangeBlocks`] holds its own block [`Arc`]s, so eviction cannot
-/// invalidate borrowed rows. Its worst case is one extra shared-cache lookup.
+/// This memo stays separate because it uses FIFO eviction for one operation.
 #[derive(Debug, Default)]
 pub(super) struct SessionBlockMemo {
     inner: Mutex<SessionBlockMemoInner>,
@@ -119,7 +115,7 @@ impl SessionBlockMemo {
         if let Some(previous) = previous {
             inner.data_decoded_bytes = inner
                 .data_decoded_bytes
-                .saturating_sub(previous.decoded_bytes());
+                .saturating_sub(previous.weight().bytes);
         } else {
             inner.data_insertion_order.push_back(cache_key);
         }
@@ -135,7 +131,7 @@ impl SessionBlockMemo {
                 .expect("session block memo queue and map should stay one-to-one");
             inner.data_decoded_bytes = inner
                 .data_decoded_bytes
-                .saturating_sub(evicted.decoded_bytes());
+                .saturating_sub(evicted.weight().bytes);
         }
     }
 }
@@ -244,8 +240,10 @@ mod tests {
     fn manifest_block() -> DecodedMetadataSegmentBlock {
         let namespace_id = NamespaceId::parse("memo").expect("namespace id");
         DecodedMetadataSegmentBlock::Manifest {
-            manifest: Arc::new(genesis_basis_manifest(&namespace_id)),
-            scan_runs: Arc::new(Vec::new()),
+            manifest: (
+                Arc::new(genesis_basis_manifest(&namespace_id)),
+                Arc::new(Vec::new()),
+            ),
             decoded_bytes: 1,
         }
     }

@@ -94,8 +94,9 @@ pub use loonfs_api::{
     PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
-    DecodedBlock, DecodedBlockCache, DecodedBlockCacheObserver, DecodedBlockCacheStats,
-    MetadataSegmentCacheConfig, Recency, StoredMetadataBlockCache,
+    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
+    DecodedBlockCacheStats, DecodedBlockWeight, DecodedSegmentBlock, MetadataSegmentCacheConfig,
+    Recency, SegmentBlockKind, SegmentCacheKey, StoredMetadataBlockCache,
     StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
 pub use loonfs_core::limits::{

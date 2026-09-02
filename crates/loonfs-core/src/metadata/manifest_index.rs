@@ -51,7 +51,7 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
 ) -> Result<Vec<ManifestDirentryBindCandidate>> {
     let parent_prefix = lookup_keys::direntry_parent_prefix(parent_inode_id);
     let lower_bound = if let Some(row_key) = start_after_row_key {
-        resume_after_row_key(row_key)
+        lookup_keys::after_row_key(row_key)
     } else if let Some(name_key) = start_after_name_key {
         let exact_name_prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key);
         string_prefix_upper_bound(&exact_name_prefix).unwrap_or(exact_name_prefix)
@@ -190,7 +190,7 @@ pub(super) async fn direntry_unbinds_for_parent_name_range<S: ObjectStore + ?Siz
         let Some(last_row_key) = last_row_key else {
             break;
         };
-        lower_bound = resume_after_row_key(&last_row_key);
+        lower_bound = lookup_keys::after_row_key(&last_row_key);
     }
     Ok(unbinds)
 }
@@ -231,8 +231,8 @@ pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Option<RevisionRecord>> {
-    let exact_prefix = revision_by_inode_desc_exact_revision_prefix(inode_id, revision_no);
-    let filter_probe = revision_by_inode_desc_filter_probe(inode_id);
+    let exact_prefix = lookup_keys::revision_by_inode_desc_revision_prefix(inode_id, revision_no);
+    let filter_probe = lookup_keys::revision_by_inode_desc_probe(inode_id);
     segments
         .scan_range_page_for_lookup(
             MetadataRowFamily::RevisionsByInodeDesc,
@@ -258,10 +258,17 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let inode_prefix = revision_by_inode_desc_inode_prefix(inode_id);
-    let filter_probe = revision_by_inode_desc_filter_probe(inode_id);
+    let inode_prefix = lookup_keys::revision_by_inode_desc_prefix(inode_id);
+    let filter_probe = lookup_keys::revision_by_inode_desc_probe(inode_id);
     let lower_bound = start_after
-        .map(|position| resume_after_row_key(&revision_by_inode_desc_row_key(inode_id, position)))
+        .map(|position| {
+            lookup_keys::after_row_key(&lookup_keys::revision_by_inode_desc_row_key(
+                inode_id,
+                position.revision_no,
+                position.committed_seq,
+                position.revision_delta_index,
+            ))
+        })
         .unwrap_or_else(|| inode_prefix.clone());
     segments
         .scan_range_page_for_lookup(
@@ -393,37 +400,6 @@ pub(super) async fn attributes_for_inode<S: ObjectStore + ?Sized>(
         let Some(last_row_key) = last_row_key else {
             return Ok(None);
         };
-        lower_bound = resume_after_row_key(&last_row_key);
+        lower_bound = lookup_keys::after_row_key(&last_row_key);
     }
-}
-
-fn resume_after_row_key(row_key: &str) -> String {
-    let mut lower_bound = String::with_capacity(row_key.len() + 1);
-    lower_bound.push_str(row_key);
-    lower_bound.push('\0');
-    lower_bound
-}
-
-fn revision_by_inode_desc_inode_prefix(inode_id: InodeId) -> String {
-    lookup_keys::revision_by_inode_desc_prefix(inode_id)
-}
-
-fn revision_by_inode_desc_filter_probe(inode_id: InodeId) -> String {
-    lookup_keys::revision_by_inode_desc_probe(inode_id)
-}
-
-fn revision_by_inode_desc_exact_revision_prefix(
-    inode_id: InodeId,
-    revision_no: RevisionNo,
-) -> String {
-    lookup_keys::revision_by_inode_desc_revision_prefix(inode_id, revision_no)
-}
-
-fn revision_by_inode_desc_row_key(inode_id: InodeId, position: RevisionPagePosition) -> String {
-    lookup_keys::revision_by_inode_desc_row_key(
-        inode_id,
-        position.revision_no,
-        position.committed_seq,
-        position.revision_delta_index,
-    )
 }
