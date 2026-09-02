@@ -29,9 +29,6 @@ from loonfs.server import (
     BeginUploadResponse_ServiceProxied,
     Checksum,
     CommitResponse,
-    CompleteUploadRequest_DirectMultipart,
-    CompleteUploadRequest_DirectPut,
-    CompleteUploadRequest_ServiceProxied,
     CompletedUploadPart,
     ConflictError,
     FilesystemOperation_CreateDirectory,
@@ -50,8 +47,11 @@ from loonfs.server import (
     PathEntry,
     PathEntry_File,
     UnauthorizedError,
-    UploadContentResponse,
+    UploadCompletion_DirectMultipart,
+    UploadCompletion_DirectPut,
+    UploadCompletion_ServiceProxied,
     UploadContentClaim,
+    UploadContentResponse,
     UploadPartChecksumClaim,
     UploadSession,
     UploadSession_Aborted,
@@ -580,7 +580,7 @@ def _stage_content(
         client.uploads.complete(
             namespace_id,
             begin.upload_id,
-            request=CompleteUploadRequest_ServiceProxied(),
+            request=UploadCompletion_ServiceProxied(),
         )
     )
 
@@ -1475,7 +1475,7 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     completed = harness.client.uploads.complete(
         request.namespace_id,
         begin.upload_id,
-        request=CompleteUploadRequest_DirectPut(content=claim),
+        request=UploadCompletion_DirectPut(content=claim),
     )
     completed = _completed_upload(completed)
     content_ref = completed.content_ref
@@ -1555,7 +1555,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         )
     completed_parts.sort(key=lambda part: part.part_number)
     whole_checksum = _checksum(begin.checksum_algorithm, payload)
-    completion_request = CompleteUploadRequest_DirectMultipart(
+    completion_request = UploadCompletion_DirectMultipart(
         content=UploadContentClaim(
             size_bytes=len(payload),
             checksum=whole_checksum,

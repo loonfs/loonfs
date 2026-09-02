@@ -34,7 +34,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -44,7 +44,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -126,7 +126,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -136,7 +136,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -146,7 +146,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -156,7 +156,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -166,7 +166,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -228,7 +228,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -238,7 +238,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -248,7 +248,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -258,7 +258,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -268,7 +268,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -351,7 +351,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -361,7 +361,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -371,7 +371,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -381,7 +381,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -391,7 +391,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -462,7 +462,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -472,7 +472,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -482,7 +482,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -492,7 +492,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -502,7 +502,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -603,7 +603,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -613,7 +613,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -623,7 +623,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -633,7 +633,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -718,7 +718,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -728,7 +728,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -738,7 +738,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -748,7 +748,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -831,7 +831,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -841,7 +841,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -851,7 +851,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -861,7 +861,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -940,7 +940,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -950,7 +950,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -960,7 +960,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -970,7 +970,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1097,7 +1097,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1107,7 +1107,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1117,7 +1117,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1127,7 +1127,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1137,7 +1137,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1147,7 +1147,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1226,7 +1226,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1236,7 +1236,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1246,7 +1246,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1301,7 +1301,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotSummary"
+                  "$ref": "#/components/schemas/Snapshot"
                 }
               }
             }
@@ -1311,7 +1311,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1321,7 +1321,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1331,7 +1331,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1341,7 +1341,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1351,7 +1351,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1414,7 +1414,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotSummary"
+                  "$ref": "#/components/schemas/Snapshot"
                 }
               }
             }
@@ -1424,7 +1424,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1434,7 +1434,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1444,7 +1444,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1454,7 +1454,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1514,7 +1514,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1524,7 +1524,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1586,7 +1586,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1596,7 +1596,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1606,7 +1606,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1616,7 +1616,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1626,7 +1626,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1636,7 +1636,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1700,7 +1700,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1710,7 +1710,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1720,7 +1720,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1730,7 +1730,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1791,7 +1791,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1801,7 +1801,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1811,7 +1811,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1821,7 +1821,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1831,7 +1831,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1881,7 +1881,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CompleteUploadRequest"
+                "$ref": "#/components/schemas/UploadCompletion"
               }
             }
           },
@@ -1903,7 +1903,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1913,7 +1913,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1923,7 +1923,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1933,7 +1933,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1943,7 +1943,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1953,7 +1953,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1967,7 +1967,7 @@
           "uploads"
         ],
         "x-fern-sdk-method-name": "complete",
-        "x-fern-request-name": "CompleteUploadBody"
+        "x-fern-request-name": "CompleteUploadRequest"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/content": {
@@ -2029,7 +2029,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2039,7 +2039,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2049,7 +2049,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2059,7 +2059,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2069,7 +2069,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2079,7 +2079,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2149,7 +2149,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2159,7 +2159,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2169,7 +2169,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2179,7 +2179,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2189,7 +2189,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2199,7 +2199,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2209,7 +2209,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2265,40 +2265,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "ApiError": {
-        "type": "object",
-        "description": "HTTP error body used by LoonFS APIs.",
-        "required": [
-          "code",
-          "message"
-        ],
-        "properties": {
-          "code": {
-            "type": "string",
-            "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
-          },
-          "details": {
-            "$ref": "#/components/schemas/ErrorDetails",
-            "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
-          },
-          "feature": {
-            "type": "string",
-            "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
-          },
-          "message": {
-            "type": "string",
-            "description": "Human-readable error message."
-          },
-          "param": {
-            "type": "string",
-            "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
-          },
-          "request_id": {
-            "type": "string",
-            "description": "Correlation id the server assigned to the failed request; the same\nvalue is sent as the `x-request-id` response header."
-          }
-        }
       },
       "AttributeKey": {
         "type": "string",
@@ -2641,28 +2607,6 @@
           }
         }
       },
-      "CompleteUploadRequest": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/CompleteUploadServiceProxied"
-          },
-          {
-            "$ref": "#/components/schemas/CompleteUploadDirectPut"
-          },
-          {
-            "$ref": "#/components/schemas/CompleteUploadDirectMultipart"
-          }
-        ],
-        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Direct uploads\ninclude the expected content details. Multipart also includes its parts.",
-        "discriminator": {
-          "propertyName": "mode",
-          "mapping": {
-            "service_proxied": "#/components/schemas/CompleteUploadServiceProxied",
-            "direct_put": "#/components/schemas/CompleteUploadDirectPut",
-            "direct_multipart": "#/components/schemas/CompleteUploadDirectMultipart"
-          }
-        }
-      },
       "CompletedUploadPart": {
         "type": "object",
         "description": "One uploaded part, as the client observed the provider accept it.\n\nThe server keeps no durable record of any part. Part bookkeeping is the\nclient's, exactly as it is in the provider's own multipart API, and this\nis where the client hands it back.",
@@ -2909,6 +2853,40 @@
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Oldest sequence still promised for incremental replay."
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "HTTP error body used by LoonFS APIs.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails",
+            "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
+          },
+          "feature": {
+            "type": "string",
+            "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error message."
+          },
+          "param": {
+            "type": "string",
+            "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
+          },
+          "request_id": {
+            "type": "string",
+            "description": "Correlation id the server assigned to the failed request; the same\nvalue is sent as the `x-request-id` response header."
           }
         }
       },
@@ -3290,7 +3268,7 @@
           "snapshots": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/SnapshotSummary"
+              "$ref": "#/components/schemas/Snapshot"
             },
             "description": "Live snapshot records in ascending snapshot-id order."
           }
@@ -3457,7 +3435,7 @@
           }
         }
       },
-      "SnapshotSummary": {
+      "Snapshot": {
         "type": "object",
         "description": "A live snapshot.",
         "required": [
@@ -3532,6 +3510,28 @@
             "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "UploadCompletion": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CompleteUploadServiceProxied"
+          },
+          {
+            "$ref": "#/components/schemas/CompleteUploadDirectPut"
+          },
+          {
+            "$ref": "#/components/schemas/CompleteUploadDirectMultipart"
+          }
+        ],
+        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Direct uploads\ninclude the expected content details. Multipart also includes its parts.",
+        "discriminator": {
+          "propertyName": "mode",
+          "mapping": {
+            "service_proxied": "#/components/schemas/CompleteUploadServiceProxied",
+            "direct_put": "#/components/schemas/CompleteUploadDirectPut",
+            "direct_multipart": "#/components/schemas/CompleteUploadDirectMultipart"
           }
         }
       },
@@ -3795,69 +3795,6 @@
           "upload_id": {
             "$ref": "#/components/schemas/UploadId",
             "description": "Durable session identity used by subsequent part-signing and\ncompletion calls."
-          }
-        }
-      },
-      "CompleteUploadServiceProxied": {
-        "type": "object",
-        "description": "Complete a service-proxied upload.",
-        "required": [
-          "mode"
-        ],
-        "properties": {
-          "mode": {
-            "type": "string",
-            "enum": [
-              "service_proxied"
-            ]
-          }
-        }
-      },
-      "CompleteUploadDirectPut": {
-        "type": "object",
-        "description": "Complete a direct-PUT upload.",
-        "required": [
-          "content",
-          "mode"
-        ],
-        "properties": {
-          "content": {
-            "$ref": "#/components/schemas/UploadContentClaim",
-            "description": "Expected length and checksum of the stored object."
-          },
-          "mode": {
-            "type": "string",
-            "enum": [
-              "direct_put"
-            ]
-          }
-        }
-      },
-      "CompleteUploadDirectMultipart": {
-        "type": "object",
-        "description": "Complete a direct multipart upload.",
-        "required": [
-          "content",
-          "parts",
-          "mode"
-        ],
-        "properties": {
-          "content": {
-            "$ref": "#/components/schemas/UploadContentClaim",
-            "description": "Expected length and checksum of the assembled object."
-          },
-          "mode": {
-            "type": "string",
-            "enum": [
-              "direct_multipart"
-            ]
-          },
-          "parts": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CompletedUploadPart"
-            },
-            "description": "Uploaded parts in ascending part order."
           }
         }
       },
@@ -4810,6 +4747,69 @@
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
             "description": "Absolute path as rendered from stored display names."
+          }
+        }
+      },
+      "CompleteUploadServiceProxied": {
+        "type": "object",
+        "description": "Complete a service-proxied upload.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "service_proxied"
+            ]
+          }
+        }
+      },
+      "CompleteUploadDirectPut": {
+        "type": "object",
+        "description": "Complete a direct-PUT upload.",
+        "required": [
+          "content",
+          "mode"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/UploadContentClaim",
+            "description": "Expected length and checksum of the stored object."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_put"
+            ]
+          }
+        }
+      },
+      "CompleteUploadDirectMultipart": {
+        "type": "object",
+        "description": "Complete a direct multipart upload.",
+        "required": [
+          "content",
+          "parts",
+          "mode"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/UploadContentClaim",
+            "description": "Expected length and checksum of the assembled object."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_multipart"
+            ]
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompletedUploadPart"
+            },
+            "description": "Uploaded parts in ascending part order."
           }
         }
       },

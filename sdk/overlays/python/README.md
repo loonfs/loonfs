@@ -1,6 +1,6 @@
 # LoonFS Python SDK
 
-One package for LoonFS server and proxy applications. SDK v0.1.x targets LoonFS
+One package for LoonFS server and proxy applications. SDK v0.2.x targets LoonFS
 API v0.3.x.
 
 ## Install

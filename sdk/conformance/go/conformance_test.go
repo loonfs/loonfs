@@ -342,10 +342,10 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
 		SizeBytes: int64(len(payload)),
 	}
-	completed, err := h.client.Uploads.Complete(context.Background(), &loonfs.CompleteUploadBody{
+	completed, err := h.client.Uploads.Complete(context.Background(), &loonfs.CompleteUploadRequest{
 		NamespaceID: request.NamespaceID,
 		UploadID:    string(begin.DirectPut.UploadID),
-		Body: &loonfs.CompleteUploadRequest{
+		Body: &loonfs.UploadCompletion{
 			DirectPut: &loonfs.CompleteUploadDirectPut{Content: claim},
 		},
 	})
@@ -379,7 +379,7 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	file := requireFileProjection(t, stat)
 	assertContentRefEqual(t, file.ContentRef, completedStatus.ContentRef)
 	readback := downloadFile(t, h.client, request.NamespaceID, request.Path)
-	if !bytes.Equal(readback.Bytes, payload) {
+	if !bytes.Equal(readback.Content, payload) {
 		t.Error("direct PUT readback did not match payload")
 	}
 }
@@ -474,10 +474,10 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		return completedParts[left].PartNumber < completedParts[right].PartNumber
 	})
 	wholeChecksum := mustChecksum(t, multipart.ChecksumAlgorithm, payload)
-	completionRequest := &loonfs.CompleteUploadBody{
+	completionRequest := &loonfs.CompleteUploadRequest{
 		NamespaceID: request.NamespaceID,
 		UploadID:    string(begin.DirectMultipart.UploadID),
-		Body: &loonfs.CompleteUploadRequest{
+		Body: &loonfs.UploadCompletion{
 			DirectMultipart: &loonfs.CompleteUploadDirectMultipart{
 				Content: &loonfs.UploadContentClaim{
 					Checksum:  wholeChecksum,
@@ -524,7 +524,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("committed_seq = %d, want %d", committed.CommittedSeq, expected.CommittedSeq)
 	}
 	readback := downloadFile(t, h.client, request.NamespaceID, request.Path)
-	if !bytes.Equal(readback.Bytes, payload) {
+	if !bytes.Equal(readback.Content, payload) {
 		t.Error("multipart readback did not match payload")
 	}
 
@@ -534,7 +534,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	helperCommit, err := h.client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(helperPath),
-		Bytes:       payload,
+		Content:     payload,
 		Actor:       &request.Actor,
 		CommitID:    loonfs.CommitID(request.CommitID + "-helper"),
 	})
@@ -545,7 +545,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Error("helper multipart put reported no committed_seq")
 	}
 	helperReadback := downloadFile(t, h.client, request.NamespaceID, helperPath)
-	if !bytes.Equal(helperReadback.Bytes, payload) {
+	if !bytes.Equal(helperReadback.Content, payload) {
 		t.Error("helper multipart readback did not match payload")
 	}
 	// Content ids are random per upload and the helper may choose a different
@@ -631,7 +631,7 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	committed, err := h.client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(request.Path),
-		Bytes:       payload,
+		Content:     payload,
 		Actor:       &request.Actor,
 		CommitID:    commitID,
 	})
@@ -716,7 +716,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	upload, err := h.client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(request.UploadPath),
-		Bytes:       []byte(request.ContentUTF8),
+		Content:     []byte(request.ContentUTF8),
 		Actor:       &request.Actor,
 		CommitID:    uploadCommitID,
 	})
@@ -738,7 +738,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("initial listing does not contain %q", request.UploadPath)
 	}
 	downloaded := downloadFile(t, h.client, request.NamespaceID, request.UploadPath)
-	if !bytes.Equal(downloaded.Bytes, []byte(request.ContentUTF8)) {
+	if !bytes.Equal(downloaded.Content, []byte(request.ContentUTF8)) {
 		t.Error("end-to-end download did not match payload")
 	}
 
@@ -1083,7 +1083,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	if _, err := h.client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.PathFileName)),
-		Bytes:       []byte(request.ContentUTF8),
+		Content:     []byte(request.ContentUTF8),
 		Actor:       &request.Actor,
 		CommitID:    loonfs.CommitID("conf-inode-mutations-path-file"),
 	}); err != nil {
@@ -1184,7 +1184,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("revised revision_no = %d, want %d", revised.RevisionNo, expected.RevisedRevisionNo)
 	}
 	readback := downloadFile(t, h.client, request.NamespaceID, childPath(request.InodeFileName))
-	if !bytes.Equal(readback.Bytes, []byte(request.RevisedContentUTF8)) {
+	if !bytes.Equal(readback.Content, []byte(request.RevisedContentUTF8)) {
 		t.Error("inode-addressed revision readback did not match the revised payload")
 	}
 	staleGeneration := optionalString(revised.BindingGeneration)
@@ -1344,10 +1344,10 @@ func stageContent(
 	); err != nil {
 		t.Fatalf("stage upload content: %v", err)
 	}
-	completed, err := sdk.Uploads.Complete(context.Background(), &loonfs.CompleteUploadBody{
+	completed, err := sdk.Uploads.Complete(context.Background(), &loonfs.CompleteUploadRequest{
 		NamespaceID: namespaceID,
 		UploadID:    uploadID,
-		Body: &loonfs.CompleteUploadRequest{
+		Body: &loonfs.UploadCompletion{
 			ServiceProxied: &loonfs.CompleteUploadServiceProxied{},
 		},
 	})
@@ -1416,7 +1416,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	_, err := h.client.Files.Upload(ctx, files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
-		Bytes:       []byte(request.CapturedContentUTF8),
+		Content:     []byte(request.CapturedContentUTF8),
 		Actor:       &request.Actor,
 		CommitID:    loonfs.CommitID("conf-snapshots-create-replaced"),
 	})
@@ -1426,7 +1426,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	_, err = h.client.Files.Upload(ctx, files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.DeletedFileName)),
-		Bytes:       []byte(request.DeletedContentUTF8),
+		Content:     []byte(request.DeletedContentUTF8),
 		Actor:       &request.Actor,
 		CommitID:    loonfs.CommitID("conf-snapshots-create-deleted"),
 	})
@@ -1459,7 +1459,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	_, err = h.client.Files.Upload(ctx, files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
-		Bytes:       []byte(request.CurrentContentUTF8),
+		Content:     []byte(request.CurrentContentUTF8),
 		Actor:       &request.Actor,
 		CommitID:    loonfs.CommitID("conf-snapshots-replace-file"),
 		Behavior:    replace,
@@ -1470,7 +1470,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	_, err = h.client.Files.Upload(ctx, files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.AddedFileName)),
-		Bytes:       []byte(request.AddedContentUTF8),
+		Content:     []byte(request.AddedContentUTF8),
 		Actor:       &request.Actor,
 		CommitID:    loonfs.CommitID("conf-snapshots-add-file"),
 	})
@@ -1951,7 +1951,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		proxyServer.Client(),
 		namespaceAliasBaseURL,
 		proxiedUploadID,
-		&loonfs.CompleteUploadRequest{
+		&loonfs.UploadCompletion{
 			ServiceProxied: &loonfs.CompleteUploadServiceProxied{},
 		},
 	)
@@ -1991,7 +1991,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		proxyServer.Client(),
 		namespaceAliasBaseURL,
 		directUploadID,
-		&loonfs.CompleteUploadRequest{
+		&loonfs.UploadCompletion{
 			DirectPut: &loonfs.CompleteUploadDirectPut{Content: directClaim},
 		},
 	)
@@ -2081,7 +2081,7 @@ func proxyCompleteUpload(
 	httpClient *http.Client,
 	namespaceAliasBaseURL string,
 	uploadID string,
-	request *loonfs.CompleteUploadRequest,
+	request *loonfs.UploadCompletion,
 ) *loonfs.UploadSession {
 	t.Helper()
 	return proxyJSONRequest[loonfs.UploadSession](
