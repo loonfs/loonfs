@@ -66,7 +66,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         _continuation: Option<&str>,
     ) -> Result<MaintenanceStepReport> {
         let build = match self.worker.build_step(namespace_id, self.policy).await {
-            Ok(report) => report.outcome,
+            Ok(outcome) => outcome,
             Err(error) if has_nothing_to_index(&error) => return Ok(not_enabled_step()),
             Err(error) => return Err(step_failure(namespace_id, "grep_build", error)),
         };
@@ -74,7 +74,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
             return Ok(MaintenanceStepReport::concluded(build_conclusion(&build)));
         };
         let reorganize = match self.worker.reorganize_step(namespace_id, self.policy).await {
-            Ok(report) => report.outcome,
+            Ok(outcome) => outcome,
             Err(error) if has_nothing_to_index(&error) => return Ok(not_enabled_step()),
             Err(error) => return Err(step_failure(namespace_id, "grep_reorganize", error)),
         };
@@ -321,7 +321,6 @@ mod tests {
                 indexed_revisions: 2,
                 skipped_revisions: 0,
                 segments_written: 1,
-                materialized: false,
             }),
             MaintenanceStepConclusion::Progressed
         );

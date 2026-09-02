@@ -73,8 +73,8 @@ async fn drive_worker_to_current(
             .reorganize_step(namespace_id, policy)
             .await
             .expect("worker reorganize step");
-        if matches!(build.outcome, GrepBuildOutcome::UpToDate { .. })
-            && matches!(reorganize.outcome, GrepReorganizeOutcome::NotNeeded { .. })
+        if matches!(build, GrepBuildOutcome::UpToDate { .. })
+            && matches!(reorganize, GrepReorganizeOutcome::NotNeeded { .. })
         {
             return;
         }
@@ -267,13 +267,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .build_step(&namespace_id, policy)
         .await
         .expect("first backfill page");
-    assert!(matches!(
-        first.outcome,
-        GrepBuildOutcome::Published {
-            materialized: false,
-            ..
-        }
-    ));
+    assert!(matches!(first, GrepBuildOutcome::Published { .. }));
     let error = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect_err("backfill is not materialized");
@@ -440,7 +434,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
         assert!(matches!(
             error,
             GrepError::Runtime(RuntimeError::Core(CoreError::Internal(message)))
-                if message.contains("grep run number must be an integer")
+                if message.contains("run number must be an integer")
         ));
     }
 
@@ -480,7 +474,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
 }
 
 #[tokio::test]
-async fn enable_releases_its_checkpoint_when_root_reload_fails_before_publication() {
+async fn enable_creates_no_checkpoint_when_the_root_load_fails() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -504,7 +498,7 @@ async fn enable_releases_its_checkpoint_when_root_reload_fails_before_publicatio
         move |context: &OperationContext<'_>| {
             context.key() == grep_root_key
                 && matches!(context.kind(), OperationKind::GetWithMetadata)
-                && observed_root_loads.fetch_add(1, Ordering::SeqCst) == 1
+                && observed_root_loads.fetch_add(1, Ordering::SeqCst) == 0
         },
         InjectedError::Transport("injected grep-root reload failure".to_owned()),
     ));
@@ -519,7 +513,7 @@ async fn enable_releases_its_checkpoint_when_root_reload_fails_before_publicatio
     let error = worker
         .enable(&namespace_id)
         .await
-        .expect_err("the second root load fails after checkpoint creation");
+        .expect_err("the root load fails before checkpoint creation");
     assert!(matches!(error, GrepError::StoreUnavailable { .. }));
     assert_eq!(failing_store.attempts(), 1);
 
@@ -705,7 +699,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("gap restart");
     assert!(matches!(
-        restart.outcome,
+        restart,
         GrepBuildOutcome::BackfillRestarted { .. }
     ));
     let gap_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
@@ -722,7 +716,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("vanished checkpoint restart");
     assert!(matches!(
-        vanished.outcome,
+        vanished,
         GrepBuildOutcome::BackfillRestarted { .. }
     ));
     // A released record is finished for good, so the new attempt takes a
@@ -791,10 +785,9 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .await
         .expect("first backfill page");
     assert!(matches!(
-        first.outcome,
+        first,
         GrepBuildOutcome::Published {
             indexed_revisions: 1,
-            materialized: false,
             ..
         }
     ));
@@ -820,10 +813,9 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .await
         .expect("final backfill page");
     assert!(matches!(
-        completed.outcome,
+        completed,
         GrepBuildOutcome::Published {
             built_through_seq,
-            materialized: true,
             ..
         } if built_through_seq == target_seq
     ));
@@ -837,7 +829,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .await
         .expect("restart expired handoff");
     assert!(matches!(
-        restarted.outcome,
+        restarted,
         GrepBuildOutcome::BackfillRestarted { .. }
     ));
     drive_worker_to_current(&worker, &namespace_id, policy).await;
@@ -1000,7 +992,7 @@ async fn grep_built_through_seq(
         .status()
         .active_watermark()
         .expect("an active grep root has a watermark")
-        .0
+        .built_through_seq()
 }
 
 fn matched_paths(response: &GrepResponse) -> Vec<String> {
@@ -1053,15 +1045,14 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         .expect("first backfill page");
     assert!(
         matches!(
-            first.outcome,
+            first,
             GrepBuildOutcome::Published {
                 indexed_revisions: 1,
-                materialized: false,
                 ..
             }
         ),
         "one file per step must leave the backfill unfinished: {:?}",
-        first.outcome
+        first
     );
 
     // Commits strictly after the pinned sequence: one new file, and a
@@ -1267,7 +1258,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_rebuild_restores_them(
         .await
         .expect("restart after undelete");
     assert!(matches!(
-        restart.outcome,
+        restart,
         GrepBuildOutcome::BackfillRestarted { .. }
     ));
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
@@ -1373,7 +1364,7 @@ async fn undeleting_a_subtree_hidden_from_backfill_restarts_the_projection() {
         .await
         .expect("restart after undelete");
     assert!(matches!(
-        restart.outcome,
+        restart,
         GrepBuildOutcome::BackfillRestarted { .. }
     ));
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
@@ -1654,7 +1645,11 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         .expect("load grep root")
         .expect("grep root exists");
     assert_eq!(
-        grep_root.manifest_state().status().active_watermark(),
+        grep_root
+            .manifest_state()
+            .status()
+            .active_watermark()
+            .map(|resume| (resume.built_through_seq(), resume.next_event_index())),
         Some((head.seq, 0)),
         "the independent worker can advance past metadata materialization"
     );

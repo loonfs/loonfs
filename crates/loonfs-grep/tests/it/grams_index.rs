@@ -76,7 +76,7 @@ async fn grams_built_through_seq(
         .status()
         .active_watermark()
         .expect("an active grep root has a watermark")
-        .0
+        .built_through_seq()
 }
 
 #[tokio::test]
@@ -400,7 +400,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .await
         .expect("first bounded build");
     assert!(matches!(
-        first.outcome,
+        first,
         GrepBuildOutcome::Published {
             indexed_revisions,
             ..
@@ -419,14 +419,14 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .await
         .expect("load partial grep root")
         .expect("partial grep root");
-    let (partial_seq, partial_event_index) = partial
+    let partial_resume = partial
         .manifest_state()
         .status()
         .active_watermark()
         .expect("the partial root is active");
-    assert_eq!(partial_seq, commit.committed_seq);
+    assert_eq!(partial_resume.built_through_seq(), commit.committed_seq);
     assert!(
-        partial_event_index > 0,
+        partial_resume.next_event_index() > 0,
         "the first step must stop within the atomic commit"
     );
     let prefix_segment_ids: BTreeSet<_> = partial
@@ -469,7 +469,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .await
         .expect("resumed bounded build");
     assert!(matches!(
-        second.outcome,
+        second,
         GrepBuildOutcome::Published {
             indexed_revisions,
             ..
@@ -495,14 +495,13 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .await
         .expect("load complete grep root")
         .expect("complete grep root");
-    assert_eq!(
-        complete
-            .manifest_state()
-            .status()
-            .active_watermark()
-            .expect("the complete root is active"),
-        (commit.committed_seq, 0)
-    );
+    let complete_resume = complete
+        .manifest_state()
+        .status()
+        .active_watermark()
+        .expect("the complete root is active");
+    assert_eq!(complete_resume.built_through_seq(), commit.committed_seq);
+    assert_eq!(complete_resume.next_event_index(), 0);
     let complete_segment_ids: BTreeSet<_> = complete
         .manifest_state()
         .segments()
@@ -993,7 +992,7 @@ async fn worker_and_service_share_decoded_index_blocks() {
         .await
         .expect("partial reorganization");
     assert!(matches!(
-        reorganization.outcome,
+        reorganization,
         GrepReorganizeOutcome::UnitPublished {
             completed: false,
             ..

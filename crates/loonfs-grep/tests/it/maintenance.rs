@@ -395,7 +395,7 @@ async fn wait_for_watermark<S: ObjectStore + 'static>(
                     .manifest_state()
                     .status()
                     .active_watermark()
-                    .is_some_and(|(reached, _)| reached >= built_through_seq)
+                    .is_some_and(|resume| resume.built_through_seq() >= built_through_seq)
                 {
                     return;
                 }

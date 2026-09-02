@@ -170,8 +170,8 @@ async fn drive_worker_to_current(
             .reorganize_step(namespace_id, policy)
             .await
             .expect("grep reorganize step");
-        if matches!(build.outcome, GrepBuildOutcome::UpToDate { .. })
-            && matches!(reorganize.outcome, GrepReorganizeOutcome::NotNeeded { .. })
+        if matches!(build, GrepBuildOutcome::UpToDate { .. })
+            && matches!(reorganize, GrepReorganizeOutcome::NotNeeded { .. })
         {
             return;
         }

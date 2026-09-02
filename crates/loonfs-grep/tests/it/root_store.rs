@@ -190,7 +190,11 @@ async fn racing_advancers_have_one_winner_and_loser_can_reload_and_retry() {
         .expect("final load succeeds")
         .expect("root exists");
     assert_eq!(
-        final_root.manifest_state().status().active_watermark(),
+        final_root
+            .manifest_state()
+            .status()
+            .active_watermark()
+            .map(|resume| (resume.built_through_seq(), resume.next_event_index())),
         Some((ChangeSeq(3), 0))
     );
 }

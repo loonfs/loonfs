@@ -728,7 +728,7 @@ async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Cha
         .await
         .active_watermark()
         .expect("an active grep root has a watermark")
-        .0
+        .built_through_seq()
 }
 
 /// This namespace's durable grep lifecycle, read where an operator reads it.
@@ -850,11 +850,8 @@ async fn drive_worker_to_current(
             .reorganize_step(namespace_id, policy)
             .await
             .expect("fold step");
-        if matches!(build.outcome, GrepBuildOutcome::UpToDate { .. })
-            && matches!(
-                fold.outcome,
-                loonfs_grep::GrepReorganizeOutcome::NotNeeded { .. }
-            )
+        if matches!(build, GrepBuildOutcome::UpToDate { .. })
+            && matches!(fold, loonfs_grep::GrepReorganizeOutcome::NotNeeded { .. })
         {
             return;
         }

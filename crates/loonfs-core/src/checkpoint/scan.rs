@@ -14,7 +14,7 @@ use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
-use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
+use loonfs_api::wire::sst_blocks::{key_range_may_intersect, string_prefix_upper_bound};
 use loonfs_api::ChangeSeq;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -283,7 +283,13 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                     .segments
                     .iter()
                     .filter(|descriptor| {
-                        descriptor_may_intersect_range(descriptor, lower_bound, upper_bound)
+                        key_range_may_intersect(
+                            &descriptor.min_row_key,
+                            &descriptor.max_row_key,
+                            descriptor.row_count,
+                            lower_bound,
+                            upper_bound,
+                        )
                     })
                     .map(|descriptor| ScanDescriptor {
                         descriptor,
@@ -457,21 +463,4 @@ pub(super) fn manifest_segment_for_family<'a>(
             object_key: manifest_object_key.to_owned(),
             family,
         })
-}
-
-pub(super) fn descriptor_may_intersect_range(
-    descriptor: &MetadataSegmentRef,
-    lower_bound: &str,
-    upper_bound: Option<&str>,
-) -> bool {
-    if descriptor.row_count == 0 {
-        return false;
-    }
-    if descriptor.max_row_key.as_str() < lower_bound {
-        return false;
-    }
-    if upper_bound.is_some_and(|upper_bound| descriptor.min_row_key.as_str() >= upper_bound) {
-        return false;
-    }
-    true
 }

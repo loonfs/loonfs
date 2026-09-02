@@ -152,10 +152,12 @@ pub mod publish {
 // `MetadataReorganizeReport` remains public because
 // `NamespaceEngine::reorganize_metadata` returns it.
 pub use checkpoint::{
-    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
-    FrozenBasePolicy, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
-    MetadataCompactionSpec, MetadataCompactionView, MetadataFamilyGroup, MetadataReorganizeOutcome,
-    MetadataReorganizeReport,
+    ensure_metadata_publication_budget, next_run_no_after, refill_iterators, select_next_iterator,
+    write_segments_in_waves, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
+    CheckpointPageCursor, FrozenBasePolicy, MetadataCompactionCancellation,
+    MetadataCompactionJobOutcome, MetadataCompactionSpec, MetadataCompactionView,
+    MetadataFamilyGroup, MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader,
+    SegmentRowIterator,
 };
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
@@ -167,7 +169,10 @@ pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
     WriterFence,
 };
-pub use gc::{delete_if_aged, gc_namespace, GcConfig, GraceAge, PassBudget};
+pub use gc::{
+    delete_if_aged, gc_namespace, GcConfig, GcCursorKeyspace, GraceAge, NamespaceGcCursor,
+    PassBudget,
+};
 pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions};
 pub use path::read::{

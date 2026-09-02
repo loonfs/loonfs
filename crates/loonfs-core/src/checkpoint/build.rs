@@ -7,14 +7,38 @@ use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
 use bytes::Bytes;
 use futures::future::try_join_all;
-use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+#[cfg(test)]
 pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_api::{sha256_digest, ChangeSeq, MetadataCompactionId, MetadataSegmentId, NamespaceId};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
+use std::future::Future;
 use std::num::NonZeroUsize;
+
+/// Writes segment requests in bounded concurrent waves.
+pub async fn write_segments_in_waves<Requests, Write, WriteFuture, Descriptor, Error>(
+    requests: Requests,
+    max_io: NonZeroUsize,
+    mut write_segment: Write,
+) -> std::result::Result<Vec<Descriptor>, Error>
+where
+    Requests: IntoIterator,
+    Write: FnMut(Requests::Item) -> WriteFuture,
+    WriteFuture: Future<Output = std::result::Result<Descriptor, Error>>,
+{
+    let mut descriptors = Vec::new();
+    let mut pending = requests.into_iter();
+    loop {
+        let chunk = pending.by_ref().take(max_io.get()).collect::<Vec<_>>();
+        if chunk.is_empty() {
+            break;
+        }
+        descriptors.extend(try_join_all(chunk.into_iter().map(&mut write_segment)).await?);
+    }
+    Ok(descriptors)
+}
 
 pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,
@@ -111,25 +135,12 @@ where
             requests.push(destination.write_request(family, segment_index, segment_rows.rows));
         }
 
-        let mut descriptors = Vec::with_capacity(requests.len());
-        let mut pending = requests.into_iter();
-        loop {
-            let chunk = pending
-                .by_ref()
-                .take(MAX_MAINTENANCE_SEGMENT_IO)
-                .collect::<Vec<_>>();
-            if chunk.is_empty() {
-                break;
-            }
-            descriptors.extend(
-                try_join_all(
-                    chunk
-                        .into_iter()
-                        .map(|request| write_manifest_segment(store, request)),
-                )
-                .await?,
-            );
-        }
+        let descriptors = write_segments_in_waves(
+            requests,
+            const { NonZeroUsize::new(MAX_MAINTENANCE_SEGMENT_IO).unwrap() },
+            |request| write_manifest_segment(store, request),
+        )
+        .await?;
         segments_by_family.push(MetadataFamilySegments {
             family,
             segments: descriptors,
@@ -226,10 +237,7 @@ pub(super) async fn write_manifest_segment_with_encoded_rows<
             "failed to build metadata segment `{segment_id}`: {err}"
         ))
     })?;
-    let filter_inline = (built.filter.stored_len <= INLINE_SEGMENT_FILTER_MAX_BYTES).then(|| {
-        let start = built.filter.offset as usize;
-        hex_encode_bytes(&built.bytes[start..start + built.filter.stored_len as usize])
-    });
+    let filter_inline = built.inline_filter_hex();
     let descriptor = MetadataSegmentRef {
         owner_namespace_id: request.destination.namespace_id().clone(),
         segment_id,

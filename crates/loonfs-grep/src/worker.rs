@@ -23,21 +23,20 @@ use crate::{GrepError, Result};
 use futures::future::try_join_all;
 use futures::StreamExt as _;
 use loonfs::{
-    delete_if_aged, CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsAdmin,
-    FsReader, GraceAge, PassBudget, RuntimeError, StoreFailureClass, DEFAULT_GC_MAX_OBJECTS,
-    GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
+    delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
+    select_next_iterator, write_segments_in_waves, CheckpointFilesPageCursor, CoreError,
+    CreateCheckpointOptions, FsAdmin, FsReader, GcCursorKeyspace, GraceAge, NamespaceGcCursor,
+    PassBudget, RuntimeError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
+    DEFAULT_GC_MAX_OBJECTS, GC_MIN_GRACE_WINDOW_MS,
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
-use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
-    index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
-    DEFAULT_INLINE_FILTER_MAX_BYTES, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_ROWS,
-    DEFAULT_MAX_ROWS_PER_SEGMENT,
+    DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_MAX_DELTA_RUNS,
+    DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_api::{
-    decode_namespace_cursor, encode_cursor, sha256_digest, ChangeSeq, CheckpointId, ContentRef,
-    ErrorCode, IndexSegmentId, InodeId, NamespaceCursor, NamespaceCursorError, NamespaceId,
-    PageCursor, RevisionNo, RunNo,
+    sha256_digest, ChangeSeq, CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId,
+    NamespaceId, RevisionNo, RunNo,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
@@ -141,13 +140,6 @@ pub enum GrepDisableOutcome {
     Superseded,
 }
 
-/// Report from one bounded build or backfill step.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrepBuildReport {
-    pub namespace_id: NamespaceId,
-    pub outcome: GrepBuildOutcome,
-}
-
 /// Outcome of one bounded build or backfill step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrepBuildOutcome {
@@ -160,19 +152,11 @@ pub enum GrepBuildOutcome {
         indexed_revisions: u64,
         skipped_revisions: u64,
         segments_written: u64,
-        materialized: bool,
     },
     BackfillRestarted {
         target_seq: ChangeSeq,
     },
     Superseded,
-}
-
-/// Report from one bounded reorganize step.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrepReorganizeReport {
-    pub namespace_id: NamespaceId,
-    pub outcome: GrepReorganizeOutcome,
 }
 
 /// Outcome of one bounded reorganize step.
@@ -281,38 +265,18 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// backfilling root. Enabling an active root is idempotent.
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
         ensure_live_namespace(&self.reads(namespace_id)).await?;
-        if let Some(current) = load_grep_root(&self.store, namespace_id).await? {
-            if !matches!(
-                current.manifest_state().status(),
-                GrepIndexStatus::Disabled {}
-            ) {
-                return Ok(GrepEnableOutcome::AlreadyEnabled {
-                    state: current.manifest_state().status().clone(),
-                });
-            }
-        }
-
-        let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let current = match load_grep_root(&self.store, namespace_id).await {
-            Ok(current) => current,
-            Err(error) => {
-                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
-                    .await?;
-                return Err(error.into());
-            }
-        };
+        let current = load_grep_root(&self.store, namespace_id).await?;
         if let Some(current) = &current {
             if !matches!(
                 current.manifest_state().status(),
                 GrepIndexStatus::Disabled {}
             ) {
-                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
-                    .await?;
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
                     state: current.manifest_state().status().clone(),
                 });
             }
         }
+        let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
         let next_run_no = current
             .as_ref()
             .map_or(RunNo(0), |root| root.manifest_state().index().next_run_no);
@@ -394,70 +358,53 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
-    ) -> Result<GrepBuildReport> {
+    ) -> Result<GrepBuildOutcome> {
         let Some(current) = load_grep_root(&self.store, namespace_id).await? else {
-            return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
+            return Ok(GrepBuildOutcome::NotEnabled);
         };
         let reads = self.reads(namespace_id);
 
-        let collected = match current.manifest_state().status() {
+        let unit = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling {
                 target_seq,
                 cursor_inode_id,
                 checkpoint_id,
-            } => {
-                collect_backfill_unit(&reads, checkpoint_id, *target_seq, *cursor_inode_id, policy)
-                    .await
-                    .map(CollectedIndexWork::Unit)
-            }
-            GrepIndexStatus::Active {
-                built_through_seq,
-                next_event_index,
-            } => {
-                collect_incremental_unit(&reads, *built_through_seq, *next_event_index, policy)
-                    .await
-            }
-            GrepIndexStatus::Disabled {} => {
-                return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled))
-            }
-        };
-
-        let unit = match collected {
-            Ok(CollectedIndexWork::Unit(unit)) => unit,
-            Ok(CollectedIndexWork::UpToDate) => {
-                let built_through_seq = current
-                    .manifest_state()
-                    .status()
+            } => match collect_backfill_unit(
+                &reads,
+                checkpoint_id,
+                *target_seq,
+                *cursor_inode_id,
+                policy,
+            )
+            .await
+            {
+                Ok(unit) => unit,
+                Err(error) if rebootstrap_required(&error) => {
+                    return self.restart_backfill(namespace_id, &current).await;
+                }
+                Err(error) => return Err(error),
+            },
+            status @ GrepIndexStatus::Active { .. } => {
+                let resume = status
                     .active_watermark()
-                    .map(|(built_through_seq, _)| built_through_seq)
-                    .ok_or_else(|| GrepError::CorruptIndex {
-                        message: "a backfilling grep root reported nothing left to index"
-                            .to_owned(),
-                    })?;
-                return Ok(build_report(
-                    namespace_id,
-                    GrepBuildOutcome::UpToDate { built_through_seq },
-                ));
+                    .expect("an active grep status should have a watermark");
+                match collect_incremental_unit(&reads, resume, policy).await {
+                    Ok(IncrementalWork::Unit(unit)) => unit,
+                    Ok(IncrementalWork::UpToDate(resume)) => {
+                        return Ok(GrepBuildOutcome::UpToDate {
+                            built_through_seq: resume.built_through_seq(),
+                        });
+                    }
+                    Ok(IncrementalWork::Restart) => {
+                        return self.restart_backfill(namespace_id, &current).await;
+                    }
+                    Err(error) if rebootstrap_required(&error) => {
+                        return self.restart_backfill(namespace_id, &current).await;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
-            // An undelete may expose a whole subtree that was hidden from
-            // the checkpoint backfill. The event names only its root and
-            // carries no descendant revisions, so no incremental unit can
-            // prove the projection complete. Rebuild from a checkpoint that
-            // sees the restored tree before advancing the watermark.
-            Ok(CollectedIndexWork::Restart) => {
-                return self.restart_backfill(namespace_id, &current).await;
-            }
-            // The projection's basis is gone. Either the change feed no
-            // longer retains history back to the watermark, or the pinned
-            // checkpoint stopped pinning its manifest. The old checkpoint
-            // reader answered the second case with `Ok(None)` and restarted
-            // silently; both are explicit now, and both mean the same thing:
-            // discard the incomplete projection and start a fresh backfill
-            // from a new checkpoint.
-            Err(error) if rebootstrap_required(&error) => {
-                return self.restart_backfill(namespace_id, &current).await;
-            }
-            Err(error) => return Err(error),
+            GrepIndexStatus::Disabled {} => return Ok(GrepBuildOutcome::NotEnabled),
         };
 
         self.publish_build_unit(namespace_id, current, unit, policy)
@@ -466,15 +413,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 
     /// Reads this namespace's durable grep lifecycle, or `Disabled` where no
     /// root has ever been published.
-    ///
-    /// One object read and no side effects: this is what a status surface
-    /// and a caller waiting on a captured target both ask.
     pub async fn lifecycle(&self, namespace_id: &NamespaceId) -> Result<GrepIndexStatus> {
-        Ok(load_grep_root(&self.store, namespace_id)
+        Ok(self
+            .root_state(namespace_id)
             .await?
-            .map_or(GrepIndexStatus::Disabled {}, |root| {
-                root.manifest_state().status().clone()
-            }))
+            .map_or(GrepIndexStatus::Disabled {}, |state| state.status().clone()))
     }
 
     /// Reads the whole durable root, for a caller that wants the index
@@ -554,7 +497,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
         current: &LoadedGrepRoot,
-    ) -> Result<GrepBuildReport> {
+    ) -> Result<GrepBuildOutcome> {
         let previous_checkpoint_id = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
             GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
@@ -579,17 +522,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     self.release_checkpoint(namespace_id, &previous_checkpoint_id)
                         .await?;
                 }
-                Ok(build_report(
-                    namespace_id,
-                    GrepBuildOutcome::BackfillRestarted {
-                        target_seq: checkpoint.checkpoint_seq,
-                    },
-                ))
+                Ok(GrepBuildOutcome::BackfillRestarted {
+                    target_seq: checkpoint.checkpoint_seq,
+                })
             }
             Err(GrepRootError::Conflict { .. }) => {
                 self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
-                Ok(build_report(namespace_id, GrepBuildOutcome::Superseded))
+                Ok(GrepBuildOutcome::Superseded)
             }
             // A non-conflict failure may be an acknowledgement failure after
             // the root update landed. Keep the checkpoint because the root
@@ -604,7 +544,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         current: LoadedGrepRoot,
         unit: CollectedIndexUnit,
         policy: GramIndexBuildPolicy,
-    ) -> Result<GrepBuildReport> {
+    ) -> Result<GrepBuildOutcome> {
         let CollectedIndexUnit {
             postings,
             stats,
@@ -616,7 +556,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next_run_no = if rows.is_empty() {
             current_run_no
         } else {
-            next_grep_run_no(current_run_no)?
+            next_run_no_after(current_run_no)?
         };
         let timer = StdMonotonicTimer::default();
         let publication_started_ms = timer.monotonic_now_ms();
@@ -672,7 +612,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 built_through_seq,
             ),
         };
-        let materialized = matches!(status, GrepIndexStatus::Active { .. });
         let next = GrepManifestState::new(
             namespace_id.clone(),
             status,
@@ -683,36 +622,23 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        ensure_publication_budget(&timer, publication_started_ms, namespace_id)?;
+        ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
         match self.advance_root(&current, &next).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
                     self.release_checkpoint(namespace_id, &checkpoint_id)
                         .await?;
                 }
-                Ok(build_report(
-                    namespace_id,
-                    GrepBuildOutcome::Published {
-                        built_through_seq,
-                        indexed_revisions: stats.indexed_revisions,
-                        skipped_revisions: stats.skipped_revisions,
-                        segments_written,
-                        materialized,
-                    },
-                ))
+                Ok(GrepBuildOutcome::Published {
+                    built_through_seq,
+                    indexed_revisions: stats.indexed_revisions,
+                    skipped_revisions: stats.skipped_revisions,
+                    segments_written,
+                })
             }
-            Err(GrepRootError::Conflict { .. }) => {
-                Ok(build_report(namespace_id, GrepBuildOutcome::Superseded))
-            }
+            Err(GrepRootError::Conflict { .. }) => Ok(GrepBuildOutcome::Superseded),
             Err(error) => Err(error.into()),
         }
-    }
-}
-
-fn build_report(namespace_id: &NamespaceId, outcome: GrepBuildOutcome) -> GrepBuildReport {
-    GrepBuildReport {
-        namespace_id: namespace_id.clone(),
-        outcome,
     }
 }
 
@@ -757,10 +683,53 @@ struct CollectedIndexUnit {
     progress: CollectedProgress,
 }
 
-enum CollectedIndexWork {
+enum IncrementalWork {
     Unit(CollectedIndexUnit),
-    UpToDate,
+    UpToDate(ChangeFeedResume),
     Restart,
+}
+
+struct IncrementalCursor {
+    resume: ChangeFeedResume,
+    run_seq: ChangeSeq,
+}
+
+impl IncrementalCursor {
+    fn new(resume: ChangeFeedResume) -> Self {
+        Self {
+            run_seq: resume.built_through_seq(),
+            resume,
+        }
+    }
+
+    fn stop_at(
+        &mut self,
+        change_seq: ChangeSeq,
+        event_index: usize,
+        event_count: usize,
+        after_event: bool,
+    ) -> Result<()> {
+        if !after_event && event_index == 0 {
+            return Ok(());
+        }
+        let next_index = event_index
+            .checked_add(usize::from(after_event))
+            .ok_or_else(|| CoreError::Internal("grep event cursor overflow".to_owned()))?;
+        let next_event_index = if next_index < event_count {
+            u32::try_from(next_index)
+                .map_err(|_| CoreError::Internal("grep event cursor overflow".to_owned()))?
+        } else {
+            0
+        };
+        self.run_seq = change_seq;
+        self.resume = ChangeFeedResume::new(change_seq, next_event_index);
+        Ok(())
+    }
+
+    fn finish_change(&mut self, change_seq: ChangeSeq) {
+        self.run_seq = change_seq;
+        self.resume = ChangeFeedResume::new(change_seq, 0);
+    }
 }
 
 #[derive(Default)]
@@ -882,22 +851,18 @@ async fn collect_backfill_unit(
 /// `Ok(None)` means the index is already at the namespace head.
 async fn collect_incremental_unit(
     reads: &NamespaceReads<'_>,
-    built_through_seq: ChangeSeq,
-    next_event_index: u32,
+    resume: ChangeFeedResume,
     policy: GramIndexBuildPolicy,
-) -> Result<CollectedIndexWork> {
-    let resume = ChangeFeedResume::new(built_through_seq, next_event_index);
+) -> Result<IncrementalWork> {
     let feed = reads
         .list_changes_after(resume.after_seq(), policy.max_files_per_step.get())
         .await?;
     if feed.changes.is_empty() {
-        return Ok(CollectedIndexWork::UpToDate);
+        return Ok(IncrementalWork::UpToDate(resume));
     }
     let mut postings = BTreeMap::new();
     let mut stats = IndexingStats::default();
-    let mut run_seq = built_through_seq;
-    let mut collected_through_seq = built_through_seq;
-    let mut collected_next_event_index = next_event_index;
+    let mut cursor = IncrementalCursor::new(resume);
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
     let mut examined_files = 0usize;
@@ -919,7 +884,7 @@ async fn collect_incremental_unit(
         }
         for (event_index, event) in change.events.iter().enumerate().skip(start_event_index) {
             if matches!(event, FilesystemChange::Undeleted { .. }) {
-                return Ok(CollectedIndexWork::Restart);
+                return Ok(IncrementalWork::Restart);
             }
             let Some(revision) = published_revision(event) else {
                 continue;
@@ -928,13 +893,12 @@ async fn collect_incremental_unit(
                 && planned_content_bytes.saturating_add(revision.content_ref.size_bytes)
                     > policy.max_content_bytes_per_step.get();
             if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget {
-                if event_index > 0 {
-                    collected_through_seq = change.committed_seq;
-                    run_seq = change.committed_seq;
-                    collected_next_event_index = u32::try_from(event_index).map_err(|_| {
-                        CoreError::Internal("grep event cursor overflow".to_owned())
-                    })?;
-                }
+                cursor.stop_at(
+                    change.committed_seq,
+                    event_index,
+                    change.events.len(),
+                    false,
+                )?;
                 break 'changes;
             }
             examined_files += 1;
@@ -951,37 +915,23 @@ async fn collect_incremental_unit(
             if examined_files >= policy.max_files_per_step.get()
                 || planned_content_bytes >= policy.max_content_bytes_per_step.get()
             {
-                collected_through_seq = change.committed_seq;
-                run_seq = change.committed_seq;
-                let next_event_index = event_index
-                    .checked_add(1)
-                    .ok_or_else(|| CoreError::Internal("grep event cursor overflow".to_owned()))?;
-                if next_event_index < change.events.len() {
-                    collected_next_event_index = u32::try_from(next_event_index).map_err(|_| {
-                        CoreError::Internal("grep event cursor overflow".to_owned())
-                    })?;
-                } else {
-                    collected_next_event_index = 0;
-                }
+                cursor.stop_at(change.committed_seq, event_index, change.events.len(), true)?;
                 break 'changes;
             }
         }
-        collected_through_seq = change.committed_seq;
-        run_seq = change.committed_seq;
-        collected_next_event_index = 0;
+        cursor.finish_change(change.committed_seq);
     }
-    if collected_through_seq == built_through_seq && collected_next_event_index == next_event_index
-    {
-        return Ok(CollectedIndexWork::UpToDate);
+    if cursor.resume == resume {
+        return Ok(IncrementalWork::UpToDate(resume));
     }
     load_and_fold_revision_contents(reads, &pending, &mut postings, &mut stats).await?;
-    Ok(CollectedIndexWork::Unit(CollectedIndexUnit {
+    Ok(IncrementalWork::Unit(CollectedIndexUnit {
         postings,
         stats,
         progress: CollectedProgress::Incremental {
-            run_seq,
-            built_through_seq: collected_through_seq,
-            next_event_index: collected_next_event_index,
+            run_seq: cursor.run_seq,
+            built_through_seq: cursor.resume.built_through_seq(),
+            next_event_index: cursor.resume.next_event_index(),
         },
     }))
 }
@@ -1055,32 +1005,22 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
             .map_err(|_| CoreError::Internal("index segment index overflow".to_owned()))?;
         requests.push((segment_index, segment_rows.to_vec()));
     }
-    let mut descriptors = Vec::with_capacity(requests.len());
-    let mut pending = requests.into_iter();
-    loop {
-        let chunk = pending
-            .by_ref()
-            .take(MAX_GREP_WORKER_IO)
-            .collect::<Vec<_>>();
-        if chunk.is_empty() {
-            break;
-        }
-        descriptors.extend(
-            try_join_all(chunk.into_iter().map(|(segment_index, segment_rows)| {
-                write_index_segment(
-                    store,
-                    namespace_id,
-                    run_seq,
-                    run_no,
-                    segment_index,
-                    segment_rows,
-                    level,
-                )
-            }))
-            .await?,
-        );
-    }
-    Ok(descriptors)
+    write_segments_in_waves(
+        requests,
+        const { NonZeroUsize::new(MAX_GREP_WORKER_IO).unwrap() },
+        |(segment_index, segment_rows)| {
+            write_index_segment(
+                store,
+                namespace_id,
+                run_seq,
+                run_no,
+                segment_index,
+                segment_rows,
+                level,
+            )
+        },
+    )
+    .await
 }
 
 async fn write_index_segment<S: ObjectStore + ?Sized>(
@@ -1109,20 +1049,18 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
             "failed to build index segment `{object_key}`: {error}"
         ))
     })?;
+    let filter_inline = built.inline_filter_hex();
     store
         .put_immutable_verified(&object_key, bytes::Bytes::from(built.bytes.clone()))
         .await
         .map_err(grep_immutable_write_error)?;
-    let filter_inline = (built.filter.stored_len <= DEFAULT_INLINE_FILTER_MAX_BYTES).then(|| {
-        let start = built.filter.offset as usize;
-        hex_encode_bytes(&built.bytes[start..start + built.filter.stored_len as usize])
-    });
     Ok(GrepSegmentRef {
         segment_id,
         run_seq,
         run_no,
         level,
         segment_index,
+        row_count: built.row_count,
         min_row_key: built.min_row_key,
         max_row_key: built.max_row_key,
         index_block: built.index,
@@ -1138,21 +1076,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
-    ) -> Result<GrepReorganizeReport> {
+    ) -> Result<GrepReorganizeOutcome> {
         let Some(current) = load_grep_root(&self.store, namespace_id).await? else {
-            return Ok(reorganize_report(
-                namespace_id,
-                GrepReorganizeOutcome::NotEnabled,
-            ));
+            return Ok(GrepReorganizeOutcome::NotEnabled);
         };
         if matches!(
             current.manifest_state().status(),
             GrepIndexStatus::Disabled {}
         ) {
-            return Ok(reorganize_report(
-                namespace_id,
-                GrepReorganizeOutcome::NotEnabled,
-            ));
+            return Ok(GrepReorganizeOutcome::NotEnabled);
         }
         let (reorganize, next_run_no) = match current.manifest_state().index().reorganize.clone() {
             Some(reorganize) => (reorganize, current.manifest_state().index().next_run_no),
@@ -1190,13 +1122,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                             INDEX_GRAMS_BASE_LEVEL,
                         )
                     } else {
-                        return Ok(reorganize_report(
-                            namespace_id,
-                            GrepReorganizeOutcome::NotNeeded {
-                                delta_runs,
-                                mid_runs,
-                            },
-                        ));
+                        return Ok(GrepReorganizeOutcome::NotNeeded {
+                            delta_runs,
+                            mid_runs,
+                        });
                     };
                 (
                     GrepReorganizeState {
@@ -1206,7 +1135,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                         output_level,
                         run_no: current_run_no,
                     },
-                    next_grep_run_no(current_run_no)?,
+                    next_run_no_after(current_run_no)?,
                 )
             }
         };
@@ -1285,20 +1214,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        ensure_publication_budget(&timer, publication_started_ms, namespace_id)?;
+        ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
         match self.advance_root(&current, &next).await {
-            Ok(_) => Ok(reorganize_report(
-                namespace_id,
-                GrepReorganizeOutcome::UnitPublished {
-                    merged_rows: merged.rows,
-                    segments_written,
-                    completed,
-                },
-            )),
-            Err(GrepRootError::Conflict { .. }) => Ok(reorganize_report(
-                namespace_id,
-                GrepReorganizeOutcome::Superseded,
-            )),
+            Ok(_) => Ok(GrepReorganizeOutcome::UnitPublished {
+                merged_rows: merged.rows,
+                segments_written,
+                completed,
+            }),
+            Err(GrepRootError::Conflict { .. }) => Ok(GrepReorganizeOutcome::Superseded),
             Err(error) => Err(error.into()),
         }
     }
@@ -1325,9 +1248,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         now_ms: u64,
         request: &GrepGcOptions,
     ) -> Result<GrepGcReport> {
-        let resume = match request.cursor.as_deref() {
-            Some(token) => GrepGcCursor::decode(token, namespace_id)?,
-            None => GrepGcCursor::initial(namespace_id),
+        let resume: NamespaceGcCursor<GrepGcKeyspace> = match request.cursor.as_deref() {
+            Some(token) => NamespaceGcCursor::decode(token, namespace_id)?,
+            None => NamespaceGcCursor::initial(namespace_id, GrepGcKeyspace {}),
         };
         let mut report = GrepGcReport::default();
         // An absent budget is the per-pass default, resolved here — the
@@ -1379,7 +1302,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 .await?;
             deleted_any |= deleted;
             examined += 1;
-            position = GrepGcCursor::after(namespace_id, key);
+            position = NamespaceGcCursor::after(namespace_id, GrepGcKeyspace {}, key);
         }
         if deleted_any && liveness == NamespaceLiveness::Gone {
             report.namespace_reaped = true;
@@ -1465,82 +1388,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 }
 
-/// Opaque, namespace-bound resume position for a bounded grep collection.
-///
-/// It carries where the enumeration stopped and nothing else. Grep's whole
-/// keyspace is one prefix, so one key is the whole position — and because
-/// every resumed pass re-reads liveness and the root, a stale or forged
-/// cursor can only re-examine work or defer it to a later pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct GrepGcCursor {
-    namespace_id: NamespaceId,
-    #[serde(default)]
-    last_key: Option<String>,
-}
+struct GrepGcKeyspace {}
 
-impl PageCursor for GrepGcCursor {
-    const KIND: &'static str = "grep_gc";
-}
+impl GcCursorKeyspace for GrepGcKeyspace {
+    const CURSOR_KIND: &'static str = "grep_gc";
 
-impl NamespaceCursor for GrepGcCursor {
-    fn namespace_id(&self) -> &NamespaceId {
-        &self.namespace_id
-    }
-
-    fn last_key(&self) -> Option<&str> {
-        self.last_key.as_deref()
-    }
-
-    fn key_prefix(&self) -> String {
-        grep_prefix(&self.namespace_id)
-    }
-}
-
-impl GrepGcCursor {
-    fn initial(namespace_id: &NamespaceId) -> Self {
-        Self {
-            namespace_id: namespace_id.clone(),
-            last_key: None,
-        }
-    }
-
-    fn after(namespace_id: &NamespaceId, key: String) -> Self {
-        Self {
-            namespace_id: namespace_id.clone(),
-            last_key: Some(key),
-        }
-    }
-
-    fn decode(token: &str, namespace_id: &NamespaceId) -> Result<Self> {
-        decode_namespace_cursor(token, namespace_id).map_err(|error| match error {
-            NamespaceCursorError::ForeignNamespace => {
-                CoreError::InvalidGcConfig(error.to_string()).into()
-            }
-            NamespaceCursorError::Malformed(_) | NamespaceCursorError::OutsideKeyspace => {
-                malformed_gc_cursor()
-            }
-            _ => malformed_gc_cursor(),
-        })
-    }
-
-    fn encode(&self) -> Result<String> {
-        encode_cursor(self).map_err(|error| {
-            CoreError::Internal(format!("failed to encode grep GC cursor: {error}")).into()
-        })
-    }
-}
-
-fn malformed_gc_cursor() -> GrepError {
-    CoreError::InvalidGcConfig("cursor is malformed".to_owned()).into()
-}
-
-fn reorganize_report(
-    namespace_id: &NamespaceId,
-    outcome: GrepReorganizeOutcome,
-) -> GrepReorganizeReport {
-    GrepReorganizeReport {
-        namespace_id: namespace_id.clone(),
-        outcome,
+    fn prefix(&self, namespace_id: &NamespaceId) -> String {
+        grep_prefix(namespace_id)
     }
 }
 
@@ -1568,15 +1423,22 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     cursor: &str,
     max_rows: usize,
 ) -> Result<MergedRange> {
-    let mut readers = Vec::with_capacity(snapshot.len());
-    for chunk in snapshot.chunks(MAX_GREP_WORKER_IO) {
-        readers.extend(
-            try_join_all(chunk.iter().map(|segment| {
-                SegmentRangeReader::open(store, block_cache, namespace_id, segment, cursor)
-            }))
-            .await?,
-        );
-    }
+    let start = if cursor.is_empty() {
+        GRAM_ROW_PREFIX
+    } else {
+        cursor
+    };
+    let loader = GrepSegmentBlockLoader {
+        store,
+        block_cache,
+        namespace_id,
+    };
+    let mut readers: Vec<SegmentRowIterator<IndexRow, GrepSegmentRef, ()>> = snapshot
+        .iter()
+        .map(|segment| {
+            SegmentRowIterator::new((), vec![(*segment).clone()], Some(start.to_owned()))
+        })
+        .collect();
     let mut merged = MergedRange {
         postings: BTreeMap::new(),
         next_cursor: String::new(),
@@ -1585,52 +1447,53 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     };
     let mut last_key = String::new();
     while merged.rows < max_rows as u64 {
-        for reader in &mut readers {
-            reader.refill(store, block_cache).await?;
-        }
-        let mut lowest: Option<(usize, String)> = None;
-        for (position, reader) in readers.iter().enumerate() {
-            if let Some(key) = reader.peek_key() {
-                if lowest
-                    .as_ref()
-                    .is_none_or(|(_, current)| key < current.as_str())
-                {
-                    lowest = Some((position, key.to_owned()));
-                }
-            }
-        }
-        let Some((position, _)) = lowest else {
+        refill_iterators(&loader, &mut readers).await?;
+        let Some(position) = select_next_iterator(&readers, |_, row_key| row_key) else {
             merged.exhausted = true;
             return Ok(merged);
         };
-        let (key, row) = readers[position].pop();
-        reorganize_snapshot_row(&mut merged, row, readers[position].object_key())?;
-        for reader in &mut readers {
-            loop {
-                reader.refill(store, block_cache).await?;
-                if reader.peek_key() != Some(key.as_str()) {
-                    break;
+        let key = readers[position]
+            .head()
+            .expect("the selected iterator should have a row")
+            .0
+            .to_owned();
+        let object_key = grep_iterator_object_key(namespace_id, &readers[position]);
+        let row = readers[position].take_head();
+        reorganize_snapshot_row(&mut merged, row, &object_key)?;
+        loop {
+            refill_iterators(&loader, &mut readers).await?;
+            let mut found = false;
+            for reader in &mut readers {
+                while reader.head().is_some_and(|(row_key, _)| row_key == key) {
+                    let object_key = grep_iterator_object_key(namespace_id, reader);
+                    let duplicate = reader.take_head();
+                    reorganize_snapshot_row(&mut merged, duplicate, &object_key)?;
+                    found = true;
                 }
-                let (_, duplicate) = reader.pop();
-                reorganize_snapshot_row(&mut merged, duplicate, reader.object_key())?;
+            }
+            if !found {
+                break;
             }
         }
         last_key = key;
     }
-    let mut any_left = false;
-    for reader in &mut readers {
-        reader.refill(store, block_cache).await?;
-        if reader.peek_key().is_some() {
-            any_left = true;
-            break;
-        }
-    }
-    if any_left {
+    refill_iterators(&loader, &mut readers).await?;
+    if readers.iter().any(|reader| reader.head().is_some()) {
         merged.next_cursor = format!("{last_key}\0");
     } else {
         merged.exhausted = true;
     }
     Ok(merged)
+}
+
+fn grep_iterator_object_key(
+    namespace_id: &NamespaceId,
+    iterator: &SegmentRowIterator<IndexRow, GrepSegmentRef, ()>,
+) -> String {
+    let segment = iterator
+        .current_segment()
+        .expect("an iterator with a row should have a current segment");
+    segment_key(namespace_id, &segment.segment_id)
 }
 
 fn reorganize_snapshot_row(
@@ -1650,91 +1513,41 @@ fn reorganize_snapshot_row(
     Ok(())
 }
 
-struct SegmentRangeReader {
-    object_key: String,
-    object_checksum: String,
-    entries: Arc<Vec<SegmentIndexEntry>>,
-    next_entry: usize,
-    current: Option<CurrentDataBlock>,
-    start: String,
+struct GrepSegmentBlockLoader<'a, S: ?Sized> {
+    store: &'a S,
+    block_cache: &'a GrepBlockCache,
+    namespace_id: &'a NamespaceId,
 }
 
-struct CurrentDataBlock {
-    block: Arc<DecodedDataBlock<IndexRow>>,
-    next_row: usize,
-}
+impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
+    for GrepSegmentBlockLoader<'_, S>
+{
+    type Error = GrepError;
 
-impl SegmentRangeReader {
-    async fn open<S: ObjectStore + ?Sized>(
-        store: &S,
-        block_cache: &GrepBlockCache,
-        namespace_id: &NamespaceId,
-        segment: &GrepSegmentRef,
-        cursor: &str,
-    ) -> Result<Self> {
-        let object_key = segment_key(namespace_id, &segment.segment_id);
-        let entries = load_index_block(store, block_cache, &object_key, segment).await?;
-        let start = if cursor.is_empty() {
-            GRAM_ROW_PREFIX
-        } else {
-            cursor
-        };
-        let range = index_blocks_for_key_range(&entries, start, None);
-        Ok(Self {
-            object_key,
-            object_checksum: segment.object_checksum.clone(),
-            next_entry: range.start,
-            entries,
-            current: None,
-            start: start.to_owned(),
-        })
+    async fn load_index(&self, segment: GrepSegmentRef) -> Result<Arc<Vec<SegmentIndexEntry>>> {
+        let object_key = segment_key(self.namespace_id, &segment.segment_id);
+        load_index_block(self.store, self.block_cache, &object_key, &segment).await
     }
 
-    fn object_key(&self) -> &str {
-        &self.object_key
-    }
-
-    fn peek_key(&self) -> Option<&str> {
-        self.current
-            .as_ref()
-            .map(|current| current.block.row_keys[current.next_row].as_str())
-    }
-
-    fn pop(&mut self) -> (String, IndexRow) {
-        let current = self.current.as_mut().expect("peek_key should precede pop");
-        let key = current.block.row_keys[current.next_row].clone();
-        let row = current.block.rows[current.next_row].clone();
-        current.next_row += 1;
-        if current.next_row == current.block.row_keys.len() {
-            self.current = None;
-        }
-        (key, row)
-    }
-
-    async fn refill<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        block_cache: &GrepBlockCache,
-    ) -> Result<()> {
-        while self.current.is_none() && self.next_entry < self.entries.len() {
-            let entry = &self.entries[self.next_entry];
-            self.next_entry += 1;
-            let block = load_data_block(
-                store,
-                block_cache,
-                &self.object_key,
-                &self.object_checksum,
+    async fn load_data_blocks(
+        &self,
+        segment: GrepSegmentRef,
+        entries: Vec<SegmentIndexEntry>,
+    ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
+        let object_key = segment_key(self.namespace_id, &segment.segment_id);
+        let object_key = &object_key;
+        let object_checksum = &segment.object_checksum;
+        try_join_all(entries.into_iter().map(|entry| async move {
+            load_data_block(
+                self.store,
+                self.block_cache,
+                object_key,
+                object_checksum,
                 &entry.block,
             )
-            .await?;
-            let next_row = block
-                .row_keys
-                .partition_point(|key| key.as_str() < self.start.as_str());
-            if next_row < block.row_keys.len() {
-                self.current = Some(CurrentDataBlock { block, next_row });
-            }
-        }
-        Ok(())
+            .await
+        }))
+        .await
     }
 }
 
@@ -1861,28 +1674,6 @@ fn count_deleted_key(key: &str, report: &mut GrepGcReport) {
     }
 }
 
-fn ensure_publication_budget(
-    timer: &impl MonotonicTimer,
-    started_ms: u64,
-    namespace_id: &NamespaceId,
-) -> Result<()> {
-    let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
-    if elapsed_ms <= METADATA_PUBLICATION_BUDGET_MS {
-        return Ok(());
-    }
-    tracing::error!(
-        namespace_id = namespace_id.as_str(),
-        elapsed_ms,
-        budget_ms = METADATA_PUBLICATION_BUDGET_MS,
-        "grep publication overran its budget; aborting before the root compare-and-swap",
-    );
-    Err(CoreError::MetadataPublicationBudgetExceeded {
-        elapsed_ms,
-        budget_ms: METADATA_PUBLICATION_BUDGET_MS,
-    }
-    .into())
-}
-
 fn core_state_error(
     namespace_id: &NamespaceId,
     error: crate::root::GrepManifestStateError,
@@ -1892,12 +1683,6 @@ fn core_state_error(
         message: error.to_string(),
     }
     .into()
-}
-
-fn next_grep_run_no(current: RunNo) -> Result<RunNo> {
-    current
-        .successor()
-        .map_err(|error| CoreError::Internal(format!("grep run number {error}")).into())
 }
 
 fn core_store_error(object_key: &str, error: &ObjectStoreError) -> GrepError {

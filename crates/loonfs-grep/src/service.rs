@@ -21,7 +21,8 @@ use loonfs::{CoreError, CurrentFileState, MetadataViewError};
 use loonfs_api::v0::FilesystemChange;
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{
-    decode_filter_block, index_blocks_for_key_range, string_prefix_upper_bound,
+    decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
+    string_prefix_upper_bound,
 };
 use loonfs_api::{
     decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EffectiveLimit, ErrorCode, GrepMatch,
@@ -69,14 +70,31 @@ pub(crate) const SCAN_DIRECTORY_PAGE_ENTRIES: usize = 1000;
 /// number of content reads.
 pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
 
+/// Namespace-independent grep execution over a decoded-block cache.
+#[derive(Debug)]
+pub struct GrepService {
+    block_cache: Arc<GrepBlockCache>,
+}
+
 #[derive(Debug, Clone)]
 struct MaterializedGrepIndexSnapshot {
-    built_through_seq: ChangeSeq,
-    next_event_index: u32,
+    resume: ChangeFeedResume,
     state: Arc<GrepManifestState>,
 }
 
 impl GrepService {
+    /// Creates a service with a fresh default-sized block cache.
+    pub fn new() -> Self {
+        Self::with_block_cache(Arc::new(GrepBlockCache::new(
+            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+        )))
+    }
+
+    /// Creates a service over a host-composed process-wide grep block cache.
+    pub fn with_block_cache(block_cache: Arc<GrepBlockCache>) -> Self {
+        Self { block_cache }
+    }
+
     /// Freshly loads the grep pointer, then loads or reuses its immutable
     /// manifest.
     async fn load_index_snapshot<S: ObjectStore + ?Sized>(
@@ -151,6 +169,151 @@ impl GrepService {
         }
         materialized_snapshot_from_state(state)
     }
+
+    async fn plan_query<'a, S: ObjectStore>(
+        &self,
+        request: &GrepRequest,
+        reads: &NamespaceReads<'a>,
+        store: &S,
+    ) -> Result<QueryPlan<'a>> {
+        let reads = reads.pin().await?;
+        let head_seq = reads.head_seq();
+        let fingerprint = request.fingerprint();
+        let resume = match &request.cursor {
+            Some(cursor) => {
+                let cursor: GrepPageCursor = decode_cursor(cursor)
+                    .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+                if cursor.fingerprint != fingerprint {
+                    return Err(CoreError::InvalidCursor(
+                        "the cursor was issued by a different request; replaying it under new criteria would silently skip results"
+                            .to_owned(),
+                    )
+                    .into());
+                }
+                if cursor.head_seq > head_seq {
+                    return Err(CoreError::from(MetadataViewError::SnapshotUnavailable {
+                        requested_seq: cursor.head_seq,
+                        head_seq,
+                    })
+                    .into());
+                }
+                Some((cursor.last_inode_id, cursor.last_byte_offset))
+            }
+            None => None,
+        };
+        let snapshot = self
+            .load_index_snapshot(store, reads.namespace_id())
+            .await?;
+        let pattern = regex::bytes::RegexBuilder::new(&request.pattern)
+            .case_insensitive(request.case_insensitive)
+            .multi_line(true)
+            .build()
+            .map_err(|error| CoreError::InvalidQuery(error.to_string()))?;
+        let scope = match &request.path_prefix {
+            Some(prefix) => Some(reads.resolve_path(prefix).await?),
+            None => None,
+        };
+        let mut candidates = GrepCandidates::default();
+        let tail_resume = match plan_pattern(&request.pattern, request.case_insensitive)
+            .map_err(CoreError::InvalidQuery)?
+        {
+            GramPlanOutcome::Indexable(plan) => {
+                candidates.indexed = indexed_candidates(
+                    store,
+                    &self.block_cache,
+                    reads.namespace_id(),
+                    snapshot.state.segments(),
+                    &plan,
+                )
+                .await?;
+                Some(snapshot.resume)
+            }
+            GramPlanOutcome::Unindexable => {
+                if !request.allow_scan {
+                    return Err(CoreError::QueryUnindexable(
+                        "the pattern has no run of at least 3 literal bytes for the trigram index; set allow_scan to search without it"
+                            .to_owned(),
+                    )
+                    .into());
+                }
+                candidates.unfiltered = scan_candidate_inodes(&reads, scope.as_ref()).await?;
+                None
+            }
+        };
+        let mut tail_scanned = true;
+        if let Some(tail_resume) = tail_resume {
+            match tail_revisions(&reads, tail_resume).await? {
+                TailScan::Within(inodes) => candidates.unfiltered.extend(inodes),
+                TailScan::OverBudget | TailScan::RebuildRequired if request.allow_stale => {
+                    tail_scanned = false;
+                }
+                TailScan::OverBudget | TailScan::RebuildRequired => {
+                    return Err(CoreError::IndexLagging {
+                        behind_commits: head_seq
+                            .0
+                            .saturating_sub(snapshot.resume.built_through_seq().0),
+                    }
+                    .into());
+                }
+            }
+        }
+        Ok(QueryPlan {
+            reads,
+            head_seq,
+            built_through_seq: snapshot.resume.built_through_seq(),
+            fingerprint,
+            resume,
+            pattern,
+            scope,
+            candidates,
+            tail_scanned,
+        })
+    }
+
+    /// Content search over one pinned namespace snapshot.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.phase",
+        err(level = "debug"),
+        skip_all,
+        fields(phase = "grep")
+    )]
+    pub async fn query<S: ObjectStore>(
+        &self,
+        request: &GrepRequest,
+        limit: EffectiveLimit,
+        reads: &NamespaceReads<'_>,
+        store: &S,
+    ) -> Result<GrepResponse> {
+        let plan = self.plan_query(request, reads, store).await?;
+        let mut walk = PageWalk::new(&plan, limit.as_usize());
+        'page: while let Some(batch) = walk.next_batch().await? {
+            let contents = join_all(
+                batch
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate_content(&plan.reads, candidate)),
+            )
+            .await;
+            for (candidate, content) in batch.candidates.iter().zip(contents) {
+                if walk.record(candidate, content)? {
+                    break 'page;
+                }
+            }
+            if walk.finish_batch(batch.exhausts_page) {
+                break;
+            }
+        }
+        let next_cursor = walk.next_cursor()?;
+        Ok(GrepResponse {
+            namespace_id: plan.reads.namespace_id().clone(),
+            head_seq: plan.head_seq,
+            built_through_seq: plan.built_through_seq,
+            tail_scanned: plan.tail_scanned,
+            matches: walk.matches,
+            next_cursor,
+        })
+    }
 }
 
 fn materialized_snapshot_from_state(
@@ -158,39 +321,15 @@ fn materialized_snapshot_from_state(
 ) -> Result<MaterializedGrepIndexSnapshot> {
     // Queries require an active index and its watermark. Disabled and
     // backfilling indexes return their corresponding errors.
-    let (built_through_seq, next_event_index) = match state.status() {
+    let resume = match state.status() {
         GrepIndexStatus::Disabled {} => return Err(GrepError::NotEnabled),
         GrepIndexStatus::Backfilling { .. } => return Err(GrepError::Backfilling),
-        GrepIndexStatus::Active {
-            built_through_seq,
-            next_event_index,
-        } => (*built_through_seq, *next_event_index),
+        GrepIndexStatus::Active { .. } => state
+            .status()
+            .active_watermark()
+            .expect("an active grep status should have a watermark"),
     };
-    Ok(MaterializedGrepIndexSnapshot {
-        built_through_seq,
-        next_event_index,
-        state,
-    })
-}
-
-/// Namespace-independent grep execution over a decoded-block cache.
-#[derive(Debug)]
-pub struct GrepService {
-    block_cache: Arc<GrepBlockCache>,
-}
-
-impl GrepService {
-    /// Creates a service with a fresh default-sized block cache.
-    pub fn new() -> Self {
-        Self::with_block_cache(Arc::new(GrepBlockCache::new(
-            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-        )))
-    }
-
-    /// Creates a service over a host-composed process-wide grep block cache.
-    pub fn with_block_cache(block_cache: Arc<GrepBlockCache>) -> Self {
-        Self { block_cache }
-    }
+    Ok(MaterializedGrepIndexSnapshot { resume, state })
 }
 
 impl Default for GrepService {
@@ -252,12 +391,13 @@ async fn indexed_candidates<S: ObjectStore + ?Sized>(
         let mut probes: Vec<(&GramLookup, &GrepSegmentRef)> = Vec::new();
         for gram_lookup in &lookups {
             for descriptor in segments {
-                if descriptor.max_row_key.as_str() < gram_lookup.probe.as_str()
-                    || gram_lookup
-                        .upper
-                        .as_deref()
-                        .is_some_and(|upper| descriptor.min_row_key.as_str() >= upper)
-                {
+                if !key_range_may_intersect(
+                    &descriptor.min_row_key,
+                    &descriptor.max_row_key,
+                    descriptor.row_count,
+                    &gram_lookup.probe,
+                    gram_lookup.upper.as_deref(),
+                ) {
                     continue;
                 }
                 probes.push((gram_lookup, descriptor));
@@ -608,340 +748,208 @@ async fn candidate_content(
     )
 }
 
-impl GrepService {
-    /// Content search over one pinned snapshot: index-accelerated
-    /// candidates through the `query.grep` watermark, an exhaustive scan of
-    /// the unindexed tail, and real-pattern verification of every candidate
-    /// against current state. Matches order by `(inode_id, byte_offset)`.
-    /// Two budgets bound a page — the match limit and a verified-candidate
-    /// budget — and the cursor resumes strictly after the last candidate the
-    /// page finished scanning, bound to the request that issued it. Each
-    /// page is evaluated against the snapshot it runs on and reports that
-    /// head in `head_seq`.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.phase",
-        err(level = "debug"),
-        skip_all,
-        fields(phase = "grep")
-    )]
-    pub async fn query<S: ObjectStore>(
-        &self,
-        request: &GrepRequest,
-        limit: EffectiveLimit,
-        reads: &NamespaceReads<'_>,
-        store: &S,
-    ) -> Result<GrepResponse> {
-        let reads = reads.pin().await?;
-        let head_seq = reads.head_seq();
-        let limit = limit.as_usize();
-        let fingerprint = request.fingerprint();
-        let resume = match &request.cursor {
-            Some(cursor) => {
-                let cursor: GrepPageCursor = decode_cursor(cursor)
-                    .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
-                if cursor.fingerprint != fingerprint {
-                    return Err(CoreError::InvalidCursor(
-                        "the cursor was issued by a different request; replaying it \
-                         under new criteria would silently skip results"
-                            .to_owned(),
-                    )
-                    .into());
-                }
-                if cursor.head_seq > head_seq {
-                    return Err(CoreError::from(MetadataViewError::SnapshotUnavailable {
-                        requested_seq: cursor.head_seq,
-                        head_seq,
-                    })
-                    .into());
-                }
-                Some((cursor.last_inode_id, cursor.last_byte_offset))
-            }
-            None => None,
-        };
+struct QueryPlan<'a> {
+    reads: PinnedNamespaceReads<'a>,
+    head_seq: ChangeSeq,
+    built_through_seq: ChangeSeq,
+    fingerprint: u64,
+    resume: Option<(InodeId, u64)>,
+    pattern: regex::bytes::Regex,
+    scope: Option<PathEntry>,
+    candidates: GrepCandidates,
+    tail_scanned: bool,
+}
 
-        let snapshot = self
-            .load_index_snapshot(store, reads.namespace_id())
-            .await?;
+struct PageBatch {
+    candidates: Vec<GrepContentCandidate>,
+    exhausts_page: bool,
+}
 
-        // Line-anchored semantics: `^` and `$` match line boundaries, the
-        // grep-family contract. The planner parses with the same flags so
-        // its gram analysis sees the pattern the verifier runs.
-        let pattern = regex::bytes::RegexBuilder::new(&request.pattern)
-            .case_insensitive(request.case_insensitive)
-            .multi_line(true)
-            .build()
-            .map_err(|error| CoreError::InvalidQuery(error.to_string()))?;
+struct PageWalk<'plan, 'reads> {
+    plan: &'plan QueryPlan<'reads>,
+    limit: usize,
+    matches: Vec<GrepMatch>,
+    verified_files: usize,
+    examined_candidates: usize,
+    has_more: bool,
+    resume_cursor: Option<(InodeId, u64)>,
+    rejected_frontier: Option<InodeId>,
+    ordered_candidates: Vec<InodeId>,
+    next_candidate: usize,
+    resolved: VecDeque<CurrentFileState>,
+}
 
-        // The scope filter resolves the requested prefix once, to the path
-        // the namespace spells it as; every candidate is then tested against
-        // that spelling, so name-policy folding and path normalization apply
-        // exactly as they do to every other read. A missing prefix is the
-        // same `path_not_found` failure as every other scoped read.
-        let scope = match &request.path_prefix {
-            Some(prefix) => Some(reads.resolve_path(prefix).await?),
-            None => None,
-        };
-
-        let mut candidates = GrepCandidates::default();
-        let tail_resume = match plan_pattern(&request.pattern, request.case_insensitive)
-            .map_err(CoreError::InvalidQuery)?
-        {
-            GramPlanOutcome::Indexable(plan) => {
-                candidates.indexed = indexed_candidates(
-                    store,
-                    &self.block_cache,
-                    reads.namespace_id(),
-                    snapshot.state.segments(),
-                    &plan,
-                )
-                .await?;
-                Some(ChangeFeedResume::new(
-                    snapshot.built_through_seq,
-                    snapshot.next_event_index,
-                ))
-            }
-            GramPlanOutcome::Unindexable => {
-                if !request.allow_scan {
-                    return Err(CoreError::QueryUnindexable(
-                        "the pattern has no run of at least 3 literal bytes for the \
-                         trigram index; set allow_scan to search without it"
-                            .to_owned(),
-                    )
-                    .into());
-                }
-                // A full scan includes all files at the current head, so it
-                // does not need a separate scan of recent unindexed changes.
-                candidates.unfiltered = scan_candidate_inodes(&reads, scope.as_ref()).await?;
-                None
-            }
-        };
-
-        let mut tail_scanned = true;
-        if let Some(tail_resume) = tail_resume {
-            match tail_revisions(&reads, tail_resume).await? {
-                TailScan::Within(inodes) => candidates.unfiltered.extend(inodes),
-                TailScan::OverBudget | TailScan::RebuildRequired if request.allow_stale => {
-                    // Serve the index's cut and nothing newer. A candidate
-                    // whose current revision is past the watermark carries no
-                    // posting for that revision, so `admits` already refuses
-                    // it below — the skipped tail cannot leak a file verified
-                    // at an unindexed revision.
-                    tail_scanned = false;
-                }
-                TailScan::OverBudget | TailScan::RebuildRequired => {
-                    return Err(CoreError::IndexLagging {
-                        behind_commits: head_seq.0.saturating_sub(snapshot.built_through_seq.0),
-                    }
-                    .into());
-                }
-            }
-        }
-
-        let mut matches: Vec<GrepMatch> = Vec::new();
-        let mut verified_files = 0usize;
-        let mut examined_candidates = 0usize;
-        let mut has_more = false;
-        // Where the next page resumes when this one stops early: the last
-        // candidate this page finished scanning (offset MAX), or the last
-        // emitted match when the page filled mid-file.
-        let mut resume_cursor: Option<(InodeId, u64)> = None;
-        // Highest candidate this page examined and rejected (invisible,
-        // superseded, or out of scope). A rejection is final for the page,
-        // so budget exits fold this into the cursor — without it, a run of
-        // rejections longer than a page budget would resume at the same
-        // cursor and re-reject the same candidates forever.
-        let mut rejected_frontier: Option<InodeId> = None;
-        // Candidates the cursor already covered never reach the walk, so
-        // they cost neither examination budget nor a resolution.
-        let ordered_candidates = candidates
+impl<'plan, 'reads> PageWalk<'plan, 'reads> {
+    fn new(plan: &'plan QueryPlan<'reads>, limit: usize) -> Self {
+        let ordered_candidates = plan
+            .candidates
             .inodes()
-            .filter(|inode_id| match resume {
+            .filter(|inode_id| match plan.resume {
                 Some((last_inode, last_offset)) => {
                     *inode_id > last_inode || (*inode_id == last_inode && last_offset != u64::MAX)
                 }
                 None => true,
             })
-            .collect::<Vec<_>>();
-        let mut next_candidate = 0usize;
-        // Current state for candidates this page has resolved but not yet
-        // walked: one resolution call serves many content batches.
-        let mut resolved: VecDeque<CurrentFileState> = VecDeque::new();
-        'page: loop {
-            // Select the next fan-out batch: walk candidates in inode order
-            // through the current-state checks until enough survivors need
-            // content, the verified-file budget fills, or the candidates run
-            // out. The content read is the only per-candidate store fetch,
-            // so it is the only stage that fans out — the design doc's
-            // "small fixed fan-out" for candidate reads.
-            let mut batch: Vec<GrepContentCandidate> = Vec::new();
-            let mut budget_exhausted = false;
-            while batch.len() < MAX_GREP_CONTENT_IO {
-                if resolved.is_empty() {
-                    if next_candidate == ordered_candidates.len() {
-                        break;
-                    }
-                    // The examination budget bounds a page's metadata work
-                    // the way the verified budget bounds its content work: a
-                    // scope filter that rejects nearly every candidate would
-                    // otherwise resolve the entire candidate set in one
-                    // page. Resolutions are requested in batches, never past
-                    // what the budget still allows.
-                    let examinable =
-                        MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE.saturating_sub(examined_candidates);
-                    if examinable == 0 {
-                        budget_exhausted = true;
-                        break;
-                    }
-                    let wanted = resolve_batch_size(
-                        examinable.min(ordered_candidates.len() - next_candidate),
-                    );
-                    let chunk = &ordered_candidates[next_candidate..next_candidate + wanted];
-                    resolved.extend(reads.resolve_current_files(chunk).await?);
-                    next_candidate += wanted;
+            .collect();
+        Self {
+            plan,
+            limit,
+            matches: Vec::new(),
+            verified_files: 0,
+            examined_candidates: 0,
+            has_more: false,
+            resume_cursor: None,
+            rejected_frontier: None,
+            ordered_candidates,
+            next_candidate: 0,
+            resolved: VecDeque::new(),
+        }
+    }
+
+    async fn next_batch(&mut self) -> Result<Option<PageBatch>> {
+        let mut candidates = Vec::new();
+        let mut budget_exhausted = false;
+        while candidates.len() < MAX_GREP_CONTENT_IO {
+            if self.resolved.is_empty() {
+                if self.next_candidate == self.ordered_candidates.len() {
+                    break;
                 }
-                let Some(state) = resolved.pop_front() else {
-                    continue;
-                };
-                let inode_id = state.inode_id;
-                examined_candidates += 1;
-                if !state.visible {
-                    rejected_frontier = Some(inode_id);
-                    continue;
-                }
-                let (Some(revision_no), Some(path)) =
-                    (state.current_revision_no, state.current_path)
-                else {
-                    // A visible inode with no current revision is a
-                    // directory, or a file whose revisions are gone; neither
-                    // has content to match.
-                    rejected_frontier = Some(inode_id);
-                    continue;
-                };
-                if !candidates.admits(inode_id, revision_no) {
-                    rejected_frontier = Some(inode_id);
-                    continue;
-                }
-                if let Some(scope) = &scope {
-                    if !path_within_scope(&path, &scope.path) {
-                        rejected_frontier = Some(inode_id);
-                        continue;
-                    }
-                }
-                if verified_files == MAX_GREP_VERIFIED_FILES_PER_PAGE {
+                let examinable =
+                    MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE.saturating_sub(self.examined_candidates);
+                if examinable == 0 {
                     budget_exhausted = true;
                     break;
                 }
-                verified_files += 1;
-                batch.push(GrepContentCandidate {
-                    inode_id,
-                    revision_no,
-                    path,
-                });
+                let wanted = resolve_batch_size(
+                    examinable.min(self.ordered_candidates.len() - self.next_candidate),
+                );
+                let chunk =
+                    &self.ordered_candidates[self.next_candidate..self.next_candidate + wanted];
+                self.resolved
+                    .extend(self.plan.reads.resolve_current_files(chunk).await?);
+                self.next_candidate += wanted;
             }
-            if batch.is_empty() {
-                if budget_exhausted {
-                    has_more = true;
-                    fold_rejected_frontier(&mut resume_cursor, rejected_frontier);
-                }
-                break 'page;
+            let Some(state) = self.resolved.pop_front() else {
+                continue;
+            };
+            let inode_id = state.inode_id;
+            self.examined_candidates += 1;
+            if !state.visible {
+                self.rejected_frontier = Some(inode_id);
+                continue;
             }
-            // The reads fan out, but their errors do not short-circuit:
-            // each result rides with its candidate into the ordered walk
-            // below, which surfaces a failure only when it reaches that
-            // candidate — the position the serial loop surfaced it. A
-            // failure the walk never reaches (the page filled first) is
-            // discarded with the rest of the speculative batch; the next
-            // page re-issues that read and reports it then.
-            let contents = join_all(
-                batch
-                    .iter()
-                    .map(|candidate| candidate_content(&reads, candidate)),
-            )
-            .await;
-            // Emission stays strictly in candidate (inode) order: the batch
-            // was selected in order and its results are consumed in order,
-            // so matches, limits, errors, and the resume cursor advance
-            // exactly as the serial walk advanced them.
-            for (candidate, content) in batch.iter().zip(contents) {
-                let inode_id = candidate.inode_id;
-                let content = match content {
-                    // Scanned and refused without a fetch, so the cursor
-                    // moves past it like any other ineligible file.
-                    CandidateContent::Oversized | CandidateContent::Superseded => {
-                        resume_cursor = Some((inode_id, u64::MAX));
-                        continue;
-                    }
-                    CandidateContent::Fetched(content) => content?,
-                };
-                if !is_indexable_text_content(&content) {
-                    resume_cursor = Some((inode_id, u64::MAX));
-                    continue;
-                }
-                for found in line_matches(&content, &pattern) {
-                    if let Some((last_inode, last_offset)) = resume {
-                        if inode_id == last_inode && found.byte_offset <= last_offset {
-                            continue;
-                        }
-                    }
-                    if matches.len() == limit {
-                        // The page filled mid-batch: contents already
-                        // fetched for the batch's later candidates are
-                        // discarded, and the cursor resumes from the last
-                        // processed candidate, never a discarded one.
-                        has_more = true;
-                        break 'page;
-                    }
-                    resume_cursor = Some((inode_id, found.byte_offset));
-                    matches.push(GrepMatch {
-                        path: candidate.path.clone(),
-                        inode_id,
-                        revision_no: candidate.revision_no,
-                        line_number: found.line_number,
-                        byte_offset: found.byte_offset,
-                        line: found.line,
-                        line_truncated: found.line_truncated,
-                    });
-                }
-                // The file was fully scanned; a later stop resumes past it.
-                resume_cursor = Some((inode_id, u64::MAX));
+            let (Some(revision_no), Some(path)) = (state.current_revision_no, state.current_path)
+            else {
+                self.rejected_frontier = Some(inode_id);
+                continue;
+            };
+            if !self.plan.candidates.admits(inode_id, revision_no) {
+                self.rejected_frontier = Some(inode_id);
+                continue;
             }
-            if budget_exhausted {
-                has_more = true;
-                // The whole final batch was scanned, so every examined
-                // candidate is resolved; rejections past the last scanned
-                // file move the cursor with them.
-                fold_rejected_frontier(&mut resume_cursor, rejected_frontier);
-                break 'page;
+            if self
+                .plan
+                .scope
+                .as_ref()
+                .is_some_and(|scope| !path_within_scope(&path, &scope.path))
+            {
+                self.rejected_frontier = Some(inode_id);
+                continue;
             }
+            if self.verified_files == MAX_GREP_VERIFIED_FILES_PER_PAGE {
+                budget_exhausted = true;
+                break;
+            }
+            self.verified_files += 1;
+            candidates.push(GrepContentCandidate {
+                inode_id,
+                revision_no,
+                path,
+            });
         }
+        if candidates.is_empty() {
+            if budget_exhausted {
+                self.has_more = true;
+                fold_rejected_frontier(&mut self.resume_cursor, self.rejected_frontier);
+            }
+            return Ok(None);
+        }
+        Ok(Some(PageBatch {
+            candidates,
+            exhausts_page: budget_exhausted,
+        }))
+    }
 
-        let next_cursor = if has_more {
-            let (last_inode_id, last_byte_offset) = resume_cursor.or(resume).ok_or_else(|| {
+    fn record(
+        &mut self,
+        candidate: &GrepContentCandidate,
+        content: CandidateContent,
+    ) -> Result<bool> {
+        let inode_id = candidate.inode_id;
+        let content = match content {
+            CandidateContent::Oversized | CandidateContent::Superseded => {
+                self.resume_cursor = Some((inode_id, u64::MAX));
+                return Ok(false);
+            }
+            CandidateContent::Fetched(content) => content?,
+        };
+        if !is_indexable_text_content(&content) {
+            self.resume_cursor = Some((inode_id, u64::MAX));
+            return Ok(false);
+        }
+        for found in line_matches(&content, &self.plan.pattern) {
+            if self.plan.resume.is_some_and(|(last_inode, last_offset)| {
+                inode_id == last_inode && found.byte_offset <= last_offset
+            }) {
+                continue;
+            }
+            if self.matches.len() == self.limit {
+                self.has_more = true;
+                return Ok(true);
+            }
+            self.resume_cursor = Some((inode_id, found.byte_offset));
+            self.matches.push(GrepMatch {
+                path: candidate.path.clone(),
+                inode_id,
+                revision_no: candidate.revision_no,
+                line_number: found.line_number,
+                byte_offset: found.byte_offset,
+                line: found.line,
+                line_truncated: found.line_truncated,
+            });
+        }
+        self.resume_cursor = Some((inode_id, u64::MAX));
+        Ok(false)
+    }
+
+    fn finish_batch(&mut self, exhausts_page: bool) -> bool {
+        if !exhausts_page {
+            return false;
+        }
+        self.has_more = true;
+        fold_rejected_frontier(&mut self.resume_cursor, self.rejected_frontier);
+        true
+    }
+
+    fn next_cursor(&self) -> Result<Option<String>> {
+        if !self.has_more {
+            return Ok(None);
+        }
+        let (last_inode_id, last_byte_offset) =
+            self.resume_cursor.or(self.plan.resume).ok_or_else(|| {
                 CoreError::Internal(
                     "a truncated page must have scanned at least one candidate".to_owned(),
                 )
             })?;
-            Some(
-                encode_cursor(&GrepPageCursor {
-                    head_seq,
-                    last_inode_id,
-                    last_byte_offset,
-                    fingerprint,
-                })
-                .map_err(|error| CoreError::Internal(error.to_string()))?,
-            )
-        } else {
-            None
-        };
-        Ok(GrepResponse {
-            namespace_id: reads.namespace_id().clone(),
-            head_seq,
-            built_through_seq: snapshot.built_through_seq,
-            tail_scanned,
-            matches,
-            next_cursor,
-        })
+        Ok(Some(
+            encode_cursor(&GrepPageCursor {
+                head_seq: self.plan.head_seq,
+                last_inode_id,
+                last_byte_offset,
+                fingerprint: self.plan.fingerprint,
+            })
+            .map_err(|error| CoreError::Internal(error.to_string()))?,
+        ))
     }
 }
 

@@ -36,14 +36,19 @@ mod streaming_compaction;
 pub(crate) mod tests;
 mod validate;
 
+pub use self::build::write_segments_in_waves;
 pub use self::cache::{
     MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheObserver,
     MetadataSegmentCacheStats, WalTailProjectionCache, WalTailProjectionCacheConfig,
     WalTailProjectionCacheKey, WalTailProjectionCacheObserver, WalTailProjectionCacheStats,
     DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
+pub use self::compaction_merge::{
+    refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
+};
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
+pub use self::flush::{ensure_metadata_publication_budget, next_run_no_after};
 pub use self::list::CheckpointPageCursor;
 pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
 pub use self::reorganize::{

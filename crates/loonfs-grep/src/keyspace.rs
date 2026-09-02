@@ -4,7 +4,7 @@ use crate::root::GrepManifestObjectId;
 use loonfs_api::{IndexSegmentId, NamespaceId};
 
 const NAMESPACE_KEYSPACE_PREFIX: &str = "namespaces/";
-const GREP_EXTENSION_SUFFIX: &str = "/extensions/grep/";
+const GREP_EXTENSION_PREFIX: &str = "extensions/grep/";
 
 /// The grep-owned object kind named by a parsed key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub struct ParsedGrepKey {
 
 /// Prefix containing every grep object for one namespace.
 pub fn grep_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{NAMESPACE_KEYSPACE_PREFIX}{namespace_id}{GREP_EXTENSION_SUFFIX}")
+    format!("{NAMESPACE_KEYSPACE_PREFIX}{namespace_id}/{GREP_EXTENSION_PREFIX}")
 }
 
 /// Key of one namespace's atomic grep root pointer.
@@ -69,7 +69,7 @@ pub fn parse_key(key: &str) -> Option<ParsedGrepKey> {
     let suffix = key.strip_prefix(NAMESPACE_KEYSPACE_PREFIX)?;
     let (namespace, suffix) = suffix.split_once('/')?;
     let namespace_id = NamespaceId::parse(namespace).ok()?;
-    let object = suffix.strip_prefix("extensions/grep/")?;
+    let object = suffix.strip_prefix(GREP_EXTENSION_PREFIX)?;
     let kind = if object == "root.json" {
         GrepKeyKind::Root
     } else if let Some(manifest) = object.strip_prefix("manifests/") {

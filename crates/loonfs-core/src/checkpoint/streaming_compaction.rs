@@ -14,7 +14,8 @@ use super::build::MetadataSegmentDestination;
 use super::cache::{MetadataSegmentCache, MetadataSegmentCacheConfig};
 use super::compaction_lease::{CompactionLease, LeaseHold};
 use super::compaction_merge::{
-    locality_of, refill_iterators, select_next_iterator, LocalityGrouping, SegmentRowIterator,
+    locality_of, refill_iterators, select_next_iterator, LocalityGrouping,
+    MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
 };
 use super::compaction_output::MergeSegmentWriter;
 use super::compaction_retention::{KeptRow, RetentionRule};
@@ -955,7 +956,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                     .cloned()
                     .collect();
                 if !segments.is_empty() {
-                    iterators.push(SegmentRowIterator::new(*family, run.run_seq, segments));
+                    iterators.push(MetadataSegmentRowIterator::metadata(
+                        *family,
+                        run.run_seq,
+                        segments,
+                    ));
                 }
             }
         }
@@ -982,7 +987,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 return Ok(Some(stop));
             }
             self.refill(&mut iterators).await?;
-            let Some(next) = select_next_iterator(&iterators, cluster.locality) else {
+            let Some(next) = select_next_iterator(&iterators, |family, row_key| {
+                locality_of(*family, row_key, cluster.locality)
+            }) else {
                 break;
             };
             // The locality is a slice of the iterator's own key, so it is
@@ -991,7 +998,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             let opened = {
                 let iterator = &iterators[next];
                 let (row_key, _) = iterator.head().expect("the selected iterator has a row");
-                let family = iterator.family;
+                let family = *iterator.sort_key();
                 self.refuse_a_repeated_input_key(family, row_key)?;
                 let row_locality = locality_of(family, row_key, cluster.locality);
                 (locality.as_deref() != Some(row_locality)).then(|| row_locality.to_owned())
@@ -1002,7 +1009,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 }
                 locality = opened;
             }
-            let family = iterators[next].family;
+            let family = *iterators[next].sort_key();
             let row = iterators[next].take_head();
             self.result.rows_read += 1;
             self.report_progress();
@@ -1084,8 +1091,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
 
     /// Fills every iterator that has run out of rows and records what the merge
     /// then holds.
-    async fn refill(&mut self, iterators: &mut [SegmentRowIterator]) -> Result<()> {
-        let resident = refill_iterators(self.store, iterators).await?;
+    async fn refill(&mut self, iterators: &mut [MetadataSegmentRowIterator]) -> Result<()> {
+        let resident =
+            refill_iterators(&MetadataSegmentBlockLoader::new(self.store), iterators).await?;
         self.result.peak_resident_blocks = self.result.peak_resident_blocks.max(resident);
         Ok(())
     }

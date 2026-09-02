@@ -4,7 +4,7 @@
 
 use super::budget::PassBudget;
 use super::config::GcConfig;
-use super::cursor::{CandidateFamily, GcCursor};
+use super::cursor::{cursor_after, CandidateFamily};
 use super::live_set::{recollect_live_set, select_reference_anchor, LiveSet, ReferenceAnchor};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
 use super::uploads::{collect_referenced_content, CollectedReferences};
@@ -2559,7 +2559,7 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
     let mut bounded = config();
     bounded.max_objects = Some(marking + 1);
     bounded.cursor = Some(
-        GcCursor::after(
+        cursor_after(
             &namespace_id,
             CandidateFamily::MetadataSegments,
             format!("{}~", metadata_segment_prefix(&namespace_id)),

@@ -19,5 +19,6 @@ mod uploads;
 
 pub use budget::PassBudget;
 pub use config::GcConfig;
+pub use cursor::{GcCursorKeyspace, NamespaceGcCursor};
 pub use reap::{delete_if_aged, GraceAge};
 pub use run::gc_namespace;

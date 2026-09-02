@@ -2014,8 +2014,9 @@ field.
 Its descriptor uses the section 4.2.1 run vocabulary unchanged too. `run_no`
 is the run's identity and comes from the grep manifest's own `next_run_no`;
 `run_seq` is the namespace sequence the run materialized through;
-`segment_index` numbers one run's segments from zero; and `min_row_key` and
-`max_row_key` state the segment's key range. Only `level` differs, because
+`segment_index` numbers one run's segments from zero; `row_count` records the
+segment's rows; and `min_row_key` and `max_row_key` state the segment's key
+range. Only `level` differs, because
 grep reorganizes in three tiers rather than two: `0` is a delta run, `1` is a
 mid run merged from delta runs, and `2` is the base run merged from everything
 below it. A reorganize in progress records the level and the run number it

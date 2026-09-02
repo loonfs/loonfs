@@ -12,6 +12,7 @@ use loonfs_api::ChangeSeq;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::Arc;
 
 /// Decoded data blocks one iterator holds at a time. An iterator refills only
@@ -64,49 +65,72 @@ pub(super) fn locality_of(
     &tail[..end]
 }
 
-/// Reads one family's rows out of one run, one bounded span of data blocks at
-/// a time.
-///
-/// A run's segments for one family are ascending and non-overlapping (manifest
-/// load enforces it), so walking them in index order walks the run's rows in
-/// row-key order. Only the current segment's index is held, and only the
-/// blocks not yet consumed.
-pub(super) struct SegmentRowIterator {
-    pub(super) family: MetadataRowFamily,
-    max_seq: ChangeSeq,
-    segments: Vec<MetadataSegmentRef>,
+/// Loads the index and data blocks for one segment row iterator.
+pub trait SegmentBlockLoader<Row, Segment> {
+    type Error;
+
+    fn load_index(
+        &self,
+        segment: Segment,
+    ) -> impl Future<Output = std::result::Result<Arc<Vec<SegmentIndexEntry>>, Self::Error>>;
+
+    fn load_data_blocks(
+        &self,
+        segment: Segment,
+        entries: Vec<SegmentIndexEntry>,
+    ) -> impl Future<Output = std::result::Result<Vec<Arc<DecodedDataBlock<Row>>>, Self::Error>>;
+}
+
+/// Walks ordered segment rows with bounded decoded-block residency.
+pub struct SegmentRowIterator<Row, Segment, SortKey> {
+    sort_key: SortKey,
+    segments: Vec<Segment>,
     next_segment: usize,
     index: Option<Arc<Vec<SegmentIndexEntry>>>,
     next_block: usize,
-    blocks: VecDeque<Arc<DecodedDataBlock>>,
+    blocks: VecDeque<Arc<DecodedDataBlock<Row>>>,
     row: usize,
+    lower: Option<String>,
 }
 
-impl SegmentRowIterator {
-    pub(super) fn new(
-        family: MetadataRowFamily,
-        max_seq: ChangeSeq,
-        mut segments: Vec<MetadataSegmentRef>,
-    ) -> Self {
-        segments.sort_by_key(|descriptor| descriptor.segment_index);
+impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
+    /// Creates an iterator over segments already ordered by segment index.
+    pub fn new(sort_key: SortKey, segments: Vec<Segment>, lower: Option<String>) -> Self {
         Self {
-            family,
-            max_seq,
+            sort_key,
             segments,
             next_segment: 0,
             index: None,
             next_block: 0,
             blocks: VecDeque::new(),
             row: 0,
+            lower,
         }
     }
 
-    pub(super) fn head(&self) -> Option<(&str, &MetadataRow)> {
+    /// Returns the source ordering key.
+    pub fn sort_key(&self) -> &SortKey {
+        &self.sort_key
+    }
+
+    /// Returns the segment that owns the current row.
+    pub fn current_segment(&self) -> Option<&Segment> {
+        self.next_segment
+            .checked_sub(1)
+            .and_then(|position| self.segments.get(position))
+    }
+
+    /// Borrows the next row key and row.
+    pub fn head(&self) -> Option<(&str, &Row)> {
         let block = self.blocks.front()?;
         Some((block.row_keys[self.row].as_str(), &block.rows[self.row]))
     }
 
-    pub(super) fn take_head(&mut self) -> MetadataRow {
+    /// Removes and returns the next row.
+    pub fn take_head(&mut self) -> Row
+    where
+        Row: Clone,
+    {
         let row = self
             .blocks
             .front()
@@ -142,75 +166,152 @@ impl SegmentRowIterator {
         self.blocks.len()
     }
 
-    /// Fetches the next span of data blocks, opening the next segment first
-    /// when the current one is spent. A segment with no rows left is closed
-    /// and its index dropped before the next one is read, so one iterator
-    /// holds one index at a time.
-    async fn fill<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
+    async fn fill<Loader>(&mut self, loader: &Loader) -> std::result::Result<(), Loader::Error>
+    where
+        Segment: Clone,
+        Loader: SegmentBlockLoader<Row, Segment>,
+    {
         while self.blocks.is_empty() {
             let index = match &self.index {
                 Some(index) if self.next_block < index.len() => Arc::clone(index),
                 _ => {
                     self.index = None;
-                    let Some(descriptor) = self.segments.get(self.next_segment) else {
+                    let Some(segment) = self.segments.get(self.next_segment).cloned() else {
                         return Ok(());
                     };
                     self.next_segment += 1;
-                    self.next_block = 0;
-                    let index = load_segment_index_for_reorganization(
-                        store,
-                        None,
-                        &SessionBlockMemo::default(),
-                        descriptor,
-                    )
-                    .await
-                    .map_err(manifest_load_failure)?;
+                    let index = loader.load_index(segment).await?;
+                    self.next_block = self.lower.as_deref().map_or(0, |lower| {
+                        index.partition_point(|entry| entry.last_row_key.as_str() < lower)
+                    });
                     self.index = Some(Arc::clone(&index));
                     index
                 }
             };
-            let descriptor = &self.segments[self.next_segment - 1];
+            let segment = self.segments[self.next_segment - 1].clone();
             let end = (self.next_block + BLOCKS_PER_ITERATOR_FETCH).min(index.len());
-            // Compaction bypasses the shared segment cache. This temporary memo
-            // retains decoded blocks only for the current load.
-            let blocks = load_segment_data_block_span(
-                store,
-                None,
-                &SessionBlockMemo::default(),
-                descriptor,
-                &index[self.next_block..end],
-            )
-            .await
-            .map_err(manifest_load_failure)?;
+            let entries = index[self.next_block..end].to_vec();
+            let blocks = loader.load_data_blocks(segment, entries).await?;
             self.next_block = end;
-            validate_manifest_row_seq_range(
-                &metadata_segment_object_key(descriptor),
-                blocks.iter().flat_map(|block| block.rows.iter()),
-                self.max_seq,
-            )
-            .map_err(manifest_load_failure)?;
-            self.row = 0;
-            self.blocks
-                .extend(blocks.into_iter().filter(|block| !block.rows.is_empty()));
+            for block in blocks {
+                let next_row = self.lower.as_deref().map_or(0, |lower| {
+                    block
+                        .row_keys
+                        .partition_point(|row_key| row_key.as_str() < lower)
+                });
+                if next_row < block.rows.len() {
+                    if self.blocks.is_empty() {
+                        self.row = next_row;
+                    }
+                    self.blocks.push_back(block);
+                }
+            }
         }
         Ok(())
     }
 }
 
+#[derive(Clone)]
+pub(super) struct MetadataSegmentInput {
+    descriptor: MetadataSegmentRef,
+    max_seq: ChangeSeq,
+}
+
+pub(super) type MetadataSegmentRowIterator =
+    SegmentRowIterator<MetadataRow, MetadataSegmentInput, MetadataRowFamily>;
+
+impl MetadataSegmentRowIterator {
+    pub(super) fn metadata(
+        family: MetadataRowFamily,
+        max_seq: ChangeSeq,
+        mut segments: Vec<MetadataSegmentRef>,
+    ) -> Self {
+        segments.sort_by_key(|descriptor| descriptor.segment_index);
+        Self::new(
+            family,
+            segments
+                .into_iter()
+                .map(|descriptor| MetadataSegmentInput {
+                    descriptor,
+                    max_seq,
+                })
+                .collect(),
+            None,
+        )
+    }
+}
+
+pub(super) struct MetadataSegmentBlockLoader<'a, S: ?Sized> {
+    store: &'a S,
+}
+
+impl<'a, S: ?Sized> MetadataSegmentBlockLoader<'a, S> {
+    pub(super) fn new(store: &'a S) -> Self {
+        Self { store }
+    }
+}
+
+impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInput>
+    for MetadataSegmentBlockLoader<'_, S>
+{
+    type Error = crate::error::CoreError;
+
+    async fn load_index(
+        &self,
+        segment: MetadataSegmentInput,
+    ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
+        load_segment_index_for_reorganization(
+            self.store,
+            None,
+            &SessionBlockMemo::default(),
+            &segment.descriptor,
+        )
+        .await
+        .map_err(manifest_load_failure)
+    }
+
+    async fn load_data_blocks(
+        &self,
+        segment: MetadataSegmentInput,
+        entries: Vec<SegmentIndexEntry>,
+    ) -> Result<Vec<Arc<DecodedDataBlock>>> {
+        let blocks = load_segment_data_block_span(
+            self.store,
+            None,
+            &SessionBlockMemo::default(),
+            &segment.descriptor,
+            &entries,
+        )
+        .await
+        .map_err(manifest_load_failure)?;
+        validate_manifest_row_seq_range(
+            &metadata_segment_object_key(&segment.descriptor),
+            blocks.iter().flat_map(|block| block.rows.iter()),
+            segment.max_seq,
+        )
+        .map_err(manifest_load_failure)?;
+        Ok(blocks)
+    }
+}
+
 /// Fills every iterator that has run out of rows, a bounded wave at a time,
 /// and answers with the decoded blocks they then hold together.
-pub(super) async fn refill_iterators<S: ObjectStore + ?Sized>(
-    store: &S,
-    iterators: &mut [SegmentRowIterator],
-) -> Result<usize> {
-    let mut hungry: Vec<&mut SegmentRowIterator> = iterators
+pub async fn refill_iterators<Row, Segment, SortKey, Loader>(
+    loader: &Loader,
+    iterators: &mut [SegmentRowIterator<Row, Segment, SortKey>],
+) -> std::result::Result<usize, Loader::Error>
+where
+    Segment: Clone,
+    Loader: SegmentBlockLoader<Row, Segment>,
+{
+    let mut hungry: Vec<&mut SegmentRowIterator<Row, Segment, SortKey>> = iterators
         .iter_mut()
         .filter(|iterator| iterator.needs_fill())
         .collect();
     for wave in hungry.chunks_mut(ITERATOR_FETCH_CONCURRENCY) {
         futures::future::try_join_all(
             wave.iter_mut()
-                .map(|iterator| Box::pin(iterator.fill(store))),
+                .map(|iterator| Box::pin(iterator.fill(loader))),
         )
         .await?;
     }
@@ -226,24 +327,28 @@ pub(super) async fn refill_iterators<S: ObjectStore + ?Sized>(
 /// A linear scan rather than a heap: an iterator is opened per run per family
 /// of one cluster, which is a handful, and the scan compares borrowed key
 /// slices while a heap would have to own them.
-pub(super) fn select_next_iterator(
-    iterators: &[SegmentRowIterator],
-    locality: LocalityGrouping,
-) -> Option<usize> {
+pub fn select_next_iterator<Row, Segment, SortKey, Locality>(
+    iterators: &[SegmentRowIterator<Row, Segment, SortKey>],
+    mut locality: Locality,
+) -> Option<usize>
+where
+    SortKey: Ord,
+    Locality: for<'a> FnMut(&SortKey, &'a str) -> &'a str,
+{
     let mut best: Option<(usize, &str, &str)> = None;
     for (position, iterator) in iterators.iter().enumerate() {
         let Some((row_key, _)) = iterator.head() else {
             continue;
         };
-        let candidate = locality_of(iterator.family, row_key, locality);
+        let candidate = locality(iterator.sort_key(), row_key);
         let take = match best {
             // Locality first so a group's rows arrive together whatever
             // family they come from, then family, then key: within one
             // family that is row-key order, which is the order a segment
             // builder demands.
             Some((best_position, best_locality, best_key)) => {
-                (candidate, iterators[position].family, row_key)
-                    < (best_locality, iterators[best_position].family, best_key)
+                (candidate, iterators[position].sort_key(), row_key)
+                    < (best_locality, iterators[best_position].sort_key(), best_key)
             }
             None => true,
         };
