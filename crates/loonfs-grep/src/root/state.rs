@@ -291,6 +291,11 @@ impl GrepManifestState {
 
         let mut by_id = BTreeMap::new();
         for segment in &self.segments {
+            if segment.row_count == 0 {
+                return Err(GrepManifestStateError::EmptySegment {
+                    segment_id: segment.segment_id.clone(),
+                });
+            }
             if segment.min_row_key > segment.max_row_key {
                 return Err(GrepManifestStateError::InvalidSegmentRange {
                     segment_id: segment.segment_id.clone(),

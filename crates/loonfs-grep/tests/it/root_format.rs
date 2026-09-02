@@ -251,3 +251,25 @@ fn constructor_rejects_reorganization_segment_mismatch() {
         Err(GrepManifestStateError::MissingReorganizeSnapshotSegment { .. })
     ));
 }
+
+#[test]
+fn constructor_rejects_a_segment_with_no_rows() {
+    let mut segment = segment_ref(1, 1, 0, 0);
+    segment.row_count = 0;
+
+    assert!(matches!(
+        GrepManifestState::new(
+            namespace_id("docs"),
+            GrepIndexStatus::Active {
+                built_through_seq: ChangeSeq(7),
+                next_event_index: 0,
+            },
+            GrepIndexState {
+                reorganize: None,
+                next_run_no: RunNo(2),
+            },
+            vec![segment]
+        ),
+        Err(GrepManifestStateError::EmptySegment { .. })
+    ));
+}

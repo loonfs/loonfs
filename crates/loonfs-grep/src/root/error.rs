@@ -16,6 +16,8 @@ pub enum GrepManifestStateError {
     DuplicateSegmentId { segment_id: IndexSegmentId },
     #[error("grep segment `{segment_id}` has a minimum row key after its maximum")]
     InvalidSegmentRange { segment_id: IndexSegmentId },
+    #[error("grep segment `{segment_id}` carries no rows")]
+    EmptySegment { segment_id: IndexSegmentId },
     #[error(
         "grep segment `{segment_id}` uses run `{run_no}` but the next run number is \
          `{next_run_no}`"
