@@ -5,7 +5,6 @@
 
 use crate::common::{mutation_context, namespace_engine, read_context};
 use bytes::Bytes;
-use loonfs_api::v0::BeginUploadRequest;
 use loonfs_api::AbsolutePath;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
@@ -13,7 +12,7 @@ use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
 use loonfs_core::{gc_namespace, GcConfig};
-use loonfs_core::{BootstrapOptions, MutationContext};
+use loonfs_core::{BootstrapOptions, MutationContext, ResolvedUploadCompletion};
 use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -91,16 +90,20 @@ async fn reads_commits_and_change_feed_never_list() {
         .expect("write junk");
 
     let baseline = store.count(OperationClass::List);
-    let staged = engine
-        .begin_upload(BeginUploadRequest::ServiceProxied {})
-        .await
-        .expect("begin upload");
+    let staged = engine.begin_upload().await.expect("begin upload");
     engine
         .upload_content(staged.upload_id(), b"uploaded\n")
         .await
         .expect("upload content");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
     engine
-        .complete_upload(staged.upload_id())
+        .complete_upload(
+            &catalog,
+            staged.upload_id(),
+            ResolvedUploadCompletion::KnownContent,
+        )
         .await
         .expect("complete upload");
     put_file(
@@ -189,16 +192,20 @@ async fn maintenance_never_touches_the_wal_head() {
     gc_namespace(&store, &namespace_id, &GcConfig::default(), &context)
         .await
         .expect("gc pass");
-    let staged = engine
-        .begin_upload(BeginUploadRequest::ServiceProxied {})
-        .await
-        .expect("second upload");
+    let staged = engine.begin_upload().await.expect("second upload");
     engine
         .upload_content(staged.upload_id(), b"more\n")
         .await
         .expect("second upload content");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
     engine
-        .complete_upload(staged.upload_id())
+        .complete_upload(
+            &catalog,
+            staged.upload_id(),
+            ResolvedUploadCompletion::KnownContent,
+        )
         .await
         .expect("second upload complete");
 

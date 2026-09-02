@@ -7,14 +7,13 @@
 use loonfs::publish::{CommitCandidate, CommitRequest};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    AdvanceRetentionResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq, Checkpoint,
-    ChecksumAlgorithm, CommitResponse, ContentRef, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode,
-    FileBytes, FsAdmin, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions,
-    ListChangesResponse, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceResponse,
-    MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PathEntry,
-    PutFileOptions, RuntimeError, SharedObjectStore, UploadContentResponse, UploadId,
-    UploadSession,
+    AdvanceRetentionResponse, BeginUploadResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm,
+    CommitResponse, ContentRef, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, FsAdmin,
+    FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, ListChangesResponse, MaintenancePlan,
+    MaintenanceStepResponse, MetadataMaintenanceResponse, MoveOptions, NamespaceDiagnostics,
+    NamespaceId, PageRequest, PaginationPolicy, PathEntry, PutFileOptions, RuntimeError,
+    SharedObjectStore, UploadContentResponse, UploadId, UploadSession,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -281,7 +280,7 @@ impl TestRuntime {
         content: loonfs::UploadContentClaim,
     ) -> loonfs::Result<UploadSession> {
         self.writer
-            .complete_upload_prepared_for_mode(namespace_id, upload_id, |_| {
+            .complete_upload_for_mode(namespace_id, upload_id, |_| {
                 Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut { content })
             })
             .await
@@ -548,10 +547,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<BeginUploadResponse> {
-        block_on(
-            self.writer
-                .create_upload(namespace_id, BeginUploadRequest::ServiceProxied {}),
-        )
+        block_on(self.writer.create_upload(namespace_id))
     }
 
     fn upload_content_blocking(

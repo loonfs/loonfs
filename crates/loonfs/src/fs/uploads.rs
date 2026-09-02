@@ -17,8 +17,8 @@ use crate::ByteStream;
 use crate::FsWriter;
 use crate::Result;
 use crate::{
-    BeginUploadRequest, BeginUploadResponse, ChecksumAlgorithm, MaintenanceJobId, NamespaceId,
-    UploadContentResponse, UploadMode, UploadSession,
+    BeginUploadResponse, ChecksumAlgorithm, MaintenanceJobId, NamespaceId, UploadContentResponse,
+    UploadMode, UploadSession,
 };
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::UploadPartChecksumClaim;
@@ -61,13 +61,9 @@ impl FsWriter {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_upload(
-        &self,
-        namespace_id: &NamespaceId,
-        request: BeginUploadRequest,
-    ) -> Result<BeginUploadResponse> {
+    pub async fn create_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let response = self.engine(namespace_id).begin_upload(request).await?;
+        let response = self.engine(namespace_id).begin_upload().await?;
         self.schedule_upload_session_reclamation(namespace_id);
         Ok(response)
     }
@@ -223,9 +219,6 @@ impl FsWriter {
     }
 
     /// Completes an upload session and returns proof for later publication.
-    ///
-    /// Service-proxied completion performs no content-blob I/O. Direct-put
-    /// completion performs one content-blob HEAD and no content-blob GET.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.complete_upload",
@@ -251,7 +244,7 @@ impl FsWriter {
             .await?;
         let completed = self
             .engine(namespace_id)
-            .complete_upload_prepared_with_catalog(&catalog, upload_id, completion)
+            .complete_upload(&catalog, upload_id, completion)
             .await?;
         self.schedule_completed_upload_reclamation(namespace_id);
         Ok(completed)
@@ -265,13 +258,13 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "complete_upload",
-            method = "complete_upload_prepared_for_mode",
+            method = "complete_upload_for_mode",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn complete_upload_prepared_for_mode<F>(
+    pub async fn complete_upload_for_mode<F>(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -288,7 +281,7 @@ impl FsWriter {
             .await?;
         let completed = self
             .engine(namespace_id)
-            .complete_upload_prepared_with_catalog_for_mode(&catalog, upload_id, resolve)
+            .complete_upload_for_mode(&catalog, upload_id, resolve)
             .await?;
         self.schedule_completed_upload_reclamation(namespace_id);
         Ok(completed)

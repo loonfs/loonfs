@@ -20,7 +20,7 @@ use loonfs_core::content::{
 };
 use loonfs_core::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
-use loonfs_core::{Error as CoreError, ErrorCode};
+use loonfs_core::{Error as CoreError, ErrorCode, ResolvedUploadCompletion};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -221,16 +221,20 @@ async fn valid_content_admission_skips_durable_content_validation() {
     // A receipt exists only for a session the store already says completed,
     // so the token this test admits has to come from a real upload.
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine
-        .begin_upload(loonfs_api::v0::BeginUploadRequest::ServiceProxied {})
-        .await
-        .expect("begin upload");
+    let upload = engine.begin_upload().await.expect("begin upload");
     engine
         .upload_content(upload.upload_id(), b"admitted")
         .await
         .expect("stage content");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
     let completed = engine
-        .complete_upload_prepared(upload.upload_id())
+        .complete_upload(
+            &catalog,
+            upload.upload_id(),
+            ResolvedUploadCompletion::KnownContent,
+        )
         .await
         .expect("complete upload");
     let content_ref = completed
@@ -247,9 +251,6 @@ async fn valid_content_admission_skips_durable_content_validation() {
         context.now_ms,
     )
     .expect("mint token");
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
-        .await
-        .expect("load namespace catalog");
     let prepared = verify_content_token(
         "test-content-token-secret",
         &catalog,
@@ -291,16 +292,20 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         .await
         .expect("bootstrap");
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine
-        .begin_upload(loonfs_api::v0::BeginUploadRequest::ServiceProxied {})
-        .await
-        .expect("begin upload");
+    let upload = engine.begin_upload().await.expect("begin upload");
     engine
         .upload_content(upload.upload_id(), b"deadline")
         .await
         .expect("stage content");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
     let completed = engine
-        .complete_upload_prepared(upload.upload_id())
+        .complete_upload(
+            &catalog,
+            upload.upload_id(),
+            ResolvedUploadCompletion::KnownContent,
+        )
         .await
         .expect("complete upload");
     let completed_at_ms = match &completed.response.status {
@@ -1052,22 +1057,22 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .await
         .expect("bootstrap");
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine
-        .begin_upload(loonfs_api::v0::BeginUploadRequest::ServiceProxied {})
-        .await
-        .expect("begin upload");
+    let upload = engine.begin_upload().await.expect("begin upload");
     let staged = engine
         .upload_content(upload.upload_id(), b"re-minted")
         .await
         .expect("stage content");
-    let completed = engine
-        .complete_upload_prepared(upload.upload_id())
-        .await
-        .expect("complete upload");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("load namespace catalog");
-
+    let completed = engine
+        .complete_upload(
+            &catalog,
+            upload.upload_id(),
+            ResolvedUploadCompletion::KnownContent,
+        )
+        .await
+        .expect("complete upload");
     // The receipt the completion handed back, past its life.
     let first = mint_content_token(
         "test-content-token-secret",

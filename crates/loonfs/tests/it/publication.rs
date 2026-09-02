@@ -6,8 +6,8 @@
 use futures::future::BoxFuture;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
-    BeginUploadRequest, CommitId, CommitResponse, CreateNamespaceOptions, DestinationBehavior,
-    FsWriter, NamespaceId, PutFileOptions, SharedObjectStore,
+    CommitId, CommitResponse, CreateNamespaceOptions, DestinationBehavior, FsWriter, NamespaceId,
+    PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
@@ -64,7 +64,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     // callers start being cancelled, the only work still in flight is
     // publication, the thing under test.
     let upload = writer
-        .create_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace_id)
         .await
         .expect("begin upload");
     let staged = writer

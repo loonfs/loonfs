@@ -14,6 +14,7 @@ use loonfs_api::{
 use loonfs_api::{Checksum, ChecksumAlgorithm};
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
+    ResolvedUploadCompletion,
 };
 use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -31,7 +32,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::BeginUploadResponse, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .begin_upload(loonfs_api::v0::BeginUploadRequest::ServiceProxied {})
+        .begin_upload()
         .await
 }
 
@@ -64,9 +65,11 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id).await?;
     namespace_engine(store, namespace_id, context)
-        .complete_upload(upload_id)
+        .complete_upload(&catalog, upload_id, ResolvedUploadCompletion::KnownContent)
         .await
+        .map(|completed| completed.response)
 }
 
 fn replay_read_guard_store(root: impl AsRef<Path>, namespace: &str) -> FailStore<LocalFsStore> {
@@ -562,9 +565,16 @@ mod direct_multipart {
         request: &CompleteMultipartUploadRequest,
         context: &MutationContext,
     ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
+        let catalog =
+            loonfs_core::control::load_namespace_catalog_entry(store, namespace_id).await?;
         namespace_engine(store, namespace_id, context)
-            .complete_multipart_upload(upload_id, request)
+            .complete_upload(
+                &catalog,
+                upload_id,
+                ResolvedUploadCompletion::Multipart(request.clone()),
+            )
             .await
+            .map(|completed| completed.response)
     }
 
     #[tokio::test]

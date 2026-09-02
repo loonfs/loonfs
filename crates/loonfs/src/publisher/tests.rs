@@ -11,7 +11,7 @@ use crate::maintenance_runner::MaintenanceRunner;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
 use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
 use crate::{
-    BeginUploadRequest, CreateNamespaceOptions, ErrorCode, FsAdmin, RuntimeCacheConfig,
+    CreateNamespaceOptions, ErrorCode, FsAdmin, RuntimeCacheConfig,
     SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
 };
 use async_trait::async_trait;
@@ -1644,7 +1644,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         .await
         .expect("bootstrap");
     let upload = writer
-        .create_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace_id)
         .await
         .expect("begin upload");
     let staged = writer

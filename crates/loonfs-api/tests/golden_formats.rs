@@ -1211,21 +1211,29 @@ fn direct_put_sessions_reject_the_pre_completion_claim_record() {
 }
 
 #[test]
-fn completed_direct_put_sessions_require_the_session_algorithm() {
-    let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session.v1.json",
-        ControlObjectKind::UploadSession,
-        |payload| {
-            payload["mode"] = serde_json::json!({
-                "kind": "direct_put",
-                "checksum_algorithm": "crc32c"
-            });
-        },
-    );
-    assert!(
-        message.contains("requires `crc32c` but its completed content uses `sha256`"),
-        "unexpected refusal: {message}"
-    );
+fn completed_direct_sessions_require_the_session_algorithm() {
+    for mode in [
+        serde_json::json!({
+            "kind": "direct_put",
+            "checksum_algorithm": "crc32c"
+        }),
+        serde_json::json!({
+            "kind": "direct_multipart",
+            "provider_upload_id": "provider-upload",
+            "part_size_bytes": 8_388_608,
+            "checksum_algorithm": "crc32c"
+        }),
+    ] {
+        let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+            "control_upload_session.v1.json",
+            ControlObjectKind::UploadSession,
+            |payload| payload["mode"] = mode,
+        );
+        assert!(
+            message.contains("requires `crc32c` but its completed content uses `sha256`"),
+            "unexpected refusal: {message}"
+        );
+    }
 }
 
 #[test]

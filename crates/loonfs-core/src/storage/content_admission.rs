@@ -47,15 +47,16 @@ impl CompletedUploadReceipt {
     }
 }
 
+/// Opaque evidence that a content reference was prepared for publication.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ContentAdmission {
+pub struct PreparedContent {
     namespace_id: NamespaceId,
     content_store_id: ContentStoreId,
     content_ref: ContentRef,
     expires_at_ms: u64,
 }
 
-impl ContentAdmission {
+impl PreparedContent {
     pub(crate) fn content_id(&self) -> &ContentId {
         &self.content_ref.content_id
     }
@@ -102,28 +103,19 @@ impl ContentAdmission {
             && self.content_ref == *content_ref
             && now_ms <= self.expires_at_ms
     }
-}
-
-/// Opaque evidence that a content reference was prepared for publication.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedContent {
-    admission: ContentAdmission,
-}
-
-impl PreparedContent {
-    pub(crate) fn from_admission(admission: ContentAdmission) -> Self {
-        Self { admission }
-    }
 
     /// Returns the prepared content reference.
     pub fn content_ref(&self) -> &ContentRef {
-        &self.admission.content_ref
+        &self.content_ref
     }
 
-    pub(crate) fn into_admission(self) -> ContentAdmission {
-        self.admission
+    #[cfg(test)]
+    pub(crate) fn from_admission(admission: Self) -> Self {
+        admission
     }
 }
+
+pub(crate) type ContentAdmission = PreparedContent;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ContentTokenPayload {
@@ -230,13 +222,12 @@ pub fn verify_content_token(
         return Err(ContentTokenError::Expired);
     }
 
-    let admission = ContentAdmission::for_completed_upload(
+    Ok(PreparedContent::for_completed_upload(
         payload.namespace_id,
         payload.content_store_id,
         payload.content_ref,
         payload.expires_at_ms,
-    );
-    Ok(PreparedContent::from_admission(admission))
+    ))
 }
 
 fn base64_url(bytes: &[u8]) -> String {
@@ -305,7 +296,7 @@ mod tests {
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
 
         assert_eq!(prepared.content_ref(), &content);
-        assert!(prepared.into_admission().admits(
+        assert!(prepared.admits(
             catalog.namespace_id(),
             catalog.content_store_id(),
             &content,
@@ -325,9 +316,8 @@ mod tests {
         )
         .expect("mint");
         let catalog = catalog_entry(namespace, CONTENT_STORE);
-        let admission = verify_content_token("secret", &catalog, &token, 1_000)
-            .expect("verify token")
-            .into_admission();
+        let admission =
+            verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
 
         assert!(!admission.admits(
             &other_namespace,
@@ -338,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn public_wrapper_does_not_change_the_signed_payload_encoding() {
+    fn prepared_content_does_not_change_the_signed_payload_encoding() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
@@ -381,14 +371,13 @@ mod tests {
         )
         .expect("verify token before expiry");
 
-        let admission = prepared.into_admission();
-        assert!(admission.admits(
+        assert!(prepared.admits(
             catalog.namespace_id(),
             catalog.content_store_id(),
             &content,
             issued_at_ms + CONTENT_RECEIPT_TTL_MS,
         ));
-        assert!(!admission.admits(
+        assert!(!prepared.admits(
             catalog.namespace_id(),
             catalog.content_store_id(),
             &content,

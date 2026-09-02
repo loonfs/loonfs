@@ -6,7 +6,7 @@
 // The drain test injects a step panic to assert it is surfaced.
 
 use super::*;
-use crate::{BeginUploadRequest, CreateNamespaceOptions, FsWriter, SharedObjectStore};
+use crate::{CreateNamespaceOptions, FsWriter, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, nonzero_usize};
 use std::collections::VecDeque;
@@ -884,7 +884,7 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
         .expect("create namespace");
 
     let begun = writer
-        .create_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace_id)
         .await
         .expect("begin upload");
     assert_eq!(
