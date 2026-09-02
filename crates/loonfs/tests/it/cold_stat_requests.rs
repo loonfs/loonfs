@@ -158,12 +158,16 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
     let direntry_delta_runs: BTreeSet<_> = manifest
         .payload
-        .segments
+        .runs
         .iter()
-        .filter(|descriptor| {
-            descriptor.level == 0 && descriptor.family == MetadataRowFamily::DirentryBinds
+        .filter(|run| {
+            run.tier == loonfs_api::wire::manifest::RunTier::Delta
+                && run
+                    .segments
+                    .iter()
+                    .any(|descriptor| descriptor.family == MetadataRowFamily::DirentryBinds)
         })
-        .map(|descriptor| descriptor.run_seq)
+        .map(|run| run.run_seq)
         .collect();
     assert!(
         direntry_delta_runs.len() >= RUNS,
@@ -173,16 +177,18 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     assert!(
         manifest
             .payload
-            .segments
+            .runs
             .iter()
-            .filter(|descriptor| descriptor.level == 0)
+            .filter(|run| run.tier == loonfs_api::wire::manifest::RunTier::Delta)
+            .flat_map(|run| &run.segments)
             .all(|descriptor| descriptor.filter_inline.is_some()),
         "every delta segment should carry an inline filter"
     );
     let filter_offsets: BTreeSet<(String, u64)> = manifest
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .map(|descriptor| {
             (
                 metadata_segment_object_key(descriptor),
@@ -192,8 +198,9 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .collect();
     let segment_keys: BTreeSet<String> = manifest
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .map(metadata_segment_object_key)
         .collect();
 

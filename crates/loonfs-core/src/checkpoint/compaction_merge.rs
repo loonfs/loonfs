@@ -8,6 +8,7 @@ use super::validate::validate_manifest_row_seq_range;
 use crate::error::Result;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
+use loonfs_api::ChangeSeq;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::collections::VecDeque;
@@ -72,6 +73,7 @@ pub(super) fn locality_of(
 /// blocks not yet consumed.
 pub(super) struct SegmentRowIterator {
     pub(super) family: MetadataRowFamily,
+    max_seq: ChangeSeq,
     segments: Vec<MetadataSegmentRef>,
     next_segment: usize,
     index: Option<Arc<Vec<SegmentIndexEntry>>>,
@@ -81,10 +83,15 @@ pub(super) struct SegmentRowIterator {
 }
 
 impl SegmentRowIterator {
-    pub(super) fn new(family: MetadataRowFamily, mut segments: Vec<MetadataSegmentRef>) -> Self {
+    pub(super) fn new(
+        family: MetadataRowFamily,
+        max_seq: ChangeSeq,
+        mut segments: Vec<MetadataSegmentRef>,
+    ) -> Self {
         segments.sort_by_key(|descriptor| descriptor.segment_index);
         Self {
             family,
+            max_seq,
             segments,
             next_segment: 0,
             index: None,
@@ -179,7 +186,7 @@ impl SegmentRowIterator {
             validate_manifest_row_seq_range(
                 &metadata_segment_object_key(descriptor),
                 blocks.iter().flat_map(|block| block.rows.iter()),
-                descriptor.run_seq,
+                self.max_seq,
             )
             .map_err(manifest_load_failure)?;
             self.row = 0;

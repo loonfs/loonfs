@@ -1891,22 +1891,19 @@ A descriptor does not store an object key. Readers derive the key from `owner_na
 
 A **run** is the set of segments one producer wrote together, and `run_no` is
 its identity. The manifest allocates run numbers from `next_run_no`: a
-producer takes that value, stamps it on every segment it writes, and publishes
+producer takes that value, stores it on the run, and publishes
 a manifest whose `next_run_no` is one higher. A WAL flush takes one number for
 the delta run it writes across every family. A rebuild takes one number for
 the run it writes for one family group. So `run_no` and `family` together name
 one family's segment list inside one run, and `segment_index` numbers that
 list from zero, once each, in the order the segments were written.
 
-A descriptor carries two more facts about its run, neither of which is its
-identity. `run_seq` is the namespace sequence the run materialized through.
-`level` is the tier the run sits at, and it has two values. Level `0` is a
-delta run: a WAL flush writes one, and so does a merge that starts above its
-family group's oldest run. Level `1` is a base run: a rebuild that starts at
-its group's oldest run writes one, and it replaces the base run it read, so a
-group holds at most one. Every segment carrying one `run_no` carries the same
-`run_seq` and the same `level`, and two runs never share a number. Two runs
-may share a sequence and a level, because a rebuild writes its output beside
+A run also carries `run_seq`, the namespace sequence it materialized through,
+and `tier`, which is either `delta` or `base`. A WAL flush writes a delta run,
+and so does a merge that starts above its family group's oldest run. A rebuild
+that starts at its group's oldest run writes a base run, and it replaces the
+base run it read, so a group holds at most one. Two runs never share a number.
+Two runs may share a sequence and a tier, because a rebuild writes its output beside
 the runs it did not read; those runs hold different families, so no read ever
 compares them.
 
@@ -1916,8 +1913,8 @@ never touch, stated by `min_row_key` and `max_row_key` and ordered by
 `segment_index`.
 
 Manifest loading rejects a manifest that breaks any of this: a `run_no` at or
-above the manifest's `next_run_no`, one `run_no` carrying two sequences or two
-levels, a family's `segment_index` values inside one run that are not
+above the manifest's `next_run_no`, a duplicate `run_no`, a family's
+`segment_index` values inside one run that are not
 zero-based and dense, and key ranges that descend or overlap.
 
 Every metadata row key identifies exactly one row, so a read merges runs by key and never has to choose between two rows for one key.
@@ -2189,7 +2186,7 @@ step's budget, and then it merges the delta runs above it; it never steps
 over a delta run.
 
 **A rebuild's output is a base run if and only if its window starts at the
-group's oldest run.** The level a run carries and the rules that produced it
+group's oldest run.** The tier a run carries and the rules that produced it
 say the same thing: a base run is one some rebuild was allowed to drop rows
 from, a delta run is one nothing has dropped from yet. So a family group
 holds at most one base run — a bottom-anchored rebuild always contains the
@@ -2302,7 +2299,7 @@ v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
 `metadata/segments/`, `metadata/compactions/`, `checkpoints/`, and
 `wal/segments/` collections. A live manifest roots every object key its
-`segments` list names, wherever that key sits. The pass also
+`runs` list names, wherever that key sits. The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
 halves are split at the completed line and described in rule 11.
 Core GC never recognizes, lists specifically, or deletes any object below a

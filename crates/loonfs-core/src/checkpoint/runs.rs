@@ -1,10 +1,10 @@
-//! The LSM run model: how a manifest's flat `segments` list groups
-//! into ordered runs and row families, plus the layout policy constants.
+//! The LSM run model: ordered manifest runs, row families, and layout policy.
 
-use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef, NamespaceManifestPayload};
+use loonfs_api::wire::manifest::{
+    MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
+};
 use loonfs_api::{ChangeSeq, RunNo};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 pub(super) use loonfs_api::wire::sst_blocks::{
@@ -15,8 +15,6 @@ pub(super) use loonfs_api::wire::sst_blocks::{
 };
 
 pub(super) const MAX_MAINTENANCE_SEGMENT_IO: usize = 8;
-pub(super) const CHECKPOINT_DELTA_RUN_LEVEL: u32 = 0;
-pub(super) const CHECKPOINT_BASE_RUN_LEVEL: u32 = 1;
 
 pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 10] = [
     MetadataRowFamily::Inodes,
@@ -107,7 +105,7 @@ pub(super) struct MetadataFamilySegments {
 pub(super) struct MetadataRunManifest {
     pub(super) run_no: RunNo,
     pub(super) run_seq: ChangeSeq,
-    pub(super) level: u32,
+    pub(super) tier: RunTier,
     pub(super) segments: Vec<MetadataFamilySegments>,
 }
 
@@ -144,26 +142,31 @@ impl Default for MetadataLsmPolicy {
 }
 
 pub(super) fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {
-    runs_from_segments(payload)
-        .into_iter()
-        .filter(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
+    payload
+        .runs
+        .iter()
+        .filter(|run| run.tier == RunTier::Delta)
         .count()
 }
 
 /// Orders runs for reorganization planning: delta runs before base runs,
 /// later sequences before earlier ones, and later run numbers first.
 ///
-/// Two runs may carry the same sequence and level, because a reorganization
+/// Two runs may carry the same sequence and tier, because a reorganization
 /// writes its output beside the runs it did not consume. They hold different
 /// families in that case, and the later-allocated run number keeps the order
 /// total.
 pub(super) fn runs_in_reorganization_order(
     payload: &NamespaceManifestPayload,
 ) -> Vec<MetadataRunManifest> {
-    let mut runs = runs_from_segments(payload);
+    let mut runs = payload
+        .runs
+        .iter()
+        .map(metadata_run_manifest)
+        .collect::<Vec<_>>();
     runs.sort_by(|left, right| {
-        left.level
-            .cmp(&right.level)
+        left.tier
+            .cmp(&right.tier)
             .then(right.run_seq.cmp(&left.run_seq))
             .then(right.run_no.cmp(&left.run_no))
     });
@@ -175,68 +178,50 @@ pub(super) fn runs_in_reorganization_order(
 pub(super) fn runs_in_materialization_order(
     payload: &NamespaceManifestPayload,
 ) -> Vec<MetadataRunManifest> {
-    let mut runs = runs_from_segments(payload);
+    let mut runs = payload
+        .runs
+        .iter()
+        .map(metadata_run_manifest)
+        .collect::<Vec<_>>();
     runs.sort_by(|left, right| {
         left.run_seq
             .cmp(&right.run_seq)
-            .then(right.level.cmp(&left.level))
+            .then(right.tier.cmp(&left.tier))
             .then(left.run_no.cmp(&right.run_no))
     });
     runs
 }
 
-/// Groups a manifest's flat descriptor list into runs by run number.
-///
-/// Manifest loading has already checked that one run number carries one
-/// sequence and one level, so reading both from any of the run's descriptors
-/// is safe here.
-pub(super) fn runs_from_segments(payload: &NamespaceManifestPayload) -> Vec<MetadataRunManifest> {
-    let mut runs: BTreeMap<RunNo, GroupedRun> = BTreeMap::new();
-    for descriptor in &payload.segments {
-        runs.entry(descriptor.run_no)
-            .or_insert_with(|| GroupedRun::new(descriptor))
-            .segments_by_family
-            .entry(descriptor.family)
-            .or_default()
-            .push(descriptor.clone());
-    }
-    runs.into_iter()
-        .map(|(run_no, grouped)| MetadataRunManifest {
-            run_no,
-            run_seq: grouped.run_seq,
-            level: grouped.level,
-            segments: CHECKPOINT_ROW_FAMILIES
-                .into_iter()
-                .map(|family| {
-                    let mut segments = grouped
-                        .segments_by_family
-                        .get(&family)
-                        .cloned()
-                        .unwrap_or_default();
-                    segments.sort_by_key(|descriptor| descriptor.segment_index);
-                    MetadataFamilySegments { family, segments }
-                })
-                .collect(),
-        })
-        .collect()
+/// Orders candidate runs for folding: base before delta, then oldest first.
+pub(super) fn runs_in_fold_order(mut runs: Vec<&MetadataRunManifest>) -> Vec<&MetadataRunManifest> {
+    runs.sort_by(|left, right| {
+        right
+            .tier
+            .cmp(&left.tier)
+            .then(left.run_seq.cmp(&right.run_seq))
+            .then(left.run_no.cmp(&right.run_no))
+    });
+    runs
 }
 
-/// One run's descriptors while a manifest's flat list is being grouped.
-struct GroupedRun {
-    run_seq: ChangeSeq,
-    level: u32,
-    segments_by_family: BTreeMap<MetadataRowFamily, Vec<MetadataSegmentRef>>,
-}
-
-impl GroupedRun {
-    /// Takes the run's sequence and level from the first descriptor that
-    /// named it. Every other descriptor of the run states the same pair.
-    fn new(descriptor: &MetadataSegmentRef) -> Self {
-        Self {
-            run_seq: descriptor.run_seq,
-            level: descriptor.level,
-            segments_by_family: BTreeMap::new(),
-        }
+fn metadata_run_manifest(run: &MetadataRunRef) -> MetadataRunManifest {
+    MetadataRunManifest {
+        run_no: run.run_no,
+        run_seq: run.run_seq,
+        tier: run.tier,
+        segments: CHECKPOINT_ROW_FAMILIES
+            .into_iter()
+            .map(|family| {
+                let mut segments = run
+                    .segments
+                    .iter()
+                    .filter(|descriptor| descriptor.family == family)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                segments.sort_by_key(|descriptor| descriptor.segment_index);
+                MetadataFamilySegments { family, segments }
+            })
+            .collect(),
     }
 }
 

@@ -198,8 +198,8 @@ mod tests {
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
-        ChangeSeq, CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-        MetadataSegmentId, NamespaceId, RunNo, UploadId, WalSegmentId,
+        CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
+        MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -393,9 +393,6 @@ mod tests {
             owner_namespace_id: namespace_id(),
             segment_id: metadata_segment_id(),
             compaction_job_id,
-            run_no: RunNo(0),
-            run_seq: ChangeSeq(1),
-            level: 0,
             family: MetadataRowFamily::Inodes,
             segment_index: 0,
             row_count: 0,

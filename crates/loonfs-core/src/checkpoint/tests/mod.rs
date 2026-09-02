@@ -21,7 +21,6 @@ use super::compaction_retention::RetentionRule;
 use super::create::load_checkpoint_projection_metadata_state;
 use super::error::ManifestLoadError;
 use super::frozen_floor::{bind_survives_frozen_floor, unbindings_at_or_below_floor};
-use super::load::load_verified_manifest_segments_with_cache;
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
     load_manifest_metadata_state_for_inspection_from_manifest, load_verified_manifest_segments,
@@ -31,10 +30,9 @@ use super::record::load_checkpoint_record;
 use super::retention::advance_retention_floor;
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
-    flatten_manifest_segments, runs_from_segments, runs_in_reorganization_order,
+    flatten_manifest_segments, runs_in_materialization_order, runs_in_reorganization_order,
     MetadataFamilyGroup, MetadataFamilySegments, MetadataLsmPolicy, MetadataRunManifest,
-    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_DELTA_RUN_LEVEL, CHECKPOINT_ROW_FAMILIES,
-    DEFAULT_MAX_CHECKPOINT_DELTA_RUNS, REORGANIZE_FAMILY_GROUPS,
+    CHECKPOINT_ROW_FAMILIES, DEFAULT_MAX_CHECKPOINT_DELTA_RUNS, REORGANIZE_FAMILY_GROUPS,
 };
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
@@ -72,8 +70,8 @@ use futures::stream::BoxStream;
 use loonfs_api::wire::control::{HeadState, ManifestRef, MetadataRootState};
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataRow,
-    MetadataRowFamily as ApiMetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
-    NamespaceManifestPayload,
+    MetadataRowFamily as ApiMetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
+    NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
 };
 use loonfs_api::wire::sst_blocks::{
     decode_data_block, string_prefix_upper_bound, BlockHandle, DecodedDataBlock,
@@ -461,13 +459,14 @@ pub(crate) async fn staged_keys_of_the_current_manifest<S: ObjectStore + ?Sized>
     let staging_prefix = loonfs_objectstore::keys::metadata_compaction_prefix(namespace_id);
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
     let staged: BTreeSet<String> =
-        load_verified_manifest_segments(store, namespace_id, &manifest_object_id)
+        load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
             .await
             .expect("load the published manifest")
             .manifest()
             .payload
-            .segments
+            .runs
             .iter()
+            .flat_map(|run| &run.segments)
             .map(metadata_segment_object_key)
             .filter(|key| key.starts_with(&staging_prefix))
             .collect();
@@ -544,9 +543,9 @@ pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
 /// as many base runs as it has rebuilt groups. A caller asking about "the
 /// base" means all of them.
 fn base_tier(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataFamilySegments> {
-    let base_runs = runs_from_segments(&manifest.payload)
+    let base_runs = runs_in_reorganization_order(&manifest.payload)
         .into_iter()
-        .filter(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
+        .filter(|run| run.tier == RunTier::Base)
         .collect::<Vec<_>>();
     assert!(!base_runs.is_empty(), "base tier");
     CHECKPOINT_ROW_FAMILIES
@@ -564,9 +563,9 @@ fn base_tier(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataFamilySegments
 }
 
 fn delta_runs(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataRunManifest> {
-    runs_from_segments(&manifest.payload)
+    runs_in_materialization_order(&manifest.payload)
         .into_iter()
-        .filter(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
+        .filter(|run| run.tier == RunTier::Delta)
         .collect()
 }
 
@@ -575,7 +574,7 @@ fn group_runs(
     manifest: &NamespaceManifestEnvelope,
     group: &[ApiMetadataRowFamily],
 ) -> Vec<MetadataRunManifest> {
-    runs_from_segments(&manifest.payload)
+    runs_in_reorganization_order(&manifest.payload)
         .into_iter()
         .filter(|run| {
             run.segments.iter().any(|family_segments| {
@@ -597,7 +596,7 @@ fn group_base_runs(
 ) -> Vec<MetadataRunManifest> {
     group_runs(manifest, group)
         .into_iter()
-        .filter(|run| run.level != CHECKPOINT_DELTA_RUN_LEVEL)
+        .filter(|run| run.tier == RunTier::Base)
         .collect()
 }
 
@@ -608,7 +607,7 @@ fn group_delta_runs(
 ) -> Vec<MetadataRunManifest> {
     group_runs(manifest, group)
         .into_iter()
-        .filter(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
+        .filter(|run| run.tier == RunTier::Delta)
         .collect()
 }
 
@@ -833,69 +832,87 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         .as_ref()
         .map_or(RunNo(0), |previous| previous.manifest.payload.next_run_no);
     let mut next_run_no = next_run_no_after(run_no)?;
-    let (base_seq, segments) = match previous_manifest {
+    let (base_seq, runs) = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
             let run_segments = build_manifest_segments(
                 store,
                 namespace_id,
-                run_no,
-                head_seq,
-                CHECKPOINT_BASE_RUN_LEVEL,
                 metadata_state,
                 policy.max_rows_per_segment,
             )
             .await?;
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
-            (head_seq, flatten_manifest_segments(run_segments))
+            (
+                head_seq,
+                vec![MetadataRunRef {
+                    run_no,
+                    run_seq: head_seq,
+                    tier: RunTier::Base,
+                    segments: flatten_manifest_segments(run_segments),
+                }],
+            )
         }
         Some(previous)
             if delta_run_count(&previous.manifest.payload) < policy.max_delta_runs.get() =>
         {
-            let mut segments = previous.manifest.payload.segments.clone();
+            let mut runs = previous.manifest.payload.runs.clone();
             if previous.manifest.payload.head_seq < head_seq {
-                segments.extend(flatten_manifest_segments(
-                    build_manifest_delta_run_segments(
-                        store,
-                        namespace_id,
-                        run_no,
-                        head_seq,
-                        previous.manifest.payload.head_seq,
-                        metadata_state,
-                        policy.max_rows_per_segment,
-                    )
-                    .await?,
-                ));
+                runs.push(MetadataRunRef {
+                    run_no,
+                    run_seq: head_seq,
+                    tier: RunTier::Delta,
+                    segments: flatten_manifest_segments(
+                        build_manifest_delta_run_segments(
+                            store,
+                            namespace_id,
+                            previous.manifest.payload.head_seq,
+                            metadata_state,
+                            policy.max_rows_per_segment,
+                        )
+                        .await?,
+                    ),
+                });
             } else {
                 next_run_no = run_no;
             }
-            (previous.manifest.payload.base_seq, segments)
+            (previous.manifest.payload.base_seq, runs)
         }
         Some(_) => {
             let run_segments = build_manifest_segments(
                 store,
                 namespace_id,
-                run_no,
-                head_seq,
-                CHECKPOINT_BASE_RUN_LEVEL,
                 metadata_state,
                 policy.max_rows_per_segment,
             )
             .await?;
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
-            (head_seq, flatten_manifest_segments(run_segments))
+            (
+                head_seq,
+                vec![MetadataRunRef {
+                    run_no,
+                    run_seq: head_seq,
+                    tier: RunTier::Base,
+                    segments: flatten_manifest_segments(run_segments),
+                }],
+            )
         }
         _ => {
             let run_segments = build_manifest_segments(
                 store,
                 namespace_id,
-                run_no,
-                head_seq,
-                CHECKPOINT_BASE_RUN_LEVEL,
                 metadata_state,
                 policy.max_rows_per_segment,
             )
             .await?;
-            (head_seq, flatten_manifest_segments(run_segments))
+            (
+                head_seq,
+                vec![MetadataRunRef {
+                    run_no,
+                    run_seq: head_seq,
+                    tier: RunTier::Base,
+                    segments: flatten_manifest_segments(run_segments),
+                }],
+            )
         }
     };
 
@@ -910,7 +927,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         next_inode_id: head.next_inode_id,
         next_run_no,
         retention_floor_seq: source.retention_floor_seq,
-        segments,
+        runs,
     })
     .map_err(|err| {
         CoreError::Internal(format!(

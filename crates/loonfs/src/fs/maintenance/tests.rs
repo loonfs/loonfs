@@ -13,7 +13,7 @@ use crate::{
     MaintenancePlan, MetadataCompactionOutcome, MetadataMaintenanceOptions, MoveOptions,
     NamespaceId, PutFileOptions, ReorganizeStepOutcome, SharedObjectStore,
 };
-use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
+use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily, RunTier};
 use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -23,10 +23,6 @@ use std::collections::BTreeSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use tempfile::tempdir;
-
-/// The level a bottom-anchored merge writes its output at, which is where a
-/// rebuilt group's one run stands.
-const BASE_RUN_LEVEL: u32 = 1;
 
 /// The group these tests watch, because it is the one the planner selects:
 /// selection takes the group holding the most delta rows, and every write and
@@ -284,7 +280,7 @@ async fn budget_that_starves_the_bindings_base<S: ObjectStore + ?Sized>(
     let base_rows: u64 = manifest_runs(store, namespace_id)
         .await
         .into_iter()
-        .filter(|run| run.level == BASE_RUN_LEVEL && BINDINGS.families().contains(&run.family))
+        .filter(|run| run.tier == RunTier::Base && BINDINGS.families().contains(&run.family))
         .map(|run| run.rows)
         .sum();
     assert!(
@@ -299,7 +295,7 @@ async fn budget_that_starves_the_bindings_base<S: ObjectStore + ?Sized>(
 /// One family's descriptors in one run of the current manifest.
 struct ManifestRun {
     run_seq: u64,
-    level: u32,
+    tier: RunTier,
     family: MetadataRowFamily,
     rows: u64,
 }
@@ -320,13 +316,15 @@ async fn manifest_runs<S: ObjectStore + ?Sized>(
     decode_namespace_manifest_json(&bytes)
         .expect("decode the manifest")
         .payload
-        .segments
+        .runs
         .iter()
-        .map(|descriptor| ManifestRun {
-            run_seq: descriptor.run_seq.0,
-            level: descriptor.level,
-            family: descriptor.family,
-            rows: descriptor.row_count,
+        .flat_map(|run| {
+            run.segments.iter().map(|descriptor| ManifestRun {
+                run_seq: run.run_seq.0,
+                tier: run.tier,
+                family: descriptor.family,
+                rows: descriptor.row_count,
+            })
         })
         .collect()
 }
@@ -335,13 +333,13 @@ async fn manifest_runs<S: ObjectStore + ?Sized>(
 async fn bindings_runs<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> (BTreeSet<(u64, u32)>, u64) {
+) -> (BTreeSet<(u64, RunTier)>, u64) {
     manifest_runs(store, namespace_id)
         .await
         .into_iter()
         .filter(|run| BINDINGS.families().contains(&run.family))
         .fold((BTreeSet::new(), 0), |(mut runs, rows), run| {
-            runs.insert((run.run_seq, run.level));
+            runs.insert((run.run_seq, run.tier));
             (runs, rows + run.rows)
         })
 }
@@ -406,7 +404,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
     );
     assert_eq!(
         runs_after.iter().next().expect("the group holds one run").1,
-        BASE_RUN_LEVEL,
+        RunTier::Base,
         "and that run is the group's base"
     );
     assert!(

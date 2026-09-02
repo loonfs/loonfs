@@ -14,8 +14,8 @@ use super::super::runs::MetadataFamilyGroup;
 use super::super::scan::VerifiedMetadataSegments;
 use super::super::streaming_compaction::{
     finalize_metadata_compaction, merge_group_in_step, run_metadata_compaction,
-    snapshot_segment_keys, Finalization, MetadataCompactionCancellation, MetadataCompactionSpec,
-    MetadataMergeOutcome, MetadataMergeResult,
+    snapshot_segment_keys, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
+    MetadataCompactionSpec, MetadataMergeResult,
 };
 use super::*;
 use crate::limits::METADATA_COMPACTION_LEASE_EXPIRY_MS;
@@ -520,7 +520,7 @@ async fn policy_that_starves_the_group<S: ObjectStore + ?Sized>(
     let segments = load_current_manifest_segments(store, namespace_id).await;
     let base_rows: u64 = runs_in_reorganization_order(&segments.manifest().payload)
         .iter()
-        .filter(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
+        .filter(|run| run.tier == RunTier::Base)
         .flat_map(|run| run.segments.iter())
         .filter(|family_segments| group.contains(family_segments.family))
         .flat_map(|family_segments| &family_segments.segments)
@@ -556,7 +556,7 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> VerifiedMetadataSegments<'a, S> {
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
-    load_verified_manifest_segments(store, namespace_id, &manifest_object_id)
+    load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
         .await
         .expect("load the current manifest's segments")
 }
@@ -603,7 +603,7 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
     .await
     .expect("plan the group");
     match selection.plan {
-        Some(ReorganizationPlan::FullCompaction(spec)) => spec,
+        ReorganizationPlan::FullCompaction(spec) => spec,
         _ => panic!("a group no budget admits must plan as a streaming compaction"),
     }
 }
@@ -639,7 +639,7 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
-) -> MetadataMergeOutcome {
+) -> std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome> {
     let segments = load_current_manifest_segments(store, namespace_id).await;
     let timer = StdMonotonicTimer::default();
     let mut lease = test_lease(store, namespace_id, spec, &timer).await;
@@ -677,7 +677,7 @@ async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     snapshot_keys: &BTreeSet<String>,
     result: &MetadataMergeResult,
-) -> Finalization {
+) -> MetadataCompactionJobOutcome {
     finalize_streaming_compaction_under(
         store,
         namespace_id,
@@ -697,7 +697,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     snapshot_keys: &BTreeSet<String>,
     result: &MetadataMergeResult,
     cancellation: &MetadataCompactionCancellation,
-) -> Finalization {
+) -> MetadataCompactionJobOutcome {
     let timer = StdMonotonicTimer::default();
     let mut lease = test_lease(store, namespace_id, spec, &timer).await;
     finalize_metadata_compaction(
@@ -722,7 +722,7 @@ async fn publish_streaming_compaction<S: ObjectStore + ?Sized>(
     result: &MetadataMergeResult,
 ) -> ManifestNo {
     match finalize_streaming_compaction(store, namespace_id, spec, snapshot_keys, result).await {
-        Finalization::Published(manifest_no) => manifest_no,
+        MetadataCompactionJobOutcome::Published { manifest_no, .. } => manifest_no,
         other => panic!("no concurrent publisher exists in this test, got {other:?}"),
     }
 }
@@ -849,7 +849,7 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     .await
     .expect("plan under generous budgets");
     assert!(
-        matches!(generous.plan, Some(ReorganizationPlan::BoundedMerge(_))),
+        matches!(generous.plan, ReorganizationPlan::BoundedMerge(_)),
         "a window that fits is a bounded merge"
     );
     assert!(generous.group_bottom_over_budget.is_none());
@@ -867,7 +867,7 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     )
     .await
     .expect("plan under budgets nothing fits");
-    let Some(ReorganizationPlan::FullCompaction(spec)) = starved.plan else {
+    let ReorganizationPlan::FullCompaction(spec) = starved.plan else {
         panic!("a group no window fits must plan as a streaming compaction");
     };
     assert!(
@@ -1185,7 +1185,7 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
         &MetadataCompactionCancellation::default(),
     )
     .await;
-    let MetadataMergeOutcome::Completed(result) = outcome else {
+    let Ok(result) = outcome else {
         panic!("nothing cancelled this job");
     };
     assert!(
@@ -1246,7 +1246,7 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     let runs = snapshot_runs_for_group(segments.manifest(), group);
     assert_eq!(runs.len(), 1, "the job must leave the group in one run");
-    assert_eq!(runs[0].level, CHECKPOINT_BASE_RUN_LEVEL);
+    assert_eq!(runs[0].tier, RunTier::Base);
 
     // Teeth: the rebuilds must actually have dropped something, or the
     // comparison above is comparing two copies of the input.
@@ -1307,7 +1307,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
         .await
         .with_frozen_floor_seq(ChangeSeq(0));
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -1344,7 +1344,7 @@ async fn a_compaction_of_the_revisions_group_rewrites_every_row_it_reads() {
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -1403,11 +1403,11 @@ async fn rewrite_base_segment(
     let head_seq = manifest.payload.head_seq;
     let descriptor = manifest
         .payload
-        .segments
+        .runs
         .iter_mut()
-        .find(|descriptor| {
-            descriptor.level == CHECKPOINT_BASE_RUN_LEVEL && descriptor.family == family
-        })
+        .filter(|run| run.tier == RunTier::Base)
+        .flat_map(|run| &mut run.segments)
+        .find(|descriptor| descriptor.family == family)
         .expect("the folded base run holds this family");
     super::index_parity::rewrite_manifest_segment(
         store,
@@ -1473,7 +1473,7 @@ async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
     let keys_before = group_segment_keys(&store, &namespace_id, group).await;
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let Some(ReorganizationPlan::BoundedMerge(input)) = select_reorganization_input(
+    let ReorganizationPlan::BoundedMerge(input) = select_reorganization_input(
         &segments,
         group,
         fold_everything_policy(),
@@ -1486,8 +1486,6 @@ async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
     else {
         panic!("raised budgets must admit a bounded merge");
     };
-    // The number the manifest this window came from would allocate.
-    let run_no = segments.manifest().payload.next_run_no;
     drop(segments);
 
     let step_error = merge_group_in_step(
@@ -1495,7 +1493,6 @@ async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
         &namespace_id,
         group,
         &input.runs,
-        run_no,
         input.placement,
         floor_seq,
         fold_everything_policy(),
@@ -1793,11 +1790,17 @@ async fn install_synthetic_bindings_base(
     // run that already holds the group's other families.
     let base_run = manifest
         .payload
-        .segments
+        .runs
         .iter()
-        .find(|descriptor| descriptor.level == CHECKPOINT_BASE_RUN_LEVEL)
+        .find(|run| {
+            run.tier == RunTier::Base
+                && run
+                    .segments
+                    .iter()
+                    .any(|descriptor| MetadataFamilyGroup::Bindings.contains(descriptor.family))
+        })
         .expect("the namespace has been folded into a base run");
-    let (base_run_no, base_run_seq) = (base_run.run_no, base_run.run_seq);
+    let base_run_no = base_run.run_no;
     let mut rows_by_family = BTreeMap::from([
         (ApiMetadataRowFamily::DirentryBinds, binds.clone()),
         (ApiMetadataRowFamily::DirentryChildBinds, binds),
@@ -1806,9 +1809,6 @@ async fn install_synthetic_bindings_base(
     let run_segments = build_manifest_segments_from_rows(
         store,
         namespace_id,
-        base_run_no,
-        base_run_seq,
-        CHECKPOINT_BASE_RUN_LEVEL,
         |family| {
             let mut rows = rows_by_family.remove(&family).unwrap_or_default();
             rows.sort_by_key(|row| row.row_key_for_family(family));
@@ -1821,12 +1821,16 @@ async fn install_synthetic_bindings_base(
 
     // Only the base tier is replaced: the delta run above it is what gives a
     // bottom-anchored window something to fold.
-    manifest.payload.segments.retain(|descriptor| {
-        !MetadataFamilyGroup::Bindings.contains(descriptor.family)
-            || descriptor.level != CHECKPOINT_BASE_RUN_LEVEL
-    });
-    manifest
+    let base_run = manifest
         .payload
+        .runs
+        .iter_mut()
+        .find(|run| run.run_no == base_run_no)
+        .expect("the base run should still exist");
+    base_run
+        .segments
+        .retain(|descriptor| !MetadataFamilyGroup::Bindings.contains(descriptor.family));
+    base_run
         .segments
         .extend(flatten_manifest_segments(run_segments));
     // What the probe cache would have to hold to serve every probe without
@@ -1834,8 +1838,9 @@ async fn install_synthetic_bindings_base(
     let mut unbind_decoded_bytes = 0u64;
     for descriptor in manifest
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .filter(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryUnbinds)
     {
         let index = block_fetch::load_segment_index_for_reorganization(
@@ -1874,8 +1879,14 @@ async fn a_step_contained_merge_reads_its_window_once() {
     let group = MetadataFamilyGroup::Bindings;
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let descriptors: Vec<MetadataSegmentRef> = segments.manifest().payload.segments.clone();
-    let Some(ReorganizationPlan::BoundedMerge(input)) = select_reorganization_input(
+    let descriptors: Vec<MetadataSegmentRef> = segments
+        .manifest()
+        .payload
+        .runs
+        .iter()
+        .flat_map(|run| run.segments.iter().cloned())
+        .collect();
+    let ReorganizationPlan::BoundedMerge(input) = select_reorganization_input(
         &segments,
         group,
         fold_everything_policy(),
@@ -1888,8 +1899,6 @@ async fn a_step_contained_merge_reads_its_window_once() {
     else {
         panic!("raised budgets must admit a bounded merge");
     };
-    // The number the manifest this window came from would allocate.
-    let run_no = segments.manifest().payload.next_run_no;
     drop(segments);
     let window_segments = input
         .runs
@@ -1908,7 +1917,6 @@ async fn a_step_contained_merge_reads_its_window_once() {
         &namespace_id,
         group,
         &input.runs,
-        run_no,
         input.placement,
         floor_seq,
         fold_everything_policy(),
@@ -1943,7 +1951,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
     // The background job keeps the probe, because it has no budget capping
     // what it would otherwise collect.
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let MetadataMergeOutcome::Completed(job) = run_compaction(
+    let Ok(job) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2036,7 +2044,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     // The uninterrupted run, for the comparison.
     let spec = compaction_spec_for_group(&straight_store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&straight_store, &namespace_id, &spec).await;
-    let MetadataMergeOutcome::Completed(straight_result) = run_compaction(
+    let Ok(straight_result) = run_compaction(
         &straight_store,
         &namespace_id,
         &spec,
@@ -2088,7 +2096,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
             &cancellation,
         )
         .await;
-        if matches!(outcome, MetadataMergeOutcome::Cancelled) {
+        if matches!(outcome, Err(MetadataCompactionJobOutcome::Cancelled)) {
             cancelled_attempts += 1;
         }
         assert_eq!(
@@ -2116,7 +2124,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     let store = LocalFsStore::new(interrupted_dir.path()).expect("store");
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2162,8 +2170,9 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
         .await
         .manifest()
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .map(metadata_segment_object_key)
         .collect();
     assert!(
@@ -2239,7 +2248,7 @@ async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothin
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2288,7 +2297,7 @@ async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothin
     .await
     .expect("finalize the fenced job");
     assert!(
-        matches!(finalization, Finalization::Fenced),
+        matches!(finalization, MetadataCompactionJobOutcome::Fenced),
         "a fenced job reports it rather than publishing, got {finalization:?}"
     );
     assert_eq!(
@@ -2395,7 +2404,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::metadata_segment(),
     );
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2449,7 +2458,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     );
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let Some(ReorganizationPlan::BoundedMerge(input)) = select_reorganization_input(
+    let ReorganizationPlan::BoundedMerge(input) = select_reorganization_input(
         &segments,
         group,
         small_segment_policy(),
@@ -2462,15 +2471,12 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     else {
         panic!("raised budgets must admit a bounded merge");
     };
-    // The number the manifest this window came from would allocate.
-    let run_no = segments.manifest().payload.next_run_no;
     drop(segments);
     let merged = merge_group_in_step(
         &store,
         &namespace_id,
         group,
         &input.runs,
-        run_no,
         input.placement,
         floor_seq,
         small_segment_policy(),
@@ -2544,7 +2550,7 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2622,7 +2628,7 @@ async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
 
         let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
         let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-        let MetadataMergeOutcome::Completed(result) = run_compaction(
+        let Ok(result) = run_compaction(
             &store,
             &namespace_id,
             &spec,
@@ -2715,11 +2721,11 @@ async fn group_segments_outside_the_job<S: ObjectStore + ?Sized>(
         .await
         .manifest()
         .payload
-        .segments
+        .runs
         .iter()
-        .filter(|descriptor| {
-            group.contains(descriptor.family) && !inputs.contains(&descriptor.run_no)
-        })
+        .filter(|run| !inputs.contains(&run.run_no))
+        .flat_map(|run| &run.segments)
+        .filter(|descriptor| group.contains(descriptor.family))
         .map(metadata_segment_object_key)
         .collect()
 }
@@ -2733,8 +2739,9 @@ async fn referenced_segment_keys<S: ObjectStore + ?Sized>(
         .await
         .manifest()
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .map(metadata_segment_object_key)
         .collect()
 }
@@ -2882,7 +2889,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     let base_runs = snapshot_runs_for_group(segments.manifest(), group)
         .into_iter()
-        .filter(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
+        .filter(|run| run.tier == RunTier::Base)
         .count();
     drop(segments);
     assert_eq!(base_runs, 1, "the group must end in one base run");
@@ -3022,7 +3029,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
     let runs = snapshot_runs_for_group(segments.manifest(), group);
     drop(segments);
     assert_eq!(runs.len(), 1, "the group must end in one run");
-    assert_eq!(runs[0].level, CHECKPOINT_BASE_RUN_LEVEL);
+    assert_eq!(runs[0].tier, RunTier::Base);
     // The first attempt's segments are still staged and still named by
     // nothing: orphans for the collector, not state anything reads.
     let referenced = referenced_segment_keys(&store, &namespace_id).await;
@@ -3102,7 +3109,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -3142,7 +3149,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     )
     .await
     {
-        Finalization::Published(manifest_no) => manifest_no,
+        MetadataCompactionJobOutcome::Published { manifest_no, .. } => manifest_no,
         other => panic!("the retry must publish, got {other:?}"),
     };
     assert!(
@@ -3158,16 +3165,12 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     // published above the job's snapshot. The flush's run survives because
     // the swap replaces only what the snapshot held.
     assert_eq!(
-        runs.iter()
-            .filter(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
-            .count(),
+        runs.iter().filter(|run| run.tier == RunTier::Base).count(),
         1,
         "the group must end in one base run"
     );
     assert_eq!(
-        runs.iter()
-            .filter(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
-            .count(),
+        runs.iter().filter(|run| run.tier == RunTier::Delta).count(),
         1,
         "the flush's run must survive the swap"
     );
@@ -3209,7 +3212,7 @@ async fn a_rebased_publication_never_moves_the_root_timestamp_backward() {
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -3266,7 +3269,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -3292,7 +3295,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
     .await;
 
     assert!(
-        matches!(finalization, Finalization::Cancelled),
+        matches!(finalization, MetadataCompactionJobOutcome::Cancelled),
         "a cancelled finalization must publish nothing, got {finalization:?}"
     );
     assert_eq!(
@@ -3385,7 +3388,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
-    let MetadataMergeOutcome::Completed(result) = run_compaction(
+    let Ok(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -3414,7 +3417,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
     .await;
 
     assert!(
-        matches!(finalization, Finalization::Cancelled),
+        matches!(finalization, MetadataCompactionJobOutcome::Cancelled),
         "the cancelled attempt must not be retried, got {finalization:?}"
     );
     assert_eq!(

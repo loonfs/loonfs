@@ -546,8 +546,9 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert!(
         clone_manifest
             .payload
-            .segments
+            .runs
             .iter()
+            .flat_map(|run| &run.segments)
             .any(|descriptor| descriptor.owner_namespace_id == source_namespace_id),
         "the target keeps referencing source-owned metadata segments"
     );
@@ -803,10 +804,10 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         .expect("source manifest exists");
     let mut manifest =
         decode_namespace_manifest_json(&manifest_bytes).expect("decode source manifest");
-    manifest
-        .payload
-        .segments
-        .retain(|descriptor| descriptor.family != MetadataRowFamily::RevisionsByInodeDesc);
+    manifest.payload.runs.iter_mut().for_each(|run| {
+        run.segments
+            .retain(|descriptor| descriptor.family != MetadataRowFamily::RevisionsByInodeDesc);
+    });
     let manifest = NamespaceManifestEnvelope::from_payload(manifest.payload)
         .expect("rebuild manifest checksum");
     let corrupted = encode_namespace_manifest_json(&manifest).expect("encode corrupt manifest");

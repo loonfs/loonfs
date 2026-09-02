@@ -13,7 +13,7 @@ use crate::metadata::VisiblePathError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::writer_epoch::WriterEpochAcquireError;
 use crate::storage::content::DurableContentValidationError;
-use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
+use crate::wal::{WalChainLoadError, WalSegmentError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
     ChangeSeq, CommitId, CommitIdValidationError, ErrorDetails, GeneratedIdValidationError,
@@ -57,7 +57,7 @@ pub enum CoreError {
     #[error("commit validation failed: {0}")]
     CommitValidation(#[from] CommitValidationError),
     #[error("WAL build failed: {0}")]
-    WalBuild(#[from] WalBuildError),
+    WalBuild(#[from] WalSegmentError),
     #[error("head publish failed: {0}")]
     HeadPublish(#[from] CommitHeadPublishError),
     #[error("failed to write WAL object `{object_key}`: {message}")]
@@ -293,7 +293,7 @@ pub enum MetadataProjectionLoadError {
     #[error(transparent)]
     ManifestLoad(#[from] ManifestLoadError),
     #[error("WAL replay failed: {0}")]
-    WalReplay(#[from] WalReplayError),
+    WalReplay(#[from] WalSegmentError),
     #[error(
         "metadata projection head mismatch: expected current head `{expected:?}`, replayed `{actual:?}`"
     )]

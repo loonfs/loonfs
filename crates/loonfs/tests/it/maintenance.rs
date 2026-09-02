@@ -607,14 +607,12 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
     let delta_files = manifest
         .payload
-        .segments
+        .runs
         .iter()
-        .filter(|descriptor| descriptor.level == 0)
+        .filter(|run| run.tier == loonfs_api::wire::manifest::RunTier::Delta)
         .collect::<Vec<_>>();
     assert!(!delta_files.is_empty());
-    assert!(delta_files
-        .iter()
-        .any(|descriptor| descriptor.run_seq == ChangeSeq(2)));
+    assert!(delta_files.iter().any(|run| run.run_seq == ChangeSeq(2)));
 }
 
 #[test]

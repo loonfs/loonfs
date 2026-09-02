@@ -8,11 +8,9 @@ mod writer;
 
 pub(crate) use self::frame::{
     DecodedWalRecord, PreparedWalSegment, ReplayedWalTail, ValidatedWalChain, ValidatedWalSegment,
-    WalBuildError, WalChainLoadError, WalChainLoadRequest, WalReplayError,
+    WalChainLoadError, WalChainLoadRequest, WalSegmentError,
 };
-pub(crate) use self::reader::{
-    count_visible_wal_tail_segments, load_validated_wal_chain, load_wal_chain_within, WalChainLoad,
-};
+pub(crate) use self::reader::{count_visible_wal_tail_segments, load_wal_chain, WalChainLoad};
 pub(crate) use self::replay::{ensure_replayed_head_matches, project_validated_wal_tail};
 pub(crate) use self::writer::prepare_wal_segment;
 

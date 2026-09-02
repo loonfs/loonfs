@@ -15,13 +15,13 @@ pub(crate) struct PreparedWalSegment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum WalBuildError {
+pub enum WalSegmentError {
     #[error("WAL segment contains no records")]
     EmptySegment,
-    #[error("WAL segment namespace mismatch: record `{record}`, segment `{segment}`")]
-    SegmentNamespaceMismatch {
-        record: NamespaceId,
-        segment: NamespaceId,
+    #[error("WAL segment namespace mismatch: expected `{expected}`, actual `{actual}`")]
+    NamespaceMismatch {
+        expected: NamespaceId,
+        actual: NamespaceId,
     },
     #[error("non-contiguous WAL seq: expected `{expected}`, actual `{actual}`")]
     NonContiguousSeq {
@@ -32,6 +32,27 @@ pub enum WalBuildError {
     Codec(String),
     #[error("sequence number cannot exceed 9007199254740991")]
     SeqOverflow,
+    #[error("WAL segment base head seq mismatch: expected `{expected}`, actual `{actual}`")]
+    BaseHeadSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    #[error(
+        "WAL segment writer epoch mismatch: expected at most `{expected_max}`, actual `{actual}`"
+    )]
+    WriterEpochMismatch {
+        expected_max: WriterEpoch,
+        actual: WriterEpoch,
+    },
+    #[error("WAL segment summary does not match its records")]
+    SegmentSummaryMismatch,
+    #[error(
+        "WAL segment `{object_key}` is missing its previous visible segment link before seq `{required_seq}`"
+    )]
+    BrokenChainLink {
+        object_key: String,
+        required_seq: ChangeSeq,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +62,7 @@ pub(crate) struct WalChainLoadRequest<'a> {
     pub(crate) head_seq: ChangeSeq,
     pub(crate) visible_tip: Option<WalSegmentPointer>,
     pub(crate) stop_after_seq: Option<ChangeSeq>,
+    pub(crate) max_segment_fetches: Option<usize>,
     /// The head's `recent_segments` accelerator, used only to prefetch the
     /// replay gap concurrently. Chain links stay the sole history
     /// authority: wrong or missing hints cost a fallback fetch, never
@@ -182,52 +204,11 @@ pub enum WalChainLoadError {
         described_from_seq: ChangeSeq,
     },
     #[error("WAL replay validation failed: {0}")]
-    Replay(#[from] WalReplayError),
+    Replay(#[from] WalSegmentError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReplayedWalTail {
     pub resulting_head: HeadState,
     pub resulting_metadata_state: crate::metadata::MetadataState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum WalReplayError {
-    #[error("WAL codec error: {0}")]
-    Codec(String),
-    #[error("WAL segment namespace mismatch: expected `{expected}`, actual `{actual}`")]
-    NamespaceMismatch {
-        expected: NamespaceId,
-        actual: NamespaceId,
-    },
-    #[error("WAL segment base head seq mismatch: expected `{expected}`, actual `{actual}`")]
-    BaseHeadSeqMismatch {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
-    },
-    #[error("non-contiguous WAL seq: expected `{expected}`, actual `{actual}`")]
-    NonContiguousSeq {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
-    },
-    #[error(
-        "WAL segment writer epoch mismatch: expected at most `{expected_max}`, actual `{actual}`"
-    )]
-    WriterEpochMismatch {
-        expected_max: WriterEpoch,
-        actual: WriterEpoch,
-    },
-    #[error("WAL segment contains no records")]
-    EmptySegment,
-    #[error("WAL segment summary does not match its records")]
-    SegmentSummaryMismatch,
-    #[error(
-        "WAL segment `{object_key}` is missing its previous visible segment link before seq `{required_seq}`"
-    )]
-    BrokenChainLink {
-        object_key: String,
-        required_seq: ChangeSeq,
-    },
-    #[error("sequence number cannot exceed 9007199254740991")]
-    SeqOverflow,
 }

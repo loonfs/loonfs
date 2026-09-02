@@ -17,8 +17,8 @@ use super::publish::{
     ManifestPublicationOutcome,
 };
 use super::runs::{
-    delta_run_count, MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest,
-    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_DELTA_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
+    delta_run_count, runs_in_fold_order, MetadataFamilyGroup, MetadataLsmPolicy,
+    MetadataRunManifest, REORGANIZE_FAMILY_GROUPS,
 };
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
@@ -27,7 +27,8 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::load_control_snapshot;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
-    MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    RunTier,
 };
 use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -204,12 +205,16 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             MetadataReorganizeOutcome::NotNeeded { delta_runs: 0 },
         ));
     };
-    let segments =
-        load_verified_manifest_segments(store, namespace_id, &root.manifest.manifest_object_id)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+    let segments = load_verified_manifest_segments(
+        store,
+        None,
+        namespace_id,
+        &root.manifest.manifest_object_id,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(&previous.payload);
@@ -248,16 +253,14 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     }
     let bottom_anchored_merge_blocked = selection.bottom_anchored_merge_blocked;
     let input = match selection.plan {
-        Some(ReorganizationPlan::BoundedMerge(input)) => input,
-        Some(ReorganizationPlan::FullCompaction(spec)) => {
+        ReorganizationPlan::BoundedMerge(input) => input,
+        ReorganizationPlan::FullCompaction(spec) => {
             return Ok(report(
                 namespace_id,
                 MetadataReorganizeOutcome::CompactionPlanned { group, spec },
             ))
         }
-        // A selected group holds delta rows, so it holds runs, so the planner
-        // always answers with one of the two plans above.
-        None => {
+        ReorganizationPlan::Nothing => {
             return Ok(report(
                 namespace_id,
                 MetadataReorganizeOutcome::NotNeeded { delta_runs },
@@ -273,27 +276,29 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // segment keys because this step publishes them below.
     // The manifest that first names a run allocates its number, and this
     // step publishes the manifest that names this merge's output.
-    let run_no = previous.payload.next_run_no;
     let merged = merge_group_in_step(
         store,
         namespace_id,
         group,
         &input.runs,
-        run_no,
         input.placement,
         floor_seq,
         policy,
     )
     .await?;
 
-    let surviving: Vec<_> = previous
+    let surviving = previous
         .payload
-        .segments
+        .runs
         .iter()
-        .filter(|descriptor| {
-            !group.contains(descriptor.family) || !input.run_nos.contains(&descriptor.run_no)
+        .filter_map(|run| {
+            let mut run = run.clone();
+            if input.run_nos.contains(&run.run_no) {
+                run.segments
+                    .retain(|descriptor| !group.contains(descriptor.family));
+            }
+            (!run.segments.is_empty()).then_some(run)
         })
-        .cloned()
         .collect();
     let manifest = write_replacement_manifest(
         store,
@@ -301,6 +306,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         previous,
         surviving,
         merged.output_segments,
+        input.placement,
         floor_seq,
     )
     .await?;
@@ -343,6 +349,8 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
 /// budget paces. The planner decides between them once, from the same run
 /// list, so no caller has to rediscover which case it is in.
 pub(super) enum ReorganizationPlan {
+    /// The group has no runs.
+    Nothing,
     /// A window of complete runs fits one step's budgets and makes progress.
     BoundedMerge(ReorganizationInput),
     /// No window that makes progress fits the budgets, so the group is
@@ -358,7 +366,7 @@ pub(super) struct ReorganizationInput {
     decoded_rows: u64,
     decoded_bytes: u64,
     /// Where this merge's output stands in the group, which decides both the
-    /// level it is written at and whether it may drop rows.
+    /// tier it is written at and whether it may drop rows.
     pub(super) placement: MergePlacement,
 }
 
@@ -391,10 +399,10 @@ impl MergePlacement {
         }
     }
 
-    pub(super) fn output_level(self) -> u32 {
+    pub(super) fn output_tier(self) -> RunTier {
         match self {
-            Self::Base { .. } => CHECKPOINT_BASE_RUN_LEVEL,
-            Self::Delta { .. } => CHECKPOINT_DELTA_RUN_LEVEL,
+            Self::Base { .. } => RunTier::Base,
+            Self::Delta { .. } => RunTier::Delta,
         }
     }
 
@@ -414,11 +422,12 @@ fn merge_placement(
             output_seq: head_seq,
         };
     }
-    // The newest input's sequence. A merge above the base needs two runs to
-    // make progress, so the window is never empty here and the fallback only
-    // keeps this total.
     MergePlacement::Delta {
-        output_seq: runs.iter().map(|run| run.run_seq).max().unwrap_or(head_seq),
+        output_seq: runs
+            .iter()
+            .map(|run| run.run_seq)
+            .max()
+            .expect("a delta merge window should hold at least one run"),
     }
 }
 
@@ -427,9 +436,8 @@ fn merge_placement(
 /// `group_bottom_over_budget` is reported for status and logging even when the
 /// plan can merge newer delta runs or start a full compaction.
 pub(super) struct ReorganizationSelection {
-    /// What the step should do, or `None` when the group holds no runs at
-    /// all and there is nothing to do either way.
-    pub(super) plan: Option<ReorganizationPlan>,
+    /// What the step should do.
+    pub(super) plan: ReorganizationPlan,
     pub(super) group_bottom_over_budget: Option<OverBudgetRun>,
     /// True when the window starting at the group's oldest run could not
     /// reach a delta run inside the budgets. The group's base is frozen while
@@ -443,7 +451,7 @@ pub(super) struct ReorganizationSelection {
 pub(super) struct OverBudgetRun {
     pub(super) run_no: RunNo,
     pub(super) run_seq: ChangeSeq,
-    pub(super) level: u32,
+    pub(super) tier: RunTier,
     pub(super) rows: u64,
     /// Decoded bytes, or `None` if the row limit rejected the run first.
     pub(super) decoded_bytes: Option<u64>,
@@ -457,7 +465,7 @@ fn over_budget_run(
     OverBudgetRun {
         run_no: run.run_no,
         run_seq: run.run_seq,
-        level: run.level,
+        tier: run.tier,
         rows,
         decoded_bytes,
     }
@@ -480,33 +488,29 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     frozen_floor_seq: ChangeSeq,
     frozen_base: &FrozenBasePolicy,
 ) -> std::result::Result<ReorganizationSelection, ManifestLoadError> {
-    let mut candidates = segments
-        .scan_runs
-        .iter()
-        .filter(|run| run_has_group_rows(run, group))
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        let left_is_delta = left.level == CHECKPOINT_DELTA_RUN_LEVEL;
-        let right_is_delta = right.level == CHECKPOINT_DELTA_RUN_LEVEL;
-        left_is_delta
-            .cmp(&right_is_delta)
-            .then(left.run_seq.cmp(&right.run_seq))
-            .then(right.level.cmp(&left.level))
-    });
+    let candidates = runs_in_fold_order(
+        segments
+            .scan_runs
+            .iter()
+            .filter(|run| run_has_group_rows(run, group))
+            .collect(),
+    );
     let candidate_count = candidates.len();
     let head_seq = segments.manifest().payload.head_seq;
-    let row_budget =
-        u64::try_from(policy.max_decoded_input_rows_per_step.get()).unwrap_or(u64::MAX);
-    let byte_budget =
-        u64::try_from(policy.max_decoded_input_bytes_per_step.get()).unwrap_or(u64::MAX);
-    let max_runs = policy.max_input_runs_per_step.get();
+    let budgets = ReorganizationBudgets {
+        rows: u64::try_from(policy.max_decoded_input_rows_per_step.get())
+            .expect("a usize input row budget should fit in u64"),
+        bytes: u64::try_from(policy.max_decoded_input_bytes_per_step.get())
+            .expect("a usize input byte budget should fit in u64"),
+        runs: policy.max_input_runs_per_step.get(),
+    };
     // Base-tier runs sort first, so this is the index of the oldest delta
     // candidate, and starting there is what skips a base run the budgets
     // cannot admit. A group has at most one base run, so this is one place
     // and the only alternative to the bottom.
     let first_delta_candidate = candidates
         .iter()
-        .take_while(|run| run.level != CHECKPOINT_DELTA_RUN_LEVEL)
+        .take_while(|run| run.tier == RunTier::Base)
         .count();
     let delta_only_start = (first_delta_candidate > 0 && first_delta_candidate < candidate_count)
         .then_some(first_delta_candidate);
@@ -527,45 +531,20 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         if window_start > 0 && frozen_base.compact_a_frozen_base(group) {
             break;
         }
-        let mut runs = Vec::new();
-        let mut decoded_rows = 0u64;
-        let mut decoded_bytes = 0u64;
-        let mut merged_delta_rows = 0u64;
-        for index in window_start..candidate_count.min(window_start + max_runs) {
-            let run = candidates[index];
-            let run_rows = group_run_descriptors(run, group)
-                .map(|descriptor| descriptor.row_count)
-                .sum::<u64>();
-            if decoded_rows.saturating_add(run_rows) > row_budget {
-                // Index zero is only reached by the first window, whose
-                // accumulator is still empty there, so this is the group's
-                // oldest run failing the budget on its own.
-                if index == 0 {
-                    group_bottom_over_budget = Some(over_budget_run(run, run_rows, None));
-                }
-                break;
-            }
-            let run_bytes = match decoded_bytes_by_candidate[index] {
-                Some(bytes) => bytes,
-                None => {
-                    let bytes = decoded_group_run_bytes(segments, run, group).await?;
-                    decoded_bytes_by_candidate[index] = Some(bytes);
-                    bytes
-                }
-            };
-            if decoded_bytes.saturating_add(run_bytes) > byte_budget {
-                if index == 0 {
-                    group_bottom_over_budget =
-                        Some(over_budget_run(run, run_rows, Some(run_bytes)));
-                }
-                break;
-            }
-            if run.level == CHECKPOINT_DELTA_RUN_LEVEL {
-                merged_delta_rows = merged_delta_rows.saturating_add(run_rows);
-            }
-            decoded_rows = decoded_rows.saturating_add(run_rows);
-            decoded_bytes = decoded_bytes.saturating_add(run_bytes);
-            runs.push(run.clone());
+        let Some(window) = weigh_window(
+            segments,
+            &candidates,
+            group,
+            window_start,
+            budgets,
+            &mut decoded_bytes_by_candidate,
+        )
+        .await?
+        else {
+            continue;
+        };
+        if window_start == 0 {
+            group_bottom_over_budget = window.over_budget;
         }
 
         // A bottom-anchored merge makes progress when it moves at least one
@@ -573,26 +552,25 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         // two runs; rewriting one delta run would not reduce pending work.
         let bottom_anchored = window_start == 0;
         let makes_progress = if bottom_anchored {
-            runs.iter()
-                .any(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
+            window.runs.iter().any(|run| run.tier == RunTier::Delta)
         } else {
-            runs.len() > 1
+            window.runs.len() > 1
         };
         if !makes_progress {
             bottom_anchored_merge_blocked |= bottom_anchored;
             continue;
         }
-        let run_nos = runs.iter().map(|run| run.run_no).collect();
-        let placement = merge_placement(bottom_anchored, &runs, head_seq);
+        let run_nos = window.runs.iter().map(|run| run.run_no).collect();
+        let placement = merge_placement(bottom_anchored, &window.runs, head_seq);
         return Ok(ReorganizationSelection {
-            plan: Some(ReorganizationPlan::BoundedMerge(ReorganizationInput {
-                runs,
+            plan: ReorganizationPlan::BoundedMerge(ReorganizationInput {
+                runs: window.runs,
                 run_nos,
-                merged_delta_rows,
-                decoded_rows,
-                decoded_bytes,
+                merged_delta_rows: window.merged_delta_rows,
+                decoded_rows: window.decoded_rows,
+                decoded_bytes: window.decoded_bytes,
                 placement,
-            })),
+            }),
             group_bottom_over_budget,
             bottom_anchored_merge_blocked,
         });
@@ -607,8 +585,10 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     // every run the group holds, which is bottom-anchored by construction, so
     // its output is the group's base run and it may drop what the floor
     // allows.
-    let spec = (!candidates.is_empty()).then(|| {
-        MetadataCompactionSpec::new(
+    let plan = if candidates.is_empty() {
+        ReorganizationPlan::Nothing
+    } else {
+        ReorganizationPlan::FullCompaction(MetadataCompactionSpec::new(
             group,
             candidates.iter().map(|run| run.run_no).collect(),
             candidates
@@ -620,13 +600,81 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
                 output_seq: head_seq,
             },
             frozen_floor_seq,
-        )
-    });
+        ))
+    };
     Ok(ReorganizationSelection {
-        plan: spec.map(ReorganizationPlan::FullCompaction),
+        plan,
         group_bottom_over_budget,
         bottom_anchored_merge_blocked,
     })
+}
+
+#[derive(Clone, Copy)]
+struct ReorganizationBudgets {
+    rows: u64,
+    bytes: u64,
+    runs: usize,
+}
+
+struct WeighedWindow {
+    runs: Vec<MetadataRunManifest>,
+    merged_delta_rows: u64,
+    decoded_rows: u64,
+    decoded_bytes: u64,
+    over_budget: Option<OverBudgetRun>,
+}
+
+async fn weigh_window<S: ObjectStore + ?Sized>(
+    segments: &VerifiedMetadataSegments<'_, S>,
+    candidates: &[&MetadataRunManifest],
+    group: MetadataFamilyGroup,
+    start: usize,
+    budgets: ReorganizationBudgets,
+    decoded_bytes_by_candidate: &mut [Option<u64>],
+) -> std::result::Result<Option<WeighedWindow>, ManifestLoadError> {
+    if start >= candidates.len() {
+        return Ok(None);
+    }
+    let mut window = WeighedWindow {
+        runs: Vec::new(),
+        merged_delta_rows: 0,
+        decoded_rows: 0,
+        decoded_bytes: 0,
+        over_budget: None,
+    };
+    for index in start..candidates.len().min(start + budgets.runs) {
+        let run = candidates[index];
+        let run_rows = group_run_descriptors(run, group)
+            .map(|descriptor| descriptor.row_count)
+            .sum::<u64>();
+        if window.decoded_rows.saturating_add(run_rows) > budgets.rows {
+            if index == 0 {
+                window.over_budget = Some(over_budget_run(run, run_rows, None));
+            }
+            break;
+        }
+        let run_bytes = match decoded_bytes_by_candidate[index] {
+            Some(bytes) => bytes,
+            None => {
+                let bytes = decoded_group_run_bytes(segments, run, group).await?;
+                decoded_bytes_by_candidate[index] = Some(bytes);
+                bytes
+            }
+        };
+        if window.decoded_bytes.saturating_add(run_bytes) > budgets.bytes {
+            if index == 0 {
+                window.over_budget = Some(over_budget_run(run, run_rows, Some(run_bytes)));
+            }
+            break;
+        }
+        if run.tier == RunTier::Delta {
+            window.merged_delta_rows = window.merged_delta_rows.saturating_add(run_rows);
+        }
+        window.decoded_rows = window.decoded_rows.saturating_add(run_rows);
+        window.decoded_bytes = window.decoded_bytes.saturating_add(run_bytes);
+        window.runs.push(run.clone());
+    }
+    Ok(Some(window))
 }
 
 /// Reports that the oldest run in a family group exceeds one step's input
@@ -648,7 +696,7 @@ fn report_group_bottom_over_budget(
         families = ?group.families(),
         run_no = bottom.run_no.0,
         run_seq = bottom.run_seq.0,
-        run_level = bottom.level,
+        run_tier = ?bottom.tier,
         run_rows = bottom.rows,
         run_decoded_bytes = bottom.decoded_bytes,
         max_decoded_input_rows_per_step = policy.max_decoded_input_rows_per_step.get(),
@@ -676,14 +724,14 @@ fn report_group_bottom_over_budget(
 fn manifest_has_partial_reorganization(runs: &[MetadataRunManifest]) -> bool {
     let Some(oldest_delta_seq) = runs
         .iter()
-        .filter(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL)
+        .filter(|run| run.tier == RunTier::Delta)
         .map(|run| run.run_seq)
         .min()
     else {
         return false;
     };
     runs.iter()
-        .any(|run| run.level != CHECKPOINT_DELTA_RUN_LEVEL && run.run_seq >= oldest_delta_seq)
+        .any(|run| run.tier == RunTier::Base && run.run_seq >= oldest_delta_seq)
 }
 
 fn run_has_group_rows(run: &MetadataRunManifest, group: MetadataFamilyGroup) -> bool {
@@ -756,24 +804,25 @@ pub(super) fn select_family_group(
 
 fn group_delta_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGroup) -> u64 {
     payload
-        .segments
+        .runs
         .iter()
-        .filter(|descriptor| {
-            descriptor.level == CHECKPOINT_DELTA_RUN_LEVEL && group.contains(descriptor.family)
-        })
+        .filter(|run| run.tier == RunTier::Delta)
+        .flat_map(|run| &run.segments)
+        .filter(|descriptor| group.contains(descriptor.family))
         .map(|descriptor| descriptor.row_count)
         .sum()
 }
 
-/// Writes a replacement manifest from surviving and newly produced segments.
+/// Writes a replacement manifest from surviving and newly produced runs.
 ///
-/// The resulting segments determine the base sequence and next run number.
+/// The resulting runs determine the base sequence and next run number.
 pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     previous: &NamespaceManifestEnvelope,
-    surviving: Vec<MetadataSegmentRef>,
+    surviving: Vec<MetadataRunRef>,
     outputs: Vec<MetadataSegmentRef>,
+    placement: MergePlacement,
     floor_seq: ChangeSeq,
 ) -> Result<NamespaceManifestEnvelope> {
     let next_run_no = if outputs.is_empty() {
@@ -781,12 +830,20 @@ pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
     } else {
         next_run_no_after(previous.payload.next_run_no)?
     };
-    let segments: Vec<MetadataSegmentRef> = surviving.into_iter().chain(outputs).collect();
-    let base_seq = segments
+    let mut runs = surviving;
+    if !outputs.is_empty() {
+        runs.push(MetadataRunRef {
+            run_no: previous.payload.next_run_no,
+            run_seq: placement.output_seq(),
+            tier: placement.output_tier(),
+            segments: outputs,
+        });
+    }
+    let base_seq = runs
         .iter()
-        .map(|descriptor| descriptor.run_seq)
+        .map(|run| run.run_seq)
         .min()
-        .unwrap_or(previous.payload.base_seq);
+        .expect("a replacement manifest should hold at least one run");
     let retention_floor_seq = previous.payload.retention_floor_seq.max(floor_seq);
     // One generated object id, one write. The generated id ends in 16 random
     // hex characters, so the key is this unit's alone and a conflict under it
@@ -805,7 +862,7 @@ pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
         next_inode_id: previous.payload.next_inode_id,
         next_run_no,
         retention_floor_seq,
-        segments,
+        runs,
     })
     .map_err(|error| CoreError::Codec {
         object_key,

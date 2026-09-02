@@ -26,8 +26,9 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
 ) -> std::result::Result<(), ManifestLoadError> {
     let object_keys = manifest
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .map(metadata_segment_object_key)
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -101,12 +102,16 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         });
     };
     let root = loaded_root.state;
-    let manifest_segments =
-        load_verified_manifest_segments(store, namespace_id, &root.manifest.manifest_object_id)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+    let manifest_segments = load_verified_manifest_segments(
+        store,
+        None,
+        namespace_id,
+        &root.manifest.manifest_object_id,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
     ensure_root_matches_manifest(namespace_id, &root, manifest_segments.manifest())?;
     // Grep tolerates retention gaps by checkpointed rebootstrap, so its
     // independent watermark never holds the core WAL floor back.

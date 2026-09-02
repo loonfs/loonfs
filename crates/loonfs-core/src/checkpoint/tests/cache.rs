@@ -35,7 +35,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     // The default cache config carries a decoded-byte budget, so a scan wider
     // than the small-scan limit populates the cache instead of reading through.
     let cache = super::MetadataSegmentCache::new(Default::default());
-    let segments = super::load_verified_manifest_segments_with_cache(
+    let segments = super::load_verified_manifest_segments(
         &store,
         Some(&cache),
         &namespace_id,
@@ -57,7 +57,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
 
     // A fresh view has no per-view segment memo; only the shared cache can
     // answer, so the repeated scan must issue no segment fetches.
-    let fresh_segments = super::load_verified_manifest_segments_with_cache(
+    let fresh_segments = super::load_verified_manifest_segments(
         &store,
         Some(&cache),
         &namespace_id,
@@ -99,7 +99,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         "a wide range scan should admit its segments to the cache"
     );
 
-    let fresh_segments = super::load_verified_manifest_segments_with_cache(
+    let fresh_segments = super::load_verified_manifest_segments(
         &store,
         Some(&cache),
         &namespace_id,
@@ -127,7 +127,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     let degenerate = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
         max_decoded_bytes: 1,
     });
-    let degenerate_segments = super::load_verified_manifest_segments_with_cache(
+    let degenerate_segments = super::load_verified_manifest_segments(
         &store,
         Some(&degenerate),
         &namespace_id,
@@ -161,7 +161,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     let cache = super::MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
     // A solo pass over its own cold cache measures the true per-scan
     // fetch count.
-    let solo_segments = super::load_verified_manifest_segments_with_cache(
+    let solo_segments = super::load_verified_manifest_segments(
         &store,
         Some(&cache),
         &namespace_id,
@@ -181,7 +181,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     // Concurrent requests race over a second cold cache, each with its own
     // segments view; single-flight is what keeps the pair at the solo count.
     let paired_cache = super::MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
-    let first_segments = super::load_verified_manifest_segments_with_cache(
+    let first_segments = super::load_verified_manifest_segments(
         &store,
         Some(&paired_cache),
         &namespace_id,
@@ -189,7 +189,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     )
     .await
     .expect("load first segments");
-    let second_segments = super::load_verified_manifest_segments_with_cache(
+    let second_segments = super::load_verified_manifest_segments(
         &store,
         Some(&paired_cache),
         &namespace_id,
@@ -244,7 +244,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
 
     let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
-    let first = super::load_verified_manifest_segments_with_cache(
+    let first = super::load_verified_manifest_segments(
         &store,
         Some(&cache),
         &namespace_id,
@@ -252,7 +252,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
     )
     .await
     .expect("load first segments");
-    let second = super::load_verified_manifest_segments_with_cache(
+    let second = super::load_verified_manifest_segments(
         &store,
         Some(&cache),
         &namespace_id,
@@ -302,14 +302,10 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
         .expect("write b");
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let segments = super::load_verified_manifest_segments_with_cache(
-        &store,
-        None,
-        &namespace_id,
-        &manifest_object_id,
-    )
-    .await
-    .expect("load segments");
+    let segments =
+        super::load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
+            .await
+            .expect("load segments");
 
     let docs_inode_id = InodeId(2);
     let lower_bound = format!("direntry-bind-{:020}-", docs_inode_id.0);
@@ -409,7 +405,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
 
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
-    let segments = super::load_verified_manifest_segments_with_cache(
+    let segments = super::load_verified_manifest_segments(
         &store,
         Some(&cache),
         &namespace_id,
@@ -491,7 +487,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     // configuration has, and without it a cold list degrades from one fetch
     // per block to one fetch per lookup.
     let segments =
-        super::load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
+        super::load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
             .await
             .expect("load segments");
     store.reset();
@@ -555,14 +551,16 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
             .expect("create checkpoint");
     }
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
-        .await
-        .expect("load segments");
+    let segments =
+        load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
+            .await
+            .expect("load segments");
     let direntry_descriptors: Vec<_> = segments
         .manifest()
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .filter(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
         .collect();
     assert!(direntry_descriptors.len() >= 3);
@@ -616,7 +614,11 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     let mut stripped_payload = segments.manifest().payload.clone();
     stripped_payload.manifest_no = ManifestNo(stripped_payload.manifest_no.0 + 1);
     stripped_payload.manifest_object_id = ManifestObjectId::generate(stripped_payload.manifest_no);
-    for descriptor in &mut stripped_payload.segments {
+    for descriptor in stripped_payload
+        .runs
+        .iter_mut()
+        .flat_map(|run| &mut run.segments)
+    {
         descriptor.filter_inline = None;
     }
     let stripped_object_id = stripped_payload.manifest_object_id.clone();
@@ -626,7 +628,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         .await
         .expect("write stripped manifest");
     let stripped_segments =
-        load_verified_manifest_segments(&store, &namespace_id, &stripped_object_id)
+        load_verified_manifest_segments(&store, None, &namespace_id, &stripped_object_id)
             .await
             .expect("load stripped segments");
     store.reset();
@@ -669,14 +671,16 @@ async fn corrupt_inline_filter_fails_the_lookup() {
         .await
         .expect("create checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
-        .await
-        .expect("load segments");
+    let segments =
+        load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
+            .await
+            .expect("load segments");
     let descriptor = segments
         .manifest()
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .find(|descriptor| {
             descriptor.family == ApiMetadataRowFamily::DirentryBinds
                 && descriptor.filter_inline.is_some()
@@ -738,14 +742,16 @@ async fn checkpointed_direntry_segment() -> (
         .await
         .expect("create checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
-        .await
-        .expect("load segments");
+    let segments =
+        load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
+            .await
+            .expect("load segments");
     let mut descriptor = segments
         .manifest()
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
         .expect("a direntry segment")
         .clone();
@@ -1004,14 +1010,16 @@ async fn multi_block_direntry_segment() -> (
         .await
         .expect("create checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
-        .await
-        .expect("load segments");
+    let segments =
+        load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
+            .await
+            .expect("load segments");
     let mut descriptor = segments
         .manifest()
         .payload
-        .segments
+        .runs
         .iter()
+        .flat_map(|run| &run.segments)
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
         .expect("a direntry segment")
         .clone();

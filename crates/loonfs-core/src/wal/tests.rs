@@ -22,6 +22,13 @@ use loonfs_test_support::stores::{
 use std::borrow::Cow;
 use tempfile::tempdir;
 
+async fn load_complete_wal_chain<S: ObjectStore + ?Sized>(
+    store: &S,
+    request: WalChainLoadRequest<'_>,
+) -> Result<ValidatedWalChain, WalChainLoadError> {
+    Ok(load_wal_chain(store, request).await?.into_complete())
+}
+
 fn test_fingerprint() -> CommitFingerprint {
     CommitFingerprint::new_unchecked("v1:sha256:test".to_owned())
 }
@@ -139,7 +146,7 @@ async fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
     )
     .await;
 
-    let chain = load_validated_wal_chain(
+    let chain = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -147,6 +154,7 @@ async fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
             head_seq: ChangeSeq(1),
             visible_tip: Some(segment.envelope.pointer()),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &[],
         },
     )
@@ -268,7 +276,7 @@ fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
 
     assert_eq!(
         error,
-        WalReplayError::WriterEpochMismatch {
+        WalSegmentError::WriterEpochMismatch {
             expected_max: WriterEpoch(1),
             actual: WriterEpoch(2),
         }
@@ -301,7 +309,7 @@ async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
     )
     .await;
 
-    let chain = load_validated_wal_chain(
+    let chain = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -309,6 +317,7 @@ async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
             head_seq: ChangeSeq(2),
             visible_tip: Some(second.envelope.pointer()),
             stop_after_seq: Some(ChangeSeq(1)),
+            max_segment_fetches: None,
             recent_segments: &[],
         },
     )
@@ -335,7 +344,7 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
     )
     .await;
 
-    let error = load_validated_wal_chain(
+    let error = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -343,6 +352,7 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
             head_seq: ChangeSeq(2),
             visible_tip: Some(segment.envelope.pointer()),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &[],
         },
     )
@@ -477,7 +487,7 @@ async fn assert_wal_chain_corruption_rejected(
         .await
         .expect("write corrupted wal segment");
 
-    load_validated_wal_chain(
+    load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -485,6 +495,7 @@ async fn assert_wal_chain_corruption_rejected(
             head_seq: pointer.end_seq,
             visible_tip: Some(pointer),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &[],
         },
     )
@@ -517,7 +528,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
         ChangeSeq(2),
     )
     .await;
-    let unhinted = load_validated_wal_chain(
+    let unhinted = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -525,6 +536,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
             head_seq: ChangeSeq(2),
             visible_tip: Some(second.envelope.pointer()),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &[],
         },
     )
@@ -533,7 +545,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
 
     // Accurate predecessor hints prefetch the gap together with the tip.
     let accurate = [first.envelope.pointer()];
-    let hinted = load_validated_wal_chain(
+    let hinted = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -541,6 +553,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
             head_seq: ChangeSeq(2),
             visible_tip: Some(second.envelope.pointer()),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &accurate,
         },
     )
@@ -563,7 +576,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
         },
         lying_tip,
     ];
-    let survived = load_validated_wal_chain(
+    let survived = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -571,6 +584,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
             head_seq: ChangeSeq(2),
             visible_tip: Some(second.envelope.pointer()),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &garbage,
         },
     )
@@ -616,7 +630,7 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
 
     // No hints, so every body comes from the serial walk down the links.
     store.reset();
-    let bounded = load_wal_chain_within(
+    let bounded = load_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -624,9 +638,9 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
             head_seq: ChangeSeq(5),
             visible_tip: Some(tip.clone()),
             stop_after_seq: None,
+            max_segment_fetches: Some(2),
             recent_segments: &[],
         },
-        2,
     )
     .await
     .expect("bounded chain load");
@@ -647,7 +661,7 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
     let mut newest_first = pointers.clone();
     newest_first.reverse();
     store.reset();
-    let hinted = load_wal_chain_within(
+    let hinted = load_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -655,9 +669,9 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
             head_seq: ChangeSeq(5),
             visible_tip: Some(tip.clone()),
             stop_after_seq: None,
+            max_segment_fetches: Some(2),
             recent_segments: &newest_first[1..],
         },
-        2,
     )
     .await
     .expect("bounded hinted load");
@@ -682,20 +696,21 @@ async fn a_limit_that_covers_the_chain_loads_all_of_it() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let pointers = write_linked_chain(store.inner(), &namespace_id, 5).await;
     let tip = pointers.last().expect("a chain was written").clone();
-    let request = |recent: &'static [WalSegmentPointer]| WalChainLoadRequest {
+    let request = |recent: &'static [WalSegmentPointer], max_segment_fetches| WalChainLoadRequest {
         namespace_id: &namespace_id,
         chain_base_seq: ChangeSeq(0),
         head_seq: ChangeSeq(5),
         visible_tip: Some(tip.clone()),
         stop_after_seq: None,
+        max_segment_fetches,
         recent_segments: recent,
     };
-    let unbounded = load_validated_wal_chain(&store, request(&[]))
+    let unbounded = load_complete_wal_chain(&store, request(&[], None))
         .await
         .expect("unbounded chain");
 
     store.reset();
-    let bounded = load_wal_chain_within(&store, request(&[]), 5)
+    let bounded = load_wal_chain(&store, request(&[], Some(5)))
         .await
         .expect("bounded chain load");
     match bounded {
@@ -735,7 +750,7 @@ async fn a_failed_prefetch_costs_its_own_request_and_the_walk_loads_the_chain() 
     failing.fail_next(newest_first.len());
     let store = CountingStore::new(failing, KeyPredicate::any());
 
-    let loaded = load_wal_chain_within(
+    let loaded = load_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -743,9 +758,9 @@ async fn a_failed_prefetch_costs_its_own_request_and_the_walk_loads_the_chain() 
             head_seq: ChangeSeq(3),
             visible_tip: Some(tip),
             stop_after_seq: None,
+            max_segment_fetches: Some(16),
             recent_segments: &newest_first[1..],
         },
-        16,
     )
     .await
     .expect("the walk fetches what the prefetch could not deliver");
@@ -791,7 +806,7 @@ async fn failed_prefetch_requests_count_against_the_limit() {
     failing.fail_all();
     let store = CountingStore::new(failing, KeyPredicate::any());
 
-    let loaded = load_wal_chain_within(
+    let loaded = load_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -799,9 +814,9 @@ async fn failed_prefetch_requests_count_against_the_limit() {
             head_seq: ChangeSeq(3),
             visible_tip: Some(tip),
             stop_after_seq: None,
+            max_segment_fetches: Some(3),
             recent_segments: &newest_first[1..],
         },
-        3,
     )
     .await
     .expect("a load whose limit the failures spent");
@@ -930,6 +945,7 @@ fn tail_count_request<'a>(
         head_seq,
         visible_tip: hints.first().cloned(),
         stop_after_seq: None,
+        max_segment_fetches: None,
         recent_segments: hints.get(1..).unwrap_or_default(),
     }
 }
@@ -981,6 +997,7 @@ fn tail_count_at_genesis_is_zero_without_tip_or_hints() {
         head_seq: ChangeSeq(0),
         visible_tip: None,
         stop_after_seq: None,
+        max_segment_fetches: None,
         recent_segments: &[],
     })
     .expect("count genesis tail");
@@ -1045,7 +1062,7 @@ async fn tail_count_and_chain_load_agree_where_the_head_describes_the_tail() {
 
     let request = tail_count_request(&namespace_id, ChangeSeq(0), ChangeSeq(3), &pointers);
     let count = count_visible_wal_tail_segments(&request).expect("count tail");
-    let loaded = load_validated_wal_chain(&store, request)
+    let loaded = load_complete_wal_chain(&store, request)
         .await
         .expect("load chain");
     assert_eq!(count as usize, loaded.segments().len());
@@ -1057,7 +1074,7 @@ async fn tail_count_and_chain_load_agree_where_the_head_describes_the_tail() {
     };
     count_visible_wal_tail_segments(&unhinted)
         .expect_err("an unhinted head describes no tail to count");
-    let loaded = load_validated_wal_chain(&store, unhinted)
+    let loaded = load_complete_wal_chain(&store, unhinted)
         .await
         .expect("replay still walks the links");
     assert_eq!(loaded.segments().len(), 3);
@@ -1073,7 +1090,7 @@ async fn chain_load_walks_predecessor_links_past_the_hinted_window() {
     let pointers = newest_first_pointers(&chain);
     let short_window = &pointers[..2];
 
-    let loaded = load_validated_wal_chain(
+    let loaded = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -1081,6 +1098,7 @@ async fn chain_load_walks_predecessor_links_past_the_hinted_window() {
             head_seq: ChangeSeq(3),
             visible_tip: Some(pointers[0].clone()),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &short_window[1..],
         },
     )
@@ -1109,7 +1127,7 @@ async fn boundary_length_replay_fetches_every_segment_once_in_bounded_waves() {
     store_chain(&store, &chain).await;
     let hints = newest_first_pointers(&chain);
 
-    let loaded = load_validated_wal_chain(
+    let loaded = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -1117,6 +1135,7 @@ async fn boundary_length_replay_fetches_every_segment_once_in_bounded_waves() {
             head_seq: ChangeSeq(crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS),
             visible_tip: Some(hints[0].clone()),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &hints[1..],
         },
     )
@@ -1145,7 +1164,7 @@ async fn prefetch_fetches_only_the_segments_the_gap_intersects() {
     let hints = newest_first_pointers(&chain);
     store.reset();
 
-    let loaded = load_validated_wal_chain(
+    let loaded = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -1153,6 +1172,7 @@ async fn prefetch_fetches_only_the_segments_the_gap_intersects() {
             head_seq: ChangeSeq(5),
             visible_tip: Some(hints[0].clone()),
             stop_after_seq: Some(ChangeSeq(3)),
+            max_segment_fetches: None,
             recent_segments: &hints[1..],
         },
     )
@@ -1193,7 +1213,7 @@ async fn a_corrupt_segment_inside_the_hinted_set_is_still_rejected() {
         .expect("overwrite middle wal segment");
     let hints = newest_first_pointers(&chain);
 
-    let hinted = load_validated_wal_chain(
+    let hinted = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -1201,12 +1221,13 @@ async fn a_corrupt_segment_inside_the_hinted_set_is_still_rejected() {
             head_seq: ChangeSeq(3),
             visible_tip: Some(hints[0].clone()),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &hints[1..],
         },
     )
     .await
     .expect_err("a prefetched corrupt segment must be rejected");
-    let serial = load_validated_wal_chain(
+    let serial = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -1214,6 +1235,7 @@ async fn a_corrupt_segment_inside_the_hinted_set_is_still_rejected() {
             head_seq: ChangeSeq(3),
             visible_tip: Some(hints[0].clone()),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &[],
         },
     )

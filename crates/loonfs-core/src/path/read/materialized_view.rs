@@ -20,8 +20,7 @@ use crate::namespace::control_snapshot::load_head_and_metadata_basis;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
 use crate::wal::{
-    ensure_replayed_head_matches, load_validated_wal_chain, project_validated_wal_tail,
-    WalChainLoadRequest,
+    ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
 };
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
@@ -246,7 +245,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 });
             }
         }
-        let wal_chain = load_validated_wal_chain(
+        let wal_chain = load_wal_chain(
             store,
             WalChainLoadRequest {
                 namespace_id,
@@ -254,13 +253,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 head_seq: head.seq,
                 visible_tip: head.visible_wal_tip.clone(),
                 stop_after_seq: None,
+                max_segment_fetches: None,
                 recent_segments: &head.recent_segments,
             },
         )
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-        })?;
+        })?
+        .into_complete();
         let replayed = {
             let _span =
                 tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();

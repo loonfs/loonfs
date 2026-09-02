@@ -1,20 +1,20 @@
 //! Replays a validated WAL chain onto metadata state, record by record.
 
-pub(crate) use super::frame::WalReplayError;
+pub(crate) use super::frame::WalSegmentError;
 use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
 use crate::commit::next_inode_after;
 use crate::error::MetadataProjectionLoadError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
-use loonfs_api::{next_public_ordinal, ChangeSeq, InodeId, NamespaceId, WriterEpoch};
+use loonfs_api::{ChangeSeq, InodeId, NamespaceId, WriterEpoch};
 
 pub(crate) fn project_validated_wal_tail(
     base_head: &HeadState,
     base_metadata_state: &MetadataState,
     expected_writer_epoch: Option<WriterEpoch>,
     wal_tail: &ValidatedWalChain,
-) -> Result<ReplayedWalTail, WalReplayError> {
+) -> Result<ReplayedWalTail, WalSegmentError> {
     let mut replayed = replay_wal_records(
         base_head,
         base_metadata_state,
@@ -55,7 +55,7 @@ pub(crate) fn replay_wal_records<'a, I>(
     base_metadata_state: &MetadataState,
     expected_writer_epoch: Option<WriterEpoch>,
     records: I,
-) -> Result<ReplayedWalTail, WalReplayError>
+) -> Result<ReplayedWalTail, WalSegmentError>
 where
     I: IntoIterator<Item = DecodedWalRecord<'a>>,
 {
@@ -91,18 +91,19 @@ fn validate_replay_record(
     current_head: &HeadState,
     expected_writer_epoch: Option<WriterEpoch>,
     record: &DecodedWalRecord<'_>,
-) -> Result<(), WalReplayError> {
+) -> Result<(), WalSegmentError> {
     if record.namespace_id != &current_head.namespace_id {
-        return Err(WalReplayError::NamespaceMismatch {
+        return Err(WalSegmentError::NamespaceMismatch {
             expected: current_head.namespace_id.clone(),
             actual: record.namespace_id.clone(),
         });
     }
-    let expected_seq = next_public_ordinal(current_head.seq.0)
-        .map(ChangeSeq)
-        .ok_or(WalReplayError::SeqOverflow)?;
+    let expected_seq = current_head
+        .seq
+        .successor()
+        .map_err(|_| WalSegmentError::SeqOverflow)?;
     if record.seq != expected_seq {
-        return Err(WalReplayError::NonContiguousSeq {
+        return Err(WalSegmentError::NonContiguousSeq {
             expected: expected_seq,
             actual: record.seq,
         });
@@ -111,7 +112,7 @@ fn validate_replay_record(
         // A visible tail may contain older epochs after writer takeover; it
         // must never contain records from an epoch beyond the current head.
         if record.writer_epoch > expected_max {
-            return Err(WalReplayError::WriterEpochMismatch {
+            return Err(WalSegmentError::WriterEpochMismatch {
                 expected_max,
                 actual: record.writer_epoch,
             });
@@ -124,39 +125,39 @@ pub(super) fn validate_wal_segment_for_replay(
     expected_namespace_id: &NamespaceId,
     expected_base_head_seq: ChangeSeq,
     envelope: &WalSegmentEnvelope,
-) -> Result<(), WalReplayError> {
+) -> Result<(), WalSegmentError> {
     if &envelope.payload.namespace_id != expected_namespace_id {
-        return Err(WalReplayError::NamespaceMismatch {
+        return Err(WalSegmentError::NamespaceMismatch {
             expected: expected_namespace_id.clone(),
             actual: envelope.payload.namespace_id.clone(),
         });
     }
 
     if envelope.payload.base_head_seq != expected_base_head_seq {
-        return Err(WalReplayError::BaseHeadSeqMismatch {
+        return Err(WalSegmentError::BaseHeadSeqMismatch {
             expected: expected_base_head_seq,
             actual: envelope.payload.base_head_seq,
         });
     }
 
-    let expected_start = next_public_ordinal(expected_base_head_seq.0)
-        .map(ChangeSeq)
-        .ok_or(WalReplayError::SeqOverflow)?;
+    let expected_start = expected_base_head_seq
+        .successor()
+        .map_err(|_| WalSegmentError::SeqOverflow)?;
 
     if envelope.payload.start_seq != expected_start {
-        return Err(WalReplayError::NonContiguousSeq {
+        return Err(WalSegmentError::NonContiguousSeq {
             expected: expected_start,
             actual: envelope.payload.start_seq,
         });
     }
     if envelope.payload.records.is_empty() {
-        return Err(WalReplayError::EmptySegment);
+        return Err(WalSegmentError::EmptySegment);
     }
     if envelope.payload.records.first().map(|record| record.seq) != Some(envelope.payload.start_seq)
         || envelope.payload.records.last().map(|record| record.seq)
             != Some(envelope.payload.end_seq)
     {
-        return Err(WalReplayError::SegmentSummaryMismatch);
+        return Err(WalSegmentError::SegmentSummaryMismatch);
     }
     for (offset, record) in envelope.payload.records.iter().enumerate() {
         let expected = envelope
@@ -165,9 +166,9 @@ pub(super) fn validate_wal_segment_for_replay(
             .0
             .checked_add(offset as u64)
             .map(ChangeSeq)
-            .ok_or(WalReplayError::SeqOverflow)?;
+            .ok_or(WalSegmentError::SeqOverflow)?;
         if record.seq != expected {
-            return Err(WalReplayError::NonContiguousSeq {
+            return Err(WalSegmentError::NonContiguousSeq {
                 expected,
                 actual: record.seq,
             });

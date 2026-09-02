@@ -1095,10 +1095,11 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
         let manifest = decode_namespace_manifest_json(&bytes).expect("decode manifest");
         let delta_files = manifest
             .payload
-            .segments
+            .runs
             .iter()
-            .filter(|descriptor| descriptor.level == 0)
-            .count();
+            .filter(|run| run.tier == loonfs_api::wire::manifest::RunTier::Delta)
+            .map(|run| run.segments.len())
+            .sum::<usize>();
         assert_eq!(
             delta_files, 0,
             "background steps drain the fold backlog to zero delta runs; \

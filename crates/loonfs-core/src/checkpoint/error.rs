@@ -107,7 +107,22 @@ impl ManifestLoadError {
     pub fn failure_class(&self) -> ManifestLoadFailureClass {
         match self {
             Self::ReadManifest { .. } | Self::ReadSegment { .. } => ManifestLoadFailureClass::Store,
-            _ => ManifestLoadFailureClass::Corrupt,
+            Self::MissingManifest { .. }
+            | Self::ManifestCodec { .. }
+            | Self::ManifestNamespaceMismatch { .. }
+            | Self::ManifestNoMismatch { .. }
+            | Self::ManifestObjectIdMismatch { .. }
+            | Self::ManifestObjectConflict { .. }
+            | Self::ManifestConflict { .. }
+            | Self::MissingRowFamily { .. }
+            | Self::DuplicateRowFamily { .. }
+            | Self::RunManifestMismatch { .. }
+            | Self::MissingSegment { .. }
+            | Self::SegmentCodec { .. }
+            | Self::SegmentDescriptorMismatch { .. }
+            | Self::SegmentRowKindMismatch { .. }
+            | Self::DuplicateRevisionRow { .. }
+            | Self::RevisionIndexMismatch { .. } => ManifestLoadFailureClass::Corrupt,
         }
     }
 }
