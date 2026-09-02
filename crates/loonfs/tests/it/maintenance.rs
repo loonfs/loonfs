@@ -786,7 +786,6 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
         snapshot.owner,
         CheckpointOwnerSummary::Snapshot {
             name: "report-run".to_owned(),
-            expires_at_ms,
         }
     );
 

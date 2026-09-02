@@ -218,7 +218,7 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
         CheckpointOwnerSummary::Fork {
             target_namespace_id,
         } => format!("fork -> {target_namespace_id}"),
-        CheckpointOwnerSummary::Snapshot { name, .. } => format!("snapshot {name}"),
+        CheckpointOwnerSummary::Snapshot { name } => format!("snapshot {name}"),
     }
 }
 

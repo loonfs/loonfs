@@ -405,7 +405,13 @@ fn strict_wal_segment_pointers<'de, D>(deserializer: D) -> Result<Vec<WalSegment
 where
     D: Deserializer<'de>,
 {
-    Vec::<StrictWalSegmentPointer>::deserialize(deserializer)?
+    let pointers = Vec::<StrictWalSegmentPointer>::deserialize(deserializer)?;
+    if pointers.len() > RECENT_SEGMENTS_LIMIT {
+        return Err(serde::de::Error::custom(format_args!(
+            "head `recent_segments` exceeds {RECENT_SEGMENTS_LIMIT} entries"
+        )));
+    }
+    pointers
         .into_iter()
         .map(|pointer| validated_wal_segment_pointer(pointer.into()))
         .collect()
@@ -475,6 +481,9 @@ pub struct ForkBasis {
     /// Source checkpoint record pinning the basis for as long as the target lives.
     pub source_checkpoint_id: CheckpointId,
 }
+
+/// Maximum number of pointers accepted in a head's `recent_segments` accelerator.
+pub const RECENT_SEGMENTS_LIMIT: usize = 256;
 
 /// Carries the authoritative visibility, allocation, and fencing state of a namespace.
 ///
@@ -1201,6 +1210,22 @@ mod tests {
         assert_eq!(
             head.recent_segments,
             vec![serde_json::from_value(older).expect("valid predecessor pointer")]
+        );
+    }
+
+    #[test]
+    fn a_head_rejects_too_many_predecessor_hints() {
+        let pointer = wal_pointer_json("wal_00000000000000000001-0123456789abcdef", 1, 1);
+        let error = serde_json::from_value::<HeadState>(head_json(
+            None,
+            vec![pointer; RECENT_SEGMENTS_LIMIT + 1],
+        ))
+        .expect_err("the head rejects an oversized predecessor accelerator");
+        assert!(
+            error
+                .to_string()
+                .contains("head `recent_segments` exceeds 256 entries"),
+            "the rejection should name the field and limit: {error}"
         );
     }
 

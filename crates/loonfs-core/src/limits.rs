@@ -45,7 +45,7 @@ pub const MAX_UNFLUSHED_WAL_SEGMENTS: u64 = 128;
 /// legal unflushed tail rather than to keep the head small: a full list
 /// encodes to roughly 68 KiB at realistic identifier lengths and 107 KiB at
 /// the worst case the grammars allow.
-pub(crate) const RECENT_SEGMENTS_LIMIT: usize = 256;
+pub(crate) use loonfs_api::wire::control::RECENT_SEGMENTS_LIMIT;
 
 /// The head-coverage inequality, shared by the compile-time assertion below
 /// and the test that proves the assertion has teeth.

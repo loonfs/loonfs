@@ -6768,16 +6768,9 @@
         "description": "An application-created read view.",
         "required": [
           "name",
-          "expires_at_ms",
           "kind"
         ],
         "properties": {
-          "expires_at_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "When the snapshot lease expires, in Unix milliseconds.",
-            "minimum": 0
-          },
           "kind": {
             "type": "string",
             "enum": [
