@@ -300,7 +300,7 @@ impl crate::time::MonotonicTimer for SteppingTimer {
 async fn retention_advancement_uses_published_manifest_and_updates_floor_only() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -1341,7 +1341,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
 async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)

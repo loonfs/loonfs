@@ -670,7 +670,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
             .iter()
             .map(|record| NormalizedAttributeRevision {
                 inode_id: record.inode_id.0,
-                revision: record.revision,
+                revision: record.revision_no,
                 committed_seq: record.committed_seq.0,
                 commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,

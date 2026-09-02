@@ -11,7 +11,7 @@ use loonfs::{
 };
 use loonfs_api::wire::control::{HeadState, NamespaceStatus};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -240,7 +240,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     let temp_dir = tempdir().expect("tempdir");
     let ns_fence = NamespaceId::parse("fence").expect("valid namespace id");
     let ns_other = NamespaceId::parse("other").expect("valid namespace id");
-    let counting = Arc::new(CountingStore::new(
+    let counting = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::wal_head(&ns_fence),
     ));
@@ -372,7 +372,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
 async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("nocache").expect("valid namespace id");
-    let counting = Arc::new(CountingStore::new(
+    let counting = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::wal_head(&namespace_id),
     ));

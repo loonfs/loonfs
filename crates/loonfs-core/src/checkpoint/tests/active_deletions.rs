@@ -698,7 +698,7 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
     /// deletions, measured after the family is folded into its base.
     async fn page_reads(deletions: u32) -> usize {
         let temp = tempdir().expect("tempdir");
-        let store = CountingStore::metadata_segments(
+        let store = RecordingStore::metadata_segments(
             LocalFsStore::new(temp.path()).expect("create local-fs store"),
         );
         let namespace_id = NamespaceId::parse("trash-bounded").expect("namespace id");

@@ -182,9 +182,7 @@ mod tests {
             .pop()
             .expect("one commit result")
     }
-    use async_trait::async_trait;
     use bytes::Bytes;
-    use futures::stream::BoxStream;
     use loonfs_api::wire::control::{
         decode_control_object, encode_control_object, ControlObjectKind, HeadStateEnvelope,
         NamespaceStatus,
@@ -192,11 +190,12 @@ mod tests {
     use loonfs_api::{ChangeSeq, CommitId, NamespaceId, MAX_PUBLIC_INTEGER};
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::{
-        ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    use loonfs_objectstore::{ObjectStore, PutMode};
+    use loonfs_test_support::stores::{
+        FailStore, InjectedError, KeyPredicate, OperationClass, OperationKind,
     };
-    use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn context(writer_id: &str, now_ms: u64) -> MutationContext {
@@ -505,14 +504,47 @@ mod tests {
         .await
         .expect("bootstrap");
 
-        // Rewrites the head with a writer-b takeover just before the delete
-        // loop's reload (head read #2), i.e. after writer A already acquired
-        // its epoch (head read #1) — the stalled-deleter interleaving.
-        let store = TakeoverBetweenHeadReadsStore {
-            inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-            head_key: wal_head(&namespace_id),
-            head_reads: AtomicUsize::new(0),
-        };
+        let inner = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let head_key = wal_head(&namespace_id);
+        let selected_head_key = head_key.clone();
+        let head_reads = AtomicUsize::new(0);
+        let takeover_inner = Arc::clone(&inner);
+        let store = FailStore::matching(
+            inner,
+            move |operation| {
+                operation.key() == selected_head_key
+                    && matches!(operation.kind(), OperationKind::GetWithMetadata)
+                    && head_reads.fetch_add(1, Ordering::SeqCst) == 1
+            },
+            InjectedError::Transport("unused".to_owned()),
+        )
+        .before_operation(move |_| {
+            let inner = Arc::clone(&takeover_inner);
+            let head_key = head_key.clone();
+            Box::pin(async move {
+                let body = inner
+                    .get_with_metadata(&head_key)
+                    .await
+                    .expect("read head for takeover")
+                    .expect("head exists");
+                let envelope: HeadStateEnvelope =
+                    decode_control_object(&body.bytes, ControlObjectKind::WalHead)
+                        .expect("decode head");
+                let mut head = envelope.state;
+                head.writer_epoch = WriterEpoch(head.writer_epoch.0 + 1);
+                head.writer = Some(WriterBlock {
+                    writer_id: "writer-b".to_owned(),
+                    acquired_at_ms: 1_500,
+                });
+                let next = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
+                    .expect("head envelope");
+                let bytes = encode_control_object(&next).expect("head bytes");
+                inner
+                    .put(&head_key, Bytes::from(bytes), PutMode::Overwrite)
+                    .await
+                    .expect("write takeover head");
+            })
+        });
 
         // The deleting session supplies its own acquired epoch (in
         // production the commit engine's), so the interleaving is explicit:
@@ -532,93 +564,13 @@ mod tests {
         .expect_err("stale-epoch delete must be fenced");
         assert_eq!(error.code(), ErrorCode::WriterFenced);
 
-        let head = load_head_object(&store.inner, &namespace_id)
+        let head = load_head_object(store.inner(), &namespace_id)
             .await
             .expect("read head")
             .state;
         assert_eq!(head.status, NamespaceStatus::Active {});
         let writer = head.writer.expect("writer block");
         assert_eq!(writer.writer_id, "writer-b");
-    }
-
-    #[derive(Debug)]
-    struct TakeoverBetweenHeadReadsStore {
-        inner: LocalFsStore,
-        head_key: String,
-        head_reads: AtomicUsize,
-    }
-
-    impl TakeoverBetweenHeadReadsStore {
-        async fn inject_takeover(&self) {
-            let body = self
-                .inner
-                .get_with_metadata(&self.head_key)
-                .await
-                .expect("read head for takeover")
-                .expect("head exists");
-            let envelope: HeadStateEnvelope =
-                decode_control_object(&body.bytes, ControlObjectKind::WalHead)
-                    .expect("decode head");
-            let mut head = envelope.state;
-            head.writer_epoch = WriterEpoch(head.writer_epoch.0 + 1);
-            head.writer = Some(WriterBlock {
-                writer_id: "writer-b".to_owned(),
-                acquired_at_ms: 1_500,
-            });
-            let next = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
-                .expect("head envelope");
-            let bytes = encode_control_object(&next).expect("head bytes");
-            self.inner
-                .put(&self.head_key, Bytes::from(bytes), PutMode::Overwrite)
-                .await
-                .expect("write takeover head");
-        }
-    }
-
-    #[async_trait]
-    impl ObjectStore for TakeoverBetweenHeadReadsStore {
-        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<ByteRange>,
-        ) -> Result<Option<Bytes>, ObjectStoreError> {
-            self.inner.get(key, range).await
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            if key == self.head_key && self.head_reads.fetch_add(1, Ordering::SeqCst) == 1 {
-                self.inject_takeover().await;
-            }
-            self.inner.get_with_metadata(key).await
-        }
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: Bytes,
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            self.inner.put(key, bytes, mode).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_from_stream(
-            &self,
-            prefix: &str,
-            start_after: Option<&str>,
-        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_from_stream(prefix, start_after)
-        }
     }
 
     #[tokio::test]
@@ -628,18 +580,40 @@ mod tests {
         // past it, so the last acquirer deterministically wins.
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+        let inner = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         write_head(
             &inner,
             &namespace_id,
             head_owned_by(&namespace_id, "writer-a", WriterEpoch(7)),
         )
         .await;
-        let store = TakeoverOnCasConflictStore {
+        let winner_inner = Arc::clone(&inner);
+        let winner_namespace_id = namespace_id.clone();
+        let store = FailStore::new(
             inner,
-            namespace_id: namespace_id.clone(),
-            remaining_conflicts: AtomicUsize::new(1),
-        };
+            KeyPredicate::exact(wal_head(&namespace_id)),
+            OperationClass::CompareAndSwap,
+            InjectedError::PreconditionFailed,
+        )
+        .before_operation(move |_| {
+            let inner = Arc::clone(&winner_inner);
+            let namespace_id = winner_namespace_id.clone();
+            Box::pin(async move {
+                let winner = head_owned_by(&namespace_id, "writer-b", WriterEpoch(8));
+                let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, winner)
+                    .expect("head envelope");
+                let bytes = encode_control_object(&envelope).expect("head bytes");
+                inner
+                    .put(
+                        &wal_head(&namespace_id),
+                        Bytes::from(bytes),
+                        PutMode::Overwrite,
+                    )
+                    .await
+                    .expect("write winner head");
+            })
+        });
+        store.fail_next(1);
 
         let acquired = acquire_writer_epoch(&store, &namespace_id, &context("writer-c", 2_000))
             .await
@@ -648,94 +622,11 @@ mod tests {
         // writer-b installed epoch 8 during the conflict; writer-c retried
         // and took 9.
         assert_eq!(acquired.writer_epoch, WriterEpoch(9));
-        let head = load_head_object(&store.inner, &namespace_id)
+        let head = load_head_object(store.inner(), &namespace_id)
             .await
             .expect("read head")
             .state;
         assert_eq!(head.writer_epoch, WriterEpoch(9));
         assert_eq!(head.writer.expect("writer block").writer_id, "writer-c");
-    }
-
-    #[derive(Debug)]
-    struct TakeoverOnCasConflictStore {
-        inner: LocalFsStore,
-        namespace_id: NamespaceId,
-        remaining_conflicts: AtomicUsize,
-    }
-
-    impl TakeoverOnCasConflictStore {
-        async fn inject_winner(&self) {
-            let winner = head_owned_by(&self.namespace_id, "writer-b", WriterEpoch(8));
-            let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, winner)
-                .expect("head envelope");
-            let bytes = encode_control_object(&envelope).expect("head bytes");
-            self.inner
-                .put(
-                    &wal_head(&self.namespace_id),
-                    Bytes::from(bytes),
-                    PutMode::Overwrite,
-                )
-                .await
-                .expect("write winner head");
-        }
-    }
-
-    #[async_trait]
-    impl ObjectStore for TakeoverOnCasConflictStore {
-        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<ByteRange>,
-        ) -> Result<Option<Bytes>, ObjectStoreError> {
-            self.inner.get(key, range).await
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key).await
-        }
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: Bytes,
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            self.inner.put(key, bytes, mode).await
-        }
-
-        async fn compare_and_swap(
-            &self,
-            key: &str,
-            expected_etag: &str,
-            bytes: Bytes,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            if self.remaining_conflicts.load(Ordering::SeqCst) > 0 {
-                self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
-                self.inject_winner().await;
-                return Err(ObjectStoreError::PreconditionFailed {
-                    object_key: key.to_owned(),
-                });
-            }
-            self.inner.compare_and_swap(key, expected_etag, bytes).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_from_stream(
-            &self,
-            prefix: &str,
-            start_after: Option<&str>,
-        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_from_stream(prefix, start_after)
-        }
     }
 }

@@ -3,24 +3,26 @@
 mod blocking_store;
 mod buffer_watch_store;
 mod concurrency_watch_store;
-mod counting_store;
+mod delegate;
 mod fail_store;
+mod fake_multipart_store;
+mod intercept_store;
 mod key_predicate;
 mod metadata_map_store;
-mod multipart_store;
 mod operation;
 mod recording_store;
 
-pub use blocking_store::BlockingStore;
+pub use crate::delegate_object_store;
+pub use blocking_store::{BlockingInterceptor, BlockingStore};
 pub use buffer_watch_store::{BufferPeaks, BufferWatchStore};
 pub use concurrency_watch_store::{ConcurrencyWatchStore, ReadConcurrency};
-pub use counting_store::{CountingStore, StoreCounts};
-pub use fail_store::{FailStore, FailureMode, InjectedError};
+pub use fail_store::{FailInterceptor, FailStore, FailureMode, InjectedError};
+pub use fake_multipart_store::{FakeMultipartStore, MultipartChecksumEnforcement};
+pub use intercept_store::{Intercept, InterceptStore, Interceptor, Outcome};
 pub use key_predicate::KeyPredicate;
 pub use metadata_map_store::MetadataMapStore;
-pub use multipart_store::{MultipartChecksumEnforcement, MultipartStore};
-pub use operation::{OperationClass, OperationContext, OperationKind};
-pub use recording_store::{RecordedGet, RecordedOperation, RecordingStore};
+pub use operation::{OperationClass, OperationContext, OperationKind, RecordedOperation};
+pub use recording_store::{RecordedGet, RecordingInterceptor, RecordingStore, StoreCounts};
 
 #[cfg(test)]
 mod tests {
@@ -35,7 +37,7 @@ mod tests {
     async fn wrappers_preserve_the_start_after_contract() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = LocalFsStore::new(temp_dir.path()).expect("local store");
-        let store = MultipartStore::new(store);
+        let store = FakeMultipartStore::new(store);
         let store = MetadataMapStore::new(store, KeyPredicate::any(), |metadata| metadata);
         let store = FailStore::new(
             store,
@@ -46,7 +48,6 @@ mod tests {
         let store = BlockingStore::new(store, KeyPredicate::any(), OperationClass::List);
         let store = BufferWatchStore::new(store, KeyPredicate::any());
         let store = ConcurrencyWatchStore::new(store, KeyPredicate::any());
-        let store = CountingStore::new(store, KeyPredicate::any());
         let store = RecordingStore::new(store, KeyPredicate::any());
 
         let prefix = "contract/start-after/";

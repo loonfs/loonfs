@@ -12,7 +12,7 @@ use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::http::StatusCode;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::StreamExt;
 use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, MaintenanceJob,
     MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepReport,
@@ -33,9 +33,7 @@ use loonfs_grep::root::{
 use loonfs_grep::{GrepWorker, NamespaceReads};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use std::path::Path;
 
 fn options_with_store(store: SharedObjectStore) -> AppOptions {
@@ -443,8 +441,8 @@ fn is_snake_case_token(token: &str) -> bool {
 use loonfs_test_support::http::{raw_agent, retry_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, BufferWatchStore, FailStore, InjectedError, KeyPredicate, OperationClass,
-    OperationContext, OperationKind,
+    delegate_object_store, BlockingStore, BufferWatchStore, FailStore, InjectedError, KeyPredicate,
+    OperationClass, OperationContext, OperationKind,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -484,56 +482,21 @@ impl PoisonProviderStore {
     }
 }
 
-#[async_trait]
-impl ObjectStore for PoisonProviderStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        Err(Self::denied(key))
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        Err(Self::denied(key))
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        _range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        Err(Self::denied(key))
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        _bytes: Bytes,
-        _mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        Err(Self::denied(key))
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        Err(Self::denied(key))
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        _start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        Box::pin(futures::stream::once(std::future::ready(Err(
-            Self::denied(prefix),
-        ))))
-    }
-}
-
 #[tokio::test]
 async fn provider_failure_is_projected_in_the_remote_api_envelope() {
     use tower::ServiceExt;
 
     let temp_dir = tempdir().expect("tempdir");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        KeyPredicate::any(),
+        OperationClass::Any,
+        InjectedError::PermissionDenied(POISON_PROVIDER_DETAIL.to_owned()),
+    );
+    store.fail_all();
     let router = app(
         test_config(temp_dir.path(), "provider-hygiene-writer"),
-        options_with_store(Arc::new(PoisonProviderStore)),
+        options_with_store(Arc::new(store)),
     )
     .await
     .expect("build app")
@@ -632,21 +595,7 @@ impl StaleHeadOnceStore {
 
 #[async_trait]
 impl ObjectStore for StaleHeadOnceStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
+    delegate_object_store!(self => self.inner; except put);
 
     async fn put(
         &self,
@@ -663,18 +612,6 @@ impl ObjectStore for StaleHeadOnceStore {
             }
         }
         self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
@@ -3961,12 +3898,7 @@ mod direct_download {
 
     #[async_trait::async_trait]
     impl loonfs_objectstore::ObjectStore for Crc32cReadbackStore {
-        async fn head(
-            &self,
-            key: &str,
-        ) -> Result<Option<loonfs_objectstore::ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
+        delegate_object_store!(self => self.inner);
 
         async fn head_stored_checksum(
             &self,
@@ -3979,42 +3911,6 @@ mod direct_download {
                 size_bytes: bytes.len() as u64,
                 checksum: Checksum::crc32c(&bytes),
             }))
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<loonfs_objectstore::ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key).await
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<loonfs_objectstore::ByteRange>,
-        ) -> Result<Option<bytes::Bytes>, ObjectStoreError> {
-            self.inner.get(key, range).await
-        }
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: bytes::Bytes,
-            mode: loonfs_objectstore::PutMode,
-        ) -> Result<loonfs_objectstore::ObjectMetadata, ObjectStoreError> {
-            self.inner.put(key, bytes, mode).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_from_stream(
-            &self,
-            prefix: &str,
-            start_after: Option<&str>,
-        ) -> futures::stream::BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_from_stream(prefix, start_after)
         }
     }
 

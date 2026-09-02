@@ -23,8 +23,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
-    OperationKind,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, OperationKind,
+    RecordingStore,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -34,7 +34,7 @@ use tempfile::tempdir;
 #[test]
 fn namespace_diagnostics_reports_wal_tail_segments() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(CountingStore::new(
+    let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::any(),
     ));
@@ -79,7 +79,7 @@ fn namespace_diagnostics_counts_wal_tail_without_reading_segments() {
     let namespace_id = namespace_id("demo");
     // Count only WAL segment reads: the head's chain pointers must be
     // enough to size a hint-covered tail.
-    let store = Arc::new(CountingStore::new(
+    let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
     ));

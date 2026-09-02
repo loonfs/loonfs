@@ -6,26 +6,15 @@ use super::record::{
     release_checkpoint_record, verify_checkpoint_basis, write_checkpoint_record,
     CheckpointBasisVerification,
 };
-#[cfg(test)]
-use super::row::manifest_rows_for_family;
-#[cfg(test)]
-use super::runs::CHECKPOINT_ROW_FAMILIES;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-#[cfg(test)]
-use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
 use loonfs_api::{Checkpoint, CheckpointId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-
-#[cfg(test)]
-use super::load::append_rows_to_metadata;
-#[cfg(test)]
-use crate::metadata::MetadataStateBuilder;
 
 pub(crate) use crate::limits::CHECKPOINT_VERIFY_BUDGET_MS;
 
@@ -153,31 +142,4 @@ fn validate_checkpoint_name(name: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-#[cfg(test)]
-pub(super) async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<(HeadState, crate::metadata::MetadataState)> {
-    use crate::error::MetadataProjectionLoadError;
-
-    let projection = super::flush::load_root_projection(store, namespace_id).await?;
-    let mut metadata_state = MetadataStateBuilder::default();
-    for family in CHECKPOINT_ROW_FAMILIES {
-        let mut rows = projection
-            .manifest_segments
-            .scan_prefix(family, "")
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
-        rows.extend(manifest_rows_for_family(&projection.tail_state, family));
-        rows.sort_by_key(|row| row.row_key_for_family(family));
-        append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
-    }
-    Ok((projection.head, metadata_state.finish()))
 }

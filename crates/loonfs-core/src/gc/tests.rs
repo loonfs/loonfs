@@ -55,8 +55,8 @@ use futures::stream::BoxStream;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
-    BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
-    OperationClass, OperationContext, OperationKind, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+    OperationContext, OperationKind, RecordingStore,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -1556,7 +1556,7 @@ async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
     assert!(chain_units > 0, "the fixture must retain a chain");
 
     let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
-    let store = CountingStore::new(inner, segment_reads);
+    let store = RecordingStore::new(inner, segment_reads);
     let mut at_the_gate = config();
     at_the_gate.max_objects = Some(marking - chain_units);
     let report = gc_namespace(&store, &namespace_id, &at_the_gate, &past)
@@ -1848,7 +1848,7 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
     );
 
     let record_reads = KeyPredicate::prefix(checkpoint_prefix(&namespace_id));
-    let store = CountingStore::new(inner, record_reads);
+    let store = RecordingStore::new(inner, record_reads);
     let mut bounded = config();
     bounded.max_objects = Some(3);
     let report = gc_namespace(&store, &namespace_id, &bounded, &aged)
@@ -4824,7 +4824,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     }
     let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
     let wal_prefix = wal_segment_prefix(&namespace_id);
-    let store = CountingStore::new(
+    let store = RecordingStore::new(
         ListingCursorStore::new(inner),
         KeyPredicate::prefix(wal_prefix.clone()),
     );
@@ -4838,8 +4838,8 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
         .expect("first bounded pass");
     assert_eq!(first.deleted.wal_segments, 2);
     assert!(first.next_cursor.is_some());
-    assert_eq!(store.snapshot().heads, 2);
-    assert_eq!(store.snapshot().deletes, 2);
+    assert_eq!(store.counts().heads, 2);
+    assert_eq!(store.counts().deletes, 2);
     for key in &orphan_keys[..2] {
         assert!(store.head(key).await.expect("head orphan").is_none());
     }
@@ -4857,8 +4857,8 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
         .expect("second bounded pass");
     assert_eq!(second.deleted.wal_segments, 2);
     assert!(second.next_cursor.is_some());
-    assert_eq!(store.snapshot().heads, 2);
-    assert_eq!(store.snapshot().deletes, 2);
+    assert_eq!(store.counts().heads, 2);
+    assert_eq!(store.counts().deletes, 2);
     let resumed_wal_starts: Vec<Option<String>> = store
         .inner()
         .take_calls()
@@ -4880,8 +4880,8 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
         let pass = gc_namespace(&store, &namespace_id, &bounded, &aged)
             .await
             .expect("remaining bounded pass");
-        assert!(store.snapshot().heads <= 2);
-        assert!(store.snapshot().deletes <= 2);
+        assert!(store.counts().heads <= 2);
+        assert!(store.counts().deletes <= 2);
         let Some(cursor) = pass.next_cursor else {
             break;
         };

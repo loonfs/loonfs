@@ -799,7 +799,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::ids::content_ref;
-    use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
+    use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -817,7 +817,7 @@ mod tests {
     #[tokio::test]
     async fn validate_content_ref_reads_and_hashes_the_bytes() {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = b"whole file bytes";
         let content_ref = content_ref(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
@@ -957,7 +957,7 @@ mod tests {
     #[tokio::test]
     async fn checksum_verification_proves_the_object_without_reading_it() {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = b"provider-verified bytes";
         let content_ref = content_ref(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
@@ -1162,7 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn a_resumed_read_fetches_only_the_rest_and_verifies_all_of_it() {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(3 * TEST_CHUNK_BYTES as usize);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
@@ -1194,7 +1194,7 @@ mod tests {
     #[tokio::test]
     async fn a_resumed_read_holds_the_prefix_to_the_same_verdict() {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
@@ -1272,7 +1272,7 @@ mod tests {
     #[tokio::test]
     async fn a_prefix_longer_than_the_content_is_refused() {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
@@ -1343,7 +1343,7 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_read_of_an_empty_object_verifies_without_fetching() {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let content_ref = content_ref(b"");
         put_content_object(&store, &content_store_id, &content_ref, b"").await;
 
@@ -1420,7 +1420,7 @@ mod tests {
 
     async fn assert_resumed_checksum_verification(checksum: fn(&[u8]) -> Checksum) {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,

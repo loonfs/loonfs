@@ -16,16 +16,13 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
 use loonfs_api::{AbsolutePath, ActorId, ActorRef, ChangeSeq, DestinationBehavior};
 use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -121,21 +118,7 @@ impl PanicGate {
 
 #[async_trait]
 impl ObjectStore for PanicHeadCasStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
+    delegate_object_store!(self => self.inner; except put);
 
     async fn put(
         &self,
@@ -164,18 +147,6 @@ impl ObjectStore for PanicHeadCasStore {
             .expect("head CAS gate task");
         }
         self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 

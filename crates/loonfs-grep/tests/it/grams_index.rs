@@ -18,7 +18,7 @@ use loonfs_grep::{
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{
-    ConcurrencyWatchStore, CountingStore, KeyPredicate, OperationClass, RecordingStore,
+    ConcurrencyWatchStore, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
@@ -324,7 +324,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     let temp_dir = tempdir().expect("tempdir");
     let content_keys = KeyPredicate::new(is_content_object);
     let raw_store = Arc::new(RecordingStore::new(
-        CountingStore::new(
+        RecordingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             content_keys.clone(),
         ),
@@ -407,7 +407,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         } if indexed_revisions == FILES_PER_STEP as u64
     ));
     let first_reads = raw_store.take_get_keys();
-    let first_read_bytes = raw_store.inner().snapshot().read_bytes;
+    let first_read_bytes = raw_store.inner().counts().read_bytes;
     assert_eq!(first_reads.len(), FILES_PER_STEP);
     assert!(
         first_read_bytes <= max_content_bytes_per_step,
@@ -476,7 +476,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         } if indexed_revisions == FILES_PER_STEP as u64
     ));
     let second_reads = raw_store.take_get_keys();
-    let second_read_bytes = raw_store.inner().snapshot().read_bytes;
+    let second_read_bytes = raw_store.inner().counts().read_bytes;
     assert_eq!(second_reads.len(), FILES_PER_STEP);
     assert!(
         second_read_bytes <= max_content_bytes_per_step,
@@ -638,7 +638,7 @@ fn index_segment_keys() -> KeyPredicate {
 #[tokio::test]
 async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(CountingStore::new(
+    let raw_store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         index_segment_keys(),
     ));
@@ -941,7 +941,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 #[tokio::test]
 async fn worker_and_service_share_decoded_index_blocks() {
     let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(CountingStore::new(
+    let raw_store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         index_segment_keys(),
     ));

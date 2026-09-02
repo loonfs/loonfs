@@ -27,7 +27,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -144,7 +144,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 fn direct_put_completion_proves_upload_without_reading_content() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(CountingStore::new(
+    let raw_store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::content_blob(),
     ));
@@ -299,7 +299,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
 fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(CountingStore::new(
+    let raw_store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::content_blob(),
     ));

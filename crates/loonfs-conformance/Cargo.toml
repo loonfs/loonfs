@@ -17,6 +17,8 @@ futures.workspace = true
 loonfs-api.workspace = true
 loonfs-objectstore.workspace = true
 loonfs-server = { path = "../loonfs-server", features = ["test-support"] }
+loonfs-test-support.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
@@ -25,7 +27,6 @@ tokio.workspace = true
 
 [dev-dependencies]
 loonfs-client.workspace = true
-reqwest = { workspace = true, features = ["json"] }
 
 [lints]
 workspace = true

@@ -14,7 +14,7 @@ use loonfs_core::test_support::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -404,7 +404,7 @@ fn stat_and_list_use_initial_manifest_without_checkpoint() {
 fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(CountingStore::new(
+    let raw_store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::content_blob(),
     ));
