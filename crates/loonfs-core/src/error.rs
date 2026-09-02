@@ -761,8 +761,11 @@ fn classify_durable_content_error(error: &DurableContentValidationError) -> Erro
         DurableContentValidationError::InvalidContentRef(_)
         | DurableContentValidationError::MissingContentObject { .. }
         | DurableContentValidationError::ContentLengthMismatch { .. }
-        | DurableContentValidationError::ContentChecksumMismatch { .. }
-        | DurableContentValidationError::ContentStoreMismatch { .. } => ErrorCode::NamespaceCorrupt,
+        | DurableContentValidationError::ContentChecksumMismatch { .. } => {
+            ErrorCode::NamespaceCorrupt
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        DurableContentValidationError::ContentStoreMismatch { .. } => ErrorCode::NamespaceCorrupt,
         DurableContentValidationError::Store { .. } => ErrorCode::ServerError,
     }
 }

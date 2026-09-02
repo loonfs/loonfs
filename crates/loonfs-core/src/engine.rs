@@ -18,17 +18,15 @@ use crate::protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
     MultipartPartTargets, ResolvedUploadCompletion,
 };
-use crate::storage::content::{
-    ensure_imported_ref_matches, open_content_import_reader, FileContentStream,
-};
+use crate::storage::content::{open_content_import_reader, FileContentStream, StreamedPayloadKind};
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use crate::time::current_time_ms;
 use loonfs_api::options::{
     DirectMultipartUploadOptions, ListInodeChildrenOptions, ListPathEntriesOptions, StatPathOptions,
 };
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, CommitResponse, CompleteMultipartUploadRequest,
-    ListChangesResponse, UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
+    BeginUploadResponse, CommitResponse, ListChangesResponse, UploadContentResponse, UploadMode,
+    UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceStatus};
 use loonfs_api::EffectiveLimit;
@@ -561,11 +559,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Starts a durable upload session with explicit transport options.
-    pub async fn begin_upload(&self, request: BeginUploadRequest) -> Result<BeginUploadResponse> {
-        crate::protocol::begin_upload(
+    pub async fn begin_upload(&self) -> Result<BeginUploadResponse> {
+        crate::protocol::begin_service_proxied_upload(
             &self.store,
             &self.namespace_id,
-            request,
             &self.mutation_context()?,
         )
         .await
@@ -641,64 +638,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .await
     }
 
-    /// Completes a service-proxied or direct-PUT upload session.
-    pub async fn complete_upload(&self, upload_id: &UploadId) -> Result<UploadSession> {
-        Ok(self.complete_upload_prepared(upload_id).await?.response)
-    }
-
-    /// Completes a direct-multipart upload session.
-    pub async fn complete_multipart_upload(
-        &self,
-        upload_id: &UploadId,
-        request: &CompleteMultipartUploadRequest,
-    ) -> Result<UploadSession> {
-        Ok(self
-            .complete_multipart_upload_prepared(upload_id, request)
-            .await?
-            .response)
-    }
-
     /// Completes an upload session and returns time-bounded proof for later
-    /// publication.
-    ///
-    /// Service-proxied completion performs no content-blob I/O. Direct-put
-    /// completion performs one content-blob HEAD and no content-blob GET.
-    pub async fn complete_upload_prepared(&self, upload_id: &UploadId) -> Result<CompletedUpload> {
-        self.complete_upload_prepared_inner(upload_id, ResolvedUploadCompletion::KnownContent)
-            .await
-    }
-
-    /// Completes a multipart upload and returns time-bounded proof for later
-    /// publication.
-    pub async fn complete_multipart_upload_prepared(
-        &self,
-        upload_id: &UploadId,
-        request: &CompleteMultipartUploadRequest,
-    ) -> Result<CompletedUpload> {
-        self.complete_upload_prepared_inner(
-            upload_id,
-            ResolvedUploadCompletion::Multipart(request.clone()),
-        )
-        .await
-    }
-
-    async fn complete_upload_prepared_inner(
-        &self,
-        upload_id: &UploadId,
-        completion: ResolvedUploadCompletion,
-    ) -> Result<CompletedUpload> {
-        let catalog = crate::namespace::catalog::load_namespace_catalog_entry(
-            &self.store,
-            &self.namespace_id,
-        )
-        .await?;
-        self.complete_upload_prepared_with_catalog(&catalog, upload_id, completion)
-            .await
-    }
-
-    /// Completes an upload with a namespace catalog binding already resolved
-    /// by the runtime.
-    pub async fn complete_upload_prepared_with_catalog(
+    /// publication. The caller passes the catalog it already holds, so
+    /// completion adds no head read.
+    pub async fn complete_upload(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
@@ -721,7 +664,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Server integrations use this to decode raw request bytes without a
     /// second upload-session read. A resolver failure is classified as an
     /// invalid upload request.
-    pub async fn complete_upload_prepared_with_catalog_for_mode<F>(
+    pub async fn complete_upload_for_mode<F>(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
@@ -775,25 +718,23 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         content_ref: &ContentRef,
-    ) -> Result<PreparedContent> {
+    ) -> Result<PreparedContent>
+    where
+        S: Clone + 'static,
+    {
         let catalog = self.own_catalog(catalog)?;
         let context = self.mutation_context()?;
-        let (object_key, pump, body) =
-            open_content_import_reader(&self.store, catalog.content_store_id(), content_ref)
+        let (_object_key, body) =
+            open_content_import_reader(self.store.clone(), catalog.content_store_id(), content_ref)
                 .await?;
-        let (source_checksum, staged) = futures::future::join(
-            pump,
-            crate::protocol::stage_owned_stream(&self.store, catalog, body, &context),
+        crate::protocol::stage_owned_stream(
+            &self.store,
+            catalog,
+            body,
+            StreamedPayloadKind::ContentImport,
+            &context,
         )
-        .await;
-        let prepared = staged?;
-        ensure_imported_ref_matches(
-            object_key,
-            content_ref,
-            prepared.content_ref(),
-            &source_checksum,
-        )?;
-        Ok(prepared)
+        .await
     }
 
     /// Stages a streamed payload as content a session owns, hashing it on
@@ -810,6 +751,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             self.own_catalog(catalog)?,
             body,
+            StreamedPayloadKind::Request,
             &self.mutation_context()?,
         )
         .await
@@ -1131,10 +1073,7 @@ mod tests {
             .bootstrap_namespace(BootstrapOptions::default())
             .await
             .expect("bootstrap namespace");
-        let begun = writer
-            .begin_upload(BeginUploadRequest::ServiceProxied {})
-            .await
-            .expect("begin upload");
+        let begun = writer.begin_upload().await.expect("begin upload");
 
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("reader store"),

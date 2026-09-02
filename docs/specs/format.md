@@ -1765,7 +1765,7 @@ The following invariants are checked when a record is read:
   `content_id`.
 - The record carries a `mode` and a `status`. Neither has a default and
   neither may be omitted.
-- A completed `direct_put` session's checksum uses the mode's stored
+- A completed direct session's checksum uses the mode's stored
   `checksum_algorithm`.
 
 A record that fails any invariant is rejected as corrupt. Upload sessions use

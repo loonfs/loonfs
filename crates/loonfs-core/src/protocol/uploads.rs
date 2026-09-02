@@ -25,17 +25,14 @@ use crate::namespace::control::load_namespace_head_control;
 use crate::storage::content::{
     abort_unpublished_multipart_upload, delete_unpublished_content_object,
     identify_streamed_payload, stage_bytes_under_content_id, stage_streamed_under_content_id,
-    verify_durable_content_checksum, DurableContentValidationError,
+    verify_durable_content_checksum, DurableContentValidationError, StreamedPayloadKind,
 };
-use crate::storage::content_admission::{
-    CompletedUploadReceipt, ContentAdmission, PreparedContent,
-};
+use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use bytes::Bytes;
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompletedUploadPart,
-    UploadContentClaim, UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
-    UploadSessionStatus,
+    BeginUploadResponse, CompleteMultipartUploadRequest, CompletedUploadPart, UploadContentClaim,
+    UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, NamespaceStatus, ProxiedStaging, UploadSessionMode,
@@ -92,6 +89,17 @@ pub enum ResolvedUploadCompletion {
     Multipart(CompleteMultipartUploadRequest),
 }
 
+impl ResolvedUploadCompletion {
+    /// Returns the upload mode this completion describes.
+    pub fn mode(&self) -> UploadMode {
+        match self {
+            Self::KnownContent => UploadMode::ServiceProxied,
+            Self::DirectPut { .. } => UploadMode::DirectPut,
+            Self::Multipart(_) => UploadMode::DirectMultipart,
+        }
+    }
+}
+
 /// One part a server integration is about to sign.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultipartPartTarget {
@@ -107,20 +115,12 @@ pub struct MultipartPartTargets {
     pub parts: Vec<MultipartPartTarget>,
 }
 
-pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
+pub(crate) async fn begin_service_proxied_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    request: BeginUploadRequest,
     context: &MutationContext,
 ) -> Result<BeginUploadResponse> {
     ensure_upload_namespace_available(store, namespace_id).await?;
-    if !matches!(request, BeginUploadRequest::ServiceProxied {}) {
-        // Direct uploads require a presigned URL issuer.
-        return Err(CoreError::InvalidUploadContent(format!(
-            "{} requires a presigned URL issuer",
-            upload_mode_name(request.mode())
-        )));
-    }
     let upload_id = create_upload_session(
         store,
         namespace_id,
@@ -132,14 +132,6 @@ pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
         namespace_id: namespace_id.clone(),
         upload_id,
     })
-}
-
-fn upload_mode_name(mode: UploadMode) -> &'static str {
-    match mode {
-        UploadMode::ServiceProxied => "service_proxied",
-        UploadMode::DirectPut => "direct_put",
-        UploadMode::DirectMultipart => "direct_multipart",
-    }
 }
 
 /// Starts a direct PUT session and assigns its content identity.
@@ -578,15 +570,6 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Returns the public name of an upload mode.
-fn mode_name(mode: &UploadSessionMode) -> &'static str {
-    match mode {
-        UploadSessionMode::ServiceProxied { .. } => "service_proxied",
-        UploadSessionMode::DirectPut { .. } => "direct_put",
-        UploadSessionMode::DirectMultipart { .. } => "direct_multipart",
-    }
-}
-
 async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -600,10 +583,15 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     if !matches!(session.mode, UploadSessionMode::ServiceProxied { .. }) {
         return Err(CoreError::InvalidUploadContent(format!(
             "{} sessions must be completed after using the presigned URLs",
-            mode_name(&session.mode)
+            upload_mode(&session.mode).as_str()
         )));
     }
     Ok((content_store_id, session))
+}
+
+pub(crate) enum ProxiedPayload<'a> {
+    Bytes(&'a [u8]),
+    Stream(ByteStream),
 }
 
 /// Stores bytes in a service-proxied upload session.
@@ -617,6 +605,24 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     bytes: &[u8],
 ) -> Result<UploadContentResponse> {
+    upload_proxied_content(store, namespace_id, upload_id, ProxiedPayload::Bytes(bytes)).await
+}
+
+pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    body: ByteStream,
+) -> Result<UploadContentResponse> {
+    upload_proxied_content(store, namespace_id, upload_id, ProxiedPayload::Stream(body)).await
+}
+
+pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    payload: ProxiedPayload<'_>,
+) -> Result<UploadContentResponse> {
     let (content_store_id, loaded) =
         read_open_proxied_session(store, namespace_id, upload_id).await?;
 
@@ -624,7 +630,14 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     // byte is written and released by the same swap that records the result.
     match claim_staging_slot(store, namespace_id, upload_id).await? {
         StagingSlot::AlreadyStaged(staged) => {
-            let content_ref = ContentRef::blob_v1(loaded.content_id.clone(), bytes);
+            let content_ref = match payload {
+                ProxiedPayload::Bytes(bytes) => {
+                    ContentRef::blob_v1(loaded.content_id.clone(), bytes)
+                }
+                ProxiedPayload::Stream(body) => {
+                    identify_streamed_payload(loaded.content_id.clone(), body).await?
+                }
+            };
             if staged != content_ref {
                 return Err(CoreError::UploadContentConflict {
                     upload_id: upload_id.clone(),
@@ -639,23 +652,31 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
         StagingSlot::Claimed => {}
     }
 
-    let stored = match stage_bytes_under_content_id(
-        store,
-        content_store_id,
-        loaded.content_id.clone(),
-        bytes,
-    )
-    .await
-    {
-        Ok(stored) => stored,
+    let staged = match payload {
+        ProxiedPayload::Bytes(bytes) => {
+            stage_bytes_under_content_id(store, content_store_id, loaded.content_id.clone(), bytes)
+                .await
+                .map(|stored| (stored.into_content_ref(), false))
+        }
+        ProxiedPayload::Stream(body) => stage_streamed_under_content_id(
+            store,
+            content_store_id,
+            loaded.content_id.clone(),
+            body,
+            StreamedPayloadKind::Request,
+        )
+        .await
+        .map(|staged| (staged.content_ref, staged.already_present)),
+    };
+    let (content_ref, already_present) = match staged {
+        Ok(staged) => staged,
         Err(error) => {
             release_staging_claim(store, namespace_id, upload_id).await;
             return Err(error);
         }
     };
 
-    let content_ref = stored.into_content_ref();
-    record_staged_content(store, namespace_id, upload_id, content_ref, false).await
+    record_staged_content(store, namespace_id, upload_id, content_ref, already_present).await
 }
 
 /// Records a staging result and releases its claim in the same
@@ -714,70 +735,6 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Streams content into a service-proxied session while computing its
-/// reference.
-///
-/// The payload is written before the session compare-and-swap because the
-/// stream cannot be replayed inside a retry loop. The compare-and-swap
-/// compares the computed reference with any value already stored in the
-/// session, making an identical retry idempotent and a different payload a
-/// conflict.
-pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    body: ByteStream,
-) -> Result<UploadContentResponse> {
-    let (content_store_id, loaded) =
-        read_open_proxied_session(store, namespace_id, upload_id).await?;
-
-    // A session that has already staged content must not have its object
-    // rewritten while the answer is being worked out. Reading the body
-    // without writing it decides the question: the same bytes are one
-    // upload arriving twice, and different bytes are a conflict either way.
-    // Taking the claim is what establishes that nothing else is writing.
-    match claim_staging_slot(store, namespace_id, upload_id).await? {
-        StagingSlot::AlreadyStaged(staged) => {
-            let content_ref = identify_streamed_payload(loaded.content_id.clone(), body).await?;
-            if staged != content_ref {
-                return Err(CoreError::UploadContentConflict {
-                    upload_id: upload_id.clone(),
-                });
-            }
-            return Ok(UploadContentResponse {
-                namespace_id: namespace_id.clone(),
-                upload_id: upload_id.clone(),
-                content_ref,
-            });
-        }
-        StagingSlot::Claimed => {}
-    }
-
-    let staged = match stage_streamed_under_content_id(
-        store,
-        content_store_id,
-        loaded.content_id.clone(),
-        body,
-    )
-    .await
-    {
-        Ok(staged) => staged,
-        Err(error) => {
-            release_staging_claim(store, namespace_id, upload_id).await;
-            return Err(error);
-        }
-    };
-
-    record_staged_content(
-        store,
-        namespace_id,
-        upload_id,
-        staged.content_ref,
-        staged.already_present,
-    )
-    .await
-}
-
 /// Completes an upload by verifying the content and then recording the
 /// terminal state.
 ///
@@ -829,7 +786,8 @@ where
     let mode = upload_mode(&loaded.mode);
     let completion = resolve(mode).map_err(CoreError::InvalidUploadContent)?;
     let plan = completion_plan(&loaded, &completion)?;
-    if let Some(completed) = already_completed_outcome(
+    // The aborted status was rejected above; the compare-and-swap caller also uses this helper.
+    if let Some(completed) = replay_terminal_completion(
         &loaded.status,
         namespace_id,
         content_store_id,
@@ -899,7 +857,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
         let upload_id = upload_id.to_owned();
         let verified = verified.clone();
         async move {
-            if let Some(completed) = already_completed_outcome(
+            if let Some(completed) = replay_terminal_completion(
                 &state.status,
                 &namespace_id,
                 &content_store_id,
@@ -979,12 +937,19 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     body: ByteStream,
+    payload_kind: StreamedPayloadKind,
     context: &MutationContext,
 ) -> Result<PreparedContent> {
     let session = open_owned_staging_session(store, catalog, context).await?;
     let content_store_id = catalog.content_store_id().clone();
-    let staged =
-        stage_streamed_under_content_id(store, content_store_id, session.content_id, body).await?;
+    let staged = stage_streamed_under_content_id(
+        store,
+        content_store_id,
+        session.content_id,
+        body,
+        payload_kind,
+    )
+    .await?;
     if staged.already_present {
         // The identity is 128 fresh random bits and this session has made no
         // earlier attempt, so an occupied key is corruption rather than a
@@ -1101,7 +1066,13 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
         })
         .await?;
 
-    let _ = abandoned.release(store, content_store_id).await;
+    if !abandoned.release(store, content_store_id).await {
+        tracing::debug!(
+            namespace_id = %namespace_id,
+            upload_id = %upload_id,
+            "upload cleanup remains for garbage collection"
+        );
+    }
     Ok(response)
 }
 
@@ -1233,12 +1204,12 @@ fn completed_upload(
             mode,
             status: completed_status(content_ref, completed_at_ms),
         },
-        prepared: PreparedContent::from_admission(ContentAdmission::for_completed_upload(
+        prepared: PreparedContent::for_completed_upload(
             namespace_id.clone(),
             content_store_id.clone(),
             content_ref.clone(),
             completed_at_ms.saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS),
-        )),
+        ),
         receipt: receipt_within_window(
             namespace_id,
             content_store_id,
@@ -1282,7 +1253,7 @@ fn receipt_within_window(
 /// Answers a completion against a session that has already reached a
 /// terminal status: a replay of the same content succeeds idempotently,
 /// anything else is the terminal error for that status.
-fn already_completed_outcome(
+fn replay_terminal_completion(
     status: &UploadSessionRecordStatus,
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
@@ -1369,6 +1340,16 @@ fn completion_plan<'a>(
     session: &'a UploadSessionState,
     completion: &'a ResolvedUploadCompletion,
 ) -> Result<CompletionPlan<'a>> {
+    let session_mode = upload_mode(&session.mode);
+    let completion_mode = completion.mode();
+    if completion_mode != session_mode {
+        return Err(CoreError::InvalidUploadContent(format!(
+            "completion mode `{}` does not match stored upload mode `{}`",
+            completion_mode.as_str(),
+            session_mode.as_str()
+        )));
+    }
+
     match (&session.mode, completion) {
         (UploadSessionMode::ServiceProxied { staging }, ResolvedUploadCompletion::KnownContent) => {
             Ok(CompletionPlan::Proxied {
@@ -1405,28 +1386,8 @@ fn completion_plan<'a>(
             checksum_algorithm: *checksum_algorithm,
             parts,
         }),
-        (UploadSessionMode::ServiceProxied { .. }, ResolvedUploadCompletion::DirectPut { .. }) => {
-            Err(CoreError::InvalidUploadContent(
-                "service_proxied completion carries no content claim".to_owned(),
-            ))
-        }
-        (UploadSessionMode::DirectPut { .. }, ResolvedUploadCompletion::KnownContent) => {
-            Err(CoreError::InvalidUploadContent(
-                "direct_put completion requires a content claim".to_owned(),
-            ))
-        }
-        (
-            UploadSessionMode::ServiceProxied { .. } | UploadSessionMode::DirectPut { .. },
-            ResolvedUploadCompletion::Multipart(_),
-        ) => Err(CoreError::InvalidUploadContent(format!(
-            "{} completion carries no multipart claim",
-            mode_name(&session.mode)
-        ))),
-        (
-            UploadSessionMode::DirectMultipart { .. },
-            ResolvedUploadCompletion::KnownContent | ResolvedUploadCompletion::DirectPut { .. },
-        ) => Err(CoreError::InvalidUploadContent(
-            "direct_multipart completion requires a content claim and parts".to_owned(),
+        _ => Err(CoreError::Internal(
+            "upload completion mode should match the session mode".to_owned(),
         )),
     }
 }
@@ -1548,7 +1509,6 @@ fn content_failure_reason(error: DurableContentValidationError) -> Result<String
 mod tests {
     use super::*;
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use loonfs_api::v0::BeginUploadRequest;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
     use tempfile::tempdir;
@@ -1571,14 +1531,9 @@ mod tests {
         bootstrap_namespace(store, &namespace_id, context, false)
             .await
             .expect("bootstrap");
-        let begin = begin_upload(
-            store,
-            &namespace_id,
-            BeginUploadRequest::ServiceProxied {},
-            context,
-        )
-        .await
-        .expect("begin upload");
+        let begin = begin_service_proxied_upload(store, &namespace_id, context)
+            .await
+            .expect("begin upload");
         let staged = upload_content(store, &namespace_id, begin.upload_id(), BYTES)
             .await
             .expect("stage upload");
@@ -2014,14 +1969,9 @@ mod tests {
             .expect_err("a completed session takes no more bytes");
         assert!(matches!(error, CoreError::UploadAlreadyCompleted { .. }));
 
-        let aborted = begin_upload(
-            &store,
-            &namespace_id,
-            BeginUploadRequest::ServiceProxied {},
-            &setup,
-        )
-        .await
-        .expect("begin a second upload");
+        let aborted = begin_service_proxied_upload(&store, &namespace_id, &setup)
+            .await
+            .expect("begin a second upload");
         abort_upload(
             &store,
             &namespace_id,
@@ -2075,14 +2025,9 @@ mod tests {
         );
 
         // A second session, aborted, to check the other terminal state.
-        let begin = begin_upload(
-            &store,
-            &namespace_id,
-            BeginUploadRequest::ServiceProxied {},
-            &setup,
-        )
-        .await
-        .expect("begin second upload");
+        let begin = begin_service_proxied_upload(&store, &namespace_id, &setup)
+            .await
+            .expect("begin second upload");
         abort_upload(
             &store,
             &namespace_id,

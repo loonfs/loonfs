@@ -140,7 +140,7 @@ pub(super) async fn create_upload(
         BeginUploadRequest::ServiceProxied {} => {
             let response = state
                 .writer
-                .create_upload(&namespace_id, request)
+                .create_upload(&namespace_id)
                 .await
                 .map_err(ApiResponseError::for_namespace(&namespace_id))?;
             Ok(Json(response))
@@ -579,7 +579,7 @@ pub(super) async fn complete_upload(
     let body = body.into_bytes();
     let completed = state
         .writer
-        .complete_upload_prepared_for_mode(&namespace_id, &upload_id, |mode| {
+        .complete_upload_for_mode(&namespace_id, &upload_id, |mode| {
             decode_completion_body(mode, &body)
         })
         .await

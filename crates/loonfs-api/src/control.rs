@@ -700,6 +700,17 @@ pub enum UploadSessionMode {
 }
 
 impl UploadSessionMode {
+    /// Returns the checksum algorithm fixed by a direct upload mode.
+    pub fn checksum_algorithm(&self) -> Option<ChecksumAlgorithm> {
+        match self {
+            Self::ServiceProxied { .. } => None,
+            Self::DirectPut { checksum_algorithm }
+            | Self::DirectMultipart {
+                checksum_algorithm, ..
+            } => Some(*checksum_algorithm),
+        }
+    }
+
     /// Returns the content reference stored by this mode, when present.
     fn content_ref(&self) -> Option<&ContentRef> {
         match self {
@@ -825,11 +836,11 @@ impl UploadSessionState {
             }
         }
         if let (
-            UploadSessionMode::DirectPut { checksum_algorithm },
+            Some(checksum_algorithm),
             UploadSessionRecordStatus::Completed { content_ref, .. },
-        ) = (&self.mode, &self.status)
+        ) = (self.mode.checksum_algorithm(), &self.status)
         {
-            if content_ref.checksum.algorithm != *checksum_algorithm {
+            if content_ref.checksum.algorithm != checksum_algorithm {
                 return Err(format!(
                     "upload session `{}` requires `{checksum_algorithm}` but its completed \
                      content uses `{}`",

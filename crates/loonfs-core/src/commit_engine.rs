@@ -76,12 +76,7 @@ impl CommitCandidate {
     pub fn prepared(request: CommitRequest, content: Vec<PreparedContent>) -> Self {
         Self {
             request,
-            content: ContentPreparation::Ready(
-                content
-                    .into_iter()
-                    .map(PreparedContent::into_admission)
-                    .collect(),
-            ),
+            content: ContentPreparation::Ready(content),
         }
     }
 
@@ -607,12 +602,11 @@ mod tests {
             .expect("operation limits must not affect identity");
 
         let content_ref = ContentRef::blob_v1(ContentId::generate(), b"proof");
-        let admission = ContentAdmission::for_durable_content_write(
+        let prepared = PreparedContent::for_durable_content_write(
             namespace_id.clone(),
             ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id"),
             content_ref,
         );
-        let prepared = PreparedContent::from_admission(admission);
         let oversized_proofs = CommitCandidate::prepared(
             create_dir_request("too-many-proofs", "docs"),
             vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],

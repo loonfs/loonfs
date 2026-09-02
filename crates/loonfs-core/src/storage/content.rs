@@ -7,9 +7,9 @@ use crate::namespace::catalog::load_namespace_content_store_id;
 #[cfg(any(test, feature = "test-support"))]
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 #[cfg(any(test, feature = "test-support"))]
-use crate::storage::content_admission::{ContentAdmission, PreparedContent};
+use crate::storage::content_admission::PreparedContent;
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 #[cfg(any(test, feature = "test-support"))]
 use loonfs_api::NamespaceId;
 use loonfs_api::{
@@ -24,17 +24,18 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// Confirms that LoonFS durably stored the content described by this reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// Test-support functions return this proof without exporting its type.
+#[allow(unreachable_pub)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContent {
     content_store_id: ContentStoreId,
     #[cfg(any(test, feature = "test-support"))]
     object_key: String,
     content_ref: ContentRef,
-    #[cfg(any(test, feature = "test-support"))]
-    #[serde(skip)]
-    _write_acknowledged: StoredContentWriteAcknowledgement,
 }
 
+// Test-support callers use these methods on an inferred return type.
+#[allow(dead_code, unreachable_pub)]
 impl StoredContent {
     pub fn content_ref(&self) -> &ContentRef {
         &self.content_ref
@@ -54,10 +55,6 @@ impl StoredContent {
         &self.object_key
     }
 }
-
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StoredContentWriteAcknowledgement;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum DurableContentValidationError {
@@ -82,6 +79,7 @@ pub enum DurableContentValidationError {
     #[error(
         "stored content belongs to content store `{actual}`, not namespace-bound store `{expected}`"
     )]
+    #[cfg(any(test, feature = "test-support"))]
     ContentStoreMismatch {
         expected: ContentStoreId,
         actual: ContentStoreId,
@@ -102,82 +100,30 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     validate_loaded_content_bytes(object_key, content_ref, &bytes)
 }
 
-/// Opens a chunked reader over an existing object for import: one HEAD, then
-/// ranged reads pumped through a one-chunk channel, so nothing holds the
-/// whole object. Drive the pump and the staging consumer together.
-pub(crate) async fn open_content_import_reader<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
+/// Opens a verified chunked reader over an existing object for import.
+pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
+    store: S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
-) -> Result<
-    (
-        String,
-        impl std::future::Future<Output = Checksum> + 'a,
-        ByteStream,
-    ),
-    DurableContentValidationError,
-> {
-    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
-    validate_content_size(store, &object_key, content_ref).await?;
-    let size_bytes = content_ref.size_bytes;
-    let checksum_algorithm = content_ref.checksum.algorithm;
-    let (mut sender, receiver) = futures::channel::mpsc::channel(1);
-    let pump_key = object_key.clone();
-    let pump = async move {
-        let mut checksum = StreamingChecksum::for_algorithm(checksum_algorithm);
-        let mut offset = 0u64;
-        while offset < size_bytes {
-            let end = offset
-                .saturating_add(CONTENT_READ_CHUNK_BYTES)
-                .min(size_bytes);
-            let range = ByteRange {
-                start_inclusive: offset,
-                end_exclusive: end,
-            };
-            let chunk = match store.get(&pump_key, Some(range)).await {
-                Ok(Some(bytes)) => Ok(bytes),
-                Ok(None) => Err(ObjectStoreError::transport(
-                    &pump_key,
-                    "content object disappeared during import",
-                )),
-                Err(error) => Err(error),
-            };
-            let failed = chunk.is_err();
-            if let Ok(bytes) = &chunk {
-                checksum.update(bytes);
+) -> Result<(String, ByteStream), DurableContentValidationError> {
+    let source =
+        FileContentStream::open_import(store, content_store_id, content_ref.clone()).await?;
+    let object_key = source.object_key.clone();
+    let stream_key = object_key.clone();
+    let body = futures::stream::try_unfold(source, move |mut source| {
+        let stream_key = stream_key.clone();
+        async move {
+            match source.next_verified_chunk().await {
+                Ok(chunk) => Ok(chunk.map(|bytes| (bytes, source))),
+                Err(error @ DurableContentValidationError::ContentChecksumMismatch { .. }) => {
+                    Err(ObjectStoreError::InvalidContentRef(error.to_string()))
+                }
+                Err(error) => Err(ObjectStoreError::transport(stream_key, error.to_string())),
             }
-            if sender.send(chunk).await.is_err() || failed {
-                return checksum.finish();
-            }
-            offset = end;
         }
-        checksum.finish()
-    };
-    Ok((object_key, pump, receiver.boxed()))
-}
-
-/// Checks that a staged import carries the bytes the source ref claimed.
-pub(crate) fn ensure_imported_ref_matches(
-    object_key: String,
-    expected: &ContentRef,
-    staged: &ContentRef,
-    source_checksum: &Checksum,
-) -> Result<(), DurableContentValidationError> {
-    if staged.size_bytes != expected.size_bytes {
-        return Err(DurableContentValidationError::ContentLengthMismatch {
-            object_key,
-            expected: expected.size_bytes,
-            actual: staged.size_bytes,
-        });
-    }
-    if source_checksum != &expected.checksum {
-        return Err(DurableContentValidationError::ContentChecksumMismatch {
-            object_key,
-            expected: describe_checksum(&expected.checksum),
-            actual: describe_checksum(source_checksum),
-        });
-    }
-    Ok(())
+    })
+    .boxed();
+    Ok((object_key, body))
 }
 
 /// Prepares content from an acknowledged LoonFS-managed durable write.
@@ -199,12 +145,11 @@ pub fn prepare_stored_content(
     }
     let content_store_id = stored_content.content_store_id;
     let content_ref = stored_content.content_ref;
-    let admission = ContentAdmission::for_durable_content_write(
+    Ok(PreparedContent::for_durable_content_write(
         catalog.namespace_id().clone(),
         content_store_id,
         content_ref,
-    );
-    Ok(PreparedContent::from_admission(admission))
+    ))
 }
 
 /// Fully validates an existing durable content reference for publication.
@@ -219,12 +164,11 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
 ) -> Result<PreparedContent, DurableContentValidationError> {
     let content_store_id = catalog.content_store_id();
     validate_durable_content_reference(store, content_store_id, &content_ref).await?;
-    let admission = ContentAdmission::for_durable_content_write(
+    Ok(PreparedContent::for_durable_content_write(
         catalog.namespace_id().clone(),
         content_store_id.clone(),
         content_ref,
-    );
-    Ok(PreparedContent::from_admission(admission))
+    ))
 }
 
 /// Compares a content reference with the size and checksum stored by the provider.
@@ -337,7 +281,7 @@ pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 /// that stops earlier has not verified the complete object.
 pub struct FileContentStream<S> {
     store: S,
-    entry: PathEntry,
+    entry: Option<PathEntry>,
     object_key: String,
     content_ref: ContentRef,
     chunk_bytes: NonZeroU64,
@@ -365,6 +309,42 @@ impl<S: ObjectStore> FileContentStream<S> {
         store: S,
         content_store_id: &ContentStoreId,
         entry: PathEntry,
+        content_ref: ContentRef,
+        chunk_bytes: NonZeroU64,
+        start_offset: u64,
+    ) -> Result<Self, DurableContentValidationError> {
+        Self::open_inner(
+            store,
+            content_store_id,
+            Some(entry),
+            content_ref,
+            chunk_bytes,
+            start_offset,
+        )
+        .await
+    }
+
+    async fn open_import(
+        store: S,
+        content_store_id: &ContentStoreId,
+        content_ref: ContentRef,
+    ) -> Result<Self, DurableContentValidationError> {
+        Self::open_inner(
+            store,
+            content_store_id,
+            None,
+            content_ref,
+            NonZeroU64::new(CONTENT_READ_CHUNK_BYTES)
+                .expect("content read chunk size should be nonzero"),
+            0,
+        )
+        .await
+    }
+
+    async fn open_inner(
+        store: S,
+        content_store_id: &ContentStoreId,
+        entry: Option<PathEntry>,
         content_ref: ContentRef,
         chunk_bytes: NonZeroU64,
         start_offset: u64,
@@ -421,7 +401,9 @@ impl<S: ObjectStore> FileContentStream<S> {
 
     /// The authoritative metadata entry the path resolved to.
     pub fn entry(&self) -> &PathEntry {
-        &self.entry
+        self.entry
+            .as_ref()
+            .expect("path content stream should carry its metadata entry")
     }
 
     /// Complete length of the content this stream reads.
@@ -676,6 +658,12 @@ pub(crate) struct StagedStream {
     pub already_present: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamedPayloadKind {
+    Request,
+    ContentImport,
+}
+
 /// Stages and hashes a payload without buffering the complete stream.
 ///
 /// The write is create-only. Multipart providers may check for an existing
@@ -686,6 +674,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     content_store_id: ContentStoreId,
     content_id: ContentId,
     body: ByteStream,
+    payload_kind: StreamedPayloadKind,
 ) -> Result<StagedStream, CoreError> {
     let object_key = content_blob(&content_store_id, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::default()));
@@ -716,6 +705,11 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
         Ok(_) => false,
         // The caller compares the checksum with the session's recorded value.
         Err(ObjectStoreError::PreconditionFailed { .. }) => true,
+        Err(ObjectStoreError::InvalidContentRef(message))
+            if payload_kind == StreamedPayloadKind::ContentImport =>
+        {
+            return Err(CoreError::NamespaceCorrupt(message));
+        }
         Err(err) => return Err(CoreError::store(&object_key, &err)),
     };
 
@@ -773,8 +767,6 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
         #[cfg(any(test, feature = "test-support"))]
         object_key,
         content_ref,
-        #[cfg(any(test, feature = "test-support"))]
-        _write_acknowledged: StoredContentWriteAcknowledgement,
     })
 }
 

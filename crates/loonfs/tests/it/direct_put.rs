@@ -8,9 +8,9 @@ use bytes::Bytes;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    BeginUploadRequest, ChangeSeq, ChecksumAlgorithm, CommitId, CreateDirectoryOptions,
-    CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions,
-    RuntimeCacheConfig, SharedObjectStore, UploadMode,
+    ChangeSeq, ChecksumAlgorithm, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
+    DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions, RuntimeCacheConfig,
+    SharedObjectStore, UploadMode,
 };
 use loonfs_api::v0::{UploadContentClaim, UploadSessionStatus};
 use loonfs_api::Checksum;
@@ -451,7 +451,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
             let begin = fs
                 .writer
-                .create_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
+                .create_upload(&namespace_id)
                 .await
                 .expect("begin upload");
             fs.writer

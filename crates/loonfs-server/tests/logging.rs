@@ -12,7 +12,6 @@ use axum::Router;
 use bytes::Bytes;
 use common::http_split_support::test_config;
 use loonfs::{CreateNamespaceOptions, FsWriter, SharedObjectStore, TraceMode, TraceStoreKind};
-use loonfs_api::v0::BeginUploadRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_server::{app, AppOptions, MaintenanceMode};
 use loonfs_test_support::ids::namespace_id;
@@ -269,7 +268,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         .await
         .expect("create namespace");
     let upload = writer
-        .create_upload(&namespace, BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace)
         .await
         .expect("begin upload");
 

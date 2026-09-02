@@ -8,9 +8,9 @@ use loonfs::publish::{
 };
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    BeginUploadRequest, CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, ErrorCode, FsWriter, NamespaceId, PutFileOptions, RevisionNo,
-    RuntimeError, SharedObjectStore, CONTENT_READ_CHUNK_BYTES,
+    CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior,
+    ErrorCode, FsWriter, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
+    CONTENT_READ_CHUNK_BYTES,
 };
 use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
 use loonfs_api::{ContentId, ContentStoreId};
@@ -565,7 +565,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
     let bytes = b"service proxied upload";
     let begin = harness
         .writer
-        .create_upload(&harness.namespace_id, BeginUploadRequest::ServiceProxied {})
+        .create_upload(&harness.namespace_id)
         .await
         .expect("begin upload");
     harness.recording.reset();
@@ -646,7 +646,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
 
     let completed = harness
         .writer
-        .complete_upload_prepared_for_mode(&harness.namespace_id, &begin.upload_id, |_| {
+        .complete_upload_for_mode(&harness.namespace_id, &begin.upload_id, |_| {
             Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
                 content: loonfs::UploadContentClaim {
                     size_bytes: bytes.len() as u64,
