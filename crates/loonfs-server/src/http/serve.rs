@@ -25,8 +25,9 @@ use loonfs_grep::{
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
-use std::future::IntoFuture;
+use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -128,9 +129,10 @@ impl http_body::Body for DrainedBody {
 /// `reader` is stored separately because most handlers require only read
 /// access.
 #[derive(Clone)]
-pub(super) struct AppState {
+pub struct AppState {
     pub(super) config: Arc<ServerConfig>,
-    pub(super) writer: FsWriter,
+    /// Writer handle that owns publication and maintenance work.
+    pub writer: FsWriter,
     pub(super) reader: FsReader,
     pub(super) admin: FsAdmin,
     /// The store itself, for the one endpoint whose subject is the store
@@ -169,7 +171,7 @@ pub(super) struct AppState {
     /// Runtime handles use it through the shared cache interface. The server
     /// retains the concrete type to read foyer statistics and close it during
     /// shutdown.
-    pub(super) local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
+    pub local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 }
 
 impl AppState {
@@ -217,69 +219,42 @@ impl GrepMaintenance {
     }
 }
 
-/// Builds the router and returns the resources the host must shut down.
+/// Optional inputs for building the HTTP application.
+#[derive(Default)]
+pub struct AppOptions {
+    /// Existing object store to use instead of building one from the config.
+    pub store: Option<SharedObjectStore>,
+    /// Direct-transfer issuers to use instead of the store's issuers.
+    pub direct_transfers: Option<DirectTransferIssuers>,
+}
+
+/// Builds the router and returns its state.
 ///
 /// After an embedded listener drains, the host must call
-/// [`FsWriter::shutdown`] to settle publication and maintenance tasks, then
-/// close the returned cache so in-memory entries are flushed. [`serve`]
-/// performs both steps automatically. The cache is present only when
-/// `[local_cache]` is configured.
+/// [`FsWriter::shutdown`] on [`AppState::writer`] to settle publication and
+/// maintenance tasks, then close [`AppState::local_cache`] so in-memory
+/// entries are flushed. [`serve`] performs both steps automatically. The
+/// cache is present only when `[local_cache]` is configured.
 pub async fn app(
     config: ServerConfig,
-) -> Result<(Router, FsWriter, Option<Arc<FoyerStoredMetadataBlockCache>>), ServerConfigError> {
+    options: AppOptions,
+) -> Result<(Router, AppState), ServerConfigError> {
     // The one unavoidable validation point: configs that skipped
     // `load_server_config` (direct Rust construction) fail here exactly as
     // file-loaded ones fail at load.
     config.validate()?;
-    let store = config.object_store()?;
-    // Provider construction already validated direct-transfer signing and endpoint
-    // support. Reuse that decision without reinterpreting configuration here.
-    let direct_transfers = store.direct_transfers();
-    let store = store.into_shared();
-    let (router, state) =
-        app_with_store_and_direct_transfers(config, store, direct_transfers).await?;
-    Ok((router, state.writer, state.local_cache))
-}
-
-/// Builds the router around an existing object store for tests.
-pub async fn app_with_store(
-    config: ServerConfig,
-    store: SharedObjectStore,
-) -> Result<Router, ServerConfigError> {
-    Ok(app_with_store_and_direct_transfers(config, store, None)
-        .await?
-        .0)
-}
-
-/// Builds the server router with custom direct-transfer providers for tests.
-#[cfg(feature = "test-support")]
-pub async fn app_with_test_transfers(
-    config: ServerConfig,
-    store: SharedObjectStore,
-    direct_transfers: DirectTransferIssuers,
-) -> Result<Router, ServerConfigError> {
-    Ok(
-        app_with_store_and_direct_transfers(config, store, Some(direct_transfers))
-            .await?
-            .0,
-    )
-}
-
-/// Test-only: the router plus its state, so tests can hold admission
-/// permits or close publisher admission and observe the served answers.
-#[cfg(test)]
-pub(super) async fn app_with_store_and_state(
-    config: ServerConfig,
-    store: SharedObjectStore,
-) -> Result<(Router, AppState), ServerConfigError> {
-    app_with_store_and_direct_transfers(config, store, None).await
-}
-
-pub(super) async fn app_with_store_and_direct_transfers(
-    config: ServerConfig,
-    store: SharedObjectStore,
-    direct_transfers: Option<DirectTransferIssuers>,
-) -> Result<(Router, AppState), ServerConfigError> {
+    let AppOptions {
+        store,
+        direct_transfers,
+    } = options;
+    let (store, direct_transfers) = match store {
+        Some(store) => (store, direct_transfers),
+        None => {
+            let store = config.object_store()?;
+            let direct_transfers = direct_transfers.or_else(|| store.direct_transfers());
+            (store.into_shared(), direct_transfers)
+        }
+    };
     let metrics = ServerMetrics::new();
     // Two switches decide automatic grep indexing and nothing else does:
     // whether this server maintains anything automatically, and whether its
@@ -400,28 +375,12 @@ async fn open_local_cache(
     }
 }
 
-#[cfg(test)]
-pub(super) async fn build_handles_with_metrics_jsonl_path(
-    config: &ServerConfig,
-    store: SharedObjectStore,
-    metrics_jsonl_path: Option<OsString>,
-) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
-    build_handles(
-        config,
-        store,
-        &ServerMetrics::new(),
-        metrics_jsonl_path,
-        None,
-    )
-    .await
-}
-
 /// Builds the process handles over one store and one metrics recorder.
 ///
 /// An optional JSONL recorder receives the same object-store samples. The
 /// local block cache is installed once on the writer's shared runtime core,
 /// so the reader and admin use the same decoded cache hierarchy.
-async fn build_handles(
+pub(super) async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
     metrics: &ServerMetrics,
@@ -605,12 +564,12 @@ where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
     let shutdown_deadline_ms = config.shutdown_deadline_ms;
-    let (router, writer, local_cache) = app(config).await?;
+    let (router, state) = app(config, AppOptions::default()).await?;
     serve_and_settle(
         listener,
         router,
-        writer,
-        local_cache,
+        state.writer,
+        state.local_cache,
         shutdown_deadline_ms,
         shutdown,
     )
@@ -649,11 +608,6 @@ where
             .into_future(),
     );
     let mut shutdown = Box::pin(shutdown);
-    enum DrainOutcome {
-        Server(std::io::Result<()>),
-        Settled,
-        Deadline,
-    }
     let served = tokio::select! {
         result = server.as_mut() => result,
         () = shutdown.as_mut() => {
@@ -663,35 +617,14 @@ where
             let deadline = tokio::time::Instant::now()
                 + Duration::from_millis(shutdown_deadline_ms);
             let mut deadline = Box::pin(tokio::time::sleep_until(deadline));
-            let drain = tokio::select! {
-                result = server.as_mut() => DrainOutcome::Server(result),
-                () = requests.settle() => DrainOutcome::Settled,
-                () = deadline.as_mut() => DrainOutcome::Deadline,
-            };
-            match drain {
-                DrainOutcome::Server(result) => result,
-                DrainOutcome::Settled => {
-                    let _ = listener_close_tx.send(());
-                    tokio::select! {
-                        result = server.as_mut() => result,
-                        () = deadline.as_mut() => {
-                            tracing::warn!(
-                                shutdown_deadline_ms,
-                                "graceful drain deadline passed; remaining requests are abandoned"
-                            );
-                            Ok(())
-                        }
-                    }
-                }
-                DrainOutcome::Deadline => {
-                    tracing::warn!(
-                        shutdown_deadline_ms,
-                        "graceful drain deadline passed; remaining requests are abandoned"
-                    );
-                    let _ = listener_close_tx.send(());
-                    Ok(())
-                }
-            }
+            drain_with_deadline(
+                server.as_mut(),
+                &requests,
+                listener_close_tx,
+                deadline.as_mut(),
+                shutdown_deadline_ms,
+            )
+            .await
         }
     };
     // Dropping the server cancels requests left behind by an expired drain.
@@ -711,6 +644,42 @@ where
         None => Ok(()),
     };
     settled.and(closed)
+}
+
+async fn drain_with_deadline<S>(
+    mut server: Pin<&mut S>,
+    requests: &RequestDrain,
+    listener_close_tx: tokio::sync::oneshot::Sender<()>,
+    mut deadline: Pin<&mut tokio::time::Sleep>,
+    shutdown_deadline_ms: u64,
+) -> std::io::Result<()>
+where
+    S: Future<Output = std::io::Result<()>> + ?Sized,
+{
+    let deadline_passed = tokio::select! {
+        result = server.as_mut() => return result,
+        () = requests.settle() => false,
+        () = deadline.as_mut() => true,
+    };
+    let _ = listener_close_tx.send(());
+    let result = if deadline_passed {
+        None
+    } else {
+        tokio::select! {
+            result = server.as_mut() => Some(result),
+            () = deadline.as_mut() => None,
+        }
+    };
+    match result {
+        Some(result) => result,
+        None => {
+            tracing::warn!(
+                shutdown_deadline_ms,
+                "graceful drain deadline passed; remaining requests are abandoned"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Resolves on ctrl-c or, on unix, SIGTERM — the stop signal container

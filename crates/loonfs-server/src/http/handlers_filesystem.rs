@@ -2,23 +2,27 @@
 //! reads, revision listings, filesystem mutations, and the committed-change
 //! feed.
 
+use super::download_body::buffered_download_response;
 use super::error::ApiResponseError;
 use super::handlers_uploads::{
     content_preparation_for_puts, current_unix_ms, ContentTokenVerifier, PutContentPreparation,
 };
-use super::{
-    acquire_download_permit, authorize, AppJson, AppQuery, AppState, NamespaceIdPath, NoQuery,
+use super::query_params::{
+    decode_optional_cursor, parse_include_attributes, parse_path_id, parse_public_ordinal,
+    parse_revision_no, required_query_param, resolve_page_limit,
 };
-use axum::body::Body;
+#[cfg(feature = "openapi")]
+pub(super) use super::query_params::{
+    OpenApiDefaultFalseBoolean, OpenApiDefaultTrueBoolean, OpenApiPageLimit,
+};
+use super::{acquire_download_permit, AppJson, AppQuery, AppState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::Json;
-use futures::Stream;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
-    payload_class, CheckpointId, ErrorCode, FsReadSnapshot, ListChangesOptions,
-    ListPathEntriesOptions, StatPathOptions, TraceMode, TraceStoreKind,
+    payload_class, CheckpointId, ErrorCode, FsReadSnapshot, FsReader, ListChangesOptions,
+    ListPathEntriesOptions, NamespaceId, StatPathOptions, TraceMode, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -26,16 +30,10 @@ use loonfs_api::ApiError;
 // tokens, which this handler resolves and strips; the operations inside them
 // are one type. The alias keeps the two request names readable side by side.
 use loonfs_api::{
-    decode_cursor,
     v0::{CommitResponse as ApiCommitResponse, ListChangesResponse},
-    CommitRequest as ApiCommitRequest, FilesystemOperation, LimitError, ListFileRevisionsResponse,
-    ListTrashResponse, PageCursorError, PageRequest, PaginationPolicy, PublicOrdinalRangeError,
-    RevisionNo,
+    CommitRequest as ApiCommitRequest, FilesystemOperation, ListFileRevisionsResponse,
+    ListTrashResponse, PageRequest, RevisionNo,
 };
-use std::convert::Infallible;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 #[derive(Debug, serde::Deserialize)]
@@ -82,37 +80,6 @@ pub(super) struct ContentQuery {
     snapshot_id: Option<String>,
 }
 
-/// One materialized download plus the permit accounting for its memory.
-///
-/// The stream owns the permit even after yielding its only chunk, so the
-/// response body releases admission only when it is fully consumed or
-/// abandoned and dropped.
-struct DownloadBodyStream {
-    bytes: Option<bytes::Bytes>,
-    _permit: OwnedSemaphorePermit,
-}
-
-pub(super) fn buffered_download_response(bytes: Vec<u8>, permit: OwnedSemaphorePermit) -> Response {
-    let body = Body::from_stream(DownloadBodyStream {
-        bytes: Some(bytes.into()),
-        _permit: permit,
-    });
-    (
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        body,
-    )
-        .into_response()
-}
-
-impl Stream for DownloadBodyStream {
-    type Item = Result<bytes::Bytes, Infallible>;
-
-    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.bytes.take().map(Ok))
-    }
-}
-
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ChangesQuery {
@@ -127,61 +94,91 @@ pub(super) struct SnapshotQuery {
     pub(super) snapshot_id: Option<String>,
 }
 
-/// Schema-only override for the shared page-limit query contract.
-#[cfg(feature = "openapi")]
-pub(super) struct OpenApiPageLimit;
-
-#[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for OpenApiPageLimit {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::Integer)
-            .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
-                utoipa::openapi::KnownFormat::Int32,
-            )))
-            .minimum(Some(1u32))
-            .maximum(Some(loonfs_api::DEFAULT_MAX_PAGE_LIMIT))
-            .default(Some(serde_json::json!(loonfs_api::DEFAULT_PAGE_LIMIT)))
-            .into()
-    }
+pub(super) enum ReadTarget {
+    Snapshot(Box<FsReadSnapshot>),
+    Live {
+        reader: FsReader,
+        namespace_id: NamespaceId,
+    },
 }
 
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for OpenApiPageLimit {}
+impl ReadTarget {
+    pub(super) async fn list_path_entries_page(
+        &self,
+        path: &str,
+        request: PageRequest<loonfs::DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
+    ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
+        match self {
+            Self::Snapshot(snapshot) => {
+                snapshot
+                    .list_path_entries_page(path, request, options)
+                    .await
+            }
+            Self::Live {
+                reader,
+                namespace_id,
+            } => {
+                reader
+                    .list_path_entries_page(namespace_id, path, request, options)
+                    .await
+            }
+        }
+    }
 
-/// Schema-only override for an optional boolean that defaults to true.
-#[cfg(feature = "openapi")]
-pub(super) struct OpenApiDefaultTrueBoolean;
+    pub(super) async fn get_path_entry(
+        &self,
+        path: &str,
+        options: StatPathOptions,
+    ) -> loonfs::Result<loonfs::PathEntry> {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.get_path_entry(path, options).await,
+            Self::Live {
+                reader,
+                namespace_id,
+            } => reader.get_path_entry(namespace_id, path, options).await,
+        }
+    }
 
-#[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for OpenApiDefaultTrueBoolean {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::Boolean)
-            .default(Some(serde_json::json!(true)))
-            .into()
+    pub(super) async fn get_file_bytes(
+        &self,
+        path: &str,
+        revision_no: Option<RevisionNo>,
+    ) -> loonfs::Result<loonfs::FileBytes> {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.get_file_bytes(path).await,
+            Self::Live {
+                reader,
+                namespace_id,
+            } => match revision_no {
+                Some(revision_no) => {
+                    reader
+                        .get_file_revision_bytes(namespace_id, path, revision_no)
+                        .await
+                }
+                None => reader.get_file_bytes(namespace_id, path).await,
+            },
+        }
+    }
+
+    pub(super) async fn create_download(
+        &self,
+        path: &str,
+        revision_no: Option<RevisionNo>,
+    ) -> loonfs::Result<loonfs::downloads::DirectDownloadTarget> {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.create_download(path).await,
+            Self::Live {
+                reader,
+                namespace_id,
+            } => {
+                reader
+                    .create_download(namespace_id, path, revision_no)
+                    .await
+            }
+        }
     }
 }
-
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for OpenApiDefaultTrueBoolean {}
-
-/// Schema-only override for an optional boolean that defaults to false.
-#[cfg(feature = "openapi")]
-pub(super) struct OpenApiDefaultFalseBoolean;
-
-#[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for OpenApiDefaultFalseBoolean {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::Boolean)
-            .default(Some(serde_json::json!(false)))
-            .into()
-    }
-}
-
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for OpenApiDefaultFalseBoolean {}
 
 #[cfg_attr(
     feature = "openapi",
@@ -212,13 +209,9 @@ impl utoipa::ToSchema for OpenApiDefaultFalseBoolean {}
 )]
 pub(super) async fn list_path_entries(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<ListPathPageQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<ListPathPageQuery>,
 ) -> Result<Json<loonfs_api::ListPathEntriesResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let query = query.into_params()?;
     let path = required_query_param(query.path, "path")?;
     // An absent parameter leaves the option type's own default in place, so
     // the HTTP surface and the in-process one cannot answer differently.
@@ -231,24 +224,14 @@ pub(super) async fn list_path_entries(
         cursor: decode_optional_cursor(query.cursor)?,
     };
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
-    let listing = match snapshot {
-        Some(snapshot) => {
-            snapshot
-                .list_path_entries_page(&path, request, options)
-                .await
-        }
-        None => {
-            state
-                .reader
-                .list_path_entries_page(&namespace_id, &path, request, options)
-                .await
-        }
-    }
-    .map_err(|error| {
-        ApiResponseError::runtime_for_namespace(&namespace_id, error)
-            .with_invalid_request_param("path")
-    })?;
+    let target = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let listing = target
+        .list_path_entries_page(&path, request, options)
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("path")
+        })?;
     Ok(Json(listing))
 }
 
@@ -279,33 +262,23 @@ pub(super) async fn list_path_entries(
 )]
 pub(super) async fn get_path_entry(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<PathQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<PathQuery>,
 ) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let query = query.into_params()?;
     let path = required_query_param(query.path, "path")?;
     let mut options = StatPathOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
-    let entry = match snapshot {
-        Some(snapshot) => snapshot.get_path_entry(&path, options).await,
-        None => {
-            state
-                .reader
-                .get_path_entry(&namespace_id, &path, options)
-                .await
-        }
-    }
-    .map_err(|error| {
-        ApiResponseError::runtime_for_namespace(&namespace_id, error)
-            .with_invalid_request_param("path")
-    })?;
+    let target = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let entry = target
+        .get_path_entry(&path, options)
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("path")
+        })?;
     Ok(Json(entry))
 }
 
@@ -337,13 +310,9 @@ pub(super) async fn get_path_entry(
 )]
 pub(super) async fn get_file_bytes(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<ContentQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<ContentQuery>,
 ) -> Result<Response, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let query = query.into_params()?;
     let path = required_query_param(query.path, "path")?;
     let revision_no = query
         .revision_no
@@ -352,24 +321,15 @@ pub(super) async fn get_file_bytes(
         .transpose()?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no)?;
-    let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let target = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
     let permit = acquire_download_permit(&state)?;
-    let file = match snapshot {
-        Some(snapshot) => snapshot.get_file_bytes(&path).await,
-        None => match revision_no {
-            Some(revision_no) => {
-                state
-                    .reader
-                    .get_file_revision_bytes(&namespace_id, &path, revision_no)
-                    .await
-            }
-            None => state.reader.get_file_bytes(&namespace_id, &path).await,
-        },
-    }
-    .map_err(|error| {
-        ApiResponseError::runtime_for_namespace(&namespace_id, error)
-            .with_invalid_request_param("path")
-    })?;
+    let file = target
+        .get_file_bytes(&path, revision_no)
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("path")
+        })?;
     Ok(buffered_download_response(file.bytes, permit))
 }
 
@@ -399,13 +359,9 @@ pub(super) async fn get_file_bytes(
 )]
 pub(super) async fn list_trash(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<PageQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let query = query.into_params()?;
     let response = state
         .reader
         .list_trash_page(
@@ -416,7 +372,7 @@ pub(super) async fn list_trash(
             },
         )
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
@@ -447,13 +403,9 @@ pub(super) async fn list_trash(
 )]
 pub(super) async fn list_file_revisions(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<PathPageQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let query = query.into_params()?;
     let path = required_query_param(query.path, "path")?;
     let response = state
         .reader
@@ -498,12 +450,10 @@ pub(super) async fn list_file_revisions(
 /// The server stores the actor from the request; the shared token does not verify it.
 pub(super) async fn create_commit(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ApiCommitRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     let ApiCommitRequest {
         commit_id,
         actor,
@@ -612,19 +562,15 @@ pub(super) async fn create_commit(
 )]
 pub(super) async fn list_changes(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<ChangesQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<ChangesQuery>,
 ) -> Result<Json<ListChangesResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let query = query.into_params()?;
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = resolve_page_limit(query.limit)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let snapshot = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
-    let response = match snapshot {
-        Some(snapshot) => {
+    let target = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let response = match target {
+        ReadTarget::Snapshot(snapshot) => {
             let captured_seq = snapshot.head_seq();
             if after_seq > captured_seq {
                 return Err(ApiResponseError::new(
@@ -650,9 +596,7 @@ pub(super) async fn list_changes(
                         ListChangesOptions { limit: Some(limit) },
                     )
                     .await
-                    .map_err(|error| {
-                        ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                    })?;
+                    .map_err(ApiResponseError::for_namespace(&namespace_id))?;
                 page.changes
                     .retain(|change| change.committed_seq <= captured_seq);
                 page.through_seq = captured_seq;
@@ -664,15 +608,17 @@ pub(super) async fn list_changes(
                 page
             }
         }
-        None => state
-            .reader
+        ReadTarget::Live {
+            reader,
+            namespace_id,
+        } => reader
             .list_changes(
                 &namespace_id,
                 after_seq,
                 ListChangesOptions { limit: Some(limit) },
             )
             .await
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?,
+            .map_err(ApiResponseError::for_namespace(&namespace_id))?,
     };
     Ok(Json(response))
 }
@@ -681,15 +627,18 @@ pub(super) async fn pin_requested_snapshot(
     state: &AppState,
     namespace_id: &loonfs_api::NamespaceId,
     snapshot_id: Option<CheckpointId>,
-) -> Result<Option<FsReadSnapshot>, ApiResponseError> {
+) -> Result<ReadTarget, ApiResponseError> {
     let Some(snapshot_id) = snapshot_id else {
-        return Ok(None);
+        return Ok(ReadTarget::Live {
+            reader: state.reader.clone(),
+            namespace_id: namespace_id.clone(),
+        });
     };
     state
         .reader
         .pin_namespace_at_snapshot(namespace_id, &snapshot_id)
         .await
-        .map(Some)
+        .map(|snapshot| ReadTarget::Snapshot(Box::new(snapshot)))
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(namespace_id, error)
                 .with_invalid_request_param("snapshot_id")
@@ -713,117 +662,14 @@ pub(super) fn reject_snapshot_with_revision(
 pub(super) fn parse_optional_snapshot_id(
     snapshot_id: Option<String>,
 ) -> Result<Option<CheckpointId>, ApiResponseError> {
-    snapshot_id.as_deref().map(parse_snapshot_id).transpose()
-}
-
-pub(super) fn parse_snapshot_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
-    CheckpointId::parse(value)
-        .map_err(|error| invalid_path_id_error("snapshot_id", value, error.reason()))
+    snapshot_id
+        .as_deref()
+        .map(|value| parse_path_id("snapshot_id", value))
+        .transpose()
 }
 
 fn parse_after_seq(value: &str) -> Result<loonfs_api::ChangeSeq, ApiResponseError> {
     parse_public_ordinal("after_seq", value, loonfs_api::ChangeSeq::parse)
-}
-
-pub(super) fn required_query_param(
-    value: Option<String>,
-    name: &str,
-) -> Result<String, ApiResponseError> {
-    value.ok_or_else(|| {
-        ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!("missing required query parameter `{name}`"),
-        )
-        .with_param(name)
-    })
-}
-
-pub(super) fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseError> {
-    parse_boolean_query_param(value, "include_attributes")
-}
-
-pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool, ApiResponseError> {
-    match value {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        other => Err(ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!("invalid {name} `{other}`: expected `true` or `false`"),
-        )
-        .with_param(name)),
-    }
-}
-
-pub(super) fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
-    parse_public_ordinal("revision_no", value, RevisionNo::parse)
-}
-
-pub(super) fn invalid_path_id_error(name: &str, value: &str, reason: &str) -> ApiResponseError {
-    ApiResponseError::new(
-        ErrorCode::InvalidRequest,
-        &format!("invalid {name} {value:?}: {reason}"),
-    )
-    .with_param(name)
-}
-
-pub(super) fn parse_public_ordinal<T>(
-    name: &str,
-    value: &str,
-    constructor: impl FnOnce(u64) -> Result<T, PublicOrdinalRangeError>,
-) -> Result<T, ApiResponseError> {
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|_| public_ordinal_response_error(name, value, PublicOrdinalRangeError))?;
-    constructor(parsed).map_err(|error| public_ordinal_response_error(name, value, error))
-}
-
-fn public_ordinal_response_error(
-    name: &str,
-    value: &str,
-    error: PublicOrdinalRangeError,
-) -> ApiResponseError {
-    ApiResponseError::new(
-        ErrorCode::InvalidRequest,
-        &format!("invalid {name} `{value}`: {error}"),
-    )
-    .with_param(name)
-}
-
-pub(super) fn resolve_page_limit(
-    limit: Option<String>,
-) -> Result<loonfs_api::EffectiveLimit, ApiResponseError> {
-    let requested = limit.as_deref().map(parse_page_limit).transpose()?;
-    PaginationPolicy::default()
-        .resolve_limit(requested)
-        .map_err(limit_response_error)
-}
-
-fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
-    value.parse::<u32>().map_err(|error| {
-        ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!("invalid limit `{value}`: {error}"),
-        )
-        .with_param("limit")
-    })
-}
-
-pub(super) fn decode_optional_cursor<C: loonfs_api::PageCursor>(
-    cursor: Option<String>,
-) -> Result<Option<C>, ApiResponseError> {
-    cursor
-        .as_deref()
-        .map(decode_cursor)
-        .transpose()
-        .map_err(page_cursor_response_error)
-}
-
-fn limit_response_error(error: LimitError) -> ApiResponseError {
-    ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("limit")
-}
-
-fn page_cursor_response_error(error: PageCursorError) -> ApiResponseError {
-    ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("cursor")
 }
 
 #[cfg(test)]

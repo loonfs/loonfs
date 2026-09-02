@@ -2,13 +2,12 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::handlers_filesystem::invalid_path_id_error;
+use super::query_params::parse_path_id;
 use super::{
-    authorize, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, UploadBodyBytes,
-    UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
+    AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, UploadBodyBytes, UploadBodyStream,
+    UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::Json;
 use loonfs::content_tokens::{
     mint_content_token, CompletedUploadReceipt, ContentToken, ContentTokenError,
@@ -75,7 +74,7 @@ impl<'a> ContentTokenVerifier<'a> {
         writer
             .prepare_content_token(namespace_id, self.secret, token, now_ms)
             .await
-            .map_err(|error| ApiResponseError::runtime_for_namespace(namespace_id, error))
+            .map_err(ApiResponseError::for_namespace(namespace_id))
     }
 
     fn mint_receipt(
@@ -121,15 +120,13 @@ pub(super) struct UploadPathParams {
 )]
 pub(super) async fn create_upload(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
     UploadControlJson(request): UploadControlJson<
         BeginUploadRequest,
         MAX_UPLOAD_CONTROL_BODY_BYTES,
     >,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     // Decoding the body settled which transport this is and that it carries
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
@@ -145,7 +142,7 @@ pub(super) async fn create_upload(
                 .writer
                 .create_upload(&namespace_id, request)
                 .await
-                .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+                .map_err(ApiResponseError::for_namespace(&namespace_id))?;
             Ok(Json(response))
         }
     }
@@ -188,7 +185,7 @@ async fn begin_direct_put_upload(
         .writer
         .create_direct_put_upload_target(&namespace_id, checksum_algorithm)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let signed = issuer
         .presign_put(
             PresignedPutRequest {
@@ -280,18 +277,15 @@ async fn begin_direct_multipart_upload(
 )]
 pub(super) async fn sign_upload_parts(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<UploadPathParams>,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
     UploadControlJson(request): UploadControlJson<
         SignUploadPartsRequest,
         MAX_UPLOAD_CONTROL_BODY_BYTES,
     >,
 ) -> Result<Json<SignUploadPartsResponse>, ApiResponseError> {
-    let namespace_id = namespace_id_path.into_id()?;
-    let UploadPathParams { upload_id } = path.into_params()?;
-    query.into_params()?;
-    let upload_id = parse_upload_id(&upload_id)?;
+    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let Some(issuer) = state
         .direct_transfers
         .as_ref()
@@ -307,7 +301,7 @@ pub(super) async fn sign_upload_parts(
         .writer
         .sign_upload_parts(&namespace_id, &upload_id, &request.parts)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let parts = sign_parts(issuer.as_ref(), &targets).await?;
 
     Ok(Json(SignUploadPartsResponse {
@@ -526,15 +520,12 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
 /// storage error.
 pub(super) async fn put_upload_content(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<UploadPathParams>,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyStream,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
-    let namespace_id = namespace_id_path.into_id()?;
-    let UploadPathParams { upload_id } = path.into_params()?;
-    query.into_params()?;
-    let upload_id = parse_upload_id(&upload_id)?;
+    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let (stream, outcome) = body.into_stream();
     match state
         .writer
@@ -579,15 +570,12 @@ pub(super) async fn put_upload_content(
 )]
 pub(super) async fn complete_upload(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<UploadPathParams>,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyBytes<MAX_COMPLETION_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace_id = namespace_id_path.into_id()?;
-    let UploadPathParams { upload_id } = path.into_params()?;
-    query.into_params()?;
-    let upload_id = parse_upload_id(&upload_id)?;
+    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let body = body.into_bytes();
     let completed = state
         .writer
@@ -595,7 +583,7 @@ pub(super) async fn complete_upload(
             decode_completion_body(mode, &body)
         })
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(with_content_token(
         completed.response,
         ContentTokenVerifier::new(state.config.content_token_secret()),
@@ -785,23 +773,16 @@ mod completion_body_tests {
 )]
 pub(super) async fn get_upload(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<UploadPathParams>,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    // Completed sessions return a fresh token when they are still allowed to
-    // mint one. Authorization runs before the upload id is parsed.
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let UploadPathParams { upload_id } = path.into_params()?;
-    query.into_params()?;
-    let upload_id = parse_upload_id(&upload_id)?;
+    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let (response, receipt) = state
         .writer
         .get_upload(&namespace_id, &upload_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(with_content_token(
         response,
         ContentTokenVerifier::new(state.config.content_token_secret()),
@@ -835,25 +816,15 @@ pub(super) async fn get_upload(
 )]
 pub(super) async fn abort_upload(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<UploadPathParams>,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let UploadPathParams { upload_id } = path.into_params()?;
-    query.into_params()?;
-    let upload_id = parse_upload_id(&upload_id)?;
+    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let response = state
         .writer
         .abort_upload(&namespace_id, &upload_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
-}
-
-fn parse_upload_id(value: &str) -> Result<UploadId, ApiResponseError> {
-    UploadId::parse(value)
-        .map_err(|error| invalid_path_id_error("upload_id", value, error.reason()))
 }

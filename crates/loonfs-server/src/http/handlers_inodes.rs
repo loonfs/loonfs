@@ -1,15 +1,14 @@
 //! HTTP reads addressed by inode ID.
 
+use super::download_body::buffered_download_response;
 use super::error::ApiResponseError;
-use super::handlers_filesystem::{
-    buffered_download_response, decode_optional_cursor, invalid_path_id_error,
-    parse_include_attributes, parse_revision_no, resolve_page_limit, PageQuery,
+use super::handlers_filesystem::PageQuery;
+use super::query_params::{
+    decode_optional_cursor, invalid_path_id_error, parse_include_attributes, parse_revision_no,
+    resolve_page_limit,
 };
-use super::{
-    acquire_download_permit, authorize, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery,
-};
+use super::{acquire_download_permit, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::Json;
 use loonfs::{ListInodeChildrenOptions, StatPathOptions};
@@ -32,6 +31,7 @@ pub(super) struct InodeRevisionPathParams {
 }
 
 pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
+    // Public inode ids use numeric encoding rather than generated string ids.
     public_inode_id::decode(value)
         .map_err(|error| invalid_path_id_error("inode_id", value, error.reason()))
 }
@@ -68,15 +68,11 @@ pub(super) struct StatInodeQuery {
 )]
 pub(super) async fn get_inode(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<InodePathParams>,
-    headers: HeaderMap,
-    query: AppQuery<StatInodeQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(path): AppPath<InodePathParams>,
+    AppQuery(query): AppQuery<StatInodeQuery>,
 ) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let inode_id = parse_inode_id(&path.into_params()?.inode_id)?;
-    let query = query.into_params()?;
+    let inode_id = parse_inode_id(&path.inode_id)?;
     let mut options = StatPathOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
@@ -85,7 +81,7 @@ pub(super) async fn get_inode(
         .reader
         .get_inode(&namespace_id, inode_id, options)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(entry))
 }
 
@@ -126,15 +122,11 @@ pub(super) struct ListInodeChildrenQuery {
 )]
 pub(super) async fn list_inode_children(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<InodePathParams>,
-    headers: HeaderMap,
-    query: AppQuery<ListInodeChildrenQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(path): AppPath<InodePathParams>,
+    AppQuery(query): AppQuery<ListInodeChildrenQuery>,
 ) -> Result<Json<loonfs_api::ListInodeChildrenResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let inode_id = parse_inode_id(&path.into_params()?.inode_id)?;
-    let query = query.into_params()?;
+    let inode_id = parse_inode_id(&path.inode_id)?;
     let mut options = ListInodeChildrenOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
@@ -151,7 +143,7 @@ pub(super) async fn list_inode_children(
             options,
         )
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(listing))
 }
 
@@ -183,15 +175,11 @@ pub(super) async fn list_inode_children(
 )]
 pub(super) async fn list_file_revisions_by_inode(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<InodePathParams>,
-    headers: HeaderMap,
-    query: AppQuery<PageQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(path): AppPath<InodePathParams>,
+    AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let inode_id = parse_inode_id(&path.into_params()?.inode_id)?;
-    let query = query.into_params()?;
+    let inode_id = parse_inode_id(&path.inode_id)?;
     let response = state
         .reader
         .list_file_revisions_by_inode_page(
@@ -203,7 +191,7 @@ pub(super) async fn list_file_revisions_by_inode(
             },
         )
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
@@ -235,22 +223,17 @@ pub(super) async fn list_file_revisions_by_inode(
 )]
 pub(super) async fn get_file_revision_bytes_by_inode(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<InodeRevisionPathParams>,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(path): AppPath<InodeRevisionPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Response, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let path = path.into_params()?;
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
-    query.into_params()?;
     let permit = acquire_download_permit(&state)?;
     let bytes = state
         .reader
         .get_file_revision_bytes_by_inode(&namespace_id, inode_id, revision_no)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(buffered_download_response(bytes, permit))
 }

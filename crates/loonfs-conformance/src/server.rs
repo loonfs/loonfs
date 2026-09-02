@@ -83,8 +83,14 @@ pub async fn start_server() -> Result<ConformanceServer, Box<dyn std::error::Err
     let config_path = temp_dir.path().join("loonfs-server.toml");
     write_server_config(&config_path, &store_root)?;
     let config = loonfs_server::load_server_config(&config_path)?;
-    let api_router =
-        loonfs_server::app_with_test_transfers(config, shared_store, transfers).await?;
+    let (api_router, _state) = loonfs_server::app(
+        config,
+        loonfs_server::AppOptions {
+            store: Some(shared_store),
+            direct_transfers: Some(transfers),
+        },
+    )
+    .await?;
     let server_task = tokio::spawn(async move {
         axum::serve(api_listener, api_router)
             .await

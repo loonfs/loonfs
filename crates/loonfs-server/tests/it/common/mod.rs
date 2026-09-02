@@ -10,8 +10,8 @@
 use loonfs_api::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use loonfs_client::{Client, ClientConfig, ListPathEntriesOptions, NamespacePath};
 use loonfs_server::{
-    app, serve_with_shutdown, GrepConfig, GrepMode, MaintenanceMode, RuntimeCacheConfigOverrides,
-    ServeError, ServerConfig, StoreConfig, TlsServerConfig,
+    app, serve_with_shutdown, AppOptions, GrepConfig, GrepMode, MaintenanceMode,
+    RuntimeCacheConfigOverrides, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
 };
 use loonfs_test_support::http::raw_agent;
 use std::collections::BTreeMap;
@@ -119,9 +119,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    // The writer is dropped: tests abort the server task instead of shutting
-    // it down gracefully.
-    let (router, _writer, _local_cache) = app(config).await.expect("build app");
+    let (router, _state) = app(config, AppOptions::default()).await.expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });

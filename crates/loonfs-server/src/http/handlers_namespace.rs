@@ -2,14 +2,9 @@
 //! handlers.
 
 use super::error::ApiResponseError;
-use super::handlers_filesystem::{
-    invalid_path_id_error, parse_public_ordinal, parse_snapshot_id, resolve_page_limit,
-};
-use super::{
-    authorize, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson,
-};
+use super::query_params::{parse_path_id, parse_public_ordinal, resolve_page_limit};
+use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::Json;
 use loonfs::{
     CheckpointPageCursor, CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions,
@@ -76,11 +71,8 @@ pub(super) struct CheckpointPageQuery {
 )]
 pub(super) async fn get_capabilities(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    query.into_params()?;
     let mut capabilities = state.reader.get_capabilities();
     // Each direct transport is advertised from the issuer that performs it,
     // so a provider that signs whole-object writes but has no multipart API
@@ -209,10 +201,9 @@ pub(super) async fn get_capabilities(
 )]
 pub(super) async fn create_namespace(
     State(state): State<AppState>,
-    query: AppQuery<NoQuery>,
+    AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
-    query.into_params()?;
     let namespace = state
         .writer
         .create_namespace(&request.namespace_id, CreateNamespaceOptions::default())
@@ -243,18 +234,14 @@ pub(super) async fn create_namespace(
 )]
 pub(super) async fn get_namespace(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     let namespace = state
         .reader
         .get_namespace(&namespace_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(namespace))
 }
 
@@ -280,18 +267,14 @@ pub(super) async fn get_namespace(
 )]
 pub(super) async fn get_namespace_diagnostics(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::NamespaceDiagnostics>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     let diagnostics = state
         .admin
         .get_namespace_diagnostics(&namespace_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(diagnostics))
 }
 
@@ -321,13 +304,9 @@ pub(super) async fn get_namespace_diagnostics(
 )]
 pub(super) async fn delete_namespace(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    query: AppQuery<DeleteNamespaceQuery>,
-    headers: HeaderMap,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<DeleteNamespaceQuery>,
 ) -> Result<Json<loonfs_api::DeleteNamespaceResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let query = query.into_params()?;
     let options = DeleteNamespaceOptions {
         expected_head_seq: query
             .expected_head_seq
@@ -339,7 +318,7 @@ pub(super) async fn delete_namespace(
         .writer
         .delete_namespace(&namespace_id, options)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
@@ -371,17 +350,15 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
 )]
 pub(super) async fn fork_namespace(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(source_namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
-    let source_namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     let namespace = state
         .writer
         .fork_namespace(&source_namespace_id, &request.new_namespace_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&source_namespace_id))?;
     Ok(Json(namespace))
 }
 
@@ -409,12 +386,10 @@ pub(super) async fn fork_namespace(
 )]
 pub(super) async fn create_snapshot(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     let now_ms = super::handlers_uploads::current_unix_ms()?;
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let checkpoint = state
@@ -463,13 +438,9 @@ pub(super) async fn create_snapshot(
 )]
 pub(super) async fn list_snapshots(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<CheckpointPageQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<CheckpointPageQuery>,
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let query = query.into_params()?;
     let cursor = decode_checkpoint_cursor(query.cursor.as_deref(), &namespace_id)?;
     let response = state
         .admin
@@ -481,7 +452,7 @@ pub(super) async fn list_snapshots(
             },
         )
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
@@ -511,15 +482,12 @@ pub(super) async fn list_snapshots(
 )]
 pub(super) async fn extend_snapshot(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<SnapshotPathParams>,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
-    let namespace_id = namespace_id_path.into_id()?;
-    let SnapshotPathParams { snapshot_id } = path.into_params()?;
-    query.into_params()?;
-    let snapshot_id = parse_snapshot_id(&snapshot_id)?;
+    let snapshot_id = parse_path_id::<CheckpointId>("snapshot_id", &snapshot_id)?;
     let now_ms = super::handlers_uploads::current_unix_ms()?;
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let response = state
@@ -531,7 +499,7 @@ pub(super) async fn extend_snapshot(
             state.config.snapshot_max_lifetime_ms,
         )
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
@@ -558,21 +526,16 @@ pub(super) async fn extend_snapshot(
 )]
 pub(super) async fn release_snapshot(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<SnapshotPathParams>,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<ReleaseSnapshotResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let SnapshotPathParams { snapshot_id } = path.into_params()?;
-    query.into_params()?;
-    let snapshot_id = parse_snapshot_id(&snapshot_id)?;
+    let snapshot_id = parse_path_id::<CheckpointId>("snapshot_id", &snapshot_id)?;
     let response = state
         .admin
         .release_snapshot(&namespace_id, &snapshot_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
@@ -634,12 +597,10 @@ fn snapshot_expiry_from_ttl(
 )]
 pub(super) async fn create_checkpoint(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateCheckpointRequest>,
 ) -> Result<Json<Checkpoint>, ApiResponseError> {
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     let response = state
         .admin
         .create_checkpoint(
@@ -679,13 +640,9 @@ pub(super) async fn create_checkpoint(
 )]
 pub(super) async fn list_checkpoints(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<CheckpointPageQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<CheckpointPageQuery>,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let query = query.into_params()?;
     let cursor = decode_checkpoint_cursor(query.cursor.as_deref(), &namespace_id)?;
     let response = state
         .admin
@@ -697,7 +654,7 @@ pub(super) async fn list_checkpoints(
             },
         )
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
@@ -725,32 +682,22 @@ pub(super) async fn list_checkpoints(
 )]
 pub(super) async fn release_checkpoint(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    path: AppPath<CheckpointPathParams>,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<ReleaseCheckpointResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let CheckpointPathParams { checkpoint_id } = path.into_params()?;
-    query.into_params()?;
-    let checkpoint_id = parse_checkpoint_id(&checkpoint_id)?;
+    let checkpoint_id = parse_path_id::<CheckpointId>("checkpoint_id", &checkpoint_id)?;
     let response = state
         .admin
         .release_checkpoint(&namespace_id, &checkpoint_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct CheckpointPathParams {
     checkpoint_id: String,
-}
-
-fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
-    CheckpointId::parse(value)
-        .map_err(|error| invalid_path_id_error("checkpoint_id", value, error.reason()))
 }
 
 fn decode_checkpoint_cursor(
@@ -789,12 +736,10 @@ fn decode_checkpoint_cursor(
 )]
 pub(super) async fn run_maintenance(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<MaintenanceStepRequest>,
 ) -> Result<Json<MaintenanceStepResponse>, ApiResponseError> {
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     let plan =
         loonfs::MaintenancePlan::from_request(request.unwrap_or_default()).map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -804,6 +749,6 @@ pub(super) async fn run_maintenance(
         .admin
         .run_maintenance(&namespace_id, plan)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(result))
 }

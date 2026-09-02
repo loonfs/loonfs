@@ -14,7 +14,7 @@ use common::http_split_support::test_config;
 use loonfs::{CreateNamespaceOptions, FsWriter, SharedObjectStore, TraceMode, TraceStoreKind};
 use loonfs_api::v0::BeginUploadRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_server::{app, app_with_store, MaintenanceMode};
+use loonfs_server::{app, AppOptions, MaintenanceMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
 use std::convert::Infallible;
@@ -217,7 +217,8 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
         "logging-missing-path",
     );
     config.maintenance = MaintenanceMode::Manual;
-    let (router, writer, _local_cache) = app(config).await.expect("build app");
+    let (router, state) = app(config, AppOptions::default()).await.expect("build app");
+    let writer = state.writer;
     writer
         .create_namespace(&namespace_id("demo"), CreateNamespaceOptions::default())
         .await
@@ -260,7 +261,8 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
     );
     config.maintenance = MaintenanceMode::Manual;
     config.max_concurrent_uploads = 1;
-    let (router, writer, _local_cache) = app(config).await.expect("build app");
+    let (router, state) = app(config, AppOptions::default()).await.expect("build app");
+    let writer = state.writer;
     let namespace = namespace_id("demo");
     writer
         .create_namespace(&namespace, CreateNamespaceOptions::default())
@@ -397,7 +399,16 @@ async fn store_fault_has_one_error_from_the_boundary() {
         .expect("shutdown bootstrap writer");
 
     failing.fail_all();
-    let router = app_with_store(config, store).await.expect("build app");
+    let router = app(
+        config,
+        AppOptions {
+            store: Some(store),
+            direct_transfers: None,
+        },
+    )
+    .await
+    .expect("build app")
+    .0;
     capture.clear();
     let (status, body, request_id) = request_error(&router, "/v0/namespaces/faulty").await;
     assert_eq!(status, 500);

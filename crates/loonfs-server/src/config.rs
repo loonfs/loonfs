@@ -472,41 +472,24 @@ impl ServerConfig {
                 ),
             });
         }
-        if self.max_upload_bytes == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "max_upload_bytes",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.request_deadline_ms == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "request_deadline_ms",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.shutdown_deadline_ms == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "shutdown_deadline_ms",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.max_download_bytes == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "max_download_bytes",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.snapshot_max_ttl_ms == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "snapshot_max_ttl_ms",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.snapshot_max_lifetime_ms == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "snapshot_max_lifetime_ms",
-                reason: "must be greater than zero".to_owned(),
-            });
+        for (field, value) in [
+            ("max_upload_bytes", self.max_upload_bytes),
+            ("request_deadline_ms", self.request_deadline_ms),
+            ("shutdown_deadline_ms", self.shutdown_deadline_ms),
+            ("max_download_bytes", self.max_download_bytes),
+            ("snapshot_max_ttl_ms", self.snapshot_max_ttl_ms),
+            ("snapshot_max_lifetime_ms", self.snapshot_max_lifetime_ms),
+            (
+                "snapshot_max_live_per_namespace",
+                self.snapshot_max_live_per_namespace as u64,
+            ),
+            ("max_concurrent_uploads", self.max_concurrent_uploads as u64),
+            (
+                "max_concurrent_downloads",
+                self.max_concurrent_downloads as u64,
+            ),
+        ] {
+            require_positive(field, value, None)?;
         }
         if self.snapshot_max_ttl_ms > self.snapshot_max_lifetime_ms {
             return Err(ServerConfigError::InvalidField {
@@ -514,42 +497,18 @@ impl ServerConfig {
                 reason: "must not exceed `snapshot_max_lifetime_ms`".to_owned(),
             });
         }
-        if self.snapshot_max_live_per_namespace == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "snapshot_max_live_per_namespace",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.max_concurrent_uploads == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "max_concurrent_uploads",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.max_concurrent_downloads == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "max_concurrent_downloads",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.max_concurrent_maintenance == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "max_concurrent_maintenance",
-                reason: "must be greater than zero; \
-                         set `maintenance = \"manual\"` to disable scheduling"
-                    .to_owned(),
-            });
-        }
+        require_positive(
+            "max_concurrent_maintenance",
+            self.max_concurrent_maintenance as u64,
+            Some("set `maintenance = \"manual\"` to disable scheduling"),
+        )?;
         if let Some(local_cache) = &self.local_cache {
             require_non_empty("local_cache.path", &local_cache.path)?;
-            if local_cache.memory_bytes == 0 {
-                return Err(ServerConfigError::InvalidField {
-                    field: "local_cache.memory_bytes",
-                    reason: "must be greater than zero; \
-                             omit the `[local_cache]` table to run without a local cache"
-                        .to_owned(),
-                });
-            }
+            require_positive(
+                "local_cache.memory_bytes",
+                local_cache.memory_bytes,
+                Some("omit the `[local_cache]` table to run without a local cache"),
+            )?;
             // The disk tier allocates whole blocks and never a partial one,
             // so a capacity under the floor is a cache that starts, holds
             // nothing on disk, and says nothing about it. Refuse it here
@@ -629,6 +588,22 @@ fn require_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfi
     } else {
         Ok(())
     }
+}
+
+fn require_positive(
+    field: &'static str,
+    value: u64,
+    hint: Option<&str>,
+) -> Result<(), ServerConfigError> {
+    if value > 0 {
+        return Ok(());
+    }
+    let mut reason = "must be greater than zero".to_owned();
+    if let Some(hint) = hint {
+        reason.push_str("; ");
+        reason.push_str(hint);
+    }
+    Err(ServerConfigError::InvalidField { field, reason })
 }
 
 fn validate_socket_addr(field: &'static str, value: &str) -> Result<SocketAddr, ServerConfigError> {

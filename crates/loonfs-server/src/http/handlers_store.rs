@@ -32,10 +32,9 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome};
 )]
 pub(super) async fn probe_store(
     State(state): State<AppState>,
-    query: AppQuery<NoQuery>,
+    AppQuery(_): AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<StoreProbeRequest>,
 ) -> Result<Json<StoreProbeResponse>, ApiResponseError> {
-    query.into_params()?;
     let StoreProbeRequest {} = request.unwrap_or_default();
     // The run id scopes the objects this run writes, so two probes against
     // one store never collide, and a provider's own log names the run.

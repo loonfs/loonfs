@@ -1,16 +1,12 @@
 //! The `query/v0` plane: derived-index reads.
 
-#[cfg(feature = "openapi")]
-use super::handlers_filesystem::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
 use super::handlers_uploads::current_unix_ms;
-use super::{
-    authorize,
-    handlers_filesystem::{parse_boolean_query_param, required_query_param, resolve_page_limit},
-    AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson,
-};
+use super::query_params::{parse_boolean_query_param, required_query_param, resolve_page_limit};
+#[cfg(feature = "openapi")]
+use super::query_params::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
+use super::{AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::Json;
 use loonfs_api::v0::{GrepGcRequest, GrepGcResponse, GrepIndex};
 #[cfg(feature = "openapi")]
@@ -68,13 +64,9 @@ pub(super) struct GrepQuery {
 )]
 pub(super) async fn grep(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<GrepQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(mut query): AppQuery<GrepQuery>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    let mut query = query.into_params()?;
     let limit = resolve_page_limit(query.limit.take())?;
     let request = grep_request(query)?;
     // First touch: on a deployment that maintains this index, a search is
@@ -135,30 +127,22 @@ fn parse_optional_boolean(value: Option<String>, name: &str) -> Result<bool, Api
 }
 
 /// Absent-capability response where this deployment answers no searches.
-pub(super) async fn grep_queries_not_served(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    Err(ApiResponseError::not_supported(
+pub(super) async fn grep_queries_not_served() -> ApiResponseError {
+    ApiResponseError::not_supported(
         FEATURE_QUERY_GREP,
         "this deployment does not serve grep queries; set `[grep].mode` to `serve_only` \
          or `serve_and_maintain`",
-    ))
+    )
 }
 
 /// Absent-capability response where this deployment maintains no index, so
 /// nothing here may enable, disable, or collect one.
-pub(super) async fn grep_index_not_maintained(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    Err(ApiResponseError::not_supported(
+pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
+    ApiResponseError::not_supported(
         FEATURE_ADMIN_GREP_INDEX,
         "this deployment does not maintain the grep index; set `[grep].mode` to \
          `maintain_only` or `serve_and_maintain`, or administer the index where it is maintained",
-    ))
+    )
 }
 
 #[cfg_attr(
@@ -185,13 +169,9 @@ pub(super) async fn grep_index_not_maintained(
 )]
 pub(super) async fn enable_grep_index(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     let outcome = state
         .grep_worker()
         .enable(&namespace_id)
@@ -235,13 +215,9 @@ pub(super) async fn enable_grep_index(
 )]
 pub(super) async fn get_grep_index(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     Ok(Json(read_grep_index_status(&state, &namespace_id).await?))
 }
 
@@ -280,13 +256,9 @@ async fn read_grep_index_status(
 )]
 pub(super) async fn disable_grep_index(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     // Disabling is one durable compare-and-swap and nothing else. A step
     // already running loses its own publication race to this one and
     // retries; the retry reads a disabled root, concludes there is nothing
@@ -331,14 +303,10 @@ pub(super) async fn disable_grep_index(
 )]
 pub(super) async fn gc_grep_index(
     State(state): State<AppState>,
-    namespace_id_path: NamespaceIdPath,
-    headers: HeaderMap,
-    query: AppQuery<NoQuery>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<GrepGcRequest>,
 ) -> Result<Json<GrepGcResponse>, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace_id_path.into_id()?;
-    query.into_params()?;
     let request = request.unwrap_or_default();
     let report = state
         .grep_worker()

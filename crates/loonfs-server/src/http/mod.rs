@@ -4,6 +4,7 @@
 //! [`extractors`], and handle construction and listener ownership live in
 //! [`serve`].
 
+mod download_body;
 mod error;
 mod extractors;
 mod handlers_downloads;
@@ -16,6 +17,7 @@ mod handlers_uploads;
 mod metrics;
 #[cfg(feature = "openapi")]
 mod openapi;
+mod query_params;
 mod serve;
 #[cfg(test)]
 mod tests;
@@ -23,10 +25,8 @@ mod tls;
 
 #[cfg(feature = "openapi")]
 pub use self::openapi::openapi_document;
-#[cfg(feature = "test-support")]
-pub use self::serve::app_with_test_transfers;
 pub use self::serve::{
-    app, app_with_store, check_config, probe_store, serve, serve_with_shutdown, ServeError,
+    app, check_config, probe_store, serve, serve_with_shutdown, AppOptions, AppState, ServeError,
 };
 pub use self::tls::TlsConfigError;
 
@@ -57,18 +57,14 @@ use self::handlers_store::probe_store as probe_store_handler;
 use self::handlers_uploads::{
     abort_upload, complete_upload, create_upload, get_upload, put_upload_content, sign_upload_parts,
 };
-use self::serve::AppState;
 #[cfg(test)]
-use self::serve::{
-    app_with_store_and_direct_transfers, app_with_store_and_state,
-    build_handles_with_metrics_jsonl_path, serve_on,
-};
+use self::serve::{build_handles, serve_on};
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::header::CONTENT_TYPE;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post, put, MethodRouter};
 use axum::Router;
 use loonfs::ErrorCode;
 #[cfg(test)]
@@ -235,6 +231,27 @@ fn request_clock() -> std::time::Instant {
     std::time::Instant::now()
 }
 
+async fn require_bearer_token(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiResponseError> {
+    authorize(state.config.auth_policy(), request.headers())?;
+    Ok(next.run(request).await)
+}
+
+fn gated(
+    enabled: bool,
+    served: MethodRouter<AppState>,
+    denied: MethodRouter<AppState>,
+) -> MethodRouter<AppState> {
+    if enabled {
+        served
+    } else {
+        denied
+    }
+}
+
 fn router(state: AppState) -> Router {
     // Searching an index and keeping one built are separate jobs, so they
     // are separately deployable: the query route exists where this server
@@ -242,38 +259,11 @@ fn router(state: AppState) -> Router {
     // it maintains one.
     let serves_grep = state.config.grep.mode.serves_grep();
     let maintains_index = state.config.grep.mode.maintains_index();
-    let grep_route = if serves_grep {
-        get(grep)
-    } else {
-        get(grep_queries_not_served)
-    };
-    let enable_grep_route = if maintains_index {
-        post(enable_grep_index)
-    } else {
-        post(grep_index_not_maintained)
-    };
-    let disable_grep_route = if maintains_index {
-        post(disable_grep_index)
-    } else {
-        post(grep_index_not_maintained)
-    };
-    let grep_gc_route = if maintains_index {
-        post(gc_grep_index)
-    } else {
-        post(grep_index_not_maintained)
-    };
-    // Reading the index's lifecycle is administering it, not serving it: a
-    // deployment that only answers searches has no authority over the state
-    // this reports, so it gates with the mutating three.
-    let grep_status_route = if maintains_index {
-        get(get_grep_index)
-    } else {
-        get(grep_index_not_maintained)
-    };
     let request_deadline_ms = state.config.request_deadline_ms;
-    Router::new()
+    let public = Router::new()
         .route("/health", get(get_health))
-        .route("/readiness", get(get_readiness))
+        .route("/readiness", get(get_readiness));
+    let authenticated = Router::new()
         .route("/metrics", get(get_metrics))
         .route(
             "/v0/capabilities",
@@ -322,22 +312,41 @@ fn router(state: AppState) -> Router {
             "/v0/namespaces/{namespace_id}/filesystem/downloads",
             post(create_download),
         )
-        .route("/v0/namespaces/{namespace_id}/grep", grep_route)
+        .route(
+            "/v0/namespaces/{namespace_id}/grep",
+            gated(serves_grep, get(grep), get(grep_queries_not_served)),
+        )
         .route(
             "/v0/admin/namespaces/{namespace_id}/grep/index",
-            grep_status_route,
+            gated(
+                maintains_index,
+                get(get_grep_index),
+                get(grep_index_not_maintained),
+            ),
         )
         .route(
             "/v0/admin/namespaces/{namespace_id}/grep/index/enable",
-            enable_grep_route,
+            gated(
+                maintains_index,
+                post(enable_grep_index),
+                post(grep_index_not_maintained),
+            ),
         )
         .route(
             "/v0/admin/namespaces/{namespace_id}/grep/index/disable",
-            disable_grep_route,
+            gated(
+                maintains_index,
+                post(disable_grep_index),
+                post(grep_index_not_maintained),
+            ),
         )
         .route(
             "/v0/admin/namespaces/{namespace_id}/grep/index/gc",
-            grep_gc_route,
+            gated(
+                maintains_index,
+                post(gc_grep_index),
+                post(grep_index_not_maintained),
+            ),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/revisions",
@@ -415,6 +424,13 @@ fn router(state: AppState) -> Router {
         .route_layer(middleware::from_fn(move |request: Request, next: Next| {
             with_request_deadline(request_deadline_ms, request, next)
         }))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer_token,
+        ));
+    Router::new()
+        .merge(public)
+        .merge(authenticated)
         // Unmatched paths and wrong methods answer inside the error
         // contract instead of axum's empty default bodies.
         .fallback(route_not_found)
@@ -430,8 +446,7 @@ fn router(state: AppState) -> Router {
 }
 
 /// 404 for paths outside the served surface. Deliberately unauthenticated:
-/// the route set is public in the API spec, and `authorize` runs per
-/// matched handler.
+/// the route set is public in the API spec.
 async fn route_not_found() -> ApiResponseError {
     ApiResponseError::new(
         ErrorCode::RouteNotFound,
@@ -529,11 +544,7 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
         )
     )
 )]
-async fn get_metrics(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Response, ApiResponseError> {
-    authorize(state.config.auth_policy(), &headers)?;
+async fn get_metrics(State(state): State<AppState>) -> Result<Response, ApiResponseError> {
     // Sample server state here because these values can change between
     // scrapes. Cache activity is already included in the recorder snapshot.
     let rendered = state.metrics.render(
