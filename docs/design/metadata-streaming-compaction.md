@@ -4,7 +4,7 @@ Status: accepted
 
 ## Summary
 
-LoonFS stores namespace metadata in immutable runs. The oldest data is stored in a base run, and checkpoints add newer delta runs. Routine maintenance merges complete runs within a fixed per-step budget, but a family group can eventually become larger than that budget. Once this happens, ordinary maintenance can reduce the number of delta runs but cannot rebuild the base run or apply retention across the complete group.
+LoonFS stores namespace metadata in immutable runs. The oldest data is stored in a base run, and flushes add newer delta runs. Routine maintenance merges complete runs within a fixed per-step budget, but a family group can eventually become larger than that budget. Once this happens, ordinary maintenance can reduce the number of delta runs but cannot rebuild the base run or apply retention across the complete group.
 
 This design adds a background streaming compaction for oversized metadata family groups. The job reads a fixed snapshot of the selected runs and captures a retention floor, which is the sequence number below which obsolete history may be removed. It applies that floor throughout the job, writes output segments under a job-specific prefix, and publishes the result with one manifest update. Readers continue using the existing manifest until that final update succeeds.
 

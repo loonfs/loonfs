@@ -33,10 +33,10 @@ use super::record::load_checkpoint_record;
 use super::retention::advance_retention_floor;
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
-    flatten_manifest_segments, runs_from_segments, runs_in_scan_order, MetadataFamilyGroup,
-    MetadataFamilySegments, MetadataLsmPolicy, MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL,
-    CHECKPOINT_DELTA_RUN_LEVEL, CHECKPOINT_ROW_FAMILIES, DEFAULT_MAX_CHECKPOINT_DELTA_RUNS,
-    REORGANIZE_FAMILY_GROUPS,
+    flatten_manifest_segments, runs_from_segments, runs_in_reorganization_order,
+    MetadataFamilyGroup, MetadataFamilySegments, MetadataLsmPolicy, MetadataRunManifest,
+    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_DELTA_RUN_LEVEL, CHECKPOINT_ROW_FAMILIES,
+    DEFAULT_MAX_CHECKPOINT_DELTA_RUNS, REORGANIZE_FAMILY_GROUPS,
 };
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,

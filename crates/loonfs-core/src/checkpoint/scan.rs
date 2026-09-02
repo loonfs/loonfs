@@ -41,9 +41,9 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(super) segment_cache: Option<&'a MetadataSegmentCache>,
     pub(super) manifest_object_key: String,
     pub(super) manifest: Arc<NamespaceManifestEnvelope>,
-    /// The manifest's runs in scan order, derived once at load validation
-    /// and shared through the manifest cache entry. A run list is immutable
-    /// per manifest object; scans must not regroup it per page.
+    /// The manifest's runs, grouped once during load validation and shared
+    /// through the manifest cache entry. Scans merge globally unique row keys
+    /// and do not depend on this order.
     pub(super) scan_runs: Arc<Vec<MetadataRunManifest>>,
     /// Per-view memo of decoded blocks: one operation never re-fetches a
     /// block it already saw, with or without a shared cache attached.

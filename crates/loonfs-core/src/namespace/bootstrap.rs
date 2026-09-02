@@ -145,20 +145,17 @@ pub(super) enum NamespaceHeadInstall {
     Deleted,
 }
 
-/// Publishes a complete namespace head as the namespace's one and only
-/// installation write.
+/// Installs a complete namespace head with one conditional create.
 ///
-/// Conditional creation is the whole protocol: exactly one attempt can win,
-/// and the loser reads the head back to say what it lost to — an existing
-/// namespace or a deletion tombstone. There is no third answer, because
-/// there is no state between absent and complete.
+/// A confirmed precondition failure is a plain conflict. The stored head is
+/// read only to distinguish an active namespace from a deleted id.
 ///
-/// The loser is not told whether the winner was its own earlier attempt.
-/// Nothing durable can say: the head's writer block is one writer session,
-/// and a server holds one session across every caller it serves, so
-/// "written by my session" does not mean "written by this attempt". A
-/// caller that wants a retry to succeed asks for that with
-/// `allow_existing`.
+/// A transport failure may leave the write unacknowledged. In that case, the
+/// stored head's immutable `namespace_id`, `content_store_id`, `created_at_ms`,
+/// and `fork_basis` fields decide whether this attempt's write landed. A create
+/// mints a fresh `content_store_id`, so the comparison distinguishes its head
+/// from one installed by a concurrent create even when both use the same writer
+/// session.
 pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

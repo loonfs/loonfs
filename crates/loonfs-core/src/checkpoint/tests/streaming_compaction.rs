@@ -518,7 +518,7 @@ async fn policy_that_starves_the_group<S: ObjectStore + ?Sized>(
     group: MetadataFamilyGroup,
 ) -> MetadataLsmPolicy {
     let segments = load_current_manifest_segments(store, namespace_id).await;
-    let base_rows: u64 = runs_in_scan_order(&segments.manifest().payload)
+    let base_rows: u64 = runs_in_reorganization_order(&segments.manifest().payload)
         .iter()
         .filter(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
         .flat_map(|run| run.segments.iter())
@@ -567,7 +567,7 @@ fn snapshot_runs_for_group(
     manifest: &NamespaceManifestEnvelope,
     group: MetadataFamilyGroup,
 ) -> Vec<MetadataRunManifest> {
-    runs_in_scan_order(&manifest.payload)
+    runs_in_reorganization_order(&manifest.payload)
         .into_iter()
         .filter(|run| {
             run.segments.iter().any(|family_segments| {
