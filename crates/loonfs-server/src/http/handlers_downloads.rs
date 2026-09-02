@@ -26,11 +26,16 @@ use std::time::Duration;
 /// Lifetime of a presigned download URL.
 const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// Issues a short-lived download URL for a file.
+///
+/// This endpoint reads metadata but does not proxy the file bytes, so buffered
+/// download limits do not apply.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
         post,
         operation_id = "create_download",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/filesystem/downloads",
         tag = "filesystem",
         summary = "Begin download",
@@ -51,10 +56,6 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
         )
     )
 )]
-/// Issues a short-lived download URL for a file.
-///
-/// This endpoint reads metadata but does not proxy the file bytes, so buffered
-/// download limits do not apply.
 pub(super) async fn create_download(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -81,11 +82,13 @@ pub(super) async fn create_download(
     }))
 }
 
+/// Authorizes a direct read of one retained inode revision.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
         post,
         operation_id = "create_download_by_inode",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
@@ -108,7 +111,6 @@ pub(super) async fn create_download(
         )
     )
 )]
-/// Authorizes a direct read of one retained inode revision.
 pub(super) async fn create_download_by_inode(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,

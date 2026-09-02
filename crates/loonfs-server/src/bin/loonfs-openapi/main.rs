@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-#[path = "loonfs-openapi/openapi_postprocess.rs"]
 mod openapi_postprocess;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

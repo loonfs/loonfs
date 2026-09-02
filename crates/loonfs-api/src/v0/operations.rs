@@ -70,10 +70,6 @@ pub struct ErrorDetails {
         skip_serializing_if = "Option::is_none",
         with = "crate::public_inode_id::option"
     )]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub inode_id: Option<InodeId>,
     /// The request expected the path to contain this inode.
     #[serde(
@@ -81,20 +77,12 @@ pub struct ErrorDetails {
         skip_serializing_if = "Option::is_none",
         with = "crate::public_inode_id::option"
     )]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub expected_inode_id: Option<InodeId>,
     /// The path actually contained this inode.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "crate::public_inode_id::option"
-    )]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
     )]
     pub actual_inode_id: Option<InodeId>,
     /// Revision the request expected to be current.
@@ -253,10 +241,6 @@ pub enum FilesystemOperation {
     CreateDirectoryByInode {
         /// Parent directory.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         parent_inode_id: InodeId,
         /// New directory name.
         display_name: DisplayName,
@@ -277,10 +261,6 @@ pub enum FilesystemOperation {
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
         )]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         expected_inode_id: Option<InodeId>,
         /// With `replace` behavior and an inode guard, the request requires this content revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,10 +275,6 @@ pub enum FilesystemOperation {
     PutFileByInode {
         /// Parent directory.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         parent_inode_id: InodeId,
         /// New file name.
         display_name: DisplayName,
@@ -313,10 +289,6 @@ pub enum FilesystemOperation {
     PutFileRevisionByInode {
         /// File to update.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// Immutable bytes that must be covered by a valid preparation proof.
         content_ref: ContentRef,
@@ -337,10 +309,6 @@ pub enum FilesystemOperation {
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
         )]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         expected_inode_id: Option<InodeId>,
     },
     /// Delete an inode if its current binding matches.
@@ -351,10 +319,6 @@ pub enum FilesystemOperation {
     DeleteByInode {
         /// Inode to delete.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// Binding generation required for the delete.
         expected_binding_generation: String,
@@ -378,10 +342,6 @@ pub enum FilesystemOperation {
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
         )]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         expected_destination_inode_id: Option<InodeId>,
         /// With `replace` behavior and an inode guard, the request requires this content revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -393,19 +353,11 @@ pub enum FilesystemOperation {
     MoveByInode {
         /// Inode to move.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// Binding generation required for the move.
         expected_binding_generation: String,
         /// Destination directory.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         to_parent_inode_id: InodeId,
         /// New name.
         to_display_name: DisplayName,
@@ -417,10 +369,6 @@ pub enum FilesystemOperation {
             default,
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
-        )]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
         )]
         expected_destination_inode_id: Option<InodeId>,
         /// With `replace` behavior and an inode guard, the request requires this content revision.
@@ -444,10 +392,6 @@ pub enum FilesystemOperation {
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
         )]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         expected_destination_inode_id: Option<InodeId>,
         /// With `replace` behavior and an inode guard, the request requires this content revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -459,10 +403,6 @@ pub enum FilesystemOperation {
     Undelete {
         /// Deleted inode to make reachable again.
         #[serde(with = "crate::public_inode_id")]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
-        )]
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
         deletion_seq: ChangeSeq,
@@ -502,10 +442,6 @@ pub enum FilesystemOperation {
             default,
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
-        )]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
         )]
         expected_inode_id: Option<InodeId>,
         /// The attribute revision that must still be current before the update.
@@ -581,10 +517,6 @@ impl CommitRequest {
 pub struct FileRevision {
     /// File inode that owns this revision.
     #[serde(with = "crate::public_inode_id")]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub inode_id: InodeId,
     /// Revision number within the file inode.
     pub revision_no: RevisionNo,
@@ -608,10 +540,6 @@ pub struct ListFileRevisionsResponse {
     pub namespace_id: NamespaceId,
     /// File inode whose revisions were returned.
     #[serde(with = "crate::public_inode_id")]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub inode_id: InodeId,
     /// Namespace head sequence used for the read.
     pub head_seq: ChangeSeq,

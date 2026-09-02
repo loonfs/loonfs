@@ -18,7 +18,9 @@ use loonfs::{
     MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepReport,
     PutFileOptions, StoredMetadataBlockCache, TraceMode, TraceStoreKind,
 };
-use loonfs_api::ErrorCode;
+use loonfs_api::{
+    AttributeRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
+};
 use loonfs_api::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
     PaginationPolicy, RevisionNo, FEATURE_QUERY_GREP,
@@ -320,18 +322,7 @@ fn registered_limit_keys_match_the_api_spec_table() {
         .map(ToOwned::to_owned)
         .collect();
 
-    let capability_source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../loonfs-api/src/capability.rs"
-    ));
-    let registered: std::collections::BTreeSet<_> = capability_source
-        .split("pub const LIMIT_")
-        .skip(1)
-        .filter_map(|declaration| declaration.split(';').next())
-        .filter_map(|declaration| declaration.split_once('"').map(|(_, value)| value))
-        .filter_map(|value| value.split('"').next())
-        .map(ToOwned::to_owned)
-        .collect();
+    let registered = ALL_LIMIT_KEYS.iter().map(|key| (*key).to_owned()).collect();
 
     assert_eq!(documented, registered);
 }
@@ -358,22 +349,35 @@ fn error_detail_fields_match_the_api_spec_table() {
         .map(ToOwned::to_owned)
         .collect();
 
-    let operations_source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../loonfs-api/src/v0/operations.rs"
-    ));
-    let details_body = operations_source
-        .split("pub struct ErrorDetails {")
-        .nth(1)
-        .expect("ErrorDetails declaration")
-        .split("\n}")
-        .next()
-        .expect("ErrorDetails body");
-    let registered: std::collections::BTreeSet<_> = details_body
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("pub "))
-        .filter_map(|field| field.split(':').next())
-        .map(ToOwned::to_owned)
+    let populated = ErrorDetails {
+        commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
+        committed_seq: Some(ChangeSeq::from(1)),
+        committed_fingerprint: Some("fingerprint".to_owned()),
+        operation_index: Some(0),
+        fenced_writer_epoch: Some(WriterEpoch::from(1)),
+        active_writer_epoch: Some(WriterEpoch::from(2)),
+        active_writer: Some("writer".to_owned()),
+        active_acquired_at_ms: Some(1),
+        inode_id: Some(InodeId(1)),
+        expected_inode_id: Some(InodeId(2)),
+        actual_inode_id: Some(InodeId(3)),
+        expected_revision_no: Some(RevisionNo::from(1)),
+        actual_revision_no: Some(RevisionNo::from(2)),
+        expected_attributes_revision_no: Some(AttributeRevisionNo::from(1)),
+        actual_attributes_revision_no: Some(AttributeRevisionNo::from(2)),
+        after_seq: Some(ChangeSeq::from(2)),
+        retention_floor_seq: Some(ChangeSeq::from(3)),
+        expected_deletion_seq: Some(ChangeSeq::from(4)),
+        actual_deletion_seq: Some(ChangeSeq::from(5)),
+        expected_head_seq: Some(ChangeSeq::from(6)),
+        actual_head_seq: Some(ChangeSeq::from(7)),
+    };
+    let serialized = serde_json::to_value(populated).expect("serialize populated error details");
+    let registered = serialized
+        .as_object()
+        .expect("populated error details serialize as an object")
+        .keys()
+        .cloned()
         .collect();
 
     assert_eq!(documented, registered);

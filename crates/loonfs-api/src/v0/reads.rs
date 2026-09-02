@@ -19,10 +19,6 @@ pub struct PathEntry {
     pub path: AbsolutePath,
     /// Stable inode identity for this item.
     #[serde(with = "crate::public_inode_id")]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub inode_id: InodeId,
     /// Actor that created this inode, as supplied by the application.
     pub created_by: ActorRef,
@@ -38,10 +34,6 @@ pub struct PathEntry {
         default,
         skip_serializing_if = "Option::is_none",
         with = "crate::public_inode_id::option"
-    )]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
     )]
     pub parent_inode_id: Option<InodeId>,
     /// Stored display name for this path component, absent for the nameless root.
@@ -194,10 +186,6 @@ pub struct ListInodeChildrenResponse {
     pub namespace_id: NamespaceId,
     /// Directory inode whose children were returned.
     #[serde(with = "crate::public_inode_id")]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub parent_inode_id: InodeId,
     /// Namespace head sequence this listing was read from.
     pub head_seq: ChangeSeq,
@@ -224,10 +212,6 @@ pub struct FileBytes {
 pub struct TrashEntry {
     /// Inode hidden by the deletion.
     #[serde(with = "crate::public_inode_id")]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub inode_id: InodeId,
     /// Commit sequence that identifies this deletion.
     pub deletion_seq: ChangeSeq,

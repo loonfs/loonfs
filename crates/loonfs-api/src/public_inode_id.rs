@@ -97,21 +97,6 @@ pub mod option {
     }
 }
 
-/// Builds the OpenAPI schema for a public inode ID.
-#[cfg(feature = "openapi")]
-#[allow(
-    deprecated,
-    reason = "the published schema uses the requested singular example field"
-)]
-pub fn schema() -> utoipa::openapi::schema::Object {
-    utoipa::openapi::schema::Object::builder()
-        .schema_type(utoipa::openapi::schema::Type::String)
-        .pattern(Some(PATTERN))
-        .example(Some(serde_json::json!(EXAMPLE)))
-        .description(Some(DESCRIPTION))
-        .build()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

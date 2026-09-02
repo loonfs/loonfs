@@ -67,10 +67,6 @@ pub struct BeginDownloadByInodeResponse {
     pub namespace_id: NamespaceId,
     /// File inode being read.
     #[serde(with = "crate::public_inode_id")]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub inode_id: InodeId,
     /// Revision being read.
     pub revision_no: RevisionNo,

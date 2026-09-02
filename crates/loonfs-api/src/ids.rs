@@ -275,8 +275,6 @@ macro_rules! numeric_id {
     ) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-        #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-        #[cfg_attr(feature = "openapi", schema(value_type = u64))]
         pub struct $name(pub u64);
 
         impl From<u64> for $name {
@@ -791,6 +789,25 @@ numeric_id! {
     /// Inodes are stable across renames.
     InodeId
 }
+
+#[cfg(feature = "openapi")]
+#[allow(
+    deprecated,
+    reason = "the published schema uses the requested singular example field"
+)]
+impl utoipa::PartialSchema for InodeId {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::Object::builder()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .pattern(Some(crate::public_inode_id::PATTERN))
+            .example(Some(serde_json::json!(crate::public_inode_id::EXAMPLE)))
+            .description(Some(crate::public_inode_id::DESCRIPTION))
+            .into()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for InodeId {}
 
 /// Inode 1 is always the root directory of a namespace.
 pub const ROOT_INODE_ID: InodeId = InodeId(1);

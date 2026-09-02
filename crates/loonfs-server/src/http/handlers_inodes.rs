@@ -47,6 +47,7 @@ pub(super) struct StatInodeQuery {
     utoipa::path(
         get,
         operation_id = "get_inode",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
         tag = "inodes",
         summary = "Stat inode",
@@ -98,6 +99,14 @@ pub(super) struct ListInodeChildrenQuery {
     utoipa::path(
         get,
         operation_id = "list_inode_children",
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-pagination" = json!({
+                "cursor": "$request.cursor",
+                "next_cursor": "$response.next_cursor",
+                "results": "$response.entries",
+            })),
+        ),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         tag = "inodes",
         summary = "List directory children by inode",
@@ -152,6 +161,14 @@ pub(super) async fn list_inode_children(
     utoipa::path(
         get,
         operation_id = "list_file_revisions_by_inode",
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-pagination" = json!({
+                "cursor": "$request.cursor",
+                "next_cursor": "$response.next_cursor",
+                "results": "$response.revisions",
+            })),
+        ),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
         tag = "inodes",
         summary = "List file revisions by inode",
@@ -200,6 +217,7 @@ pub(super) async fn list_file_revisions_by_inode(
     utoipa::path(
         get,
         operation_id = "get_file_revision_bytes_by_inode",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
         summary = "Read file revision by inode",

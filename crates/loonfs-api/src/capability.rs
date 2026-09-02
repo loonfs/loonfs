@@ -58,65 +58,79 @@ pub const FEATURE_QUERY_GREP: &str = "query.grep";
 /// `query/v0` profile for a `query.` key to be parented by.
 pub const FEATURE_ADMIN_GREP_INDEX: &str = "admin.grep.index";
 
-/// Advisory limit: the largest request body accepted for service-proxied
-/// upload content requests. This is the proxy's cap, not the provider's.
-pub const LIMIT_UPLOAD_MAX_CONTENT_BYTES: &str = "upload.max_content_bytes";
-/// Advisory limit: the largest object this deployment's provider accepts in
-/// one presigned `direct_put` request.
-///
-/// Unrelated to [`LIMIT_UPLOAD_MAX_CONTENT_BYTES`], which bounds what the
-/// service will buffer on a client's behalf. This one is the provider's own
-/// single-request ceiling, and it is typically far larger; a claim above it
-/// answers `content_too_large` at begin rather than being signed into a
-/// write the provider would reject.
-pub const LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES: &str = "upload.direct_put_max_content_bytes";
-/// Advisory limit: the largest JSON body accepted when completing an upload.
-/// It is large enough for the maximum number of multipart entries.
-pub const LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES: &str = "upload.completion_max_body_bytes";
-/// Advisory limit: the largest file content a service-proxied read will
-/// buffer and return in one response.
-pub const LIMIT_DOWNLOAD_MAX_CONTENT_BYTES: &str = "download.max_content_bytes";
-/// Advisory limit: how many service-proxied upload bodies the deployment
-/// buffers at once; requests past the cap answer `server_busy`.
-pub const LIMIT_UPLOAD_MAX_CONCURRENT: &str = "upload.max_concurrent";
-/// Advisory limit: how many service-proxied content reads the deployment
-/// materializes at once; requests past the cap answer `server_busy`.
-pub const LIMIT_DOWNLOAD_MAX_CONCURRENT: &str = "download.max_concurrent";
-/// Advisory limit: the largest snapshot TTL one request may ask for.
-pub const LIMIT_SNAPSHOT_MAX_TTL_MS: &str = "snapshot.max_ttl_ms";
-/// Advisory limit: the largest snapshot expiry measured from record creation.
-pub const LIMIT_SNAPSHOT_MAX_LIFETIME_MS: &str = "snapshot.max_lifetime_ms";
-/// Advisory limit: the most live snapshots one namespace may hold.
-pub const LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE: &str = "snapshot.max_live_per_namespace";
-/// Advisory limit: the most path operations one commit may carry; a longer
-/// list answers `invalid_request` before planning.
-pub const LIMIT_COMMIT_MAX_OPERATIONS: &str = "commit.max_operations";
-/// Advisory limit: the most content tokens one commit may carry.
-pub const LIMIT_COMMIT_MAX_CONTENT_TOKENS: &str = "commit.max_content_tokens";
-/// Advisory limit: the most distinct external content refs one commit's
-/// operations may name.
-pub const LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS: &str = "commit.max_external_content_refs";
-/// Advisory limit: the largest accepted commit `message`, in bytes.
-pub const LIMIT_COMMIT_MAX_MESSAGE_BYTES: &str = "commit.max_message_bytes";
-/// Advisory capability key for the default page size applied when callers omit `limit`.
-pub const LIMIT_PAGINATION_DEFAULT: &str = "pagination.default_limit";
-/// Advisory capability key for the largest page size accepted by a deployment.
-pub const LIMIT_PAGINATION_MAX: &str = "pagination.max_limit";
-/// Advisory limit: the smallest accepted `grace_window_ms` on a `gc`
-/// request; smaller values answer `invalid_request`. Derived from the
-/// publication budgets, not tuned.
-pub const LIMIT_GC_MIN_GRACE_WINDOW_MS: &str = "maintenance.gc.min_grace_window_ms";
-/// Advisory limit: matches per grep page when the request omits `limit`.
-pub const LIMIT_QUERY_GREP_DEFAULT: &str = "query.grep.default_limit";
-/// Advisory limit: the largest accepted grep page limit. Distinct from the
-/// pagination keys — a grep item costs a verified file read, not a row.
-pub const LIMIT_QUERY_GREP_MAX: &str = "query.grep.max_limit";
-/// Advisory limit: files a plan-less `allow_scan` grep will scan before
-/// refusing with `query_unindexable`.
-pub const LIMIT_QUERY_GREP_SCAN_BUDGET_FILES: &str = "query.grep.scan_budget_files";
-/// Advisory limit: unindexed-tail revisions one grep scans exhaustively
-/// before failing with `index_lagging`.
-pub const LIMIT_QUERY_GREP_TAIL_BUDGET_FILES: &str = "query.grep.tail_budget_files";
+macro_rules! limit_keys {
+    ($( $(#[$meta:meta])* $name:ident = $value:literal; )+) => {
+        $(
+            $(#[$meta])*
+            pub const $name: &str = $value;
+        )+
+
+        /// Every registered advisory limit key.
+        pub const ALL_LIMIT_KEYS: &[&str] = &[$($name),+];
+    };
+}
+
+limit_keys! {
+    /// Advisory limit: the largest request body accepted for service-proxied
+    /// upload content requests. This is the proxy's cap, not the provider's.
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES = "upload.max_content_bytes";
+    /// Advisory limit: the largest object this deployment's provider accepts in
+    /// one presigned `direct_put` request.
+    ///
+    /// Unrelated to [`LIMIT_UPLOAD_MAX_CONTENT_BYTES`], which bounds what the
+    /// service will buffer on a client's behalf. This one is the provider's own
+    /// single-request ceiling, and it is typically far larger; a claim above it
+    /// answers `content_too_large` at begin rather than being signed into a
+    /// write the provider would reject.
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES = "upload.direct_put_max_content_bytes";
+    /// Advisory limit: the largest JSON body accepted when completing an upload.
+    /// It is large enough for the maximum number of multipart entries.
+    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES = "upload.completion_max_body_bytes";
+    /// Advisory limit: the largest file content a service-proxied read will
+    /// buffer and return in one response.
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES = "download.max_content_bytes";
+    /// Advisory limit: how many service-proxied upload bodies the deployment
+    /// buffers at once; requests past the cap answer `server_busy`.
+    LIMIT_UPLOAD_MAX_CONCURRENT = "upload.max_concurrent";
+    /// Advisory limit: how many service-proxied content reads the deployment
+    /// materializes at once; requests past the cap answer `server_busy`.
+    LIMIT_DOWNLOAD_MAX_CONCURRENT = "download.max_concurrent";
+    /// Advisory limit: the largest snapshot TTL one request may ask for.
+    LIMIT_SNAPSHOT_MAX_TTL_MS = "snapshot.max_ttl_ms";
+    /// Advisory limit: the largest snapshot expiry measured from record creation.
+    LIMIT_SNAPSHOT_MAX_LIFETIME_MS = "snapshot.max_lifetime_ms";
+    /// Advisory limit: the most live snapshots one namespace may hold.
+    LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE = "snapshot.max_live_per_namespace";
+    /// Advisory limit: the most path operations one commit may carry; a longer
+    /// list answers `invalid_request` before planning.
+    LIMIT_COMMIT_MAX_OPERATIONS = "commit.max_operations";
+    /// Advisory limit: the most content tokens one commit may carry.
+    LIMIT_COMMIT_MAX_CONTENT_TOKENS = "commit.max_content_tokens";
+    /// Advisory limit: the most distinct external content refs one commit's
+    /// operations may name.
+    LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS = "commit.max_external_content_refs";
+    /// Advisory limit: the largest accepted commit `message`, in bytes.
+    LIMIT_COMMIT_MAX_MESSAGE_BYTES = "commit.max_message_bytes";
+    /// Advisory capability key for the default page size applied when callers omit `limit`.
+    LIMIT_PAGINATION_DEFAULT = "pagination.default_limit";
+    /// Advisory capability key for the largest page size accepted by a deployment.
+    LIMIT_PAGINATION_MAX = "pagination.max_limit";
+    /// Advisory limit: the smallest accepted `grace_window_ms` on a `gc`
+    /// request; smaller values answer `invalid_request`. Derived from the
+    /// publication budgets, not tuned.
+    LIMIT_GC_MIN_GRACE_WINDOW_MS = "maintenance.gc.min_grace_window_ms";
+    /// Advisory limit: matches per grep page when the request omits `limit`.
+    LIMIT_QUERY_GREP_DEFAULT = "query.grep.default_limit";
+    /// Advisory limit: the largest accepted grep page limit. Distinct from the
+    /// pagination keys — a grep item costs a verified file read, not a row.
+    LIMIT_QUERY_GREP_MAX = "query.grep.max_limit";
+    /// Advisory limit: files a plan-less `allow_scan` grep will scan before
+    /// refusing with `query_unindexable`.
+    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES = "query.grep.scan_budget_files";
+    /// Advisory limit: unindexed-tail revisions one grep scans exhaustively
+    /// before failing with `index_lagging`.
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES = "query.grep.tail_budget_files";
+}
 
 /// The profiles, features, and limits advertised by a deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

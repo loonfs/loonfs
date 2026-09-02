@@ -71,6 +71,10 @@ impl ApiResponseError {
         }
     }
 
+    pub(super) fn message(&self) -> &str {
+        &self.body.message
+    }
+
     #[cfg(test)]
     pub(super) fn param(&self) -> Option<&str> {
         self.body.param.as_deref()

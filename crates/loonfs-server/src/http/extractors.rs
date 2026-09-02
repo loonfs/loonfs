@@ -206,7 +206,7 @@ where
     decode_json(body.get().as_bytes())
 }
 
-fn decode_json<T>(body: &[u8]) -> Result<T, ApiResponseError>
+pub(super) fn decode_json<T>(body: &[u8]) -> Result<T, ApiResponseError>
 where
     T: serde::de::DeserializeOwned,
 {

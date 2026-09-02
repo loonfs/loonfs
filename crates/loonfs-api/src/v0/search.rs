@@ -56,10 +56,6 @@ pub struct GrepMatch {
     pub path: AbsolutePath,
     /// Durable identity of the matched file.
     #[serde(with = "crate::public_inode_id")]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
     pub inode_id: InodeId,
     /// The matched revision (the newest visible one at the snapshot).
     pub revision_no: RevisionNo,
@@ -110,10 +106,6 @@ pub enum GrepIndexLifecycle {
             default,
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
-        )]
-        #[cfg_attr(
-            feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
         )]
         cursor_inode_id: Option<InodeId>,
         /// Checkpoint pinning the state being walked.
