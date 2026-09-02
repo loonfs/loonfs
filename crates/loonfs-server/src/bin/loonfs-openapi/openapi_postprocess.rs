@@ -199,7 +199,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         SdkName {
             group: &["uploads"],
             method: "complete",
-            request: Some("CompleteUploadBody"),
+            request: Some("CompleteUploadRequest"),
         },
     ),
     (

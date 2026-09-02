@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 /// HTTP error body used by LoonFS APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(as = ErrorResponse))]
 pub struct ApiError {
     /// Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)
     /// registry.
@@ -790,6 +791,7 @@ pub struct Checkpoint {
 /// A live snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(as = Snapshot))]
 pub struct SnapshotSummary {
     /// Snapshot id.
     pub snapshot_id: CheckpointId,

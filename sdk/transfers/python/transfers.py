@@ -20,15 +20,15 @@ from .types import (
     BeginUploadRequest_DirectPut,
     BeginUploadRequest_ServiceProxied,
     Checksum,
-    CompleteUploadRequest_DirectMultipart,
-    CompleteUploadRequest_DirectPut,
-    CompleteUploadRequest_ServiceProxied,
     CompletedUploadPart,
     ContentRef,
     DestinationBehavior,
     FilesystemOperation_PutFile,
     ObjectTransferAccess,
     RevisionNo,
+    UploadCompletion_DirectMultipart,
+    UploadCompletion_DirectPut,
+    UploadCompletion_ServiceProxied,
     UploadContentClaim,
     UploadPartChecksumClaim,
     UploadSession,
@@ -305,7 +305,7 @@ def _stage_upload(
             completion = client.uploads.complete(
                 namespace_id,
                 begin.upload_id,
-                request=CompleteUploadRequest_ServiceProxied(),
+                request=UploadCompletion_ServiceProxied(),
             )
         except Exception:
             _abort_quietly(client, namespace_id, begin.upload_id)
@@ -325,7 +325,7 @@ def _stage_upload(
         completion = client.uploads.complete(
             namespace_id,
             begin.upload_id,
-            request=CompleteUploadRequest_DirectPut(
+            request=UploadCompletion_DirectPut(
                 content=UploadContentClaim(
                     size_bytes=len(content),
                     checksum=_checksum(begin.checksum_algorithm, content),
@@ -406,7 +406,7 @@ def _stage_multipart(
     completion = client.uploads.complete(
         namespace_id,
         upload_id,
-        request=CompleteUploadRequest_DirectMultipart(
+        request=UploadCompletion_DirectMultipart(
             content=UploadContentClaim(
                 size_bytes=len(content),
                 checksum=_checksum(checksum_algorithm, content),

@@ -46,7 +46,7 @@ var (
 type UploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
-	Bytes              []byte
+	Content            []byte
 	Actor              *loonfs.ActorRef
 	CommitID           loonfs.CommitID
 	Message            *string
@@ -71,7 +71,7 @@ type DownloadInput struct {
 
 // DownloadResult contains file bytes and the resolved revision facts.
 type DownloadResult struct {
-	Bytes       []byte
+	Content     []byte
 	NamespaceID loonfs.NamespaceID
 	Path        loonfs.AbsolutePath
 	RevisionNo  loonfs.RevisionNo
@@ -95,7 +95,7 @@ func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, err
 	if err != nil {
 		return nil, fmt.Errorf("transfers: read capabilities: %w", err)
 	}
-	createRequest, err := createUploadRequest(capabilities, in.NamespaceID, int64(len(in.Bytes)))
+	createRequest, err := createUploadRequest(capabilities, in.NamespaceID, int64(len(in.Content)))
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +104,7 @@ func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, err
 		return nil, fmt.Errorf("transfers: begin upload: %w", err)
 	}
 
-	completed, err := transferAndComplete(ctx, uploadsClient, in.NamespaceID, in.Bytes, begin)
+	completed, err := transferAndComplete(ctx, uploadsClient, in.NamespaceID, in.Content, begin)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +194,7 @@ func (c *Client) Download(ctx context.Context, in DownloadInput) (*DownloadResul
 	}
 
 	return &DownloadResult{
-		Bytes:       payload,
+		Content:     payload,
 		NamespaceID: grant.NamespaceID,
 		Path:        grant.Path,
 		RevisionNo:  grant.RevisionNo,
@@ -271,7 +271,7 @@ func downloadProxied(ctx context.Context, c *Client, in DownloadInput) (*Downloa
 	}
 
 	return &DownloadResult{
-		Bytes:       payload,
+		Content:     payload,
 		NamespaceID: in.NamespaceID,
 		Path:        in.Path,
 		RevisionNo:  *revisionNo,
@@ -369,10 +369,10 @@ func transferDirectPut(
 		Checksum:  checksum,
 		SizeBytes: int64(len(payload)),
 	}
-	completed, err := uploadsClient.Complete(ctx, &loonfs.CompleteUploadBody{
+	completed, err := uploadsClient.Complete(ctx, &loonfs.CompleteUploadRequest{
 		NamespaceID: string(namespaceID),
 		UploadID:    string(begin.UploadID),
-		Body: &loonfs.CompleteUploadRequest{
+		Body: &loonfs.UploadCompletion{
 			DirectPut: &loonfs.CompleteUploadDirectPut{Content: content},
 		},
 	})
@@ -457,10 +457,10 @@ func transferDirectMultipart(
 		abortUpload(ctx, uploadsClient, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: checksum multipart payload: %w", err)
 	}
-	completed, err := uploadsClient.Complete(ctx, &loonfs.CompleteUploadBody{
+	completed, err := uploadsClient.Complete(ctx, &loonfs.CompleteUploadRequest{
 		NamespaceID: string(namespaceID),
 		UploadID:    string(begin.UploadID),
-		Body: &loonfs.CompleteUploadRequest{
+		Body: &loonfs.UploadCompletion{
 			DirectMultipart: &loonfs.CompleteUploadDirectMultipart{
 				Content: &loonfs.UploadContentClaim{
 					Checksum:  wholeChecksum,
@@ -493,10 +493,10 @@ func transferServiceProxied(
 		abortUpload(ctx, uploadsClient, namespaceID, begin.UploadID)
 		return nil, fmt.Errorf("transfers: upload proxied content: %w", err)
 	}
-	completed, err := uploadsClient.Complete(ctx, &loonfs.CompleteUploadBody{
+	completed, err := uploadsClient.Complete(ctx, &loonfs.CompleteUploadRequest{
 		NamespaceID: string(namespaceID),
 		UploadID:    string(begin.UploadID),
-		Body: &loonfs.CompleteUploadRequest{
+		Body: &loonfs.UploadCompletion{
 			ServiceProxied: &loonfs.CompleteUploadServiceProxied{},
 		},
 	})

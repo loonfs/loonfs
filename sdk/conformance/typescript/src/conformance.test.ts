@@ -870,7 +870,7 @@ async function assertBrowserTransfer(
     const committed = await client.files.upload({
         namespace_alias: namespaceAlias,
         path,
-        bytes,
+        content: bytes,
         actor,
         commit_id: commitId,
     });
@@ -880,7 +880,7 @@ async function assertBrowserTransfer(
         namespace_alias: namespaceAlias,
         path,
     });
-    assert.deepEqual(readback.bytes, bytes);
+    assert.deepEqual(readback.content, bytes);
     assert.equal(readback.content_ref.size_bytes, bytes.byteLength);
     const contentChecksum = readback.content_ref.checksum;
     if (contentChecksum !== undefined) {
@@ -1141,8 +1141,8 @@ if (environmentSkip === undefined) {
     const token = requiredEnvironment("LOONFS_CONFORMANCE_TOKEN");
     cases = loadCases(requiredEnvironment("LOONFS_CONFORMANCE_CASES"));
     harness = {
-        client: new LoonFSClient({ environment: configuredBaseUrl, token }),
-        unauthenticated: new LoonFSClient({ environment: configuredBaseUrl, token, auth: false }),
+        client: new LoonFSClient({ baseUrl: configuredBaseUrl, token }),
+        unauthenticated: new LoonFSClient({ baseUrl: configuredBaseUrl, token, auth: false }),
         serverBaseUrl: configuredBaseUrl,
         token,
     };
@@ -1403,7 +1403,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.path_file_name),
-        bytes: new TextEncoder().encode(request.content_utf8),
+        content: new TextEncoder().encode(request.content_utf8),
         actor: request.actor,
         commit_id: "conf-inode-mutations-path-file",
     });
@@ -1618,14 +1618,14 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.replaced_file_name),
-        bytes: capturedBytes,
+        content: capturedBytes,
         actor: request.actor,
         commit_id: "conf-snapshots-create-replaced",
     });
     await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.deleted_file_name),
-        bytes: new TextEncoder().encode(request.deleted_content_utf8),
+        content: new TextEncoder().encode(request.deleted_content_utf8),
         actor: request.actor,
         commit_id: "conf-snapshots-create-deleted",
     });
@@ -1643,7 +1643,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.replaced_file_name),
-        bytes: currentBytes,
+        content: currentBytes,
         actor: request.actor,
         commit_id: "conf-snapshots-replace-file",
         behavior: "replace",
@@ -1651,7 +1651,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.added_file_name),
-        bytes: new TextEncoder().encode(request.added_content_utf8),
+        content: new TextEncoder().encode(request.added_content_utf8),
         actor: request.actor,
         commit_id: "conf-snapshots-add-file",
     });
@@ -1991,7 +1991,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal((await disallowedRoute.arrayBuffer()).byteLength, 0);
 
     beginModes.length = 0;
-    const browserClient = new BrowserLoonFSClient({ environment: proxy.baseUrl });
+    const browserClient = new BrowserLoonFSClient({ baseUrl: proxy.baseUrl });
     const browserPath = `${request.proxied_path}-browser`;
     await assertBrowserTransfer(
         browserClient,
@@ -2042,7 +2042,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         browserClient.files.upload({
             namespace_alias: request.unknown_namespace_alias,
             path: `${request.proxied_path}-browser-failure`,
-            bytes: payload,
+            content: payload,
             actor: request.actor,
             commit_id: `${request.commit_ids.proxied}-browser-failure`,
         }),
@@ -2182,7 +2182,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     }
     completedParts.sort((left, right) => left.part_number - right.part_number);
     const wholeChecksum = checksum(multipart.checksum_algorithm, payload);
-    const completion: LoonFS.CompleteUploadRequest = {
+    const completion: LoonFS.UploadCompletion = {
         mode: "direct_multipart",
         content: {
             size_bytes: payload.byteLength,
@@ -2235,7 +2235,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     const helperCommit = await activeHarness.client.files.upload({
         namespace_id: request.namespace_id,
         path: helperPath,
-        bytes: payload,
+        content: payload,
         actor: request.actor,
         commit_id: `${request.commit_id}-helper`,
     });
@@ -2244,7 +2244,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         namespace_id: request.namespace_id,
         path: helperPath,
     });
-    assert.deepEqual(helperRead.bytes, payload);
+    assert.deepEqual(helperRead.content, payload);
     // Content ids are random per upload and the helper may choose a different
     // checksum algorithm; the comparable content fact is the size.
     assert.equal(helperRead.content_ref.size_bytes, first.content_ref.size_bytes);
@@ -2282,7 +2282,7 @@ conformanceTest("download", async (activeHarness, testCase) => {
     const committed = await activeHarness.client.files.upload({
         namespace_id: request.namespace_id,
         path: request.path,
-        bytes: payload,
+        content: payload,
         actor: request.actor,
         commit_id: request.commit_id,
     });
@@ -2300,12 +2300,12 @@ conformanceTest("download", async (activeHarness, testCase) => {
     assert.deepEqual(stat.content_ref, download.content_ref);
     assert.equal(download.content_ref.size_bytes, expected.size_bytes);
     assert.equal(download.content_ref.checksum.algorithm, expected.checksum_algorithm);
-    assert.equal(download.bytes.byteLength, download.content_ref.size_bytes);
+    assert.equal(download.content.byteLength, download.content_ref.size_bytes);
     assert.deepEqual(
-        checksum(download.content_ref.checksum.algorithm, download.bytes),
+        checksum(download.content_ref.checksum.algorithm, download.content),
         download.content_ref.checksum,
     );
-    assert.deepEqual(download.bytes, payload);
+    assert.deepEqual(download.content, payload);
 });
 
 conformanceTest("end_to_end", async (activeHarness, testCase) => {
@@ -2325,7 +2325,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     const upload = await activeHarness.client.files.upload({
         namespace_id: request.namespace_id,
         path: request.upload_path,
-        bytes: payload,
+        content: payload,
         actor: request.actor,
         commit_id: request.commit_ids.upload,
     });
@@ -2349,7 +2349,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         namespace_id: request.namespace_id,
         path: request.upload_path,
     });
-    assert.deepEqual(downloaded.bytes, payload);
+    assert.deepEqual(downloaded.content, payload);
 
     const moved = await activeHarness.client.commits.create(
         moveCommit(

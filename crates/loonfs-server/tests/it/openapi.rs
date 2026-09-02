@@ -151,7 +151,7 @@ fn no_schema_a_response_reaches_admits_null() {
         assert_no_null_property(&spec, response, &location, &mut visited, &mut properties);
     }
 
-    for schema_name in ["ApiError", "ErrorDetails", "GcResponse", "GrepMatch"] {
+    for schema_name in ["ErrorResponse", "ErrorDetails", "GcResponse", "GrepMatch"] {
         assert!(
             visited.contains(&format!("#/components/schemas/{schema_name}")),
             "the walk never reached `{schema_name}`"
@@ -1197,7 +1197,7 @@ fn openapi_names_tagged_one_of_alternatives() {
             ][..],
         ),
         (
-            "CompleteUploadRequest",
+            "UploadCompletion",
             &[
                 "CompleteUploadServiceProxied",
                 "CompleteUploadDirectPut",
@@ -1653,7 +1653,7 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     }
 
     let completion_variants = schemas
-        .get("CompleteUploadRequest")
+        .get("UploadCompletion")
         .and_then(|schema| schema.get("oneOf"))
         .and_then(Value::as_array)
         .expect("completion variants");

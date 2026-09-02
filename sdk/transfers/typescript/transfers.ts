@@ -1,5 +1,6 @@
 import { LoonFSClient as GeneratedLoonFSClient } from "./Client.js";
 import { FilesClient as GeneratedFilesClient } from "./api/resources/files/client/Client.js";
+import * as core from "./core/index.js";
 import type * as LoonFS from "./api/index.js";
 
 const DIRECT_GET_FEATURE = "core.downloads.direct_get";
@@ -18,7 +19,7 @@ const CRC64_NVME_TABLE = makeCrc64NvmeTable();
 export interface FileUploadInput {
     namespace_id: LoonFS.NamespaceId;
     path: LoonFS.AbsolutePath;
-    bytes: Uint8Array;
+    content: Uint8Array;
     actor: LoonFS.ActorRef;
     commit_id: LoonFS.CommitId;
     message?: string | null;
@@ -44,7 +45,7 @@ export interface FileDownloadResult {
     path: LoonFS.AbsolutePath;
     revision_no: LoonFS.RevisionNo;
     content_ref: LoonFS.ContentRef;
-    bytes: Uint8Array;
+    content: Uint8Array;
 }
 
 interface StagedContent {
@@ -55,6 +56,20 @@ interface StagedContent {
 interface DirectPutBody {
     body: ArrayBuffer;
     content: LoonFS.UploadContentClaim;
+}
+
+export declare namespace LoonFSClient {
+    /** The generated client options with `baseUrl` in place of `environment`. */
+    export type Options = Omit<GeneratedLoonFSClient.Options, "environment"> & {
+        /** Base URL of the LoonFS server. */
+        baseUrl: core.Supplier<string>;
+    };
+    export interface RequestOptions extends GeneratedLoonFSClient.RequestOptions {}
+}
+
+export declare namespace FilesClient {
+    export type Options = GeneratedFilesClient.Options;
+    export interface RequestOptions extends GeneratedFilesClient.RequestOptions {}
 }
 
 /** The files group plus whole-file transfers. */
@@ -68,7 +83,7 @@ export class FilesClient extends GeneratedFilesClient {
 
     /** Uploads in-memory bytes and commits them at one path. Streaming and resume are follow-ups. */
     public async upload(input: FileUploadInput): Promise<FileUploadResult> {
-        const staged = await stageBytes(this.root, input.namespace_id, input.bytes);
+        const staged = await stageBytes(this.root, input.namespace_id, input.content);
         const request: LoonFS.CommitRequest = {
             namespace_id: input.namespace_id,
             actor: input.actor,
@@ -120,7 +135,7 @@ export class FilesClient extends GeneratedFilesClient {
             path: grant.path,
             revision_no: grant.revision_no,
             content_ref: grant.content_ref,
-            bytes,
+            content: bytes,
         };
     }
 }
@@ -128,6 +143,10 @@ export class FilesClient extends GeneratedFilesClient {
 /** The generated client with `files.upload` and `files.download`. */
 export class LoonFSClient extends GeneratedLoonFSClient {
     private _transferFiles: FilesClient | undefined;
+
+    constructor(options: LoonFSClient.Options) {
+        super({ ...options, environment: options.baseUrl });
+    }
 
     public override get files(): FilesClient {
         return (this._transferFiles ??= new FilesClient(this._options, this));
@@ -181,7 +200,13 @@ async function downloadProxied(
     if (actual.value !== claim.checksum.value) {
         throw new Error(`proxied read checksum did not match ${claim.checksum.algorithm} claim`);
     }
-    return { namespace_id: input.namespace_id, path: input.path, revision_no: revisionNo, content_ref: claim, bytes };
+    return {
+        namespace_id: input.namespace_id,
+        path: input.path,
+        revision_no: revisionNo,
+        content_ref: claim,
+        content: bytes,
+    };
 }
 
 async function stageBytes(

@@ -45,6 +45,14 @@ module_root = pathlib.Path("generated/go")
 server_package = module_root / "server"
 (module_root / "client").replace(server_package)
 
+
+def remove_exact(source, snippet, expected_count, label):
+    actual_count = source.count(snippet)
+    assert actual_count == expected_count, (
+        f"expected {expected_count} {label}, found {actual_count}"
+    )
+    return source.replace(snippet, "")
+
 for source_path in [*module_root.rglob("*.go"), *module_root.rglob("*.md")]:
     source = source_path.read_text()
     source = source.replace(
@@ -63,6 +71,93 @@ for source_path in [*module_root.rglob("*.go"), *module_root.rglob("*.md")]:
         source = source.replace("package client", "package server")
     source_path.write_text(source)
 
+option_path = module_root / "option/request_option.go"
+source = option_path.read_text()
+source = remove_exact(
+    source,
+    "// WithMaxStreamBufSize configures the maximum buffer size for streaming responses.\n"
+    "// This controls the maximum size of a single message (in bytes) that the stream\n"
+    "// can process. By default, this is set to 1MB.\n"
+    "func WithMaxStreamBufSize(size int) *core.MaxBufSizeOption {\n"
+    "\treturn &core.MaxBufSizeOption{\n"
+    "\t\tMaxBufSize: size,\n"
+    "\t}\n"
+    "}\n\n",
+    1,
+    "WithMaxStreamBufSize option",
+)
+source = remove_exact(
+    source,
+    "// WithMaxStreamReconnectAttempts caps the number of transparent mid-stream\n"
+    "// reconnect attempts on streaming endpoints that support resumption. The\n"
+    "// reconnect loop honors Last-Event-ID and any server-sent `retry:` directives.\n"
+    "// Has no effect on endpoints that don't support resumption.\n"
+    "func WithMaxStreamReconnectAttempts(attempts uint) *core.MaxStreamReconnectAttemptsOption {\n"
+    "\treturn &core.MaxStreamReconnectAttemptsOption{\n"
+    "\t\tMaxStreamReconnectAttempts: attempts,\n"
+    "\t}\n"
+    "}\n\n",
+    1,
+    "WithMaxStreamReconnectAttempts option",
+)
+source = remove_exact(
+    source,
+    "// WithoutStreamReconnection disables transparent mid-stream reconnection on\n"
+    "// resumable SSE endpoints. Has no effect on non-resumable endpoints.\n"
+    "func WithoutStreamReconnection() *core.WithoutStreamReconnectionOption {\n"
+    "\treturn &core.WithoutStreamReconnectionOption{}\n"
+    "}\n\n",
+    1,
+    "WithoutStreamReconnection option",
+)
+option_path.write_text(source)
+
+core_option_path = module_root / "core/request_option.go"
+source = core_option_path.read_text()
+source = remove_exact(
+    source,
+    "\tMaxBufSize                 int\n"
+    "\tMaxStreamReconnectAttempts uint\n"
+    "\tDisableStreamReconnection  bool\n",
+    1,
+    "streaming RequestOptions fields",
+)
+source = remove_exact(
+    source,
+    "// MaxBufSizeOption implements the RequestOption interface.\n"
+    "type MaxBufSizeOption struct {\n"
+    "\tMaxBufSize int\n"
+    "}\n\n"
+    "func (m *MaxBufSizeOption) applyRequestOptions(opts *RequestOptions) {\n"
+    "\topts.MaxBufSize = m.MaxBufSize\n"
+    "}\n\n",
+    1,
+    "MaxBufSizeOption type",
+)
+source = remove_exact(
+    source,
+    "// MaxStreamReconnectAttemptsOption implements the RequestOption interface.\n"
+    "type MaxStreamReconnectAttemptsOption struct {\n"
+    "\tMaxStreamReconnectAttempts uint\n"
+    "}\n\n"
+    "func (m *MaxStreamReconnectAttemptsOption) applyRequestOptions(opts *RequestOptions) {\n"
+    "\topts.MaxStreamReconnectAttempts = m.MaxStreamReconnectAttempts\n"
+    "}\n\n",
+    1,
+    "MaxStreamReconnectAttemptsOption type",
+)
+source = remove_exact(
+    source,
+    "// WithoutStreamReconnectionOption implements the RequestOption interface.\n"
+    "type WithoutStreamReconnectionOption struct{}\n\n"
+    "func (w *WithoutStreamReconnectionOption) applyRequestOptions(opts *RequestOptions) {\n"
+    "\topts.DisableStreamReconnection = true\n"
+    "}\n\n",
+    1,
+    "WithoutStreamReconnectionOption type",
+)
+core_option_path.write_text(source)
+
 test_path = module_root / "internal/explicit_fields_test.go"
 source = test_path.read_text()
 start = source.index("// Test for backwards compatibility")
@@ -75,6 +170,16 @@ PY
         rm -r generated/python/core/http_sse
         python3 - <<'PY'
 import pathlib
+
+
+def remove_exact(source, snippet, expected_count, label):
+    actual_count = source.count(snippet)
+    assert actual_count == expected_count, (
+        f"expected {expected_count} {label}, found {actual_count}"
+    )
+    return source.replace(snippet, "")
+
+
 path = pathlib.Path("generated/python/core/pydantic_utilities.py")
 source = path.read_text()
 import_block = 'if TYPE_CHECKING:\n    from .http_sse._models import ServerSentEvent\n\n'
@@ -91,6 +196,18 @@ source = source.replace(
     "",
 )
 source = source.replace("    timeout_in_seconds: NotRequired[int]\n", "")
+source = remove_exact(
+    source,
+    "    stream_reconnection_enabled: NotRequired[bool]\n",
+    1,
+    "request stream_reconnection_enabled option",
+)
+source = remove_exact(
+    source,
+    "    max_stream_reconnection_attempts: NotRequired[int]\n",
+    1,
+    "request max_stream_reconnection_attempts option",
+)
 request_options_path.write_text(source)
 
 http_client_path = pathlib.Path("generated/python/core/http_client.py")
@@ -102,6 +219,102 @@ source = source.replace(
 )
 http_client_path.write_text(source)
 
+client_path = pathlib.Path("generated/python/client.py")
+source = client_path.read_text()
+source = remove_exact(
+    source,
+    "    stream_reconnection_enabled : typing.Optional[bool]\n"
+    "        Whether to automatically reconnect on stream disconnection for resumable streaming endpoints. Defaults to True. Per-request `stream_reconnection_enabled` in `request_options` takes precedence over this value.\n\n",
+    2,
+    "client stream_reconnection_enabled documentation blocks",
+)
+source = remove_exact(
+    source,
+    "    max_stream_reconnection_attempts : typing.Optional[int]\n"
+    "        The maximum number of reconnection attempts for resumable streaming endpoints. Defaults to no limit. Per-request `max_stream_reconnection_attempts` in `request_options` takes precedence over this value.\n\n",
+    2,
+    "client max_stream_reconnection_attempts documentation blocks",
+)
+source = remove_exact(
+    source,
+    "        stream_reconnection_enabled: typing.Optional[bool] = None,\n",
+    2,
+    "client stream_reconnection_enabled parameters",
+)
+source = remove_exact(
+    source,
+    "        max_stream_reconnection_attempts: typing.Optional[int] = None,\n",
+    2,
+    "client max_stream_reconnection_attempts parameters",
+)
+source = remove_exact(
+    source,
+    "            stream_reconnection_enabled=stream_reconnection_enabled,\n",
+    2,
+    "client stream_reconnection_enabled pass-throughs",
+)
+source = remove_exact(
+    source,
+    "            max_stream_reconnection_attempts=max_stream_reconnection_attempts,\n",
+    2,
+    "client max_stream_reconnection_attempts pass-throughs",
+)
+client_path.write_text(source)
+
+wrapper_path = pathlib.Path("generated/python/core/client_wrapper.py")
+source = wrapper_path.read_text()
+source = remove_exact(
+    source,
+    "        stream_reconnection_enabled: typing.Optional[bool] = None,\n",
+    3,
+    "client wrapper stream_reconnection_enabled parameters",
+)
+source = remove_exact(
+    source,
+    "        max_stream_reconnection_attempts: typing.Optional[int] = None,\n",
+    3,
+    "client wrapper max_stream_reconnection_attempts parameters",
+)
+source = remove_exact(
+    source,
+    "        self._stream_reconnection_enabled = stream_reconnection_enabled\n",
+    1,
+    "client wrapper stream_reconnection_enabled attribute",
+)
+source = remove_exact(
+    source,
+    "        self._max_stream_reconnection_attempts = max_stream_reconnection_attempts\n",
+    1,
+    "client wrapper max_stream_reconnection_attempts attribute",
+)
+source = remove_exact(
+    source,
+    "    def get_stream_reconnection_enabled(self) -> bool:\n"
+    "        return self._stream_reconnection_enabled if self._stream_reconnection_enabled is not None else True\n\n",
+    1,
+    "client wrapper stream_reconnection_enabled getter",
+)
+source = remove_exact(
+    source,
+    "    def get_max_stream_reconnection_attempts(self) -> typing.Optional[int]:\n"
+    "        return self._max_stream_reconnection_attempts\n\n",
+    1,
+    "client wrapper max_stream_reconnection_attempts getter",
+)
+source = remove_exact(
+    source,
+    "            stream_reconnection_enabled=stream_reconnection_enabled,\n",
+    2,
+    "client wrapper stream_reconnection_enabled pass-throughs",
+)
+source = remove_exact(
+    source,
+    "            max_stream_reconnection_attempts=max_stream_reconnection_attempts,\n",
+    2,
+    "client wrapper max_stream_reconnection_attempts pass-throughs",
+)
+wrapper_path.write_text(source)
+
 package_root = pathlib.Path("generated/python")
 server_module = package_root / "server.py"
 (package_root / "__init__.py").replace(server_module)
@@ -110,15 +323,32 @@ server_module = package_root / "server.py"
 )
 
 source = server_module.read_text()
+assert '"ApiError"' not in source, "generated server.py unexpectedly exports ApiError"
 generated_import = "    from .client import AsyncLoonFS, LoonFS\n"
 assert source.count(generated_import) == 1, "generated server.py client import not found"
 source = source.replace(
     generated_import,
-    "    from .client import AsyncLoonFS\n    from .transfers import LoonFS\n",
+    "    from .client import AsyncLoonFS\n"
+    "    from .core.api_error import ApiError\n"
+    "    from .transfers import FileDownloadResult, FileUploadResult, LoonFS\n",
 )
 generated_mapping = '    "LoonFS": ".client",\n'
 assert source.count(generated_mapping) == 1, "generated server.py client mapping not found"
 source = source.replace(generated_mapping, '    "LoonFS": ".transfers",\n')
+for anchor, insertion, label in (
+    ('    "AsyncLoonFS": ".client",\n', '    "ApiError": ".core.api_error",\n', "ApiError mapping"),
+    ('    "FileRevision": ".types",\n', '    "FileDownloadResult": ".transfers",\n', "FileDownloadResult mapping"),
+    ('    "FilesystemChange": ".types",\n', '    "FileUploadResult": ".transfers",\n', "FileUploadResult mapping"),
+):
+    assert source.count(anchor) == 1, f"generated server.py anchor for {label} not found exactly once"
+    source = source.replace(anchor, insertion + anchor)
+for anchor, insertion, label in (
+    ('    "AsyncLoonFS",\n', '    "ApiError",\n', "ApiError __all__ entry"),
+    ('    "FileRevision",\n', '    "FileDownloadResult",\n', "FileDownloadResult __all__ entry"),
+    ('    "FilesystemChange",\n', '    "FileUploadResult",\n', "FileUploadResult __all__ entry"),
+):
+    assert source.count(anchor) == 1, f"generated server.py anchor for {label} not found exactly once"
+    source = source.replace(anchor, insertion + anchor)
 server_module.write_text(source)
 
 for example_path in [*package_root.rglob("*.py"), package_root / "reference.md"]:
@@ -134,6 +364,22 @@ import pathlib
 import sys
 
 package_root = pathlib.Path("generated") / sys.argv[1]
+
+base_client_path = package_root / "BaseClient.ts"
+source = base_client_path.read_text()
+client_stream_options = (
+    "    /** Default options for SSE stream reconnection behavior. Has no effect on non-resumable endpoints. */\n"
+    "    stream?: { reconnectionEnabled?: boolean; maxReconnectionAttempts?: number };\n"
+)
+assert source.count(client_stream_options) == 1, "generated BaseClient.ts client stream options not found"
+source = source.replace(client_stream_options, "")
+request_stream_options = (
+    "    /** Options for SSE stream reconnection behavior. Has no effect on non-resumable endpoints. */\n"
+    "    stream?: { reconnectionEnabled?: boolean; maxReconnectionAttempts?: number };\n"
+)
+assert source.count(request_stream_options) == 1, "generated BaseClient.ts request stream options not found"
+source = source.replace(request_stream_options, "")
+base_client_path.write_text(source)
 
 response_path = package_root / "core/fetcher/APIResponse.ts"
 source = response_path.read_text()

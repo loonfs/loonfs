@@ -280,6 +280,7 @@ pub struct UploadContentResponse {
 /// include the expected content details. Multipart also includes its parts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(as = UploadCompletion))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompleteUploadRequest {
     /// Complete a service-proxied upload.
