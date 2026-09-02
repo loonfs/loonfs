@@ -281,7 +281,7 @@ fn runner_with(
 ) -> MaintenanceRunner {
     let runner = MaintenanceRunner::with_clock(
         policy,
-        Some(tokio::runtime::Handle::current()),
+        tokio::runtime::Handle::current(),
         nonzero_usize(1),
         clock,
         RuntimeInstruments::new(None),
@@ -901,7 +901,11 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
         .await
         .expect("upload content");
     writer
-        .complete_upload(&namespace_id, begun.upload_id())
+        .complete_upload(
+            &namespace_id,
+            begun.upload_id(),
+            crate::uploads::ResolvedUploadCompletion::KnownContent,
+        )
         .await
         .expect("complete upload");
     // The session's own lease comes due first, so it stays the next wake;

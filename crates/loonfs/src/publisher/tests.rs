@@ -28,6 +28,7 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Condvar;
 use tempfile::tempdir;
 use tokio::time::timeout;
@@ -211,7 +212,7 @@ fn test_writer_bits() -> Arc<WriterBits> {
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
         maintenance: MaintenanceRunner::new(
             crate::FsBackgroundWork::ManualOnly,
-            None,
+            tokio::runtime::Handle::current(),
             std::num::NonZeroUsize::new(1).expect("nonzero"),
             RuntimeInstruments::new(None),
         ),
@@ -287,13 +288,18 @@ fn retained_projections(registry: &PublisherRegistry) -> RetainedProjectionTotal
 /// The namespaces whose projections the registry still holds, least
 /// recently published first.
 fn retained_namespaces(registry: &PublisherRegistry) -> Vec<NamespaceId> {
-    registry
+    let mut entries = registry
         .shared
         .lock_state()
         .projections
         .entries
         .iter()
-        .map(|entry| entry.namespace_id.clone())
+        .map(|(namespace_id, (_, last_touch))| (namespace_id.clone(), *last_touch))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(_, last_touch)| *last_touch);
+    entries
+        .into_iter()
+        .map(|(namespace_id, _)| namespace_id)
         .collect()
 }
 
@@ -340,6 +346,21 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
 /// `wait_past_cas_pacing` outlasting it is meaningful.
 const TEST_STANDALONE_PACING: Duration = Duration::from_secs(1);
 
+#[derive(Debug, Default)]
+struct ManualMonotonicTimer(AtomicU64);
+
+impl ManualMonotonicTimer {
+    fn set(&self, now_ms: u64) {
+        self.0.store(now_ms, AtomicOrdering::Release);
+    }
+}
+
+impl loonfs_objectstore::timing::MonotonicTimer for ManualMonotonicTimer {
+    fn monotonic_now_ms(&self) -> u64 {
+        self.0.load(AtomicOrdering::Acquire)
+    }
+}
+
 fn publisher_state(
     publisher: &NamespacePublisher,
 ) -> std::sync::MutexGuard<'_, NamespacePublisherState> {
@@ -354,7 +375,7 @@ fn single_live_worker(publisher: &NamespacePublisher) -> bool {
     publisher_state(publisher)
         .worker
         .as_ref()
-        .is_some_and(|worker| !worker.liveness.is_finished())
+        .is_some_and(|worker| !*worker.liveness.borrow())
 }
 
 /// Yields until the publisher's queue holds at least `expected` candidates
@@ -440,6 +461,8 @@ fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> Na
         runtime.core.clone(),
         Arc::downgrade(&runtime.bits),
         Weak::new(),
+        tokio::runtime::Handle::current(),
+        Arc::new(loonfs_objectstore::timing::StdMonotonicTimer::default()),
         TEST_STANDALONE_PACING,
     )
 }
@@ -489,8 +512,6 @@ fn try_admit_commit(
     try_admit_candidate(publisher, namespace_id, candidate)
 }
 
-#[allow(clippy::disallowed_methods)]
-// This timestamp is used only by publisher wait metrics.
 fn try_admit_candidate(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
@@ -504,7 +525,7 @@ fn try_admit_candidate(
         candidate,
         semantic_identity,
         sender,
-        Instant::now(),
+        publisher.timer.monotonic_now_ms(),
     )?;
     assert!(matches!(admission, SubmissionAdmission::OwnOutcome));
     Ok(receiver)
@@ -533,8 +554,6 @@ fn publisher_trace_labels_are_low_cardinality() {
 }
 
 #[tokio::test]
-#[allow(clippy::disallowed_methods)]
-// Monotonic time is used only by publisher wait metrics in this test.
 async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -554,7 +573,7 @@ async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
             waiters: vec![sender],
         },
     );
-    let selected_at = Instant::now();
+    let selected_at = publisher.timer.monotonic_now_ms();
     publisher.deliver_batch_results(
         vec![BatchCandidate {
             commit_id,
@@ -995,7 +1014,9 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let writer = test_writer_with_interval(store.clone(), 400).await;
+    let mut writer = test_writer_with_interval(store.clone(), 400).await;
+    let timer = Arc::new(ManualMonotonicTimer::default());
+    writer.publisher.timer = timer.clone();
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
@@ -1023,12 +1044,14 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
         }
     });
     tokio::task::yield_now().await;
+    timer.set(399);
     tokio::time::advance(Duration::from_millis(399)).await;
     tokio::task::yield_now().await;
     assert!(
         !hot.is_finished(),
         "a follow-up publication must remain paced before the interval boundary"
     );
+    timer.set(400);
     tokio::time::advance(Duration::from_millis(1)).await;
     hot.await
         .expect("join hot publication")

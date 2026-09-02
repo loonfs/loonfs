@@ -562,15 +562,13 @@ impl FsWriter {
         options: CreateDirectoryOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.commit_candidate_inner(
+        self.commit_one(
             namespace_id,
-            CommitCandidate::new(single_operation(
-                &options.commit,
-                FilesystemOperation::CreateDirectory {
-                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                    parents: options.parents,
-                },
-            )),
+            &options.commit,
+            FilesystemOperation::CreateDirectory {
+                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                parents: options.parents,
+            },
         )
         .await
     }
@@ -601,16 +599,14 @@ impl FsWriter {
         options: DeleteOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.commit_candidate_inner(
+        self.commit_one(
             namespace_id,
-            CommitCandidate::new(single_operation(
-                &options.commit,
-                FilesystemOperation::DeletePath {
-                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                    behavior: options.behavior,
-                    expected_inode_id: options.expected_inode_id,
-                },
-            )),
+            &options.commit,
+            FilesystemOperation::DeletePath {
+                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                behavior: options.behavior,
+                expected_inode_id: options.expected_inode_id,
+            },
         )
         .await
     }
@@ -637,18 +633,16 @@ impl FsWriter {
         options: MoveOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.commit_candidate_inner(
+        self.commit_one(
             namespace_id,
-            CommitCandidate::new(single_operation(
-                &options.commit,
-                FilesystemOperation::MovePath {
-                    from_path: loonfs_core::path::parse_mutation_path(from_path)?,
-                    to_path: loonfs_core::path::parse_mutation_path(to_path)?,
-                    behavior: options.behavior,
-                    expected_destination_inode_id: options.expected_destination_inode_id,
-                    expected_destination_revision_no: options.expected_destination_revision_no,
-                },
-            )),
+            &options.commit,
+            FilesystemOperation::MovePath {
+                from_path: loonfs_core::path::parse_mutation_path(from_path)?,
+                to_path: loonfs_core::path::parse_mutation_path(to_path)?,
+                behavior: options.behavior,
+                expected_destination_inode_id: options.expected_destination_inode_id,
+                expected_destination_revision_no: options.expected_destination_revision_no,
+            },
         )
         .await
     }
@@ -676,18 +670,16 @@ impl FsWriter {
         options: CopyOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.commit_candidate_inner(
+        self.commit_one(
             namespace_id,
-            CommitCandidate::new(single_operation(
-                &options.commit,
-                FilesystemOperation::CopyPath {
-                    from_path: loonfs_core::path::parse_mutation_path(from_path)?,
-                    to_path: loonfs_core::path::parse_mutation_path(to_path)?,
-                    behavior: options.behavior,
-                    expected_destination_inode_id: options.expected_destination_inode_id,
-                    expected_destination_revision_no: options.expected_destination_revision_no,
-                },
-            )),
+            &options.commit,
+            FilesystemOperation::CopyPath {
+                from_path: loonfs_core::path::parse_mutation_path(from_path)?,
+                to_path: loonfs_core::path::parse_mutation_path(to_path)?,
+                behavior: options.behavior,
+                expected_destination_inode_id: options.expected_destination_inode_id,
+                expected_destination_revision_no: options.expected_destination_revision_no,
+            },
         )
         .await
     }
@@ -714,15 +706,13 @@ impl FsWriter {
         options: RestoreRevisionOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.commit_candidate_inner(
+        self.commit_one(
             namespace_id,
-            CommitCandidate::new(single_operation(
-                &options.commit,
-                FilesystemOperation::RestoreRevision {
-                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                    source_revision_no,
-                },
-            )),
+            &options.commit,
+            FilesystemOperation::RestoreRevision {
+                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                source_revision_no,
+            },
         )
         .await
     }
@@ -753,18 +743,16 @@ impl FsWriter {
         options: UpdateAttributesOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.commit_candidate_inner(
+        self.commit_one(
             namespace_id,
-            CommitCandidate::new(single_operation(
-                &options.commit,
-                FilesystemOperation::UpdateAttributes {
-                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                    set: options.set,
-                    remove: options.remove,
-                    expected_inode_id: options.expected_inode_id,
-                    expected_attributes_revision_no: options.expected_attributes_revision_no,
-                },
-            )),
+            &options.commit,
+            FilesystemOperation::UpdateAttributes {
+                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                set: options.set,
+                remove: options.remove,
+                expected_inode_id: options.expected_inode_id,
+                expected_attributes_revision_no: options.expected_attributes_revision_no,
+            },
         )
         .await
     }
@@ -797,16 +785,14 @@ impl FsWriter {
         let path = absolute_path
             .map(loonfs_core::path::parse_mutation_path)
             .transpose()?;
-        self.commit_candidate_inner(
+        self.commit_one(
             namespace_id,
-            CommitCandidate::new(single_operation(
-                &options.commit,
-                FilesystemOperation::Undelete {
-                    inode_id,
-                    deletion_seq,
-                    path,
-                },
-            )),
+            &options.commit,
+            FilesystemOperation::Undelete {
+                inode_id,
+                deletion_seq,
+                path,
+            },
         )
         .await
     }
@@ -909,6 +895,19 @@ impl FsWriter {
         self.publisher
             .submit_candidate(namespace_id.clone(), candidate)
             .await
+    }
+
+    async fn commit_one(
+        &self,
+        namespace_id: &NamespaceId,
+        commit: &CommitOptions,
+        operation: FilesystemOperation,
+    ) -> Result<CommitResponse> {
+        self.commit_candidate_inner(
+            namespace_id,
+            CommitCandidate::new(single_operation(commit, operation)),
+        )
+        .await
     }
 }
 

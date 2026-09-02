@@ -11,24 +11,27 @@
 use crate::fs::{ReadCore, WriterBits};
 use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
-use crate::trace::phase_span;
+use crate::trace::{phase_event, phase_span};
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeCacheConfig, RuntimeError,
 };
 use futures::FutureExt;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
+use loonfs_core::cache::Recency;
 use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
 use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
 use loonfs_core::publish::{NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState};
+use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use tokio::sync::oneshot;
+use tokio::runtime::Handle;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 use tracing::Instrument;
 
 type CommitResult = Result<ApiCommitResponse, RuntimeError>;
@@ -82,6 +85,8 @@ pub struct PublisherRegistry {
     /// once the writer is gone, so dropping the writer stops new work
     /// without ever leaving the caches or store dangling.
     writer: Weak<WriterBits>,
+    runtime: Handle,
+    timer: Arc<dyn MonotonicTimer>,
     min_publish_interval: Duration,
 }
 
@@ -131,45 +136,26 @@ impl RegistryShared {
         weight: Option<PublishTailWeight>,
         budget: &RuntimeCacheConfig,
     ) -> RetainedProjectionTotals {
-        let victims = {
-            let mut state = self.lock_state();
-            state.projections.record(namespace_id, weight);
-            let selected = state.projections.over_budget_victims(budget);
-            selected
-                .into_iter()
-                .map(|victim| {
-                    let publisher = state.publishers.get(&victim.namespace_id).cloned();
-                    (victim, publisher)
-                })
-                .collect::<Vec<_>>()
-        };
-        // Invalidate projections without holding the registry lock.
-        // Publication may acquire the engine lock before the registry lock,
-        // so eviction must not acquire them in the opposite order.
-        let dropped = victims
-            .into_iter()
-            .filter(|(_, publisher)| {
-                // No publisher means no engine, so nothing is retained under
-                // that namespace either way.
-                publisher
-                    .as_ref()
-                    .is_none_or(NamespacePublisher::invalidate_projection)
-            })
-            .map(|(victim, _)| victim)
-            .collect::<Vec<_>>();
-
         let mut state = self.lock_state();
-        for victim in dropped {
-            state.projections.forget_recorded(&victim);
+        state.projections.record(namespace_id, weight);
+        let attempts = state.projections.len();
+        for _ in 0..attempts {
+            if !state.projections.is_over_budget(budget) {
+                break;
+            }
+            let Some(victim) = state.projections.oldest() else {
+                break;
+            };
+            if state
+                .publishers
+                .get(&victim)
+                .is_none_or(NamespacePublisher::invalidate_projection)
+            {
+                state.projections.remove_entry(&victim);
+            } else {
+                state.projections.retain(&victim);
+            }
         }
-        state.projections.totals()
-    }
-
-    /// Forgets one namespace's retained projection after something outside
-    /// the publish path dropped it.
-    fn forget_projection(&self, namespace_id: &NamespaceId) -> RetainedProjectionTotals {
-        let mut state = self.lock_state();
-        state.projections.forget(namespace_id);
         state.projections.totals()
     }
 }
@@ -182,22 +168,10 @@ impl RegistryShared {
 /// namespaces actually holds.
 #[derive(Debug, Default)]
 struct RetainedProjections {
-    /// Least-recently-published first, one entry per namespace whose engine
-    /// retains a projection.
-    entries: VecDeque<RetainedProjection>,
+    entries: HashMap<NamespaceId, (PublishTailWeight, u64)>,
+    order: Recency<NamespaceId>,
     rows: usize,
     decoded_bytes: usize,
-    next_stamp: u64,
-}
-
-#[derive(Debug, Clone)]
-struct RetainedProjection {
-    namespace_id: NamespaceId,
-    weight: PublishTailWeight,
-    /// Distinguishes the projection a sweep selected from a newer one the
-    /// namespace published while that sweep ran outside the lock, so a
-    /// completed eviction never forgets a live projection.
-    stamp: u64,
 }
 
 /// What the writer retains right now, for the gauges and for tests.
@@ -212,74 +186,59 @@ impl RetainedProjections {
     /// Records what one namespace retains after a publish; `None` is a
     /// publish that kept nothing.
     fn record(&mut self, namespace_id: &NamespaceId, weight: Option<PublishTailWeight>) {
-        self.forget(namespace_id);
+        self.remove_entry(namespace_id);
         let Some(weight) = weight else {
             return;
         };
-        self.next_stamp += 1;
+        let last_touch = self.order.touch(namespace_id);
         self.rows = self.rows.saturating_add(weight.rows);
         self.decoded_bytes = self.decoded_bytes.saturating_add(weight.decoded_bytes);
-        self.entries.push_back(RetainedProjection {
-            namespace_id: namespace_id.clone(),
-            weight,
-            stamp: self.next_stamp,
-        });
+        self.entries
+            .insert(namespace_id.clone(), (weight, last_touch));
+        self.compact_order();
     }
 
     fn forget(&mut self, namespace_id: &NamespaceId) {
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.namespace_id == *namespace_id);
-        self.remove_entry(index);
+        self.remove_entry(namespace_id);
     }
 
-    /// Forgets exactly the projection an eviction dropped. A namespace that
-    /// published again while the sweep ran outside the lock carries a newer
-    /// stamp, so its live projection stays accounted.
-    fn forget_recorded(&mut self, recorded: &RetainedProjection) {
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.stamp == recorded.stamp);
-        self.remove_entry(index);
+    fn retain(&mut self, namespace_id: &NamespaceId) {
+        let last_touch = self.order.touch(namespace_id);
+        if let Some((_, entry_last_touch)) = self.entries.get_mut(namespace_id) {
+            *entry_last_touch = last_touch;
+        }
+        self.compact_order();
     }
 
-    /// Drops one entry and its weight from the totals. At most one entry per
-    /// namespace exists, so callers locate it by whichever key they hold.
-    fn remove_entry(&mut self, index: Option<usize>) {
-        let Some(entry) = index.and_then(|index| self.entries.remove(index)) else {
+    fn remove_entry(&mut self, namespace_id: &NamespaceId) {
+        let Some((weight, _)) = self.entries.remove(namespace_id) else {
             return;
         };
-        self.rows = self.rows.saturating_sub(entry.weight.rows);
-        self.decoded_bytes = self
-            .decoded_bytes
-            .saturating_sub(entry.weight.decoded_bytes);
+        self.rows = self.rows.saturating_sub(weight.rows);
+        self.decoded_bytes = self.decoded_bytes.saturating_sub(weight.decoded_bytes);
     }
 
-    /// Selects least-recently-published projections until the remaining totals
-    /// fit the same three limits used by the read-side projection cache.
-    ///
-    /// Selection does not change accounting. Totals are updated only after a
-    /// selected projection is actually invalidated.
-    fn over_budget_victims(&self, budget: &RuntimeCacheConfig) -> Vec<RetainedProjection> {
-        let mut projections = self.entries.len();
-        let mut rows = self.rows;
-        let mut decoded_bytes = self.decoded_bytes;
-        let mut victims = Vec::new();
-        for entry in &self.entries {
-            if projections <= budget.max_cached_namespaces
-                && rows <= budget.max_cached_wal_tail_projection_rows
-                && decoded_bytes <= budget.max_cached_wal_tail_projection_decoded_bytes
-            {
-                break;
-            }
-            projections = projections.saturating_sub(1);
-            rows = rows.saturating_sub(entry.weight.rows);
-            decoded_bytes = decoded_bytes.saturating_sub(entry.weight.decoded_bytes);
-            victims.push(entry.clone());
-        }
-        victims
+    fn oldest(&mut self) -> Option<NamespaceId> {
+        let entries = &self.entries;
+        self.order
+            .pop_oldest(|namespace_id, stamp| projection_is_live(entries, namespace_id, stamp))
+    }
+
+    fn compact_order(&mut self) {
+        let entries = &self.entries;
+        self.order.compact(entries.len(), |namespace_id, stamp| {
+            projection_is_live(entries, namespace_id, stamp)
+        });
+    }
+
+    fn is_over_budget(&self, budget: &RuntimeCacheConfig) -> bool {
+        self.entries.len() > budget.max_cached_namespaces
+            || self.rows > budget.max_cached_wal_tail_projection_rows
+            || self.decoded_bytes > budget.max_cached_wal_tail_projection_decoded_bytes
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
     }
 
     fn totals(&self) -> RetainedProjectionTotals {
@@ -291,6 +250,16 @@ impl RetainedProjections {
     }
 }
 
+fn projection_is_live(
+    entries: &HashMap<NamespaceId, (PublishTailWeight, u64)>,
+    namespace_id: &NamespaceId,
+    stamp: u64,
+) -> bool {
+    entries
+        .get(namespace_id)
+        .is_some_and(|(_, last_touch)| *last_touch == stamp)
+}
+
 impl PublisherRegistry {
     /// Creates the registry a writer owns. Batches publish through each
     /// publisher's own commit engine and writer session, and the writer's
@@ -299,6 +268,7 @@ impl PublisherRegistry {
     pub(crate) fn new(
         read_core: ReadCore,
         writer: Weak<WriterBits>,
+        runtime: Handle,
         min_publish_interval: Duration,
     ) -> Self {
         Self {
@@ -312,6 +282,8 @@ impl PublisherRegistry {
             }),
             read_core,
             writer,
+            runtime,
+            timer: Arc::new(StdMonotonicTimer::default()),
             min_publish_interval,
         }
     }
@@ -346,21 +318,20 @@ impl PublisherRegistry {
     /// operation validates the live head and reports its retained projection when
     /// it completes.
     pub(crate) fn invalidate_projection(&self, namespace_id: &NamespaceId) {
-        let publisher = self
-            .shared
-            .lock_state()
-            .publishers
-            .get(namespace_id)
-            .cloned();
-        let Some(publisher) = publisher else {
-            return;
+        let totals = {
+            let mut state = self.shared.lock_state();
+            let Some(publisher) = state.publishers.get(namespace_id) else {
+                return;
+            };
+            if !publisher.invalidate_projection() {
+                return;
+            }
+            state.projections.remove_entry(namespace_id);
+            state.projections.totals()
         };
-        if publisher.invalidate_projection() {
-            let totals = self.shared.forget_projection(namespace_id);
-            self.read_core
-                .instruments()
-                .publisher_retained_projections(totals.projections, totals.decoded_bytes);
-        }
+        self.read_core
+            .instruments()
+            .publisher_retained_projections(totals.projections, totals.decoded_bytes);
     }
 
     /// Looks up or creates the namespace's publisher, refusing once
@@ -379,6 +350,8 @@ impl PublisherRegistry {
                     self.read_core.clone(),
                     self.writer.clone(),
                     Arc::downgrade(&self.shared),
+                    self.runtime.clone(),
+                    Arc::clone(&self.timer),
                     self.min_publish_interval,
                 )
             })
@@ -452,6 +425,8 @@ struct NamespacePublisher {
     /// back would cycle the whole structure into a leak. A publisher whose
     /// registry is gone keeps serving, with an unowned worker.
     shared: Weak<RegistryShared>,
+    runtime: Handle,
+    timer: Arc<dyn MonotonicTimer>,
     min_publish_interval: Duration,
 }
 
@@ -497,17 +472,20 @@ struct NamespacePublisherState {
     worker: Option<WorkerHandle>,
     /// Earliest instant the next head compare-and-swap may start. `None` is
     /// a cold namespace: it publishes immediately.
-    next_allowed_cas_at: Option<Instant>,
+    next_allowed_cas_at: Option<u64>,
 }
 
-/// One publisher's worker task, split so a drain can await it without
-/// making the publisher look idle.
 struct WorkerHandle {
-    /// Taken by a drain, which awaits it. The task itself is unaffected.
-    task: Option<JoinHandle<()>>,
-    /// Answers admission's single-flight check, which must stay answerable
-    /// while a drain holds `task`. Never used to abort.
-    liveness: tokio::task::AbortHandle,
+    _task: JoinHandle<()>,
+    liveness: watch::Receiver<bool>,
+}
+
+struct WorkerExit(watch::Sender<bool>);
+
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
 }
 
 struct PendingDelete {
@@ -528,7 +506,7 @@ struct OpenBatch {
 struct BatchCandidate {
     commit_id: CommitId,
     candidate: CommitCandidate,
-    enqueued_at: Instant,
+    enqueued_at: u64,
 }
 
 struct InFlightRequest {
@@ -556,6 +534,8 @@ impl NamespacePublisher {
         read_core: ReadCore,
         writer: Weak<WriterBits>,
         shared: Weak<RegistryShared>,
+        runtime: Handle,
+        timer: Arc<dyn MonotonicTimer>,
         min_publish_interval: Duration,
     ) -> Self {
         Self {
@@ -574,6 +554,8 @@ impl NamespacePublisher {
                 session: SharedWriterSessionState::default(),
             })),
             shared,
+            runtime,
+            timer,
             min_publish_interval,
         }
     }
@@ -623,9 +605,8 @@ impl NamespacePublisher {
     /// writer's shared projection budget.
     ///
     /// The caller still holds the engine lock, so the recorded weight matches the
-    /// projection in the engine. This path may acquire the registry lock while
-    /// holding the engine lock. Eviction avoids deadlock by releasing the
-    /// registry lock before attempting to lock any engine.
+    /// projection in the engine. Eviction only tries engine locks, so it
+    /// does not wait while holding the registry lock.
     fn settle_retained_projection(&self, weight: Option<PublishTailWeight>) {
         let Some(shared) = self.shared.upgrade() else {
             return;
@@ -647,11 +628,9 @@ impl NamespacePublisher {
     /// claim on its commit ID, or returns an error. Once the candidate enters
     /// the queue, cancelling the caller only drops result delivery; the worker
     /// still owns and publishes the request.
-    #[allow(clippy::disallowed_methods)]
-    // Monotonic time is used only to record queue latency.
     async fn submit(&self, candidate: CommitCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
-        let enqueued_at = Instant::now();
+        let enqueued_at = self.timer.monotonic_now_ms();
         let mut candidate = candidate;
         let mut semantic_identity = candidate.semantic_identity(&self.namespace_id)?;
         for _ in 0..CONTENTION_RETRY_LIMIT {
@@ -704,7 +683,7 @@ impl NamespacePublisher {
         candidate: CommitCandidate,
         semantic_identity: CommitFingerprint,
         waiter: oneshot::Sender<CommitResult>,
-        enqueued_at: Instant,
+        enqueued_at: u64,
     ) -> Result<SubmissionAdmission, CoreError> {
         let mut state = self.lock_state();
         self.check_admission(&state)?;
@@ -799,31 +778,32 @@ impl NamespacePublisher {
         if state
             .worker
             .as_ref()
-            .is_some_and(|worker| !worker.liveness.is_finished())
+            .is_some_and(|worker| !*worker.liveness.borrow())
         {
             return;
         }
         let publisher = self.clone();
-        let task = tokio::spawn(async move {
+        let (exit, liveness) = watch::channel(false);
+        let exit = WorkerExit(exit);
+        let task = self.runtime.spawn(async move {
+            let _exit = exit;
             publisher.run_worker().await;
         });
         state.worker = Some(WorkerHandle {
-            liveness: task.abort_handle(),
-            task: Some(task),
+            _task: task,
+            liveness,
         });
     }
 
     /// Drains the queue in admission order, then exits.
-    #[allow(clippy::disallowed_methods)]
-    // Monotonic time is used only to record batch collection latency.
     async fn run_worker(self) {
         loop {
-            let collect_started = Instant::now();
+            let collect_started = self.timer.monotonic_now_ms();
             let queue_depth_start = queued_candidates(&self.lock_state());
             // Do not add a separate batching delay. The first request for an idle
             // namespace publishes immediately; requests arriving during a publish or
             // pacing interval form the next batch.
-            self.await_cas_slot(false).await;
+            self.await_cas_slot().await;
             let Some(item) = self.take_next_item() else {
                 return;
             };
@@ -833,14 +813,15 @@ impl NamespacePublisher {
                     self.read_core
                         .instruments()
                         .publisher_batch(batch.candidates.len());
-                    tracing::info!(
-                        phase = "batch_collect",
-                        mode = self.read_core.trace_mode(),
-                        store_kind = self.read_core.trace_store_kind(),
+                    phase_event!(
+                        self.read_core,
+                        "batch_collect",
+                        self.namespace_id,
+                        tracing::Level::INFO,
                         batch_size = usize_to_u64(batch.candidates.len()),
                         queue_depth_start = usize_to_u64(queue_depth_start),
                         queue_depth_end = usize_to_u64(batch.candidates.len()),
-                        collect_ms = elapsed_ms_since(collect_started)
+                        collect_ms = self.elapsed_ms_since(collect_started)
                     );
                     self.publish_batch(batch.candidates).await;
                 }
@@ -858,8 +839,6 @@ impl NamespacePublisher {
     /// Ownership is released under the same lock that finds the queue empty,
     /// so a racing admission either queued before this check and is taken
     /// here, or finds no worker and spawns one.
-    #[allow(clippy::disallowed_methods)]
-    // Monotonic time is used only to pace CAS attempts.
     fn take_next_item(&self) -> Option<WorkItem> {
         let mut state = self.lock_state();
         // Terminal: a successful delete emptied the queue and set this
@@ -869,7 +848,7 @@ impl NamespacePublisher {
             return None;
         }
         let item = state.queue.pop_front();
-        state.next_allowed_cas_at = Some(Instant::now() + self.min_publish_interval);
+        self.reserve_next_cas_slot(&mut state);
         let queue_depth = queued_candidates(&state);
         drop(state);
         self.read_core
@@ -914,15 +893,14 @@ impl NamespacePublisher {
         }
     }
 
-    #[allow(clippy::disallowed_methods)]
-    // Monotonic time is used only to record publication latency.
     async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) {
-        let selected_at = Instant::now();
+        let selected_at = self.timer.monotonic_now_ms();
         for candidate in &candidates {
-            tracing::info!(
-                phase = "wait_for_batch",
-                mode = self.read_core.trace_mode(),
-                store_kind = self.read_core.trace_store_kind(),
+            phase_event!(
+                self.read_core,
+                "wait_for_batch",
+                self.namespace_id,
+                tracing::Level::DEBUG,
                 result = RESULT_OK,
                 wait_ms = elapsed_ms_from(candidate.enqueued_at, selected_at)
             );
@@ -959,7 +937,7 @@ impl NamespacePublisher {
                     break;
                 }
                 retry_count += 1;
-                self.await_cas_slot(true).await;
+                self.claim_cas_slot().await;
             }
             (results, retry_count)
         }
@@ -1090,48 +1068,57 @@ impl NamespacePublisher {
 
     /// Waits for the running worker, if any.
     ///
-    /// Only the join handle is taken; the liveness half stays in the slot,
-    /// so an admission racing this drain still sees a live worker instead of
-    /// spawning a second one for the same queue.
     async fn wait_for_worker(&self) {
-        let task = self
+        let mut liveness = self
             .lock_state()
             .worker
-            .as_mut()
-            .and_then(|worker| worker.task.take());
-        if let Some(task) = task {
-            let _ = task.await;
+            .as_ref()
+            .map(|worker| worker.liveness.clone());
+        if let Some(liveness) = liveness.as_mut() {
+            while !*liveness.borrow_and_update() {
+                if liveness.changed().await.is_err() {
+                    break;
+                }
+            }
         }
     }
 
     /// Waits until the namespace may start another head CAS.
-    ///
-    /// When `claim` is true, this method also reserves the next slot by advancing
-    /// the deadline one pacing interval. When false, it only waits; the caller
-    /// reserves the slot when it removes work from the queue.
-    #[allow(clippy::disallowed_methods)]
-    // Monotonic time is used only to wait between CAS attempts.
-    async fn await_cas_slot(&self, claim: bool) {
+    async fn await_cas_slot(&self) {
         loop {
             let Some(sleep_until) = self.lock_state().next_allowed_cas_at else {
                 break;
             };
-            if sleep_until <= Instant::now() {
+            let now_ms = self.timer.monotonic_now_ms();
+            if sleep_until <= now_ms {
                 break;
             }
-            tokio::time::sleep_until(sleep_until).await;
+            wait_for_cas_pacing(Duration::from_millis(sleep_until - now_ms)).await;
         }
-        if claim {
-            let mut state = self.lock_state();
-            state.next_allowed_cas_at = Some(Instant::now() + self.min_publish_interval);
-        }
+    }
+
+    async fn claim_cas_slot(&self) {
+        self.await_cas_slot().await;
+        self.reserve_next_cas_slot(&mut self.lock_state());
+    }
+
+    fn reserve_next_cas_slot(&self, state: &mut NamespacePublisherState) {
+        state.next_allowed_cas_at = Some(
+            self.timer
+                .monotonic_now_ms()
+                .saturating_add(duration_ms(self.min_publish_interval)),
+        );
+    }
+
+    fn elapsed_ms_since(&self, started_at_ms: u64) -> u64 {
+        elapsed_ms_from(started_at_ms, self.timer.monotonic_now_ms())
     }
 
     fn deliver_batch_results(
         &self,
         candidates: Vec<BatchCandidate>,
         results: Vec<CommitResult>,
-        selected_at: Instant,
+        selected_at: u64,
     ) {
         let mut deliveries = Vec::new();
         let mut wait_traces = Vec::new();
@@ -1155,7 +1142,7 @@ impl NamespacePublisher {
                         .next()
                         .expect("equal-length batch should hold one result per candidate"),
                 };
-                wait_traces.push((result_label(&result), elapsed_ms_since(selected_at)));
+                wait_traces.push((result_label(&result), self.elapsed_ms_since(selected_at)));
                 if let Some(in_flight) = state.in_flight.remove(&candidate.commit_id) {
                     for waiter in in_flight.waiters {
                         deliveries.push((waiter, result.clone()));
@@ -1166,10 +1153,11 @@ impl NamespacePublisher {
 
         for (outcome, wait_ms) in wait_traces {
             self.read_core.instruments().publisher_publish(outcome);
-            tracing::info!(
-                phase = "wait_for_result",
-                mode = self.read_core.trace_mode(),
-                store_kind = self.read_core.trace_store_kind(),
+            phase_event!(
+                self.read_core,
+                "wait_for_result",
+                self.namespace_id,
+                tracing::Level::DEBUG,
                 result = outcome.as_str(),
                 wait_ms
             );
@@ -1184,10 +1172,11 @@ impl NamespacePublisher {
         self.read_core
             .instruments()
             .publisher_queue_depth(queue_depth);
-        tracing::info!(
-            phase = "enqueue",
-            mode = self.read_core.trace_mode(),
-            store_kind = self.read_core.trace_store_kind(),
+        phase_event!(
+            self.read_core,
+            "enqueue",
+            self.namespace_id,
+            tracing::Level::DEBUG,
             queue_depth = usize_to_u64(queue_depth),
             reason
         );
@@ -1264,16 +1253,18 @@ fn batch_result_label(results: &[CommitResult]) -> PublishOutcome {
     }
 }
 
-fn elapsed_ms_since(start: Instant) -> u64 {
-    duration_ms(start.elapsed())
-}
-
-fn elapsed_ms_from(start: Instant, end: Instant) -> u64 {
-    duration_ms(end.saturating_duration_since(start))
+fn elapsed_ms_from(start: u64, end: u64) -> u64 {
+    end.saturating_sub(start)
 }
 
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[allow(clippy::disallowed_methods)]
+// The configured CAS pacing delay does not affect publication validity.
+async fn wait_for_cas_pacing(delay: Duration) {
+    tokio::time::sleep(delay).await;
 }
 
 fn usize_to_u64(value: usize) -> u64 {

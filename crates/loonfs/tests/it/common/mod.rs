@@ -5,6 +5,7 @@
 // Fixture assertions panic for precise diagnostics, as the test modules do.
 
 use loonfs::publish::{CommitCandidate, CommitRequest};
+use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     AdvanceRetentionResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq, Checkpoint,
     ChecksumAlgorithm, CommitResponse, ContentRef, CopyOptions, CreateCheckpointOptions,
@@ -16,12 +17,22 @@ use loonfs::{
     UploadSession,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::stores::{
     CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
 use std::path::Path;
 use std::sync::Arc;
+
+thread_local! {
+    static BLOCKING_RUNTIME: tokio::runtime::Runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+}
+
+pub(crate) fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    BLOCKING_RUNTIME.with(|runtime| runtime.block_on(future))
+}
 
 pub(crate) fn store(root: &Path) -> SharedObjectStore {
     Arc::new(LocalFsStore::new(root).expect("create local-fs store"))
@@ -560,7 +571,12 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> loonfs::Result<UploadSession> {
-        block_on(self.writer.complete_upload(namespace_id, upload_id))
+        block_on(self.writer.complete_upload(
+            namespace_id,
+            upload_id,
+            ResolvedUploadCompletion::KnownContent,
+        ))
+        .map(|completed| completed.response)
     }
 
     fn mutate_blocking(

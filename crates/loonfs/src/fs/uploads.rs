@@ -11,14 +11,14 @@ use crate::content_tokens::{CompletedUpload, CompletedUploadReceipt};
 use crate::maintenance_runner::{completed_upload_reclaim_at_ms, upload_session_reclaim_at_ms};
 use crate::uploads::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
-    MultipartPartTargets,
+    MultipartPartTargets, ResolvedUploadCompletion,
 };
 use crate::ByteStream;
 use crate::FsWriter;
 use crate::Result;
 use crate::{
-    BeginUploadRequest, BeginUploadResponse, ChecksumAlgorithm, CompleteMultipartUploadRequest,
-    MaintenanceJobId, NamespaceId, UploadContentResponse, UploadMode, UploadSession,
+    BeginUploadRequest, BeginUploadResponse, ChecksumAlgorithm, MaintenanceJobId, NamespaceId,
+    UploadContentResponse, UploadMode, UploadSession,
 };
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::UploadPartChecksumClaim;
@@ -222,7 +222,10 @@ impl FsWriter {
             .await?)
     }
 
-    /// Completes a service-proxied or direct-PUT upload session.
+    /// Completes an upload session and returns proof for later publication.
+    ///
+    /// Service-proxied completion performs no content-blob I/O. Direct-put
+    /// completion performs one content-blob HEAD and no content-blob GET.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.complete_upload",
@@ -240,115 +243,9 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<UploadSession> {
-        self.core.record_trace_context(&tracing::Span::current());
-        Ok(self
-            .complete_upload_prepared_inner(
-                namespace_id,
-                upload_id,
-                loonfs_core::ResolvedUploadCompletion::KnownContent,
-            )
-            .await?
-            .response)
-    }
-
-    /// Completes a direct-multipart upload session.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.complete_upload",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "complete_upload",
-            method = "complete_multipart_upload",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn complete_multipart_upload(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-        request: &CompleteMultipartUploadRequest,
-    ) -> Result<UploadSession> {
-        self.core.record_trace_context(&tracing::Span::current());
-        Ok(self
-            .complete_upload_prepared_inner(
-                namespace_id,
-                upload_id,
-                loonfs_core::ResolvedUploadCompletion::Multipart(request.clone()),
-            )
-            .await?
-            .response)
-    }
-
-    /// Completes an upload session and returns proof for later publication.
-    ///
-    /// Service-proxied completion performs no content-blob I/O. Direct-put
-    /// completion performs one content-blob HEAD and no content-blob GET.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.complete_upload",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "complete_upload",
-            method = "complete_upload_prepared",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn complete_upload_prepared(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
+        completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.complete_upload_prepared_inner(
-            namespace_id,
-            upload_id,
-            loonfs_core::ResolvedUploadCompletion::KnownContent,
-        )
-        .await
-    }
-
-    /// Completes a multipart upload and returns its publication proof.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.complete_upload",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "complete_upload",
-            method = "complete_multipart_upload_prepared",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn complete_multipart_upload_prepared(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-        request: &CompleteMultipartUploadRequest,
-    ) -> Result<CompletedUpload> {
-        self.core.record_trace_context(&tracing::Span::current());
-        self.complete_upload_prepared_inner(
-            namespace_id,
-            upload_id,
-            loonfs_core::ResolvedUploadCompletion::Multipart(request.clone()),
-        )
-        .await
-    }
-
-    async fn complete_upload_prepared_inner(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-        completion: loonfs_core::ResolvedUploadCompletion,
-    ) -> Result<CompletedUpload> {
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;

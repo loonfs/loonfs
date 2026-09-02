@@ -398,20 +398,20 @@ impl FsWriterBuilder {
                         .to_owned(),
                 )
             })?;
-        let runtime = Some(owning_runtime()?);
+        let runtime = owning_runtime()?;
         let core = self.core.open_read_core()?;
         let instruments = Arc::clone(core.instruments());
         let maintenance = match self.maintenance_clock {
             Some(clock) => MaintenanceRunner::with_clock(
                 self.background_work,
-                runtime,
+                runtime.clone(),
                 max_concurrent_maintenance,
                 clock,
                 instruments,
             ),
             None => MaintenanceRunner::new(
                 self.background_work,
-                runtime,
+                runtime.clone(),
                 max_concurrent_maintenance,
                 instruments,
             ),
@@ -424,6 +424,7 @@ impl FsWriterBuilder {
         let publisher = PublisherRegistry::new(
             core.clone(),
             Arc::downgrade(&bits),
+            runtime,
             std::time::Duration::from_millis(self.min_publish_interval_ms),
         );
         // The runtime's own executors register last: they run as an admin

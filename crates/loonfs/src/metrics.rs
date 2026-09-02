@@ -218,12 +218,6 @@ impl DefaultMetricsRecorder {
 
     /// Returns the instrument registered under `key`, installing `build`'s
     /// if there is none.
-    ///
-    /// A second registration of the same name and labels shares the first
-    /// one's value. A registration that reuses a name with a different
-    /// instrument kind keeps the first kind and hands back a detached
-    /// instrument, so a mistake costs the new instrument's readings rather
-    /// than corrupting the established one.
     fn register(
         &self,
         key: InstrumentKey,
@@ -234,9 +228,42 @@ impl DefaultMetricsRecorder {
             .or_insert_with(build)
             .clone()
     }
+
+    fn register_instrument<T>(
+        &self,
+        name: &'static str,
+        labels: &[(&'static str, &'static str)],
+        fresh: Arc<T>,
+        build: impl FnOnce(Arc<T>) -> RegisteredInstrument,
+        extract: impl FnOnce(&RegisteredInstrument) -> Option<Arc<T>>,
+        expected_kind: &'static str,
+    ) -> Arc<T> {
+        let registered = self.register(InstrumentKey::new(name, labels), || {
+            build(Arc::clone(&fresh))
+        });
+        if let Some(instrument) = extract(&registered) {
+            return instrument;
+        }
+        tracing::error!(
+            metric = name,
+            expected_kind,
+            actual_kind = registered.kind(),
+            "metric registered with conflicting kind"
+        );
+        debug_assert!(false, "metric `{name}` registered with conflicting kind");
+        fresh
+    }
 }
 
 impl RegisteredInstrument {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Counter(_) => "counter",
+            Self::Gauge(_) => "gauge",
+            Self::Histogram(_) => "histogram",
+        }
+    }
+
     fn description(&self) -> &'static str {
         match self {
             Self::Counter(counter) => counter.description,
@@ -262,12 +289,17 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         labels: &[(&'static str, &'static str)],
     ) -> Arc<dyn CounterHandle> {
         let fresh = Arc::new(CounterValue::new(description));
-        match self.register(InstrumentKey::new(name, labels), || {
-            RegisteredInstrument::Counter(Arc::clone(&fresh))
-        }) {
-            RegisteredInstrument::Counter(counter) => counter,
-            _ => fresh,
-        }
+        self.register_instrument::<CounterValue>(
+            name,
+            labels,
+            fresh,
+            RegisteredInstrument::Counter,
+            |registered| match registered {
+                RegisteredInstrument::Counter(counter) => Some(Arc::clone(counter)),
+                _ => None,
+            },
+            "counter",
+        )
     }
 
     fn register_gauge(
@@ -277,12 +309,17 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         labels: &[(&'static str, &'static str)],
     ) -> Arc<dyn GaugeHandle> {
         let fresh = Arc::new(GaugeValue::new(description));
-        match self.register(InstrumentKey::new(name, labels), || {
-            RegisteredInstrument::Gauge(Arc::clone(&fresh))
-        }) {
-            RegisteredInstrument::Gauge(gauge) => gauge,
-            _ => fresh,
-        }
+        self.register_instrument::<GaugeValue>(
+            name,
+            labels,
+            fresh,
+            RegisteredInstrument::Gauge,
+            |registered| match registered {
+                RegisteredInstrument::Gauge(gauge) => Some(Arc::clone(gauge)),
+                _ => None,
+            },
+            "gauge",
+        )
     }
 
     fn register_histogram(
@@ -293,12 +330,17 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         boundaries: &'static [f64],
     ) -> Arc<dyn HistogramHandle> {
         let fresh = Arc::new(HistogramValue::new(description, boundaries));
-        match self.register(InstrumentKey::new(name, labels), || {
-            RegisteredInstrument::Histogram(Arc::clone(&fresh))
-        }) {
-            RegisteredInstrument::Histogram(histogram) => histogram,
-            _ => fresh,
-        }
+        self.register_instrument::<HistogramValue>(
+            name,
+            labels,
+            fresh,
+            RegisteredInstrument::Histogram,
+            |registered| match registered {
+                RegisteredInstrument::Histogram(histogram) => Some(Arc::clone(histogram)),
+                _ => None,
+            },
+            "histogram",
+        )
     }
 }
 

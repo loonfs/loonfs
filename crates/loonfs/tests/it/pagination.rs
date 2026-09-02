@@ -8,7 +8,6 @@ use loonfs::{
     CreateDirectoryOptions, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
     DestinationBehavior, ErrorCode, InodeId, MoveOptions, PageRequest, PathEntry, PutFileOptions,
 };
-use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use tempfile::tempdir;
 

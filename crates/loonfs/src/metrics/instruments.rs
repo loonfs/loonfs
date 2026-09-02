@@ -16,7 +16,54 @@ use crate::{
 };
 use loonfs_core::cache::{MetadataSegmentCacheObserver, WalTailProjectionCacheObserver};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard};
+
+trait MetricLabel: Copy + PartialEq + 'static {
+    const VALUES: &'static [Self];
+
+    fn as_str(self) -> &'static str;
+
+    fn index(self) -> usize {
+        Self::VALUES
+            .iter()
+            .position(|value| *value == self)
+            .expect("`MetricLabel::VALUES` should contain every label")
+    }
+}
+
+#[derive(Clone)]
+struct LabeledCounters<E> {
+    handles: Vec<Arc<dyn CounterHandle>>,
+    marker: PhantomData<fn(E)>,
+}
+
+impl<E: MetricLabel> LabeledCounters<E> {
+    fn register(
+        recorder: &dyn MetricsRecorder,
+        name: &'static str,
+        description: &'static str,
+        label_name: &'static str,
+        common_labels: &[(&'static str, &'static str)],
+    ) -> Self {
+        let handles = E::VALUES
+            .iter()
+            .map(|value| {
+                let mut labels = common_labels.to_vec();
+                labels.push((label_name, value.as_str()));
+                recorder.register_counter(name, description, &labels)
+            })
+            .collect();
+        Self {
+            handles,
+            marker: PhantomData,
+        }
+    }
+
+    fn get(&self, label: E) -> &Arc<dyn CounterHandle> {
+        &self.handles[label.index()]
+    }
+}
 
 /// The closed outcome vocabulary for a finished streaming compaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,8 +75,16 @@ pub(crate) enum CompactionOutcome {
     Fenced,
 }
 
-impl CompactionOutcome {
-    const fn as_str(self) -> &'static str {
+impl MetricLabel for CompactionOutcome {
+    const VALUES: &'static [Self] = &[
+        Self::Completed,
+        Self::Failed,
+        Self::Superseded,
+        Self::Cancelled,
+        Self::Fenced,
+    ];
+
+    fn as_str(self) -> &'static str {
         match self {
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -53,6 +108,28 @@ impl PublishOutcome {
             Self::Ok => RESULT_OK,
             Self::Error => RESULT_ERROR,
         }
+    }
+}
+
+impl MetricLabel for PublishOutcome {
+    const VALUES: &'static [Self] = &[Self::Ok, Self::Error];
+
+    fn as_str(self) -> &'static str {
+        PublishOutcome::as_str(self)
+    }
+}
+
+impl MetricLabel for MaintenanceStepConclusion {
+    const VALUES: &'static [Self] = &[
+        Self::Progressed,
+        Self::Idle,
+        Self::Blocked,
+        Self::Superseded,
+        Self::NotEnabled,
+    ];
+
+    fn as_str(self) -> &'static str {
+        MaintenanceStepConclusion::as_str(self)
     }
 }
 
@@ -172,7 +249,7 @@ impl RuntimeInstruments {
             return;
         };
         let instruments = installed.maintenance_job(job);
-        instruments.step(conclusion).increment(1);
+        instruments.steps.get(conclusion).increment(1);
         instruments.step_seconds.record(seconds_from_ms(elapsed_ms));
         instruments
             .queue_wait_seconds
@@ -263,10 +340,10 @@ impl RuntimeInstruments {
         let Some(installed) = &self.installed else {
             return;
         };
-        let outcome_instruments = installed.compactions.outcome(outcome);
-        outcome_instruments.count.increment(1);
-        outcome_instruments
-            .seconds
+        installed.compactions.outcomes.get(outcome).increment(1);
+        installed
+            .compactions
+            .outcome_seconds(outcome)
             .record(seconds_from_ms(elapsed_ms));
         let Some((input_rows, output_rows, input_bytes, output_bytes)) = totals else {
             return;
@@ -318,7 +395,7 @@ impl RuntimeInstruments {
         let Some(installed) = &self.installed else {
             return;
         };
-        installed.publisher.publish(outcome).increment(1);
+        installed.publisher.publishes.get(outcome).increment(1);
     }
 
     /// Reports what one collection pass reclaimed and retained.
@@ -508,11 +585,7 @@ impl ObjectStoreOperationInstruments {
 /// build registers.
 #[derive(Clone)]
 struct MaintenanceJobInstruments {
-    progressed: Arc<dyn CounterHandle>,
-    idle: Arc<dyn CounterHandle>,
-    blocked: Arc<dyn CounterHandle>,
-    superseded: Arc<dyn CounterHandle>,
-    not_enabled: Arc<dyn CounterHandle>,
+    steps: LabeledCounters<MaintenanceStepConclusion>,
     failures: Arc<dyn CounterHandle>,
     probe_failures: Arc<dyn CounterHandle>,
     step_seconds: Arc<dyn HistogramHandle>,
@@ -522,19 +595,15 @@ struct MaintenanceJobInstruments {
 impl MaintenanceJobInstruments {
     fn register(recorder: &dyn MetricsRecorder, job: MaintenanceJobId) -> Self {
         let job = job.as_str();
-        let steps = |conclusion: MaintenanceStepConclusion| {
-            recorder.register_counter(
+        let common_labels = [("job", job)];
+        Self {
+            steps: LabeledCounters::register(
+                recorder,
                 "loonfs.maintenance.steps",
                 "Maintenance steps by job and conclusion",
-                &[("job", job), ("conclusion", conclusion.as_str())],
-            )
-        };
-        Self {
-            progressed: steps(MaintenanceStepConclusion::Progressed),
-            idle: steps(MaintenanceStepConclusion::Idle),
-            blocked: steps(MaintenanceStepConclusion::Blocked),
-            superseded: steps(MaintenanceStepConclusion::Superseded),
-            not_enabled: steps(MaintenanceStepConclusion::NotEnabled),
+                "conclusion",
+                &common_labels,
+            ),
             failures: recorder.register_counter(
                 "loonfs.maintenance.step_failures",
                 "Maintenance steps that failed before concluding",
@@ -557,16 +626,6 @@ impl MaintenanceJobInstruments {
                 &[("job", job)],
                 LATENCY_SECONDS_BOUNDARIES,
             ),
-        }
-    }
-
-    fn step(&self, conclusion: MaintenanceStepConclusion) -> &Arc<dyn CounterHandle> {
-        match conclusion {
-            MaintenanceStepConclusion::Progressed => &self.progressed,
-            MaintenanceStepConclusion::Idle => &self.idle,
-            MaintenanceStepConclusion::Blocked => &self.blocked,
-            MaintenanceStepConclusion::Superseded => &self.superseded,
-            MaintenanceStepConclusion::NotEnabled => &self.not_enabled,
         }
     }
 }
@@ -789,37 +848,16 @@ fn metric_level(value: usize) -> i64 {
 struct CompactionInstruments {
     running: Arc<dyn GaugeHandle>,
     queued: Arc<dyn GaugeHandle>,
-    completed: CompactionOutcomeInstruments,
-    failed: CompactionOutcomeInstruments,
-    superseded: CompactionOutcomeInstruments,
-    cancelled: CompactionOutcomeInstruments,
-    fenced: CompactionOutcomeInstruments,
+    outcomes: LabeledCounters<CompactionOutcome>,
+    outcome_seconds: Vec<Arc<dyn HistogramHandle>>,
     input_rows: Arc<dyn CounterHandle>,
     output_rows: Arc<dyn CounterHandle>,
     input_bytes: Arc<dyn CounterHandle>,
     output_bytes: Arc<dyn CounterHandle>,
 }
 
-struct CompactionOutcomeInstruments {
-    count: Arc<dyn CounterHandle>,
-    seconds: Arc<dyn HistogramHandle>,
-}
-
 impl CompactionInstruments {
     fn register(recorder: &dyn MetricsRecorder) -> Self {
-        let outcome = |outcome: CompactionOutcome| CompactionOutcomeInstruments {
-            count: recorder.register_counter(
-                "loonfs.maintenance.compactions",
-                "Streaming metadata compactions by outcome",
-                &[("outcome", outcome.as_str())],
-            ),
-            seconds: recorder.register_histogram(
-                "loonfs.maintenance.compaction_seconds",
-                "Duration of a finished streaming metadata compaction in seconds",
-                &[("outcome", outcome.as_str())],
-                LATENCY_SECONDS_BOUNDARIES,
-            ),
-        };
         let rows = |direction: &'static str| {
             recorder.register_counter(
                 "loonfs.maintenance.compaction_rows",
@@ -846,11 +884,24 @@ impl CompactionInstruments {
                  process permit",
                 &[],
             ),
-            completed: outcome(CompactionOutcome::Completed),
-            failed: outcome(CompactionOutcome::Failed),
-            superseded: outcome(CompactionOutcome::Superseded),
-            cancelled: outcome(CompactionOutcome::Cancelled),
-            fenced: outcome(CompactionOutcome::Fenced),
+            outcomes: LabeledCounters::register(
+                recorder,
+                "loonfs.maintenance.compactions",
+                "Streaming metadata compactions by outcome",
+                "outcome",
+                &[],
+            ),
+            outcome_seconds: CompactionOutcome::VALUES
+                .iter()
+                .map(|outcome| {
+                    recorder.register_histogram(
+                        "loonfs.maintenance.compaction_seconds",
+                        "Duration of a finished streaming metadata compaction in seconds",
+                        &[("outcome", outcome.as_str())],
+                        LATENCY_SECONDS_BOUNDARIES,
+                    )
+                })
+                .collect(),
             input_rows: rows("input"),
             output_rows: rows("output"),
             input_bytes: bytes("input"),
@@ -858,14 +909,8 @@ impl CompactionInstruments {
         }
     }
 
-    fn outcome(&self, outcome: CompactionOutcome) -> &CompactionOutcomeInstruments {
-        match outcome {
-            CompactionOutcome::Completed => &self.completed,
-            CompactionOutcome::Failed => &self.failed,
-            CompactionOutcome::Superseded => &self.superseded,
-            CompactionOutcome::Cancelled => &self.cancelled,
-            CompactionOutcome::Fenced => &self.fenced,
-        }
+    fn outcome_seconds(&self, outcome: CompactionOutcome) -> &Arc<dyn HistogramHandle> {
+        &self.outcome_seconds[outcome.index()]
     }
 }
 
@@ -877,19 +922,11 @@ struct PublisherInstruments {
     queue_depth: Arc<dyn GaugeHandle>,
     retained_projections: Arc<dyn GaugeHandle>,
     retained_projection_bytes: Arc<dyn GaugeHandle>,
-    published_ok: Arc<dyn CounterHandle>,
-    published_error: Arc<dyn CounterHandle>,
+    publishes: LabeledCounters<PublishOutcome>,
 }
 
 impl PublisherInstruments {
     fn register(recorder: &dyn MetricsRecorder) -> Self {
-        let publishes = |outcome: PublishOutcome| {
-            recorder.register_counter(
-                "loonfs.publisher.publishes",
-                "Publication results delivered to their callers",
-                &[("result", outcome.as_str())],
-            )
-        };
         Self {
             batches: recorder.register_counter(
                 "loonfs.publisher.batches",
@@ -922,15 +959,13 @@ impl PublisherInstruments {
                 "Decoded bytes held by the retained WAL-tail projections",
                 &[],
             ),
-            published_ok: publishes(PublishOutcome::Ok),
-            published_error: publishes(PublishOutcome::Error),
-        }
-    }
-
-    fn publish(&self, outcome: PublishOutcome) -> &Arc<dyn CounterHandle> {
-        match outcome {
-            PublishOutcome::Ok => &self.published_ok,
-            PublishOutcome::Error => &self.published_error,
+            publishes: LabeledCounters::register(
+                recorder,
+                "loonfs.publisher.publishes",
+                "Publication results delivered to their callers",
+                "result",
+                &[],
+            ),
         }
     }
 }

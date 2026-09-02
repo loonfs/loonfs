@@ -76,24 +76,22 @@ pub use loonfs_api::v0::{
     UploadSessionStatus,
 };
 pub use loonfs_api::{
-    ActorId, ActorKind, ActorRef, AdvanceRetentionRequest, AdvanceRetentionResponse, AttributeKey,
-    AttributeRevisionNo, AttributeValue, Attributes, AttributesProjection, CapabilityDocument,
-    ChangeSeq, Checkpoint, CheckpointId, CheckpointOwnerSummary, ChecksumAlgorithm, CommitId,
-    ContentId, ContentRef, ContentRefKind, CreateCheckpointRequest, CreateSnapshotRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, DeletedObjectCounts, DestinationBehavior,
-    DirectoryPageCursor, EffectiveLimit, ExtendSnapshotRequest, FileBytes, FileRevision,
-    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest, GcResponse, InodeId,
-    InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListSnapshotsResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, ManifestNo, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
-    NameKey, Namespace, NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy,
-    PathEntry, PathEntryKind, ReleaseCheckpointResponse, ReleaseSnapshotResponse,
-    ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
-    RevisionNo, SnapshotSummary, TrashEntry, UploadId, WalFlushStepOutcome, FEATURE_ATTRIBUTES,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
-    PROFILE_CORE_V0, PROTOCOL_VERSION,
+    ActorId, ActorKind, ActorRef, AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo,
+    AttributeValue, Attributes, AttributesProjection, CapabilityDocument, ChangeSeq, Checkpoint,
+    CheckpointId, CheckpointOwnerSummary, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
+    ContentRefKind, DeleteDirectoryBehavior, DeleteNamespaceResponse, DeletedObjectCounts,
+    DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileBytes, FileRevision,
+    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcResponse, InodeId, InodeKind,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    ListPathEntriesResponse, ListSnapshotsResponse, MaintenanceStepResponse, ManifestNo,
+    MetadataMaintenanceResponse, NameKey, Namespace, NamespaceDiagnostics, NamespaceId, Page,
+    PageRequest, PaginationPolicy, PathEntry, PathEntryKind, ReleaseCheckpointResponse,
+    ReleaseSnapshotResponse, ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates,
+    RetainedReason, RevisionNo, SnapshotSummary, TrashEntry, UploadId, WalFlushStepOutcome,
+    FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_INODES_LIST_CHILDREN,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheObserver, DecodedBlockCacheStats,
@@ -113,6 +111,14 @@ pub use loonfs_core::{
     CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
+
+/// Request shapes a serving host decodes before converting them to runtime options.
+pub mod wire {
+    pub use loonfs_api::{
+        AdvanceRetentionRequest, CreateCheckpointRequest, CreateSnapshotRequest,
+        ExtendSnapshotRequest, GcRequest, MaintenanceStepRequest, MetadataMaintenanceRequest,
+    };
+}
 
 /// Commit types used by integrations that submit classified mutations to
 /// the runtime publisher.

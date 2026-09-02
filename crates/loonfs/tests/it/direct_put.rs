@@ -6,6 +6,7 @@
 use crate::common::*;
 use bytes::Bytes;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     BeginUploadRequest, ChangeSeq, ChecksumAlgorithm, CommitId, CreateDirectoryOptions,
     CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions,
@@ -24,7 +25,6 @@ fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {
 }
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
@@ -460,7 +460,11 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 .expect("upload content");
             let completed = fs
                 .writer
-                .complete_upload(&namespace_id, begin.upload_id())
+                .complete_upload(
+                    &namespace_id,
+                    begin.upload_id(),
+                    ResolvedUploadCompletion::KnownContent,
+                )
                 .await
                 .expect("complete upload");
             prepared_contents.push(
@@ -468,6 +472,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                     &object_store,
                     &catalog,
                     completed
+                        .response
                         .content_ref()
                         .expect("completed content ref")
                         .clone(),

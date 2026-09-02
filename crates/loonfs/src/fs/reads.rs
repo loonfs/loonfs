@@ -512,26 +512,62 @@ fn advance_typed_cursor<C: PageCursor>(
 }
 
 impl FsReader {
+    fn read_snapshot(
+        &self,
+        engine: NamespaceReaderEngine<SharedObjectStore>,
+        context: RuntimeReadContext,
+        snapshot_id: Option<CheckpointId>,
+    ) -> FsReadSnapshot {
+        FsReadSnapshot {
+            engine,
+            context,
+            snapshot_id,
+            max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
+        }
+    }
+
     /// Pins one namespace metadata view for a sequence of related reads.
     ///
     /// The returned snapshot keeps path lookup, directory listing, inode
     /// resolution, and content selection on the same head even if commits
     /// publish concurrently. It is intended to be short-lived for one
     /// request or unit of work.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.pin_namespace",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "pin_namespace",
+            method = "pin_namespace",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn pin_namespace(&self, namespace_id: &NamespaceId) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-        Ok(FsReadSnapshot {
-            engine,
-            context,
-            snapshot_id: None,
-            max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
-        })
+        Ok(self.read_snapshot(engine, context, None))
     }
 
     /// Pins the namespace state captured by a checkpoint.
     ///
     /// Missing or released checkpoints return `checkpoint_unavailable`.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.pin_namespace",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "pin_namespace",
+            method = "pin_namespace_at_checkpoint",
+            namespace_id = %namespace_id,
+            checkpoint_id = %checkpoint_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn pin_namespace_at_checkpoint(
         &self,
         namespace_id: &NamespaceId,
@@ -542,15 +578,24 @@ impl FsReader {
             .core
             .pinned_read_at_checkpoint(namespace_id, checkpoint_id)
             .await?;
-        Ok(FsReadSnapshot {
-            engine,
-            context,
-            snapshot_id: None,
-            max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
-        })
+        Ok(self.read_snapshot(engine, context, None))
     }
 
     /// Pins the namespace state captured by a live snapshot.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.pin_namespace",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "pin_namespace",
+            method = "pin_namespace_at_snapshot",
+            namespace_id = %namespace_id,
+            snapshot_id = %snapshot_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn pin_namespace_at_snapshot(
         &self,
         namespace_id: &NamespaceId,
@@ -563,12 +608,7 @@ impl FsReader {
             .pinned_read_at_snapshot(namespace_id, snapshot_id, now_ms)
             .await?;
         self.core.inner.cache_stats.record_snapshot_view_read();
-        Ok(FsReadSnapshot {
-            engine,
-            context,
-            snapshot_id: Some(snapshot_id.clone()),
-            max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
-        })
+        Ok(self.read_snapshot(engine, context, Some(snapshot_id.clone())))
     }
 
     /// Returns a namespace's current state.
