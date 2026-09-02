@@ -3,8 +3,7 @@
 use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
 use super::load::{
-    ensure_manifest_reference_matches, head_from_manifest,
-    load_verified_manifest_segments_with_cache,
+    ensure_manifest_reference_matches, head_from_manifest, load_verified_manifest_segments,
 };
 use super::record::load_checkpoint_record;
 use super::scan::VerifiedMetadataSegments;
@@ -50,7 +49,7 @@ pub(crate) async fn load_pinned_checkpoint_basis_from_record<'a, S: ObjectStore 
 ) -> Result<PinnedCheckpointBasis<'a, S>> {
     let checkpoint_id = &record.checkpoint_id;
     let namespace_id = &record.namespace_id;
-    let segments = load_verified_manifest_segments_with_cache(
+    let segments = load_verified_manifest_segments(
         store,
         segment_cache,
         namespace_id,

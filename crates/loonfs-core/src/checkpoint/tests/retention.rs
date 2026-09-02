@@ -114,7 +114,7 @@ async fn current_manifest_no<S: ObjectStore + ?Sized>(
 }
 
 fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> {
-    runs_from_segments(&manifest.payload)
+    runs_in_reorganization_order(&manifest.payload)
         .into_iter()
         .flat_map(|run| {
             run.segments.into_iter().flat_map(|family_segments| {
@@ -212,10 +212,10 @@ fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
 }
 
 type FamilyRunShape = (ApiMetadataRowFamily, u64, usize);
-type ManifestRunShape = (ChangeSeq, u32, Vec<FamilyRunShape>);
+type ManifestRunShape = (ChangeSeq, RunTier, Vec<FamilyRunShape>);
 
 fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunShape> {
-    runs_from_segments(&manifest.payload)
+    runs_in_reorganization_order(&manifest.payload)
         .into_iter()
         .map(|run| {
             let segments = run
@@ -234,7 +234,7 @@ fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunSh
                     )
                 })
                 .collect();
-            (run.run_seq, run.level, segments)
+            (run.run_seq, run.tier, segments)
         })
         .collect()
 }
@@ -335,17 +335,22 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .await
         .expect("load metadata root")
         .state;
-    let referenced_segment_count =
-        load_verified_manifest_segments(&store, &namespace_id, &root.manifest.manifest_object_id)
-            .await
-            .expect("load current manifest")
-            .manifest()
-            .payload
-            .segments
-            .iter()
-            .map(metadata_segment_object_key)
-            .collect::<BTreeSet<_>>()
-            .len();
+    let referenced_segment_count = load_verified_manifest_segments(
+        &store,
+        None,
+        &namespace_id,
+        &root.manifest.manifest_object_id,
+    )
+    .await
+    .expect("load current manifest")
+    .manifest()
+    .payload
+    .runs
+    .iter()
+    .flat_map(|run| &run.segments)
+    .map(metadata_segment_object_key)
+    .collect::<BTreeSet<_>>()
+    .len();
     store.reset();
     let advanced = advance_retention_floor(&store, &namespace_id, &context)
         .await
@@ -408,15 +413,21 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .await
         .expect("load metadata root")
         .state;
-    let segments =
-        load_verified_manifest_segments(&store, &namespace_id, &root.manifest.manifest_object_id)
-            .await
-            .expect("load current manifest");
+    let segments = load_verified_manifest_segments(
+        &store,
+        None,
+        &namespace_id,
+        &root.manifest.manifest_object_id,
+    )
+    .await
+    .expect("load current manifest");
     let missing_key = segments
         .manifest()
         .payload
-        .segments
-        .first()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .next()
         .map(metadata_segment_object_key)
         .expect("current manifest references a segment");
     store
@@ -469,6 +480,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         .state;
     let segments = load_verified_manifest_segments(
         &setup_store,
+        None,
         &namespace_id,
         &root.manifest.manifest_object_id,
     )
@@ -477,8 +489,10 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     let selected_key = segments
         .manifest()
         .payload
-        .segments
-        .first()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .next()
         .map(metadata_segment_object_key)
         .expect("current manifest references a segment");
     let failed_key = selected_key.clone();
@@ -1736,9 +1750,11 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
     assert!(delta_runs(&compacted_materialized.manifest).is_empty());
     // Groups untouched since the first fold keep their older base run, so
     // several base runs may coexist; what matters is that no delta remains.
-    assert!(runs_from_segments(&compacted_materialized.manifest.payload)
-        .iter()
-        .all(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL));
+    assert!(
+        runs_in_reorganization_order(&compacted_materialized.manifest.payload)
+            .iter()
+            .all(|run| run.tier == RunTier::Base)
+    );
     assert!(revision_keys_after
         .iter()
         .all(|key| !revision_keys_before.contains(key)));
@@ -1999,7 +2015,7 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     super::reorganize::ReorganizationSelection,
 ) {
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
-    let segments = load_verified_manifest_segments(store, namespace_id, &manifest_object_id)
+    let segments = load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
         .await
         .expect("load manifest segments");
     let group = super::reorganize::select_family_group(&segments.manifest().payload, None)
@@ -2023,7 +2039,7 @@ fn bounded_merge(
     selection: super::reorganize::ReorganizationSelection,
 ) -> Option<super::reorganize::ReorganizationInput> {
     match selection.plan {
-        Some(super::reorganize::ReorganizationPlan::BoundedMerge(input)) => Some(input),
+        super::reorganize::ReorganizationPlan::BoundedMerge(input) => Some(input),
         _ => None,
     }
 }
@@ -2118,15 +2134,12 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
         input.placement
     );
     assert!(
-        input
-            .runs
-            .iter()
-            .all(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL),
+        input.runs.iter().all(|run| run.tier == RunTier::Delta),
         "skipping the base leaves a delta-only merge, got {:?}",
         input
             .runs
             .iter()
-            .map(|run| (run.run_seq, run.level))
+            .map(|run| (run.run_seq, run.tier))
             .collect::<Vec<_>>()
     );
     assert!(
@@ -2139,7 +2152,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     };
     assert_eq!(bottom.run_no, group_base.run_no);
     assert_eq!(bottom.run_seq, group_base.run_seq);
-    assert_eq!(bottom.level, CHECKPOINT_BASE_RUN_LEVEL);
+    assert_eq!(bottom.tier, RunTier::Base);
     assert_eq!(bottom.rows, base_rows);
 
     // Repeated steps keep merging what fits. While they do, the base run
@@ -2382,8 +2395,8 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         panic!("the merged delta runs must leave exactly one delta run");
     };
     assert_eq!(
-        (merged_delta.run_seq, merged_delta.level),
-        (newest_input, CHECKPOINT_DELTA_RUN_LEVEL),
+        (merged_delta.run_seq, merged_delta.tier),
+        (newest_input, RunTier::Delta),
         "the merged delta run must stand where the newest input run stood"
     );
     // A merge that skipped older runs drops nothing, so the row set is
@@ -2485,7 +2498,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     assert!(
         matches!(
             selection.plan,
-            Some(super::reorganize::ReorganizationPlan::FullCompaction(_))
+            super::reorganize::ReorganizationPlan::FullCompaction(_)
         ),
         "no legal window exists; the selector must hand the group to a streaming compaction \
          rather than assemble one across the wide run"

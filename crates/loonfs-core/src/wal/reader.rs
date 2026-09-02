@@ -1,7 +1,7 @@
 //! Loads and validates the WAL segment chain from a base seq through the
 //! head.
 
-use super::replay::{validate_wal_segment_for_replay, WalReplayError};
+use super::replay::{validate_wal_segment_for_replay, WalSegmentError};
 use super::{ValidatedWalChain, ValidatedWalSegment, WalChainLoadError, WalChainLoadRequest};
 use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
@@ -137,25 +137,29 @@ pub(crate) enum WalChainLoad {
     LimitReached { requests_issued: usize },
 }
 
-/// Loads the chain, issuing at most `max_segment_fetches` requests for
-/// segment bodies.
-///
-/// A caller that meters its own reads uses this so that the loader cannot
-/// read past what the caller may pay for. The loader itself keeps no
-/// budget, because foreground reads and the changefeed share it.
+impl WalChainLoad {
+    pub(crate) fn into_complete(self) -> ValidatedWalChain {
+        match self {
+            Self::Complete { chain, .. } => Some(chain),
+            Self::LimitReached { .. } => None,
+        }
+        .expect("an unbounded WAL chain load should complete")
+    }
+}
+
+/// Loads the WAL chain within the request's optional segment fetch limit.
 #[tracing::instrument(
     level = "debug",
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "load_wal_chain_within", key_class = "wal_segment")
+    fields(phase = "load_wal_chain", key_class = "wal_segment")
 )]
-pub(crate) async fn load_wal_chain_within<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_wal_chain<S: ObjectStore + ?Sized>(
     store: &S,
     request: WalChainLoadRequest<'_>,
-    max_segment_fetches: usize,
 ) -> Result<WalChainLoad, WalChainLoadError> {
-    let walked = walk_chain(store, &request, Some(max_segment_fetches)).await?;
+    let walked = walk_chain(store, &request).await?;
     if walked.limit_reached {
         Ok(WalChainLoad::LimitReached {
             requests_issued: walked.fetches,
@@ -168,27 +172,11 @@ pub(crate) async fn load_wal_chain_within<S: ObjectStore + ?Sized>(
     }
 }
 
-#[tracing::instrument(
-    level = "debug",
-    name = "loonfs.phase",
-    err(level = "warn"),
-    skip_all,
-    fields(phase = "load_validated_wal_chain", key_class = "wal_segment")
-)]
-pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
-    store: &S,
-    request: WalChainLoadRequest<'_>,
-) -> Result<ValidatedWalChain, WalChainLoadError> {
-    let walked = walk_chain(store, &request, None).await?;
-    finish_chain(&request, walked.segments)
-}
-
 /// Walks the chain links from the visible tip down to the base, optionally
 /// limiting requests for segment bodies.
 async fn walk_chain<S: ObjectStore + ?Sized>(
     store: &S,
     request: &WalChainLoadRequest<'_>,
-    max_segment_fetches: Option<usize>,
 ) -> Result<WalkedChain, WalChainLoadError> {
     let Some((mut pointer, stop_after_seq)) = request.tip_and_stop()? else {
         return Ok(WalkedChain {
@@ -208,8 +196,9 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
     // never exceeds `max_segment_fetches`. Prefetch consumes its share first;
     // the chain walk uses the remaining budget. Because hints are ordered from
     // newest to oldest, a limited prefetch covers the segments nearest the tip.
-    let prefetched_hints =
-        max_segment_fetches.map_or(in_gap.len(), |limit| in_gap.len().min(limit));
+    let prefetched_hints = request
+        .max_segment_fetches
+        .map_or(in_gap.len(), |limit| in_gap.len().min(limit));
     let mut fetches = prefetched_hints;
     let mut prefetched = if prefetched_hints == 0 {
         HashMap::new()
@@ -228,7 +217,10 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
             // costs nothing further.
             Some(bytes) => bytes,
             None => {
-                if max_segment_fetches.is_some_and(|limit| fetches >= limit) {
+                if request
+                    .max_segment_fetches
+                    .is_some_and(|limit| fetches >= limit)
+                {
                     return Ok(WalkedChain {
                         segments: Vec::new(),
                         fetches,
@@ -249,7 +241,7 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
             }
         };
         let envelope = decode_wal_segment_envelope_zstd(&encoded_bytes)
-            .map_err(|err| WalReplayError::Codec(err.to_string()))?;
+            .map_err(|err| WalSegmentError::Codec(err.to_string()))?;
         validate_pointer_matches_envelope(&pointer, &object_key, &envelope)?;
 
         let reached_stop = envelope.payload.base_head_seq <= stop_after_seq;
@@ -260,7 +252,7 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
             break;
         }
 
-        pointer = prev.ok_or_else(|| WalReplayError::BrokenChainLink {
+        pointer = prev.ok_or_else(|| WalSegmentError::BrokenChainLink {
             object_key: object_key.clone(),
             required_seq: stop_after_seq,
         })?;

@@ -227,6 +227,13 @@ macro_rules! numeric_id {
                 }
                 Ok(Self(value))
             }
+
+            /// Returns the next ordinal, or an error at the public maximum.
+            pub fn successor(self) -> Result<Self, $crate::PublicOrdinalRangeError> {
+                $crate::next_public_ordinal(self.0)
+                    .map(Self)
+                    .ok_or($crate::PublicOrdinalRangeError)
+            }
         }
 
         #[cfg(feature = "openapi")]
@@ -833,15 +840,6 @@ numeric_id! {
     RunNo,
     public_ordinal,
     schema_description = "Monotonic run counter allocated by the manifest that names the run. A run is the set of segments one producer wrote together."
-}
-
-impl RunNo {
-    /// Returns the next run number, or an error at the public maximum.
-    pub fn successor(self) -> Result<Self, PublicOrdinalRangeError> {
-        next_public_ordinal(self.0)
-            .map(Self)
-            .ok_or(PublicOrdinalRangeError)
-    }
 }
 
 numeric_id! {

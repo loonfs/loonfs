@@ -4,7 +4,7 @@
 use crate::binding_generation::BindingGeneration;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::load_head_and_retention_floor;
-use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
+use crate::wal::{load_wal_chain, WalChainLoadRequest};
 use loonfs_api::v0::{CommittedChange, FilesystemChange, ListChangesResponse};
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
@@ -50,7 +50,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         });
     }
 
-    let wal_chain = load_validated_wal_chain(
+    let wal_chain = load_wal_chain(
         store,
         WalChainLoadRequest {
             namespace_id,
@@ -58,13 +58,15 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: Some(after_seq),
+            max_segment_fetches: None,
             recent_segments: &head.recent_segments,
         },
     )
     .await
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-    })?;
+    })?
+    .into_complete();
     let mut changes = Vec::with_capacity(limit.as_usize());
     let mut through_seq = head.seq;
     let mut next_after_seq = None;

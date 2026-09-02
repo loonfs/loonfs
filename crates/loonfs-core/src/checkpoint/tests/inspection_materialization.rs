@@ -23,7 +23,7 @@ use loonfs_api::manifest_object_id_manifest_no;
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
-use loonfs_api::{ManifestNo, ManifestObjectId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
     metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
 };
@@ -137,6 +137,7 @@ pub(crate) async fn load_manifest_metadata_state_for_inspection_from_manifest<
             store,
             namespace_id,
             manifest_object_key,
+            run.run_seq,
             &run.segments,
             &mut metadata_state,
         )
@@ -151,6 +152,7 @@ pub(super) async fn append_manifest_segments_to_metadata<S>(
     store: &S,
     _namespace_id: &NamespaceId,
     manifest_object_key: &str,
+    run_seq: ChangeSeq,
     segments_by_family: &[MetadataFamilySegments],
     metadata_state: &mut MetadataStateBuilder,
 ) -> Result<(), ManifestLoadError>
@@ -169,7 +171,7 @@ where
                 try_join_all(
                     chunk
                         .iter()
-                        .map(|descriptor| load_manifest_segment_rows(store, descriptor)),
+                        .map(|descriptor| load_manifest_segment_rows(store, run_seq, descriptor)),
                 )
                 .await?,
             );
@@ -216,9 +218,10 @@ where
 #[cfg(test)]
 pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
+    run_seq: ChangeSeq,
     descriptor: &MetadataSegmentRef,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
-    load_manifest_segment_rows_with_cache(store, None, descriptor).await
+    load_manifest_segment_rows_with_cache(store, None, run_seq, descriptor).await
 }
 
 /// Loads a segment's full row set: every data block, in key order, checked
@@ -228,6 +231,7 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
 pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
+    run_seq: ChangeSeq,
     descriptor: &MetadataSegmentRef,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     let row_set = load_manifest_segment_rows_in_key_range_with_cache(
@@ -235,6 +239,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         segment_cache,
         &SessionBlockMemo::default(),
         descriptor,
+        run_seq,
         "",
         None,
         Readahead::Disabled,

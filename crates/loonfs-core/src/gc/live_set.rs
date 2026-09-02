@@ -11,7 +11,7 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::{load_control_snapshot, NamespaceControlSnapshot};
-use crate::wal::{load_wal_chain_within, WalChainLoad, WalChainLoadRequest};
+use crate::wal::{load_wal_chain, WalChainLoad, WalChainLoadRequest};
 use futures::StreamExt;
 use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordState, CheckpointStatus, HeadState, NamespaceStatus,
@@ -446,8 +446,9 @@ async fn collect_manifest_segments<S: ObjectStore + ?Sized>(
             Ok(Some(manifest)) => live.segments.extend(
                 manifest
                     .payload
-                    .segments
+                    .runs
                     .iter()
+                    .flat_map(|run| &run.segments)
                     .map(metadata_segment_object_key),
             ),
             Ok(None) if Some(manifest_object_id) == root_manifest_object_id => {
@@ -527,7 +528,7 @@ async fn collect_retained_wal<S: ObjectStore + ?Sized>(
     if remaining == 0 {
         return Err(CollectStop::Budget);
     }
-    let load = load_wal_chain_within(
+    let load = load_wal_chain(
         store,
         WalChainLoadRequest {
             namespace_id,
@@ -535,9 +536,9 @@ async fn collect_retained_wal<S: ObjectStore + ?Sized>(
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
+            max_segment_fetches: Some(usize::try_from(remaining).unwrap_or(usize::MAX)),
             recent_segments: &head.recent_segments,
         },
-        usize::try_from(remaining).unwrap_or(usize::MAX),
     )
     .await
     .map_err(|error| {
@@ -726,8 +727,9 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
         segments.extend(
             manifest
                 .payload
-                .segments
+                .runs
                 .iter()
+                .flat_map(|run| &run.segments)
                 .map(metadata_segment_object_key),
         );
     }

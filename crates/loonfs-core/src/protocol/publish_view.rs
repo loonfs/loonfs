@@ -16,8 +16,7 @@ use crate::namespace::control::load_head_object;
 use crate::namespace::control_snapshot::load_head_and_metadata_basis;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::{
-    ensure_replayed_head_matches, load_validated_wal_chain, project_validated_wal_tail,
-    WalChainLoadRequest,
+    ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
 };
 use loonfs_api::v0::CommittedChange;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceStatus};
@@ -222,7 +221,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<PublishTailProjection> {
     let manifest_head = head_from_manifest(head, loaded_basis.segments.manifest());
-    let wal_chain = load_validated_wal_chain(
+    let wal_chain = load_wal_chain(
         store,
         WalChainLoadRequest {
             namespace_id: &key.namespace_id,
@@ -230,13 +229,15 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &head.recent_segments,
         },
     )
     .await
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-    })?;
+    })?
+    .into_complete();
     let replayed = project_validated_wal_tail(
         &manifest_head,
         &loaded_basis.base_state,

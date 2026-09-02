@@ -13,7 +13,7 @@ use super::publish::{
     manifest_ref_for, manifest_write_failure, publish_metadata_root, write_namespace_manifest,
     ManifestPublicationOutcome,
 };
-use super::runs::{flatten_manifest_segments, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
+use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
@@ -27,14 +27,15 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control_snapshot::load_control_snapshot;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{
-    ensure_replayed_head_matches, load_validated_wal_chain, project_validated_wal_tail,
-    WalChainLoadRequest,
+    ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
 };
 use loonfs_api::wire::control::{HeadState, ManifestRef, NamespaceStatus};
-use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
+use loonfs_api::wire::manifest::{
+    MetadataRunRef, NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
+};
 use loonfs_api::{
-    next_public_ordinal, ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo,
-    ManifestObjectId, NamespaceId, RunNo, MAX_PUBLIC_INTEGER,
+    ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo, ManifestObjectId,
+    NamespaceId, RunNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
 use tracing::Instrument;
@@ -247,7 +248,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         load_basis_metadata_segments(store, None, namespace_id, &basis, head.created_at_ms).await?;
     let manifest_segments = loaded_basis.segments;
     let manifest_head = head_from_manifest(&head, manifest_segments.manifest());
-    let wal_chain = load_validated_wal_chain(
+    let wal_chain = load_wal_chain(
         store,
         WalChainLoadRequest {
             namespace_id,
@@ -255,13 +256,15 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
+            max_segment_fetches: None,
             recent_segments: &head.recent_segments,
         },
     )
     .await
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-    })?;
+    })?
+    .into_complete();
     let replayed = {
         let _span =
             tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
@@ -285,13 +288,11 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
 }
 
 pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> {
-    next_public_ordinal(current.0)
-        .map(ManifestNo)
-        .ok_or_else(|| {
-            CoreError::Internal(format!(
-                "manifest number cannot exceed {MAX_PUBLIC_INTEGER}"
-            ))
-        })
+    current.successor().map_err(|_| {
+        CoreError::Internal(format!(
+            "manifest number cannot exceed {MAX_PUBLIC_INTEGER}"
+        ))
+    })
 }
 
 /// Advances the manifest's run allocator after a producer has taken
@@ -349,42 +350,47 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     // one root-inode row sits at sequence zero, which no delta run above
     // that sequence would carry. The namespace's first manifest is
     // therefore one complete base run over the whole projected state.
-    let (base_seq, segments, next_run_no) = if matches!(projection.basis, MetadataBasis::Genesis) {
+    let (base_seq, runs, next_run_no) = if matches!(projection.basis, MetadataBasis::Genesis) {
         (
             head_seq,
-            flatten_manifest_segments(
-                build_manifest_segments(
-                    store,
-                    namespace_id,
-                    run_no,
-                    head_seq,
-                    CHECKPOINT_BASE_RUN_LEVEL,
-                    &projection.tail_state,
-                    MetadataLsmPolicy::default().max_rows_per_segment,
-                )
-                .await?,
-            ),
+            vec![MetadataRunRef {
+                run_no,
+                run_seq: head_seq,
+                tier: RunTier::Base,
+                segments: flatten_manifest_segments(
+                    build_manifest_segments(
+                        store,
+                        namespace_id,
+                        &projection.tail_state,
+                        MetadataLsmPolicy::default().max_rows_per_segment,
+                    )
+                    .await?,
+                ),
+            }],
             next_run_no_after(run_no)?,
         )
     } else {
-        let mut segments = previous_manifest.payload.segments.clone();
+        let mut runs = previous_manifest.payload.runs.clone();
         let mut next_run_no = run_no;
         if previous_manifest.payload.head_seq < head_seq {
-            segments.extend(flatten_manifest_segments(
-                build_manifest_delta_run_segments(
-                    store,
-                    namespace_id,
-                    run_no,
-                    head_seq,
-                    previous_manifest.payload.head_seq,
-                    &projection.tail_state,
-                    MetadataLsmPolicy::default().max_rows_per_segment,
-                )
-                .await?,
-            ));
+            runs.push(MetadataRunRef {
+                run_no,
+                run_seq: head_seq,
+                tier: RunTier::Delta,
+                segments: flatten_manifest_segments(
+                    build_manifest_delta_run_segments(
+                        store,
+                        namespace_id,
+                        previous_manifest.payload.head_seq,
+                        &projection.tail_state,
+                        MetadataLsmPolicy::default().max_rows_per_segment,
+                    )
+                    .await?,
+                ),
+            });
             next_run_no = next_run_no_after(run_no)?;
         }
-        (previous_manifest.payload.base_seq, segments, next_run_no)
+        (previous_manifest.payload.base_seq, runs, next_run_no)
     };
 
     NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
@@ -398,7 +404,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         next_inode_id: projection.head.next_inode_id,
         next_run_no,
         retention_floor_seq: projection.floor_seq,
-        segments,
+        runs,
     })
     .map_err(|err| {
         CoreError::Internal(format!(

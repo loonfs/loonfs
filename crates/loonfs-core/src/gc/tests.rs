@@ -3057,7 +3057,7 @@ async fn assert_record_reaped_and_basis_kept(
     )
     .await
     .expect("the basis manifest survives its record");
-    for descriptor in &basis.payload.segments {
+    for descriptor in basis.payload.runs.iter().flat_map(|run| &run.segments) {
         assert!(
             store
                 .head(&metadata_segment_object_key(descriptor))

@@ -513,8 +513,9 @@ async fn foreign_metadata_segment_owners(
     loonfs_api::wire::manifest::decode_namespace_manifest_json(&bytes)
         .expect("decode manifest")
         .payload
-        .segments
+        .runs
         .into_iter()
+        .flat_map(|run| run.segments)
         .map(|descriptor| descriptor.owner_namespace_id)
         .collect()
 }

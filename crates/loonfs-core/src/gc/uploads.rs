@@ -342,7 +342,9 @@ pub(super) async fn collect_referenced_content<S: ObjectStore + ?Sized>(
             return Ok(CollectedReferences::Deferred);
         }
         let segments =
-            match load_verified_manifest_segments(store, namespace_id, manifest_object_id).await {
+            match load_verified_manifest_segments(store, None, namespace_id, manifest_object_id)
+                .await
+            {
                 Ok(segments) => segments,
                 Err(error) => match error.failure_class() {
                     ManifestLoadFailureClass::Store => {

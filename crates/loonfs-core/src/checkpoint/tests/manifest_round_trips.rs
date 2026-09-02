@@ -606,9 +606,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     assert_eq!(delta_runs.len(), 2);
     assert_eq!(delta_runs[0].run_seq, first.checkpoint_seq);
     assert_eq!(delta_runs[1].run_seq, second.checkpoint_seq);
-    assert!(delta_runs
-        .iter()
-        .all(|run| run.level == CHECKPOINT_DELTA_RUN_LEVEL));
+    assert!(delta_runs.iter().all(|run| run.tier == RunTier::Delta));
     for response in [&first, &second] {
         let record = load_checkpoint_record(&store, &namespace_id, &response.checkpoint_id)
             .await
@@ -653,7 +651,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     assert_eq!(chained_delta_runs.len(), checkpoint_seqs.len());
     for (run, checkpoint_seq) in chained_delta_runs.iter().zip(&checkpoint_seqs) {
         assert_eq!(run.run_seq, *checkpoint_seq);
-        assert_eq!(run.level, CHECKPOINT_DELTA_RUN_LEVEL);
+        assert_eq!(run.tier, RunTier::Delta);
     }
 }
 
@@ -745,9 +743,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     let malformed_run_segments = build_manifest_segments_from_rows(
         &store,
         &namespace_id,
-        RunNo(0),
-        first,
-        CHECKPOINT_BASE_RUN_LEVEL,
         |family| manifest_rows_for_family(&materialization.metadata_state, family),
         NonZeroUsize::MAX,
     )
@@ -756,9 +751,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     let metadata_segments = build_manifest_segments_from_rows(
         &store,
         &namespace_id,
-        RunNo(1),
-        materialization.head.seq,
-        CHECKPOINT_DELTA_RUN_LEVEL,
         |family| {
             super::row::manifest_rows_for_family_after_seq(
                 &materialization.metadata_state,
@@ -770,8 +762,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     )
     .await
     .expect("write empty metadata run segments");
-    let mut segments = flatten_manifest_segments(malformed_run_segments);
-    segments.extend(flatten_manifest_segments(metadata_segments));
     let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no: manifest_no(materialization.head.seq),
@@ -783,7 +773,20 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         next_inode_id: materialization.head.next_inode_id,
         next_run_no: RunNo(2),
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-        segments,
+        runs: vec![
+            MetadataRunRef {
+                run_no: RunNo(0),
+                run_seq: first,
+                tier: RunTier::Base,
+                segments: flatten_manifest_segments(malformed_run_segments),
+            },
+            MetadataRunRef {
+                run_no: RunNo(1),
+                run_seq: materialization.head.seq,
+                tier: RunTier::Delta,
+                segments: flatten_manifest_segments(metadata_segments),
+            },
+        ],
     })
     .expect("build malformed manifest");
 

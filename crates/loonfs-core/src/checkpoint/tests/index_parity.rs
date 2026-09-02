@@ -105,12 +105,11 @@ async fn rewrite_revision_index_segment(
     rows.sort_by_key(|row| row.row_key_for_family(ApiMetadataRowFamily::RevisionsByInodeDesc));
     let descriptor = manifest
         .payload
-        .segments
+        .runs
         .iter_mut()
-        .find(|descriptor| {
-            descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
-                && descriptor.family == ApiMetadataRowFamily::RevisionsByInodeDesc
-        })
+        .filter(|run| run.tier == RunTier::Base)
+        .flat_map(|run| &mut run.segments)
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::RevisionsByInodeDesc)
         .expect("revision index metadata file");
     rewrite_manifest_segment(
         store,
@@ -187,24 +186,16 @@ async fn load_perturbed_manifest(
     write_namespace_manifest(store, &envelope)
         .await
         .expect("write perturbed manifest");
-    load_verified_manifest_segments(store, namespace_id, &manifest_object_id)
+    load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
         .await
         .map(|_| ())
 }
 
-/// Copies a descriptor with a new segment id and the requested run identity.
+/// Copies a descriptor with a new segment id.
 /// The copied row metadata models a stray or duplicate descriptor.
-fn segment_modelled_on(
-    modelled_on: &MetadataSegmentRef,
-    run_no: RunNo,
-    run_seq: ChangeSeq,
-    level: u32,
-) -> MetadataSegmentRef {
+fn segment_modelled_on(modelled_on: &MetadataSegmentRef) -> MetadataSegmentRef {
     MetadataSegmentRef {
         segment_id: loonfs_api::MetadataSegmentId::generate(),
-        run_no,
-        run_seq,
-        level,
         segment_index: 0,
         ..modelled_on.clone()
     }
@@ -218,11 +209,11 @@ fn base_segment_of_family(
 ) -> MetadataSegmentRef {
     manifest
         .payload
-        .segments
+        .runs
         .iter()
-        .find(|descriptor| {
-            descriptor.family == family && descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
-        })
+        .filter(|run| run.tier == RunTier::Base)
+        .flat_map(|run| &run.segments)
+        .find(|descriptor| descriptor.family == family)
         .expect("a folded base segment of this family")
         .clone()
 }
@@ -269,7 +260,7 @@ async fn current_manifest(
     namespace_id: &NamespaceId,
 ) -> NamespaceManifestEnvelope {
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
-    let segments = load_verified_manifest_segments(store, namespace_id, &manifest_object_id)
+    let segments = load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
         .await
         .expect("load the current manifest's segments");
     segments.manifest().clone()
@@ -650,15 +641,16 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
             .manifest;
     let descriptor = manifest
         .payload
-        .segments
+        .runs
         .iter_mut()
+        .flat_map(|run| &mut run.segments)
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::RevisionsByInodeDesc)
         .expect("revision index descriptor");
     descriptor.row_count += 1;
     let manifest_object_id = manifest.payload.manifest_object_id.clone();
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
-    match load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id).await {
+    match load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id).await {
         Err(ManifestLoadError::RunManifestMismatch { .. }) => {}
         Err(other) => panic!("expected run manifest mismatch, got {other:?}"),
         Ok(_) => panic!("tampered descriptor counts must not load"),
@@ -702,12 +694,11 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     let mut manifest = materialized.manifest;
     let descriptor = manifest
         .payload
-        .segments
+        .runs
         .iter_mut()
-        .find(|descriptor| {
-            descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
-                && descriptor.family == ApiMetadataRowFamily::Revisions
-        })
+        .filter(|run| run.tier == RunTier::Base)
+        .flat_map(|run| &mut run.segments)
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::Revisions)
         .expect("revision metadata file");
     // The descriptor is the only description of a segment; its index CRC
     // is what binds the manifest to the object's exact bytes.
@@ -782,8 +773,9 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     let descriptor = materialized
         .manifest
         .payload
-        .segments
+        .runs
         .iter_mut()
+        .flat_map(|run| &mut run.segments)
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::Inodes)
         .expect("inode segment");
     store
@@ -936,12 +928,11 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
 
     let child_descriptor = manifest
         .payload
-        .segments
+        .runs
         .iter_mut()
-        .find(|descriptor| {
-            descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
-                && descriptor.family == ApiMetadataRowFamily::DirentryChildBinds
-        })
+        .filter(|run| run.tier == RunTier::Base)
+        .flat_map(|run| &mut run.segments)
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryChildBinds)
         .expect("child bind metadata file");
     rewrite_manifest_segment(
         &store,
@@ -1000,10 +991,10 @@ async fn manifest_rejects_missing_revision_desc_index() {
             .expect("load manifest before corruption");
     let mut manifest = materialized.manifest;
     let manifest_no = manifest.payload.manifest_no;
-    manifest
-        .payload
-        .segments
-        .retain(|descriptor| descriptor.family != ApiMetadataRowFamily::RevisionsByInodeDesc);
+    manifest.payload.runs.iter_mut().for_each(|run| {
+        run.segments
+            .retain(|descriptor| descriptor.family != ApiMetadataRowFamily::RevisionsByInodeDesc);
+    });
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
@@ -1053,12 +1044,11 @@ async fn manifest_rejects_a_revision_desc_index_that_disagrees_with_its_family()
     let index_key = metadata_segment_object_key(
         pristine_manifest
             .payload
-            .segments
+            .runs
             .iter()
-            .find(|descriptor| {
-                descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
-                    && descriptor.family == ApiMetadataRowFamily::RevisionsByInodeDesc
-            })
+            .filter(|run| run.tier == RunTier::Base)
+            .flat_map(|run| &run.segments)
+            .find(|descriptor| descriptor.family == ApiMetadataRowFamily::RevisionsByInodeDesc)
             .expect("revision index metadata file"),
     );
     let pristine_index_bytes = store
@@ -1276,12 +1266,11 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
 
     let base_inode_segments = manifest
         .payload
-        .segments
+        .runs
         .iter()
-        .filter(|descriptor| {
-            descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
-                && descriptor.family == ApiMetadataRowFamily::Inodes
-        })
+        .filter(|run| run.tier == RunTier::Base)
+        .flat_map(|run| &run.segments)
+        .filter(|descriptor| descriptor.family == ApiMetadataRowFamily::Inodes)
         .count();
     assert_eq!(
         base_inode_segments, 1,
@@ -1289,12 +1278,11 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
     );
     let descriptor = manifest
         .payload
-        .segments
+        .runs
         .iter_mut()
-        .find(|descriptor| {
-            descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
-                && descriptor.family == ApiMetadataRowFamily::Inodes
-        })
+        .filter(|run| run.tier == RunTier::Base)
+        .flat_map(|run| &mut run.segments)
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::Inodes)
         .expect("base inode segment");
     // A one-byte target closes a block on every push, the last row
     // included. That is the shape a final row produces whenever it lands on
@@ -1316,9 +1304,10 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
-        .await
-        .expect("the rewritten manifest should load");
+    let segments =
+        load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
+            .await
+            .expect("the rewritten manifest should load");
     for row in &inode_rows {
         let key = row.row_key_for_family(ApiMetadataRowFamily::Inodes);
         let found = segments
@@ -1355,9 +1344,10 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
         .await
         .expect("create checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let segments = load_verified_manifest_segments(&store, &namespace_id, &manifest_object_id)
-        .await
-        .expect("load segments");
+    let segments =
+        load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
+            .await
+            .expect("load segments");
     let payload = segments.manifest().payload.clone();
 
     // The read path assumes the filter block directly precedes the index
@@ -1391,8 +1381,9 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     for (index, (label, perturb)) in perturbations.iter().enumerate() {
         let mut perturbed = payload.clone();
         let descriptor = perturbed
-            .segments
+            .runs
             .iter_mut()
+            .flat_map(|run| &mut run.segments)
             // A segment spanning several keys, so swapping its bounds
             // actually descends.
             .find(|descriptor| {
@@ -1433,12 +1424,15 @@ async fn a_manifest_whose_group_base_fragmented_does_not_load() {
     // the copy takes a run number of its own out of the allocator.
     let second_base_run_no = fragmented.next_run_no;
     fragmented.next_run_no = RunNo(second_base_run_no.0 + 1);
-    fragmented.segments.push(segment_modelled_on(
-        &base_segment_of_family(&manifest, ApiMetadataRowFamily::Inodes),
-        second_base_run_no,
-        manifest.payload.head_seq,
-        CHECKPOINT_BASE_RUN_LEVEL,
-    ));
+    fragmented.runs.push(MetadataRunRef {
+        run_no: second_base_run_no,
+        run_seq: manifest.payload.head_seq,
+        tier: RunTier::Base,
+        segments: vec![segment_modelled_on(&base_segment_of_family(
+            &manifest,
+            ApiMetadataRowFamily::Inodes,
+        ))],
+    });
 
     let error = load_perturbed_manifest(&store, &namespace_id, fragmented, 1)
         .await
@@ -1464,12 +1458,19 @@ async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
     assert_eq!(existing.segment_index, 0);
 
     let mut repeated = manifest.payload.clone();
-    repeated.segments.push(segment_modelled_on(
-        &existing,
-        existing.run_no,
-        existing.run_seq,
-        existing.level,
-    ));
+    repeated
+        .runs
+        .iter_mut()
+        .find(|run| {
+            run.tier == RunTier::Base
+                && run
+                    .segments
+                    .iter()
+                    .any(|descriptor| descriptor.family == existing.family)
+        })
+        .expect("the base run should exist")
+        .segments
+        .push(segment_modelled_on(&existing));
 
     let error = load_perturbed_manifest(&store, &namespace_id, repeated, 2)
         .await
@@ -1495,12 +1496,23 @@ async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
     assert_eq!(existing.segment_index, 0);
 
     let mut overlapping = manifest.payload.clone();
-    let mut second =
-        segment_modelled_on(&existing, existing.run_no, existing.run_seq, existing.level);
+    let mut second = segment_modelled_on(&existing);
     // Index one keeps the numbering valid, leaving the overlapping range as
     // the only error.
     second.segment_index = 1;
-    overlapping.segments.push(second);
+    overlapping
+        .runs
+        .iter_mut()
+        .find(|run| {
+            run.tier == RunTier::Base
+                && run
+                    .segments
+                    .iter()
+                    .any(|descriptor| descriptor.family == existing.family)
+        })
+        .expect("the base run should exist")
+        .segments
+        .push(second);
 
     let error = load_perturbed_manifest(&store, &namespace_id, overlapping, 3)
         .await

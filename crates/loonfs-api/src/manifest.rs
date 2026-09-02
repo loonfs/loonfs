@@ -67,6 +67,31 @@ pub enum MetadataRowFamily {
     Attributes,
 }
 
+/// Identifies the compaction tier that holds a metadata run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunTier {
+    /// Holds rows that no compaction has dropped.
+    Delta,
+    /// Holds rows produced by a compaction over the oldest run.
+    Base,
+}
+
+/// Reference to one immutable metadata run in a namespace manifest.
+///
+/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataRunRef {
+    /// Run identity allocated by the manifest.
+    pub run_no: RunNo,
+    /// Namespace sequence at which this run was produced.
+    pub run_seq: ChangeSeq,
+    /// Compaction tier used to order overlapping runs.
+    pub tier: RunTier,
+    /// Segments written as part of this run.
+    pub segments: Vec<MetadataSegmentRef>,
+}
+
 /// Reference to one immutable metadata segment in a namespace manifest.
 ///
 /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
@@ -81,13 +106,6 @@ pub struct MetadataSegmentRef {
     /// The owner, segment id, and optional job id determine the object key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_job_id: Option<MetadataCompactionId>,
-    /// Run this segment belongs to. Every segment one producer wrote
-    /// together carries the same run number, and no two runs share one.
-    pub run_no: RunNo,
-    /// Namespace sequence at which this run was produced.
-    pub run_seq: ChangeSeq,
-    /// Compaction tier used to order overlapping runs during reads and reorganization.
-    pub level: u32,
     /// Row schema and lookup ordering encoded in this segment.
     pub family: MetadataRowFamily,
     /// Zero-based shard position among segments emitted for the same family and run.
@@ -415,20 +433,31 @@ impl MetadataRow {
                 bind_delta_index,
                 ..
             } => match family {
-                MetadataRowFamily::DirentryChildBinds => lookup_keys::direntry_child_bind_row_key(
-                    *child_inode_id,
-                    *bind_seq,
-                    *bind_delta_index,
-                    *parent_inode_id,
-                    name_key.as_str(),
-                ),
-                _ => lookup_keys::direntry_bind_row_key(
+                MetadataRowFamily::DirentryBinds => Some(lookup_keys::direntry_bind_row_key(
                     *parent_inode_id,
                     name_key.as_str(),
                     *bind_seq,
                     *bind_delta_index,
-                ),
-            },
+                )),
+                MetadataRowFamily::DirentryChildBinds => {
+                    Some(lookup_keys::direntry_child_bind_row_key(
+                        *child_inode_id,
+                        *bind_seq,
+                        *bind_delta_index,
+                        *parent_inode_id,
+                        name_key.as_str(),
+                    ))
+                }
+                MetadataRowFamily::Inodes
+                | MetadataRowFamily::DirentryUnbinds
+                | MetadataRowFamily::Revisions
+                | MetadataRowFamily::RevisionsByInodeDesc
+                | MetadataRowFamily::Tombstones
+                | MetadataRowFamily::ActiveDeletions
+                | MetadataRowFamily::CommitReceipts
+                | MetadataRowFamily::Attributes => None,
+            }
+            .expect("a direntry bind row should use a direntry bind family"),
             Self::DirentryUnbind {
                 parent_inode_id,
                 name_key,
@@ -452,16 +481,29 @@ impl MetadataRow {
                 delta_index,
                 ..
             } => match family {
+                MetadataRowFamily::Revisions => Some(lookup_keys::revision_row_key(
+                    *inode_id,
+                    *revision_no,
+                    *delta_index,
+                )),
                 MetadataRowFamily::RevisionsByInodeDesc => {
-                    lookup_keys::revision_by_inode_desc_row_key(
+                    Some(lookup_keys::revision_by_inode_desc_row_key(
                         *inode_id,
                         *revision_no,
                         *committed_seq,
                         *delta_index,
-                    )
+                    ))
                 }
-                _ => lookup_keys::revision_row_key(*inode_id, *revision_no, *delta_index),
-            },
+                MetadataRowFamily::Inodes
+                | MetadataRowFamily::DirentryBinds
+                | MetadataRowFamily::DirentryChildBinds
+                | MetadataRowFamily::DirentryUnbinds
+                | MetadataRowFamily::Tombstones
+                | MetadataRowFamily::ActiveDeletions
+                | MetadataRowFamily::CommitReceipts
+                | MetadataRowFamily::Attributes => None,
+            }
+            .expect("a file revision row should use a revision family"),
             Self::Tombstone {
                 root_inode_id,
                 generation,
@@ -506,22 +548,43 @@ impl MetadataRow {
                 child_inode_id,
                 ..
             } => match family {
+                MetadataRowFamily::DirentryBinds => Some(lookup_keys::direntry_bind_probe(
+                    *parent_inode_id,
+                    name_key.as_str(),
+                )),
                 MetadataRowFamily::DirentryChildBinds => {
-                    lookup_keys::direntry_child_probe(*child_inode_id)
+                    Some(lookup_keys::direntry_child_probe(*child_inode_id))
                 }
-                _ => lookup_keys::direntry_bind_probe(*parent_inode_id, name_key.as_str()),
-            },
+                MetadataRowFamily::Inodes
+                | MetadataRowFamily::DirentryUnbinds
+                | MetadataRowFamily::Revisions
+                | MetadataRowFamily::RevisionsByInodeDesc
+                | MetadataRowFamily::Tombstones
+                | MetadataRowFamily::ActiveDeletions
+                | MetadataRowFamily::CommitReceipts
+                | MetadataRowFamily::Attributes => None,
+            }
+            .expect("a direntry bind row should use a direntry bind family"),
             Self::DirentryUnbind {
                 parent_inode_id,
                 name_key,
                 ..
             } => lookup_keys::direntry_unbind_probe(*parent_inode_id, name_key.as_str()),
             Self::FileRevision { inode_id, .. } => match family {
+                MetadataRowFamily::Revisions => Some(lookup_keys::revision_probe(*inode_id)),
                 MetadataRowFamily::RevisionsByInodeDesc => {
-                    lookup_keys::revision_by_inode_desc_probe(*inode_id)
+                    Some(lookup_keys::revision_by_inode_desc_probe(*inode_id))
                 }
-                _ => lookup_keys::revision_probe(*inode_id),
-            },
+                MetadataRowFamily::Inodes
+                | MetadataRowFamily::DirentryBinds
+                | MetadataRowFamily::DirentryChildBinds
+                | MetadataRowFamily::DirentryUnbinds
+                | MetadataRowFamily::Tombstones
+                | MetadataRowFamily::ActiveDeletions
+                | MetadataRowFamily::CommitReceipts
+                | MetadataRowFamily::Attributes => None,
+            }
+            .expect("a file revision row should use a revision family"),
             Self::Tombstone { root_inode_id, .. } => lookup_keys::tombstone_probe(*root_inode_id),
             // The family is only ever range-scanned in key order, never
             // probed for one deletion, so the filter key is the row key.
@@ -856,19 +919,18 @@ pub struct NamespaceManifestPayload {
     pub head_seq: ChangeSeq,
     /// Commit id assigned to `head_seq`, used to validate agreement with the head.
     pub head_commit_id: CommitId,
-    /// Oldest run sequence still represented by `segments`.
+    /// Oldest run sequence still represented by `runs`.
     pub base_seq: ChangeSeq,
     /// Fencing epoch of the writer that produced this candidate.
     pub writer_epoch: WriterEpoch,
     /// First inode identity available after replaying the manifest snapshot.
     pub next_inode_id: InodeId,
-    /// Run number the next producer allocates. Every segment's `run_no` is
-    /// below it.
+    /// Run number the next producer allocates. Every run's `run_no` is below it.
     pub next_run_no: RunNo,
     /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: ChangeSeq,
-    /// Complete ordered set of metadata segments required to reconstruct the snapshot.
-    pub segments: Vec<MetadataSegmentRef>,
+    /// Complete set of metadata runs required to reconstruct the snapshot.
+    pub runs: Vec<MetadataRunRef>,
 }
 
 /// In-memory view of a namespace manifest envelope.
@@ -952,7 +1014,8 @@ pub fn decode_namespace_manifest_json(
 mod tests {
     use super::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
-        MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
+        MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope,
+        NamespaceManifestPayload, RunTier,
     };
     use crate::{
         ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
@@ -1027,12 +1090,12 @@ mod tests {
             next_inode_id: InodeId(42),
             next_run_no: RunNo(1),
             retention_floor_seq: ChangeSeq(0),
-            segments: vec![metadata_segment_ref(
+            runs: vec![metadata_run_ref(
                 "demo",
                 "seg_00000000000000000000000000000001",
                 RunNo(0),
                 ChangeSeq(10),
-                1,
+                RunTier::Base,
             )],
         })
         .expect("manifest");
@@ -1042,8 +1105,8 @@ mod tests {
 
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.payload.base_seq, ChangeSeq(10));
-        assert_eq!(decoded.payload.segments.len(), 1);
-        assert_eq!(decoded.payload.segments[0].run_seq, ChangeSeq(10));
+        assert_eq!(decoded.payload.runs.len(), 1);
+        assert_eq!(decoded.payload.runs[0].run_seq, ChangeSeq(10));
     }
 
     #[test]
@@ -1063,20 +1126,20 @@ mod tests {
             next_inode_id: InodeId(42),
             next_run_no: RunNo(2),
             retention_floor_seq: ChangeSeq(0),
-            segments: vec![
-                metadata_segment_ref(
+            runs: vec![
+                metadata_run_ref(
                     "source",
                     "seg_00000000000000000000000000000001",
                     RunNo(0),
                     ChangeSeq(10),
-                    1,
+                    RunTier::Base,
                 ),
-                metadata_segment_ref(
+                metadata_run_ref(
                     "demo",
                     "seg_00000000000000000000000000000002",
                     RunNo(1),
                     ChangeSeq(12),
-                    0,
+                    RunTier::Delta,
                 ),
             ],
         })
@@ -1086,11 +1149,11 @@ mod tests {
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
-        assert_eq!(decoded.payload.segments[0].level, 1);
-        assert_eq!(decoded.payload.segments[1].level, 0);
-        assert_eq!(decoded.payload.segments[1].run_seq, ChangeSeq(12));
+        assert_eq!(decoded.payload.runs[0].tier, RunTier::Base);
+        assert_eq!(decoded.payload.runs[1].tier, RunTier::Delta);
+        assert_eq!(decoded.payload.runs[1].run_seq, ChangeSeq(12));
         assert_eq!(
-            decoded.payload.segments[0].owner_namespace_id,
+            decoded.payload.runs[0].segments[0].owner_namespace_id,
             NamespaceId::parse("source").expect("valid namespace id")
         );
     }
@@ -1099,21 +1162,9 @@ mod tests {
     fn namespace_manifest_codec_round_trips_a_compaction_job_segment() {
         let compaction_job_id = MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
             .expect("valid compaction job id");
-        let mut staged = metadata_segment_ref(
-            "demo",
-            "seg_00000000000000000000000000000001",
-            RunNo(0),
-            ChangeSeq(14),
-            1,
-        );
+        let mut staged = metadata_segment_ref("demo", "seg_00000000000000000000000000000001");
         staged.compaction_job_id = Some(compaction_job_id.clone());
-        let flushed = metadata_segment_ref(
-            "demo",
-            "seg_00000000000000000000000000000002",
-            RunNo(1),
-            ChangeSeq(14),
-            0,
-        );
+        let flushed = metadata_segment_ref("demo", "seg_00000000000000000000000000000002");
         let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(14),
@@ -1129,7 +1180,20 @@ mod tests {
             next_inode_id: InodeId(42),
             next_run_no: RunNo(2),
             retention_floor_seq: ChangeSeq(0),
-            segments: vec![staged, flushed],
+            runs: vec![
+                MetadataRunRef {
+                    run_no: RunNo(0),
+                    run_seq: ChangeSeq(14),
+                    tier: RunTier::Base,
+                    segments: vec![staged],
+                },
+                MetadataRunRef {
+                    run_no: RunNo(1),
+                    run_seq: ChangeSeq(14),
+                    tier: RunTier::Delta,
+                    segments: vec![flushed],
+                },
+            ],
         })
         .expect("manifest");
 
@@ -1138,10 +1202,10 @@ mod tests {
 
         assert_eq!(decoded, envelope);
         assert_eq!(
-            decoded.payload.segments[0].compaction_job_id,
+            decoded.payload.runs[0].segments[0].compaction_job_id,
             Some(compaction_job_id)
         );
-        assert_eq!(decoded.payload.segments[1].compaction_job_id, None);
+        assert_eq!(decoded.payload.runs[1].segments[0].compaction_job_id, None);
         let text = String::from_utf8(encoded).expect("manifest json is utf-8");
         assert_eq!(
             text.matches("\"compaction_job_id\"").count(),
@@ -1480,20 +1544,26 @@ mod tests {
         }
     }
 
-    fn metadata_segment_ref(
+    fn metadata_run_ref(
         owner_namespace_id: &str,
         segment_id: &str,
         run_no: RunNo,
         run_seq: ChangeSeq,
-        level: u32,
-    ) -> MetadataSegmentRef {
+        tier: RunTier,
+    ) -> MetadataRunRef {
+        MetadataRunRef {
+            run_no,
+            run_seq,
+            tier,
+            segments: vec![metadata_segment_ref(owner_namespace_id, segment_id)],
+        }
+    }
+
+    fn metadata_segment_ref(owner_namespace_id: &str, segment_id: &str) -> MetadataSegmentRef {
         MetadataSegmentRef {
             owner_namespace_id: NamespaceId::parse(owner_namespace_id).expect("valid namespace id"),
             segment_id: MetadataSegmentId::parse(segment_id).expect("valid segment id"),
             compaction_job_id: None,
-            run_no,
-            run_seq,
-            level,
             family: MetadataRowFamily::Inodes,
             segment_index: 0,
             row_count: 0,

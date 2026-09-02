@@ -9,8 +9,7 @@
 //! staging prefix and lease. Only base merges may remove rows below the
 //! retention floor; delta merges preserve every row.
 
-use super::block_fetch::{load_segment_filter, segment_object_len};
-use super::block_load::SessionBlockMemo;
+use super::block_fetch::segment_object_len;
 use super::build::MetadataSegmentDestination;
 use super::cache::{MetadataSegmentCache, MetadataSegmentCacheConfig};
 use super::compaction_lease::{CompactionLease, LeaseHold};
@@ -25,26 +24,22 @@ use super::frozen_floor::{
     bind_survives_frozen_floor, unbinding_at_or_below_floor, unbindings_at_or_below_floor,
     BindingGeneration,
 };
-use super::load::{
-    load_manifest_segment_rows_in_key_range_with_cache, load_verified_manifest_segments,
-};
+use super::load::load_verified_manifest_segments;
 use super::publish::{publish_metadata_root, ManifestPublicationOutcome};
 use super::reorganize::{group_run_descriptors, write_replacement_manifest, MergePlacement};
 use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
-use super::scan::{descriptor_may_intersect_range, Readahead, VerifiedMetadataSegments};
+use super::scan::{Readahead, VerifiedMetadataSegments};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::load_metadata_root_object_if_present;
 use crate::time::current_time_ms;
 use crate::time::StdMonotonicTimer;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily, MetadataSegmentRef};
-use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -231,19 +226,6 @@ impl MetadataCompactionCancellation {
     }
 }
 
-/// How a job ended.
-#[derive(Debug)]
-pub(super) enum MetadataMergeOutcome {
-    Completed(MetadataMergeResult),
-    /// The cancellation token was set. Whatever the job had written stays
-    /// staged and unreferenced.
-    Cancelled,
-    /// A heartbeat lost its compare-and-swap, so garbage collection owns this
-    /// job's prefix now. Whatever the job had written is being reaped, and
-    /// the job must not publish descriptors naming it.
-    Fenced,
-}
-
 /// What one finished merge built, held in memory until the caller publishes
 /// it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -281,10 +263,8 @@ pub(super) struct MetadataMergeResult {
 /// no registry entry, and no admission, and the segments are written at
 /// ordinary segment keys because the step publishes them itself a moment later.
 ///
-/// `runs` is the window the step's budgets chose, `run_no` is the number the
-/// step's manifest allocated for the output, and `placement` is where that
-/// output stands in the group — which is also what decides whether rows may
-/// be dropped.
+/// `runs` is the window the step's budgets chose, and `placement` is where the
+/// output stands in the group.
 #[allow(
     clippy::too_many_arguments,
     reason = "one merge's inputs, named rather than grouped into a second shape"
@@ -294,21 +274,23 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
     runs: &[MetadataRunManifest],
-    run_no: RunNo,
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
     policy: MetadataLsmPolicy,
 ) -> Result<MetadataMergeResult> {
-    let merge = StepGroupMerge(GroupMerge::new(
+    let probe_cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
+        max_decoded_bytes: PROBE_CACHE_DECODED_BYTES,
+    });
+    let merge = GroupMerge::new(
         store,
         namespace_id,
         group,
-        run_no,
         placement,
         frozen_floor_seq,
         MetadataSegmentDestination::Published { namespace_id },
         policy,
         runs.to_vec(),
+        &probe_cache,
         // The window is capped by the step's budgets, so the set of below-floor
         // unbound generations is capped with it and costs no store reads.
         ReverseBindResolution::CollectedUnbinds(BTreeSet::new()),
@@ -316,8 +298,15 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
         // ends in the step's own publication, so it has nothing to report
         // progress about.
         None,
-    ));
-    merge.run().await
+    );
+    let mut control = MergeControl {
+        cancellation: None,
+        lease: None,
+    };
+    Ok(merge
+        .run(&mut control)
+        .await?
+        .expect("a step merge has no cancellation token or lease to stop it"))
 }
 
 /// Rebuilds the family group and runs selected by `spec`. `segments` must come
@@ -329,16 +318,14 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
     lease: &mut CompactionLease<'_>,
-) -> Result<MetadataMergeOutcome> {
+) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
+    let probe_cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
+        max_decoded_bytes: PROBE_CACHE_DECODED_BYTES,
+    });
     let merge = GroupMerge::new(
         segments.store,
         namespace_id,
         spec.group,
-        // The manifest this job reads allocates the number its output is
-        // written under. Finalization stamps the number again from the
-        // manifest it actually rebases onto, so a flush that lands while the
-        // job runs cannot leave two runs sharing one number.
-        segments.manifest().payload.next_run_no,
         spec.placement,
         spec.frozen_floor_seq,
         MetadataSegmentDestination::CompactionStaging {
@@ -347,26 +334,18 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
         },
         policy,
         resolve_snapshot_runs(segments, spec)?,
+        &probe_cache,
         // A job has no bound on the group it rebuilds, so it reads the
         // snapshot per reverse row rather than holding a set that would follow
         // the group's size.
         ReverseBindResolution::PointProbeSnapshot,
         Some(ProgressReporter::new(spec.input_rows())),
     );
-    let mut control = JobMergeControl {
-        cancellation,
-        lease,
+    let mut control = MergeControl {
+        cancellation: Some(cancellation),
+        lease: Some(lease),
     };
-    match merge.run(&mut control).await? {
-        Ok(result) => Ok(MetadataMergeOutcome::Completed(result)),
-        Err(MergeStop::Cancelled) => Ok(MetadataMergeOutcome::Cancelled),
-        Err(MergeStop::Fenced) => Ok(MetadataMergeOutcome::Fenced),
-    }
-}
-
-enum MergeStop {
-    Cancelled,
-    Fenced,
+    merge.run(&mut control).await
 }
 
 /// How one background compaction job ended.
@@ -397,21 +376,6 @@ pub enum MetadataCompactionJobOutcome {
     /// Every publication attempt lost the root race. The job is thrown away
     /// and a later step plans it again.
     Superseded,
-}
-
-/// What one finalization attempt sequence decided.
-#[derive(Debug)]
-pub(super) enum Finalization {
-    Published(ManifestNo),
-    Abandoned,
-    Superseded,
-    /// The cancellation token was set before this finalization published.
-    /// Nothing was swapped in, so the ending is the executor's: staged output
-    /// nothing references, and the manifest where it was.
-    Cancelled,
-    /// The heartbeat at the top of an attempt lost its compare-and-swap, so
-    /// this job no longer owns the segments it was about to name.
-    Fenced,
 }
 
 /// Runs one streaming compaction end to end: rebuild the group, then swap the
@@ -462,7 +426,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         "streaming metadata compaction started"
     );
 
-    let result = match run_metadata_compaction(
+    let outcome = match run_metadata_compaction(
         &segments,
         namespace_id,
         spec,
@@ -472,103 +436,74 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     )
     .await?
     {
-        MetadataMergeOutcome::Completed(result) => result,
-        // The prefix belongs to garbage collection now, and the segments the
-        // job wrote are being reaped. Publishing descriptors naming them is
-        // exactly what the fence exists to stop.
-        MetadataMergeOutcome::Fenced => {
-            tracing::warn!(
-                namespace_id = namespace_id.as_str(),
-                job_id = spec.job_id().as_str(),
-                families = ?spec.families(),
-                "streaming metadata compaction fenced: garbage collection claimed its prefix \
-                 while it ran, so it publishes nothing and a later step plans it again"
-            );
-            return Ok(MetadataCompactionJobOutcome::Fenced);
+        Ok(result) => {
+            drop(segments);
+            finalize_metadata_compaction(
+                store,
+                namespace_id,
+                spec,
+                &snapshot_keys,
+                result,
+                cancellation,
+                &mut lease,
+            )
+            .await?
         }
-        MetadataMergeOutcome::Cancelled => {
-            // The executor stops between block fetches, so what it wrote is
-            // whatever segments had already filled. They are staged and named
-            // by nothing. The lease is left where it is: it expires on its
-            // own, and a pass that arrives before it does keeps a dead job's
-            // orphans a while longer, which costs storage and nothing else.
-            tracing::info!(
-                namespace_id = namespace_id.as_str(),
-                job_id = spec.job_id().as_str(),
-                families = ?spec.families(),
-                "streaming metadata compaction cancelled"
-            );
-            return Ok(MetadataCompactionJobOutcome::Cancelled);
-        }
+        Err(stopped) => stopped,
     };
-    drop(segments);
+    log_metadata_compaction_outcome(namespace_id, spec, &outcome);
+    Ok(outcome)
+}
 
-    let rows_read = result.rows_read;
-    let rows_written = result.rows_written;
-    let input_bytes = result.input_bytes;
-    let output_bytes = result.output_bytes;
-    let output_segments = result.output_segments.len();
-    match finalize_metadata_compaction(
-        store,
-        namespace_id,
-        spec,
-        &snapshot_keys,
-        result,
-        cancellation,
-        &mut lease,
-    )
-    .await?
-    {
-        Finalization::Published(manifest_no) => {
-            // The job stops heartbeating here and leaves its final lease
-            // where it is. Deleting it would break the handoff: a collection
-            // pass that captured its live set before this publication would
-            // find segments hours older than any grace window and no lease
-            // saying who owns them. The fresh lease covers that pass, and the
-            // next one reads a root that already names the segments and
-            // removes only the expired lease.
-            tracing::info!(
-                namespace_id = namespace_id.as_str(),
-                job_id = spec.job_id().as_str(),
-                families = ?spec.families(),
-                rows_read,
-                rows_written,
-                input_bytes,
-                output_bytes,
-                output_segments,
-                manifest_no = manifest_no.0,
-                "streaming metadata compaction published"
-            );
-            Ok(MetadataCompactionJobOutcome::Published {
-                manifest_no,
-                rows_read,
-                rows_written,
-                input_bytes,
-                output_bytes,
-                output_segments,
-            })
-        }
-        Finalization::Abandoned => Ok(MetadataCompactionJobOutcome::Abandoned),
-        Finalization::Superseded => Ok(MetadataCompactionJobOutcome::Superseded),
-        Finalization::Fenced => {
-            tracing::warn!(
-                namespace_id = namespace_id.as_str(),
-                job_id = spec.job_id().as_str(),
-                families = ?spec.families(),
-                "streaming metadata compaction fenced while finalizing: garbage collection owns \
-                 its prefix, so nothing was published"
-            );
-            Ok(MetadataCompactionJobOutcome::Fenced)
-        }
-        Finalization::Cancelled => {
-            tracing::info!(
-                namespace_id = namespace_id.as_str(),
-                job_id = spec.job_id().as_str(),
-                families = ?spec.families(),
-                "streaming metadata compaction cancelled while finalizing"
-            );
-            Ok(MetadataCompactionJobOutcome::Cancelled)
-        }
+fn log_metadata_compaction_outcome(
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+    outcome: &MetadataCompactionJobOutcome,
+) {
+    match outcome {
+        MetadataCompactionJobOutcome::Published {
+            manifest_no,
+            rows_read,
+            rows_written,
+            input_bytes,
+            output_bytes,
+            output_segments,
+        } => tracing::info!(
+            namespace_id = namespace_id.as_str(),
+            job_id = spec.job_id().as_str(),
+            families = ?spec.families(),
+            rows_read,
+            rows_written,
+            input_bytes,
+            output_bytes,
+            output_segments,
+            manifest_no = manifest_no.0,
+            "streaming metadata compaction published"
+        ),
+        MetadataCompactionJobOutcome::Cancelled => tracing::info!(
+            namespace_id = namespace_id.as_str(),
+            job_id = spec.job_id().as_str(),
+            families = ?spec.families(),
+            "streaming metadata compaction cancelled"
+        ),
+        MetadataCompactionJobOutcome::Abandoned => tracing::info!(
+            namespace_id = namespace_id.as_str(),
+            job_id = spec.job_id().as_str(),
+            families = ?spec.families(),
+            "streaming metadata compaction abandoned"
+        ),
+        MetadataCompactionJobOutcome::Fenced => tracing::warn!(
+            namespace_id = namespace_id.as_str(),
+            job_id = spec.job_id().as_str(),
+            families = ?spec.families(),
+            "streaming metadata compaction fenced"
+        ),
+        MetadataCompactionJobOutcome::Superseded => tracing::info!(
+            namespace_id = namespace_id.as_str(),
+            job_id = spec.job_id().as_str(),
+            families = ?spec.families(),
+            "streaming metadata compaction superseded"
+        ),
     }
 }
 
@@ -589,17 +524,22 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     result: MetadataMergeResult,
     cancellation: &MetadataCompactionCancellation,
     lease: &mut CompactionLease<'_>,
-) -> Result<Finalization> {
+) -> Result<MetadataCompactionJobOutcome> {
+    let rows_read = result.rows_read;
+    let rows_written = result.rows_written;
+    let input_bytes = result.input_bytes;
+    let output_bytes = result.output_bytes;
+    let output_segments = result.output_segments.len();
     let timer = lease.timer();
     for attempt in 1..=MAX_FINALIZATION_ATTEMPTS {
         // Check cancellation again after every publication conflict.
         if cancellation.is_cancelled() {
-            return Ok(Finalization::Cancelled);
+            return Ok(MetadataCompactionJobOutcome::Cancelled);
         }
         // Refresh the lease before publishing. Its expiry exceeds the
         // publication budget, so GC cannot claim the prefix before the CAS.
         if lease.heartbeat(store).await? == LeaseHold::Fenced {
-            return Ok(Finalization::Fenced);
+            return Ok(MetadataCompactionJobOutcome::Fenced);
         }
         let publication_started_ms = timer.monotonic_now_ms();
         let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
@@ -607,41 +547,36 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             .map_err(CoreError::ControlObjectLoad)?
             .map(|loaded| loaded.state)
         else {
-            return Ok(Finalization::Abandoned);
+            return Ok(MetadataCompactionJobOutcome::Abandoned);
         };
-        let segments =
-            load_verified_manifest_segments(store, namespace_id, &root.manifest.manifest_object_id)
-                .await
-                .map_err(manifest_load_failure)?;
+        let segments = load_verified_manifest_segments(
+            store,
+            None,
+            namespace_id,
+            &root.manifest.manifest_object_id,
+        )
+        .await
+        .map_err(manifest_load_failure)?;
         if snapshot_segment_keys(&segments, spec).as_ref() != Some(snapshot_keys) {
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
                 families = ?spec.families(),
                 "streaming metadata compaction abandoned: its input runs moved while it ran"
             );
-            return Ok(Finalization::Abandoned);
+            return Ok(MetadataCompactionJobOutcome::Abandoned);
         }
 
         let previous = segments.manifest();
-        let surviving: Vec<MetadataSegmentRef> = previous
+        let surviving = previous
             .payload
-            .segments
+            .runs
             .iter()
-            .filter(|descriptor| !snapshot_keys.contains(&metadata_segment_object_key(descriptor)))
-            .cloned()
-            .collect();
-        // The manifest that first names a run allocates its number, and this
-        // attempt may be rebasing onto a manifest published after the job
-        // started. So the number is taken here, from the manifest this
-        // attempt replaces, and stamped onto the output the job wrote.
-        let run_no = previous.payload.next_run_no;
-        let outputs: Vec<MetadataSegmentRef> = result
-            .output_segments
-            .iter()
-            .cloned()
-            .map(|descriptor| MetadataSegmentRef {
-                run_no,
-                ..descriptor
+            .filter_map(|run| {
+                let mut run = run.clone();
+                run.segments.retain(|descriptor| {
+                    !snapshot_keys.contains(&metadata_segment_object_key(descriptor))
+                });
+                (!run.segments.is_empty()).then_some(run)
             })
             .collect();
         let manifest = write_replacement_manifest(
@@ -649,7 +584,8 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             namespace_id,
             previous,
             surviving,
-            outputs,
+            result.output_segments.clone(),
+            spec.placement,
             spec.frozen_floor_seq(),
         )
         .await?;
@@ -657,7 +593,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         // The last check before the swap that makes this output reader
         // truth. Everything above it is reads and objects nothing references.
         if cancellation.is_cancelled() {
-            return Ok(Finalization::Cancelled);
+            return Ok(MetadataCompactionJobOutcome::Cancelled);
         }
         ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
         let published = publish_metadata_root(
@@ -671,7 +607,14 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         drop(segments);
         let lost_to = match published {
             ManifestPublicationOutcome::Published(_) => {
-                return Ok(Finalization::Published(manifest.payload.manifest_no))
+                return Ok(MetadataCompactionJobOutcome::Published {
+                    manifest_no: manifest.payload.manifest_no,
+                    rows_read,
+                    rows_written,
+                    input_bytes,
+                    output_bytes,
+                    output_segments,
+                })
             }
             ManifestPublicationOutcome::CoveredByCurrent(_) => "covered_by_current",
             ManifestPublicationOutcome::PredecessorChanged(_) => "predecessor_changed",
@@ -693,7 +636,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         "streaming metadata compaction lost every publication attempt; a later step plans it \
          again"
     );
-    Ok(Finalization::Superseded)
+    Ok(MetadataCompactionJobOutcome::Superseded)
 }
 
 /// Loads the segments in the current root manifest, or `None` if no root exists.
@@ -708,7 +651,7 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     else {
         return Ok(None);
     };
-    load_verified_manifest_segments(store, namespace_id, &root.manifest.manifest_object_id)
+    load_verified_manifest_segments(store, None, namespace_id, &root.manifest.manifest_object_id)
         .await
         .map(Some)
         .map_err(manifest_load_failure)
@@ -831,18 +774,13 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     namespace_id: &'a NamespaceId,
     group: MetadataFamilyGroup,
-    /// The number every output segment carries, so all of them read back as
-    /// one run.
-    run_no: RunNo,
-    /// Where the output stands in the group, which decides the level and
-    /// sequence every segment carries and whether rows may be dropped at all.
+    /// Where the output stands in the group and whether rows may be dropped.
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
     destination: MetadataSegmentDestination<'a>,
     policy: MetadataLsmPolicy,
-    snapshot: Vec<MetadataRunManifest>,
+    snapshot: VerifiedMetadataSegments<'a, S>,
     reverse_binds: ReverseBindResolution,
-    probe_cache: MetadataSegmentCache,
     result: MetadataMergeResult,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
@@ -854,68 +792,27 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     progress: Option<ProgressReporter>,
 }
 
-/// A merge owned by one bounded maintenance step. Its control type cannot
-/// produce cancellation or fencing, so its result carries neither state.
-struct StepGroupMerge<'a, S: ObjectStore + ?Sized>(GroupMerge<'a, S>);
-
-impl<'a, S: ObjectStore + ?Sized> StepGroupMerge<'a, S> {
-    async fn run(self) -> Result<MetadataMergeResult> {
-        let mut control = StepMergeControl;
-        match self.0.run(&mut control).await? {
-            Ok(result) => Ok(result),
-            Err(never) => match never {},
-        }
-    }
+struct MergeControl<'a, 'lease> {
+    cancellation: Option<&'a MetadataCompactionCancellation>,
+    lease: Option<&'a mut CompactionLease<'lease>>,
 }
 
-trait MergeControl {
-    type Stop;
-
-    fn cancellation(&self) -> Option<Self::Stop>;
-
-    async fn heartbeat<S: ObjectStore + ?Sized>(&mut self, store: &S)
-        -> Result<Option<Self::Stop>>;
-}
-
-struct StepMergeControl;
-
-impl MergeControl for StepMergeControl {
-    type Stop = Infallible;
-
-    fn cancellation(&self) -> Option<Self::Stop> {
-        None
-    }
-
-    async fn heartbeat<S: ObjectStore + ?Sized>(
-        &mut self,
-        _store: &S,
-    ) -> Result<Option<Self::Stop>> {
-        Ok(None)
-    }
-}
-
-struct JobMergeControl<'a, 'lease> {
-    cancellation: &'a MetadataCompactionCancellation,
-    lease: &'a mut CompactionLease<'lease>,
-}
-
-impl MergeControl for JobMergeControl<'_, '_> {
-    type Stop = MergeStop;
-
-    fn cancellation(&self) -> Option<Self::Stop> {
+impl MergeControl<'_, '_> {
+    fn cancellation(&self) -> Option<MetadataCompactionJobOutcome> {
         self.cancellation
-            .is_cancelled()
-            .then_some(MergeStop::Cancelled)
+            .is_some_and(|cancellation| cancellation.is_cancelled())
+            .then_some(MetadataCompactionJobOutcome::Cancelled)
     }
 
     async fn heartbeat<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
-    ) -> Result<Option<Self::Stop>> {
-        Ok(
-            (self.lease.heartbeat_if_due(store).await? == LeaseHold::Fenced)
-                .then_some(MergeStop::Fenced),
-        )
+    ) -> Result<Option<MetadataCompactionJobOutcome>> {
+        let Some(lease) = &mut self.lease else {
+            return Ok(None);
+        };
+        Ok((lease.heartbeat_if_due(store).await? == LeaseHold::Fenced)
+            .then_some(MetadataCompactionJobOutcome::Fenced))
     }
 }
 
@@ -942,16 +839,16 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         store: &'a S,
         namespace_id: &'a NamespaceId,
         group: MetadataFamilyGroup,
-        run_no: RunNo,
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
         destination: MetadataSegmentDestination<'a>,
         policy: MetadataLsmPolicy,
-        snapshot: Vec<MetadataRunManifest>,
+        snapshot_runs: Vec<MetadataRunManifest>,
+        probe_cache: &'a MetadataSegmentCache,
         reverse_binds: ReverseBindResolution,
         progress: Option<ProgressReporter>,
     ) -> Self {
-        let input_bytes = snapshot
+        let input_bytes = snapshot_runs
             .iter()
             .flat_map(|run| group_run_descriptors(run, group))
             .map(segment_object_len)
@@ -960,16 +857,12 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             store,
             namespace_id,
             group,
-            run_no,
             placement,
             frozen_floor_seq,
             destination,
             policy,
-            snapshot,
+            snapshot: VerifiedMetadataSegments::from_runs(store, probe_cache, snapshot_runs),
             reverse_binds,
-            probe_cache: MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-                max_decoded_bytes: PROBE_CACHE_DECODED_BYTES,
-            }),
             result: MetadataMergeResult {
                 input_bytes,
                 ..MetadataMergeResult::default()
@@ -982,13 +875,13 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     }
 
     /// Merges every cluster of the group, in order.
-    async fn run<C: MergeControl>(
+    async fn run(
         mut self,
-        control: &mut C,
-    ) -> Result<std::result::Result<MetadataMergeResult, C::Stop>> {
+        control: &mut MergeControl<'_, '_>,
+    ) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
         for cluster in retention_clusters(self.group) {
-            if let Err(stop) = self.run_cluster(cluster, control).await? {
-                return Ok(Err(stop));
+            if let Some(stopped) = self.run_cluster(cluster, control).await? {
+                return Ok(Err(stopped));
             }
         }
         self.refuse_a_run_whose_index_disagrees()?;
@@ -1046,35 +939,30 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     }
 
     /// Merges one cluster end to end.
-    async fn run_cluster<C: MergeControl>(
+    async fn run_cluster(
         &mut self,
         cluster: &RetentionCluster,
-        control: &mut C,
-    ) -> Result<std::result::Result<(), C::Stop>> {
+        control: &mut MergeControl<'_, '_>,
+    ) -> Result<Option<MetadataCompactionJobOutcome>> {
         // The descriptors are cloned out of the snapshot rather than borrowed
         // from it: an iterator outlives every other borrow the merge takes, and
         // a cluster opens one per run per family, which is a handful.
         let mut iterators = Vec::new();
-        for run in &self.snapshot {
+        for run in self.snapshot.scan_runs.iter() {
             for family in cluster.families {
                 let segments: Vec<MetadataSegmentRef> = group_run_descriptors(run, self.group)
                     .filter(|descriptor| descriptor.family == *family)
                     .cloned()
                     .collect();
                 if !segments.is_empty() {
-                    iterators.push(SegmentRowIterator::new(*family, segments));
+                    iterators.push(SegmentRowIterator::new(*family, run.run_seq, segments));
                 }
             }
         }
         let mut writers: BTreeMap<MetadataRowFamily, MergeSegmentWriter> = cluster
             .families
             .iter()
-            .map(|family| {
-                (
-                    *family,
-                    MergeSegmentWriter::new(*family, self.destination, self.run_no, self.placement),
-                )
-            })
+            .map(|family| (*family, MergeSegmentWriter::new(*family, self.destination)))
             .collect();
 
         let floor_seq = self.frozen_floor_seq;
@@ -1083,7 +971,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let mut locality: Option<String> = None;
         loop {
             if let Some(stop) = control.cancellation() {
-                return Ok(Err(stop));
+                return Ok(Some(stop));
             }
             // The claim on a staged merge's prefix is refreshed where it checks
             // whether it should stop, which is the one place it is guaranteed
@@ -1091,7 +979,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             // merge has to stop: the segments it has written belong to the
             // collector now.
             if let Some(stop) = control.heartbeat(self.store).await? {
-                return Ok(Err(stop));
+                return Ok(Some(stop));
             }
             self.refill(&mut iterators).await?;
             let Some(next) = select_next_iterator(&iterators, cluster.locality) else {
@@ -1163,7 +1051,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 .saturating_add(segments.iter().map(segment_object_len).sum());
             self.result.output_segments.extend(segments);
         }
-        Ok(Ok(()))
+        Ok(None)
     }
 
     /// Says where a long job has got to, at [`PROGRESS_ROW_INTERVAL`].
@@ -1332,42 +1220,15 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         prefix: &str,
         filter_probe: &str,
     ) -> Result<Vec<MetadataRow>> {
-        let upper_bound = string_prefix_upper_bound(prefix);
-        let mut rows = Vec::new();
-        for run in &self.snapshot {
-            for descriptor in group_run_descriptors(run, self.group)
-                .filter(|descriptor| descriptor.family == MetadataRowFamily::DirentryUnbinds)
-            {
-                if !descriptor_may_intersect_range(descriptor, prefix, upper_bound.as_deref()) {
-                    continue;
-                }
-                let memo = SessionBlockMemo::default();
-                let filter =
-                    load_segment_filter(self.store, Some(&self.probe_cache), &memo, descriptor)
-                        .await
-                        .map_err(manifest_load_failure)?;
-                if !filter.may_contain(filter_probe) {
-                    continue;
-                }
-                let blocks = load_manifest_segment_rows_in_key_range_with_cache(
-                    self.store,
-                    Some(&self.probe_cache),
-                    &memo,
-                    descriptor,
-                    prefix,
-                    upper_bound.as_deref(),
-                    Readahead::Disabled,
-                )
-                .await
-                .map_err(manifest_load_failure)?;
-                rows.extend(
-                    blocks
-                        .rows_in_key_range(prefix, upper_bound.as_deref())
-                        .map(|(_, row)| row.clone()),
-                );
-            }
-        }
-        Ok(rows)
+        self.snapshot
+            .scan_prefix_for_lookup(
+                MetadataRowFamily::DirentryUnbinds,
+                prefix,
+                filter_probe,
+                Readahead::Disabled,
+            )
+            .await
+            .map_err(manifest_load_failure)
     }
 
     /// Refuses to hand back a run whose secondary index does not hold the same
@@ -1445,7 +1306,11 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
             MetadataRowFamily::Revisions,
             MetadataRowFamily::RevisionsByInodeDesc,
         )),
-        _ => None,
+        MetadataFamilyGroup::Inodes
+        | MetadataFamilyGroup::Tombstones
+        | MetadataFamilyGroup::ActiveDeletions
+        | MetadataFamilyGroup::CommitReceipts
+        | MetadataFamilyGroup::Attributes => None,
     }
 }
 

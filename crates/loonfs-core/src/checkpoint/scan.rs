@@ -15,6 +15,7 @@ use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
+use loonfs_api::ChangeSeq;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -40,7 +41,7 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(super) store: &'a S,
     pub(super) segment_cache: Option<&'a MetadataSegmentCache>,
     pub(super) manifest_object_key: String,
-    pub(super) manifest: Arc<NamespaceManifestEnvelope>,
+    pub(super) manifest: Option<Arc<NamespaceManifestEnvelope>>,
     /// The manifest's runs, grouped once during load validation and shared
     /// through the manifest cache entry. Scans merge globally unique row keys
     /// and do not depend on this order.
@@ -62,7 +63,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     /// object key is never read or written.
     pub(crate) fn synthesized(store: &'a S, manifest: NamespaceManifestEnvelope) -> Self {
         debug_assert!(
-            manifest.payload.segments.is_empty(),
+            manifest.payload.runs.is_empty(),
             "a synthesized manifest must name no durable metadata files"
         );
         let scan_runs = Arc::new(Vec::new());
@@ -70,8 +71,23 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             store,
             segment_cache: None,
             manifest_object_key: String::new(),
-            manifest: Arc::new(manifest),
+            manifest: Some(Arc::new(manifest)),
             scan_runs,
+            block_memo: SessionBlockMemo::default(),
+        }
+    }
+
+    pub(super) fn from_runs(
+        store: &'a S,
+        segment_cache: &'a MetadataSegmentCache,
+        scan_runs: Vec<MetadataRunManifest>,
+    ) -> Self {
+        Self {
+            store,
+            segment_cache: Some(segment_cache),
+            manifest_object_key: String::new(),
+            manifest: None,
+            scan_runs: Arc::new(scan_runs),
             block_memo: SessionBlockMemo::default(),
         }
     }
@@ -79,7 +95,9 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
     pub(crate) fn manifest(&self) -> &NamespaceManifestEnvelope {
-        self.manifest.as_ref()
+        self.manifest
+            .as_deref()
+            .expect("loaded metadata segments should carry their manifest")
     }
 
     pub(crate) async fn get_for_lookup(
@@ -260,19 +278,33 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         for run in self.scan_runs.iter() {
             let family_segments =
                 manifest_segment_for_family(&self.manifest_object_key, &run.segments, family)?;
-            candidates.extend(family_segments.segments.iter().filter(|descriptor| {
-                descriptor_may_intersect_range(descriptor, lower_bound, upper_bound)
-            }));
+            candidates.extend(
+                family_segments
+                    .segments
+                    .iter()
+                    .filter(|descriptor| {
+                        descriptor_may_intersect_range(descriptor, lower_bound, upper_bound)
+                    })
+                    .map(|descriptor| ScanDescriptor {
+                        descriptor,
+                        max_seq: run.run_seq,
+                    }),
+            );
         }
         let mut matching_descriptors = self
             .filter_admitted_descriptors(candidates, filter_probe)
             .await?;
         matching_descriptors.sort_by(|left, right| {
-            left.min_row_key
-                .cmp(&right.min_row_key)
-                .then(left.max_row_key.cmp(&right.max_row_key))
+            left.descriptor
+                .min_row_key
+                .cmp(&right.descriptor.min_row_key)
+                .then(
+                    left.descriptor
+                        .max_row_key
+                        .cmp(&right.descriptor.max_row_key),
+                )
                 // Segment ids are unique and provide the final tie-breaker.
-                .then(left.segment_id.cmp(&right.segment_id))
+                .then(left.descriptor.segment_id.cmp(&right.descriptor.segment_id))
         });
 
         let mut rows = Vec::<(String, MetadataRow)>::new();
@@ -282,7 +314,10 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 true
             } else {
                 let boundary_key = &rows[limit - 1].0;
-                matching_descriptors[next_descriptor_index].min_row_key <= *boundary_key
+                matching_descriptors[next_descriptor_index]
+                    .descriptor
+                    .min_row_key
+                    <= *boundary_key
             };
             if !should_load_next {
                 break;
@@ -293,8 +328,8 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             let loaded_segments = try_join_all(
                 matching_descriptors[next_descriptor_index..chunk_end]
                     .iter()
-                    .map(|descriptor| {
-                        self.segment_rows(descriptor, lower_bound, upper_bound, readahead)
+                    .map(|scan_descriptor| {
+                        self.segment_rows(scan_descriptor, lower_bound, upper_bound, readahead)
                     }),
             )
             .await?;
@@ -327,20 +362,19 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
     /// probe every descriptor is admitted untouched.
     async fn filter_admitted_descriptors<'d>(
         &self,
-        descriptors: Vec<&'d MetadataSegmentRef>,
+        descriptors: Vec<ScanDescriptor<'d>>,
         filter_probe: Option<&str>,
-    ) -> Result<Vec<&'d MetadataSegmentRef>, ManifestLoadError> {
+    ) -> Result<Vec<ScanDescriptor<'d>>, ManifestLoadError> {
         let Some(filter_probe) = filter_probe else {
             return Ok(descriptors);
         };
         let mut admitted = Vec::with_capacity(descriptors.len());
         for chunk in descriptors.chunks(MAX_MATERIALIZED_TABLE_LOADS) {
-            let checks = try_join_all(
-                chunk
-                    .iter()
-                    .map(|descriptor| self.segment_filter_admits(descriptor, filter_probe)),
-            )
-            .await?;
+            let checks =
+                try_join_all(chunk.iter().map(|descriptor| {
+                    self.segment_filter_admits(descriptor.descriptor, filter_probe)
+                }))
+                .await?;
             admitted.extend(
                 chunk
                     .iter()
@@ -354,7 +388,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
 
     async fn segment_rows(
         &self,
-        descriptor: &MetadataSegmentRef,
+        scan_descriptor: &ScanDescriptor<'_>,
         lower_bound: &str,
         upper_bound: Option<&str>,
         readahead: Readahead,
@@ -363,13 +397,20 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             self.store,
             self.segment_cache,
             &self.block_memo,
-            descriptor,
+            scan_descriptor.descriptor,
+            scan_descriptor.max_seq,
             lower_bound,
             upper_bound,
             readahead,
         )
         .await
     }
+}
+
+#[derive(Clone, Copy)]
+struct ScanDescriptor<'a> {
+    descriptor: &'a MetadataSegmentRef,
+    max_seq: ChangeSeq,
 }
 
 fn strip_row_keys(rows: Vec<(String, MetadataRow)>) -> Vec<MetadataRow> {

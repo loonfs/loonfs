@@ -748,9 +748,6 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
     let segments = build_manifest_segments(
         &store,
         &namespace_id,
-        RunNo(0),
-        materialization_before.head.seq,
-        CHECKPOINT_BASE_RUN_LEVEL,
         &materialization_before.metadata_state,
         MetadataLsmPolicy::default().max_rows_per_segment,
     )
@@ -767,7 +764,12 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         next_inode_id: materialization_before.head.next_inode_id,
         next_run_no: RunNo(1),
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-        segments: flatten_manifest_segments(segments),
+        runs: vec![MetadataRunRef {
+            run_no: RunNo(0),
+            run_seq: materialization_before.head.seq,
+            tier: RunTier::Base,
+            segments: flatten_manifest_segments(segments),
+        }],
     })
     .expect("build manifest");
     write_namespace_manifest(&store, &manifest)

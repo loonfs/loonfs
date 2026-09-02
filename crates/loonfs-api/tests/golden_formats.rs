@@ -31,8 +31,9 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
-    DeletedDirentry, MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
-    NamespaceManifestPayload, TombstoneGeneration, TombstoneRowAction,
+    DeletedDirentry, MetadataRow, MetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
+    NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier, TombstoneGeneration,
+    TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
@@ -334,35 +335,37 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
         next_inode_id: InodeId(10),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
-        segments: vec![MetadataSegmentRef {
-            owner_namespace_id: namespace_id(),
-            segment_id: segment_id(),
-            // WAL flush segments use the standard metadata segment prefix.
-            compaction_job_id: None,
+        runs: vec![MetadataRunRef {
             run_no: RunNo(0),
             run_seq: ChangeSeq(2),
-            level: 0,
-            family: MetadataRowFamily::Inodes,
-            segment_index: 0,
-            row_count: 6,
-            min_row_key: "commit-receipt".to_owned(),
-            max_row_key: "tombstone".to_owned(),
-            index_block: loonfs_api::wire::sst_blocks::BlockHandle {
-                offset: 4_000,
-                stored_len: 200,
-                decoded_len: 400,
-                crc32c: 0x1234_5678,
-            },
-            filter_block: loonfs_api::wire::sst_blocks::BlockHandle {
-                offset: 3_900,
-                stored_len: 100,
-                decoded_len: 100,
-                crc32c: 0x9abc_def0,
-            },
-            // Only small filters are inlined; this descriptor's filter
-            // is read through its handle, so the field is omitted.
-            filter_inline: None,
-            object_checksum: sha256_digest(b"sst payload"),
+            tier: RunTier::Delta,
+            segments: vec![MetadataSegmentRef {
+                owner_namespace_id: namespace_id(),
+                segment_id: segment_id(),
+                // WAL flush segments use the standard metadata segment prefix.
+                compaction_job_id: None,
+                family: MetadataRowFamily::Inodes,
+                segment_index: 0,
+                row_count: 6,
+                min_row_key: "commit-receipt".to_owned(),
+                max_row_key: "tombstone".to_owned(),
+                index_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                    offset: 4_000,
+                    stored_len: 200,
+                    decoded_len: 400,
+                    crc32c: 0x1234_5678,
+                },
+                filter_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                    offset: 3_900,
+                    stored_len: 100,
+                    decoded_len: 100,
+                    crc32c: 0x9abc_def0,
+                },
+                // Only small filters are inlined; this descriptor's filter
+                // is read through its handle, so the field is omitted.
+                filter_inline: None,
+                object_checksum: sha256_digest(b"sst payload"),
+            }],
         }],
     })
     .expect("manifest envelope")

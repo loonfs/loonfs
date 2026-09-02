@@ -209,9 +209,6 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
     let segments = build_manifest_segments(
         &store,
         &namespace_id,
-        RunNo(0),
-        ChangeSeq(9),
-        CHECKPOINT_BASE_RUN_LEVEL,
         &state,
         NonZeroUsize::new(64).expect("segment row budget"),
     )
@@ -240,7 +237,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         flatten_manifest_segments(segments),
     )
     .await;
-    let verified = load_verified_manifest_segments(&store, &namespace_id, &manifest)
+    let verified = load_verified_manifest_segments(&store, None, &namespace_id, &manifest)
         .await
         .expect("load manifest segments");
 
@@ -300,7 +297,12 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         next_inode_id: InodeId(64),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
-        segments,
+        runs: vec![MetadataRunRef {
+            run_no: RunNo(0),
+            run_seq: head_seq,
+            tier: RunTier::Base,
+            segments,
+        }],
     })
     .expect("manifest envelope");
     write_namespace_manifest(store, &manifest)

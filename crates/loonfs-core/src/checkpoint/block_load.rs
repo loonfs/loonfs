@@ -9,6 +9,7 @@ use super::validate::validate_manifest_row_seq_range;
 use crate::block_cache::DecodedBlock as _;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, DecodedDataBlock};
+use loonfs_api::ChangeSeq;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, VecDeque};
@@ -150,11 +151,16 @@ const RANGE_SCAN_READAHEAD_BLOCKS: usize = 32;
 /// `[lower_bound, upper_bound)`: index first, then only the data blocks the
 /// index says can match. Callers trim edge blocks with
 /// [`SegmentKeyRangeBlocks::rows_in_key_range`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the segment scan inputs stay explicit at the shared load boundary"
+)]
 pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     memo: &SessionBlockMemo,
     descriptor: &MetadataSegmentRef,
+    max_seq: ChangeSeq,
     lower_bound: &str,
     upper_bound: Option<&str>,
     readahead: Readahead,
@@ -188,7 +194,7 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     validate_manifest_row_seq_range(
         &metadata_segment_object_key(descriptor),
         blocks.iter().flat_map(|block| block.rows.iter()),
-        descriptor.run_seq,
+        max_seq,
     )?;
     Ok(SegmentKeyRangeBlocks { blocks })
 }

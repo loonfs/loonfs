@@ -2,7 +2,7 @@
 //! benchmark shape. Builds a bench-like namespace, then runs each warm
 //! phase on a fresh handle while classifying every store GET — by object
 //! class, and for metadata segments by section (index / filter / data),
-//! family, and run level, using the live manifest's own descriptors.
+//! family, and run tier, using the live manifest's own descriptors.
 //!
 //! Run with:
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
@@ -14,7 +14,7 @@ use loonfs::{
 };
 use loonfs_api::AbsolutePath;
 
-use loonfs_api::wire::manifest::decode_namespace_manifest_json;
+use loonfs_api::wire::manifest::{decode_namespace_manifest_json, RunTier};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
@@ -26,8 +26,8 @@ const FILES: usize = 10_000;
 const BATCH: usize = 100;
 const STEP_EVERY_BATCHES: usize = 33;
 
-/// (family, level, index_offset, filter_offset) per segment object key.
-type SegmentMap = BTreeMap<String, (String, u32, u64, u64)>;
+/// (family, tier, index_offset, filter_offset) per segment object key.
+type SegmentMap = BTreeMap<String, (String, RunTier, u64, u64)>;
 
 async fn segment_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> SegmentMap {
     let root = loonfs_core::control::load_namespace_metadata_root_control(store, namespace_id)
@@ -43,18 +43,20 @@ async fn segment_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> S
     let manifest = decode_namespace_manifest_json(&bytes).expect("decode manifest");
     manifest
         .payload
-        .segments
+        .runs
         .iter()
-        .map(|descriptor| {
-            (
-                metadata_segment_object_key(descriptor),
+        .flat_map(|run| {
+            run.segments.iter().map(|descriptor| {
                 (
-                    format!("{:?}", descriptor.family),
-                    descriptor.level,
-                    descriptor.index_block.offset,
-                    descriptor.filter_block.offset,
-                ),
-            )
+                    metadata_segment_object_key(descriptor),
+                    (
+                        format!("{:?}", descriptor.family),
+                        run.tier,
+                        descriptor.index_block.offset,
+                        descriptor.filter_block.offset,
+                    ),
+                )
+            })
         })
         .collect()
 }
@@ -64,7 +66,7 @@ fn report(phase: &str, gets: &[RecordedGet], segments: &SegmentMap) {
     let mut by_class: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_segment: BTreeMap<String, usize> = BTreeMap::new();
     for (key, range) in gets {
-        let class = if let Some((family, level, index_offset, filter_offset)) = segments.get(key) {
+        let class = if let Some((family, tier, index_offset, filter_offset)) = segments.get(key) {
             let section = match range {
                 Some((start, _)) if start == index_offset => "index",
                 Some((start, _)) if start == filter_offset => "filter",
@@ -72,7 +74,7 @@ fn report(phase: &str, gets: &[RecordedGet], segments: &SegmentMap) {
                 None => "whole",
             };
             by_segment
-                .entry(format!("L{level} {family} {section}"))
+                .entry(format!("{tier:?} {family} {section}"))
                 .and_modify(|count| *count += 1)
                 .or_insert(1);
             format!("segment:{section}")
@@ -209,11 +211,11 @@ async fn warm_phase_request_accounting() {
     }
     let segments = segment_map(&store, &namespace_id).await;
     println!(
-        "layout: {} segment objects across levels {:?}",
+        "layout: {} segment objects across tiers {:?}",
         segments.len(),
         segments
             .values()
-            .map(|(_, level, _, _)| *level)
+            .map(|(_, tier, _, _)| *tier)
             .collect::<std::collections::BTreeSet<_>>()
     );
     let _ = log.take_gets();
