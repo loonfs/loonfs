@@ -161,8 +161,6 @@ pub struct DirectoryPageCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<crate::CheckpointId>,
     /// Directory inode resolved at `head_seq`.
-    // The wire field is frozen as `dir_inode_id` in page cursor version 1.
-    #[serde(rename = "dir_inode_id")]
     pub directory_inode_id: InodeId,
     /// Last canonical name key returned to the client.
     pub last_name_key: NameKey,

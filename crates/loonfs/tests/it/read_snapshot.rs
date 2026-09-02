@@ -107,15 +107,15 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
             .await,
         ErrorCode::InvalidRequest,
     );
-    let mut legacy_cursor = cursor.clone();
-    legacy_cursor.snapshot_id = None;
+    let mut unbound_cursor = cursor.clone();
+    unbound_cursor.snapshot_id = None;
     assert_core_error_kind(
         second_view
             .list_path_entries_page(
                 "/",
                 PageRequest {
                     limit,
-                    cursor: Some(legacy_cursor.clone()),
+                    cursor: Some(unbound_cursor.clone()),
                 },
                 Default::default(),
             )
@@ -156,17 +156,19 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         ErrorCode::InvalidRequest,
     );
 
-    first_view
-        .list_path_entries_page(
-            "/",
-            PageRequest {
-                limit,
-                cursor: Some(legacy_cursor),
-            },
-            Default::default(),
-        )
-        .await
-        .expect("resume a legacy cursor at its exact pinned head");
+    assert_core_error_kind(
+        first_view
+            .list_path_entries_page(
+                "/",
+                PageRequest {
+                    limit,
+                    cursor: Some(unbound_cursor),
+                },
+                Default::default(),
+            )
+            .await,
+        ErrorCode::InvalidRequest,
+    );
 
     let second_page = first_view
         .list_path_entries_page(
