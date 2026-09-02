@@ -54,10 +54,11 @@ fn validate_pinned_directory_cursor(
             "directory cursor is bound to snapshot `{actual}`"
         ))
         .into()),
-        // A cursor minted before snapshot binding has no snapshot field.
-        // Matching the immutable head makes its resume safe; the next cursor
-        // is stamped below.
-        (None, _) => Ok(()),
+        (None, Some(expected)) => Err(CoreError::InvalidCursor(format!(
+            "directory cursor is not bound to snapshot `{expected}`"
+        ))
+        .into()),
+        (None, None) => Ok(()),
     }
 }
 
