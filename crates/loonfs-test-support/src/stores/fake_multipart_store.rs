@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::{Checksum, Crc64Nvme};
+use loonfs_api::Checksum;
 use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
     ObjectStore, ObjectStoreError, PutMode, Result, StoredObjectChecksum,
@@ -39,23 +39,30 @@ pub enum MultipartChecksumEnforcement {
     Precondition,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct OpenUpload {
-    /// Part bytes by part number. A repeated part replaces its predecessor.
-    parts: BTreeMap<u32, Vec<u8>>,
+    object_key: String,
+    parts: BTreeMap<u32, StoredPart>,
+}
+
+#[derive(Debug)]
+struct StoredPart {
+    bytes: Vec<u8>,
+    etag: String,
 }
 
 /// Wraps a store with a working multipart upload surface.
 #[derive(Debug)]
-pub struct MultipartStore<S> {
+pub struct FakeMultipartStore<S> {
     inner: S,
     enforcement: MultipartChecksumEnforcement,
     open: Mutex<BTreeMap<String, OpenUpload>>,
+    stored_checksums: Mutex<BTreeMap<String, Checksum>>,
     next_id: AtomicUsize,
     aborts: AtomicUsize,
 }
 
-impl<S> MultipartStore<S> {
+impl<S> FakeMultipartStore<S> {
     /// Wraps `inner`, witnessing rather than enforcing the whole-object
     /// checksum at completion.
     pub fn new(inner: S) -> Self {
@@ -68,6 +75,7 @@ impl<S> MultipartStore<S> {
             inner,
             enforcement,
             open: Mutex::new(BTreeMap::new()),
+            stored_checksums: Mutex::new(BTreeMap::new()),
             next_id: AtomicUsize::new(1),
             aborts: AtomicUsize::new(0),
         }
@@ -89,13 +97,27 @@ impl<S> MultipartStore<S> {
     ///
     /// Repeating a part replaces it, which is what makes retrying one part
     /// of a large upload cheap.
-    pub fn upload_part(&self, provider_upload_id: &str, part_number: u32, bytes: &[u8]) -> String {
+    pub fn upload_part(
+        &self,
+        provider_upload_id: &str,
+        part_number: u32,
+        bytes: &[u8],
+    ) -> Result<String> {
         let mut open = self.lock();
-        let upload = open
-            .get_mut(provider_upload_id)
-            .expect("part uploaded into an open multipart upload");
-        upload.parts.insert(part_number, bytes.to_vec());
-        format!("\"{}\"", Checksum::crc64nvme(bytes).value)
+        let upload =
+            open.get_mut(provider_upload_id)
+                .ok_or_else(|| ObjectStoreError::NotFound {
+                    object_key: provider_upload_id.to_owned(),
+                })?;
+        let etag = format!("\"{}\"", Checksum::crc64nvme(bytes).value);
+        upload.parts.insert(
+            part_number,
+            StoredPart {
+                bytes: bytes.to_vec(),
+                etag: etag.clone(),
+            },
+        );
+        Ok(etag)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, OpenUpload>> {
@@ -104,22 +126,33 @@ impl<S> MultipartStore<S> {
 }
 
 #[async_trait]
-impl<S: ObjectStore> ObjectStore for MultipartStore<S> {
+impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.inner.head(key).await
     }
 
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        // The provider reports a multipart object's CRC-64/NVME, not a
-        // SHA-256, so this reports what the bytes at the key actually hash
-        // to under that algorithm.
-        let Some(bytes) = self.inner.get(key, None).await? else {
-            return Ok(None);
-        };
-        Ok(Some(StoredObjectChecksum {
-            size_bytes: bytes.len() as u64,
-            checksum: Checksum::crc64nvme(&bytes),
-        }))
+        let checksum = self
+            .stored_checksums
+            .lock()
+            .expect("stored checksum lock should not be poisoned")
+            .get(key)
+            .cloned();
+        if let Some(checksum) = checksum {
+            let size_bytes = self
+                .inner
+                .head(key)
+                .await?
+                .ok_or_else(|| ObjectStoreError::NotFound {
+                    object_key: key.to_owned(),
+                })?
+                .size_bytes;
+            return Ok(Some(StoredObjectChecksum {
+                size_bytes,
+                checksum,
+            }));
+        }
+        self.inner.head_stored_checksum(key).await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
@@ -128,8 +161,13 @@ impl<S: ObjectStore> ObjectStore for MultipartStore<S> {
             self.next_id.fetch_add(1, Ordering::SeqCst),
             key.len()
         );
-        self.lock()
-            .insert(provider_upload_id.clone(), OpenUpload::default());
+        self.lock().insert(
+            provider_upload_id.clone(),
+            OpenUpload {
+                object_key: key.to_owned(),
+                parts: BTreeMap::new(),
+            },
+        );
         Ok(provider_upload_id)
     }
 
@@ -145,11 +183,16 @@ impl<S: ObjectStore> ObjectStore for MultipartStore<S> {
             // left — exactly what the caller reconciles from.
             return Ok(MultipartCompletion::UnknownUpload);
         };
+        if upload.object_key != key {
+            return Err(ObjectStoreError::transport(
+                key,
+                "multipart completion named a different object",
+            ));
+        }
 
         let mut assembled = Vec::new();
-        let mut digest = Crc64Nvme::new();
         for part in parts {
-            let Some(bytes) = upload.parts.get(&part.part_number) else {
+            let Some(stored) = upload.parts.get(&part.part_number) else {
                 return Err(ObjectStoreError::transport(
                     key,
                     format!("multipart complete named unknown part {}", part.part_number),
@@ -158,7 +201,9 @@ impl<S: ObjectStore> ObjectStore for MultipartStore<S> {
             // Both providers verify a part's checksum on the way in, so a
             // part whose declared checksum does not match its bytes could
             // never have landed.
-            if part.checksum != Checksum::crc64nvme(bytes) {
+            if part.etag != stored.etag
+                || part.checksum != Checksum::compute(part.checksum.algorithm, &stored.bytes)
+            {
                 return Err(ObjectStoreError::transport(
                     key,
                     format!(
@@ -167,22 +212,26 @@ impl<S: ObjectStore> ObjectStore for MultipartStore<S> {
                     ),
                 ));
             }
-            digest.update(bytes);
-            assembled.extend_from_slice(bytes);
+            assembled.extend_from_slice(&stored.bytes);
         }
 
+        let stored_checksum = Checksum::compute(full_object_checksum.algorithm, &assembled);
         if self.enforcement == MultipartChecksumEnforcement::Precondition
-            && digest.finish() != *full_object_checksum
+            && stored_checksum != *full_object_checksum
         {
             return Err(ObjectStoreError::transport(
                 key,
-                "the crc64nvme you specified did not match the calculated checksum",
+                "the specified checksum did not match the calculated checksum",
             ));
         }
 
         self.inner
             .put(key, Bytes::from(assembled), PutMode::Overwrite)
             .await?;
+        self.stored_checksums
+            .lock()
+            .expect("stored checksum lock should not be poisoned")
+            .insert(key.to_owned(), stored_checksum);
         Ok(MultipartCompletion::Assembled)
     }
 

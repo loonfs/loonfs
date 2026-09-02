@@ -27,7 +27,7 @@ use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
-    CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -389,7 +389,7 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
 #[tokio::test]
 async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
     let temp_dir = tempdir().expect("tempdir");
-    let sessions = Arc::new(CountingStore::new(
+    let sessions = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::family(DurableObjectFamily::UploadSession),
     ));
@@ -409,7 +409,7 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
         .await
         .expect("put file");
 
-    let counts = sessions.snapshot();
+    let counts = sessions.counts();
     assert_eq!(
         counts.create_if_absent_puts, 1,
         "one record opens, claiming the content id before the bytes exist"
@@ -420,7 +420,7 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
     );
     assert_eq!(counts.overwrite_puts, 0, "a session is never clobbered");
     assert_eq!(
-        counts.operations(OperationClass::Read),
+        sessions.count(OperationClass::Read),
         1,
         "the swap reads the etag it swaps on, and nothing else reads a session"
     );

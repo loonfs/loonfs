@@ -448,7 +448,7 @@ mod direct_multipart {
     use loonfs_api::wire::control::{decode_control_object, UploadSessionRecordStatus};
     use loonfs_core::{gc_namespace, GcConfig};
     use loonfs_objectstore::keys::content_blob;
-    use loonfs_test_support::stores::{MultipartChecksumEnforcement, MultipartStore};
+    use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
     use std::sync::Arc;
 
     const PART: &[u8] = b"a part's worth of bytes, repeated enough to be a part\n";
@@ -467,7 +467,7 @@ mod direct_multipart {
     }
 
     async fn open_session<S: ObjectStore>(
-        store: &MultipartStore<S>,
+        store: &FakeMultipartStore<S>,
         context: &MutationContext,
     ) -> Session {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -532,13 +532,15 @@ mod direct_multipart {
     /// Uploads every part, the way a client would after asking for the
     /// signed URLs, and returns the bookkeeping it carries to completion.
     fn upload_every_part<S: ObjectStore>(
-        store: &MultipartStore<S>,
+        store: &FakeMultipartStore<S>,
         session: &Session,
     ) -> Vec<CompletedUploadPart> {
         let mut parts = Vec::new();
         for (index, chunk) in session.payload.chunks(PART.len()).enumerate() {
             let part_number = index as u32 + 1;
-            let etag = store.upload_part(&session.provider_upload_id, part_number, chunk);
+            let etag = store
+                .upload_part(&session.provider_upload_id, part_number, chunk)
+                .expect("upload part");
             parts.push(CompletedUploadPart {
                 part_number,
                 etag,
@@ -580,7 +582,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_multipart_upload_completes_against_the_assembled_object() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
 
@@ -635,7 +637,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_multipart_completion_rejects_an_empty_part_list() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
 
@@ -658,14 +660,16 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_re_uploaded_part_is_the_one_that_lands() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
 
         // Part two arrives wrong first, then correct: same length both
         // times, so only the checksum can tell them apart.
         let wrong = vec![b'x'; PART.len()];
-        store.upload_part(&session.provider_upload_id, 2, &wrong);
+        store
+            .upload_part(&session.provider_upload_id, 2, &wrong)
+            .expect("upload wrong part");
         let parts = upload_every_part(&store, &session);
 
         complete_upload(
@@ -691,7 +695,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_lost_completion_reconciles_from_the_session_and_the_object() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
         let parts = upload_every_part(&store, &session);
@@ -732,7 +736,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_conflicting_retry_cannot_destroy_a_recoverable_assembly() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
         let request = complete_request(&session, upload_every_part(&store, &session));
@@ -804,7 +808,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_completion_that_does_not_verify_ends_the_session_and_deletes_the_object() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
 
@@ -814,7 +818,9 @@ mod direct_multipart {
         // witnesses the whole-object checksum lets through.
         let mut parts = upload_every_part(&store, &session);
         let short = &PART[..PART.len() / 2];
-        let etag = store.upload_part(&session.provider_upload_id, 3, short);
+        let etag = store
+            .upload_part(&session.provider_upload_id, 3, short)
+            .expect("upload short part");
         parts[2] = CompletedUploadPart {
             part_number: 3,
             etag,
@@ -871,7 +877,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_refused_assembly_stays_open_without_object_evidence() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::with_enforcement(
+        let store = FakeMultipartStore::with_enforcement(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             MultipartChecksumEnforcement::Precondition,
         );
@@ -880,7 +886,9 @@ mod direct_multipart {
 
         let mut parts = upload_every_part(&store, &session);
         let short = &PART[..PART.len() / 2];
-        let etag = store.upload_part(&session.provider_upload_id, 3, short);
+        let etag = store
+            .upload_part(&session.provider_upload_id, 3, short)
+            .expect("upload short part");
         parts[2] = CompletedUploadPart {
             part_number: 3,
             etag,
@@ -937,10 +945,10 @@ mod direct_multipart {
         let failing = Arc::new(FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Read,
+            OperationClass::Head,
             InjectedError::Transport("injected content read failure".to_owned()),
         ));
-        let store = MultipartStore::new(Arc::clone(&failing));
+        let store = FakeMultipartStore::new(Arc::clone(&failing));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
         let parts = upload_every_part(&store, &session);
@@ -997,7 +1005,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn upload_collection_abandons_the_provider_upload_of_an_expired_session() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
         upload_every_part(&store, &session);
@@ -1044,7 +1052,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_multipart_session_takes_a_part_size_inside_the_providers_bounds() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         bootstrap_namespace(&store, &namespace_id, &context, false)

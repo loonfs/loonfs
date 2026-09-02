@@ -30,7 +30,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -87,8 +87,8 @@ async fn namespace_keys<S: ObjectStore + ?Sized>(
         .expect("list namespace prefix")
 }
 
-fn metadata_segment_counting_store(root: impl AsRef<Path>) -> CountingStore<LocalFsStore> {
-    CountingStore::new(
+fn metadata_segment_counting_store(root: impl AsRef<Path>) -> RecordingStore<LocalFsStore> {
+    RecordingStore::new(
         LocalFsStore::new(root.as_ref()).expect("store"),
         KeyPredicate::metadata_segment(),
     )

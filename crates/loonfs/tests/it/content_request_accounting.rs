@@ -17,7 +17,7 @@ use loonfs_api::{ContentId, ContentStoreId};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
-    BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -51,19 +51,19 @@ impl RequestCounts {
 #[derive(Debug, Clone)]
 struct RequestLog {
     store: SharedObjectStore,
-    content: Arc<CountingStore<SharedObjectStore>>,
-    other: Arc<CountingStore<SharedObjectStore>>,
+    content: Arc<RecordingStore<SharedObjectStore>>,
+    other: Arc<RecordingStore<SharedObjectStore>>,
 }
 
 impl RequestLog {
     fn new(root: &Path) -> Self {
         let inner: SharedObjectStore =
             Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
-        let other = Arc::new(CountingStore::new(
+        let other = Arc::new(RecordingStore::new(
             inner,
             KeyPredicate::new(|key| !key.starts_with("content-stores/")),
         ));
-        let content = Arc::new(CountingStore::new(
+        let content = Arc::new(RecordingStore::new(
             other.clone() as SharedObjectStore,
             KeyPredicate::prefix("content-stores/"),
         ));
@@ -79,8 +79,8 @@ impl RequestLog {
     }
 
     fn snapshot(&self) -> RequestCounts {
-        let content = self.content.snapshot();
-        let other = self.other.snapshot();
+        let content = self.content.counts();
+        let other = self.other.counts();
         let mut counts = RequestCounts::default();
         counts.by_class[KeyClass::Content as usize] = OperationCounts {
             head: content.heads,

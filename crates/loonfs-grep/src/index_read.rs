@@ -289,64 +289,40 @@ fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unreachable)]
-    // Only `get` is used by this test store.
-
     use super::{load_index_section_bytes, BlockHandle, GrepError};
     use bytes::Bytes;
-    use futures::stream::BoxStream;
-    use loonfs_objectstore::{
-        ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode, Result as StoreResult,
-    };
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::{ByteRange, ObjectStore, Result as StoreResult};
+    use loonfs_test_support::stores::delegate_object_store;
+    use tempfile::tempdir;
 
     #[derive(Debug)]
-    struct ShortReadStore;
+    struct ShortReadStore {
+        inner: LocalFsStore,
+    }
 
     #[async_trait::async_trait]
     impl ObjectStore for ShortReadStore {
-        async fn head(&self, _key: &str) -> StoreResult<Option<ObjectMetadata>> {
-            unreachable!()
-        }
-
-        async fn get_with_metadata(&self, _key: &str) -> StoreResult<Option<ObjectBody>> {
-            unreachable!()
-        }
+        delegate_object_store!(self => self.inner; except get);
 
         async fn get(&self, _key: &str, _range: Option<ByteRange>) -> StoreResult<Option<Bytes>> {
             Ok(Some(Bytes::from_static(b"truncated")))
-        }
-
-        async fn put(
-            &self,
-            _key: &str,
-            _bytes: Bytes,
-            _mode: PutMode,
-        ) -> StoreResult<ObjectMetadata> {
-            unreachable!()
-        }
-
-        async fn delete(&self, _key: &str) -> StoreResult<()> {
-            unreachable!()
-        }
-
-        fn list_prefix_from_stream(
-            &self,
-            _prefix: &str,
-            _start_after: Option<&str>,
-        ) -> BoxStream<'static, StoreResult<String>> {
-            unreachable!()
         }
     }
 
     #[tokio::test]
     async fn a_short_ranged_read_is_a_store_failure_not_index_corruption() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = ShortReadStore {
+            inner: LocalFsStore::new(temp_dir.path()).expect("store"),
+        };
         let handle = BlockHandle {
             offset: 0,
             stored_len: 64,
             decoded_len: 64,
             crc32c: 0,
         };
-        let error = load_index_section_bytes(&ShortReadStore, "segments/one", &handle)
+        let error = load_index_section_bytes(&store, "segments/one", &handle)
             .await
             .expect_err("a short ranged read should not decode");
         assert!(

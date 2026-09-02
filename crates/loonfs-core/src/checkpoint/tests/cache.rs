@@ -27,7 +27,7 @@ async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
 async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
@@ -150,7 +150,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
 async fn concurrent_scans_share_one_fetch_per_segment() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
@@ -455,7 +455,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
 async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -522,7 +522,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
 async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -721,12 +721,12 @@ async fn corrupt_inline_filter_fails_the_lookup() {
 /// filter is too big to inline, already has.
 async fn checkpointed_direntry_segment() -> (
     tempfile::TempDir,
-    CountingStore<LocalFsStore>,
+    RecordingStore<LocalFsStore>,
     MetadataSegmentRef,
 ) {
     let temp_dir = tempdir().expect("tempdir");
     let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -785,7 +785,7 @@ fn stored_key(
 /// Fills `blocks` the way one cold read fills it, and returns the index that
 /// read decoded.
 async fn warm_local_block_cache(
-    store: &CountingStore<LocalFsStore>,
+    store: &RecordingStore<LocalFsStore>,
     descriptor: &MetadataSegmentRef,
     blocks: &Arc<RecordingStoredMetadataBlockCache>,
 ) -> Arc<Vec<SegmentIndexEntry>> {
@@ -988,13 +988,13 @@ async fn a_closed_local_block_cache_reads_as_a_miss() {
 /// cache first.
 async fn multi_block_direntry_segment() -> (
     tempfile::TempDir,
-    CountingStore<LocalFsStore>,
+    RecordingStore<LocalFsStore>,
     MetadataSegmentRef,
     Arc<Vec<SegmentIndexEntry>>,
 ) {
     let temp_dir = tempdir().expect("tempdir");
     let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -1081,7 +1081,7 @@ async fn multi_block_direntry_segment() -> (
 /// Every row of one segment, in row-key order, read straight through with
 /// no caches of either kind.
 async fn segment_rows(
-    store: &CountingStore<LocalFsStore>,
+    store: &RecordingStore<LocalFsStore>,
     descriptor: &MetadataSegmentRef,
 ) -> Vec<MetadataRow> {
     let memo = load::SessionBlockMemo::default();
@@ -1098,7 +1098,7 @@ async fn segment_rows(
 
 /// One segment object's whole body, which the seeding helpers slice.
 async fn segment_object_bytes(
-    store: &CountingStore<LocalFsStore>,
+    store: &RecordingStore<LocalFsStore>,
     descriptor: &MetadataSegmentRef,
 ) -> Bytes {
     store
@@ -1158,7 +1158,7 @@ fn seed_local_blocks(
 /// One wide read over a whole segment through `cache`, with the per-view
 /// memo a fresh request would carry, and the segment fetches it paid.
 async fn wide_read(
-    store: &CountingStore<LocalFsStore>,
+    store: &RecordingStore<LocalFsStore>,
     cache: Option<&MetadataSegmentCache>,
     descriptor: &MetadataSegmentRef,
     index: &[SegmentIndexEntry],
@@ -1346,7 +1346,7 @@ async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
 async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
-        CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)

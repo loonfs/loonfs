@@ -730,6 +730,7 @@ mod tests {
     use super::{remote_client_config_from, CliConfig, ProfileConfig};
     use loonfs_api::env::AUTH_TOKEN_ENV;
     use loonfs_api::SecretString;
+    use loonfs_test_support::EnvGuard;
 
     #[test]
     fn a_remote_profile_takes_its_token_from_the_config_then_the_environment() {
@@ -985,28 +986,6 @@ secret_access_key = "secret"
             panic!("expected embedded profile")
         };
         assert_eq!(cli_store.credentials_kind(), Some("ambient"));
-    }
-
-    struct EnvGuard {
-        name: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(name: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(name);
-            std::env::set_var(name, value);
-            Self { name, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
-            }
-        }
     }
 
     #[test]

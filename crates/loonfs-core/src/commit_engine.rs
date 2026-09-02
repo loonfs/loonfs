@@ -540,7 +540,7 @@ mod tests {
     use loonfs_objectstore::keys::wal_segment_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
-    use loonfs_test_support::stores::{CountingStore, OperationClass};
+    use loonfs_test_support::stores::{OperationClass, RecordingStore};
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
 
@@ -1017,7 +1017,7 @@ mod tests {
         use crate::cache::MetadataSegmentCacheConfig;
         let temp_dir = tempdir().expect("tempdir");
         let store =
-            CountingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+            RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = context("writer-a");
         bootstrap_namespace(&store, &namespace_id, &writer, false)

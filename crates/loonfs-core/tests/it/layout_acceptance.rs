@@ -16,7 +16,7 @@ use loonfs_core::{BootstrapOptions, MutationContext, ResolvedUploadCompletion};
 use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
 use tempfile::tempdir;
 
 async fn put_file<S: ObjectStore + ?Sized>(
@@ -67,7 +67,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
 #[tokio::test]
 async fn reads_commits_and_change_feed_never_list() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::new(
+    let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::any(),
     );

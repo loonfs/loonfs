@@ -13,7 +13,7 @@ use loonfs::{
     PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore, StoreConfig, UndeleteOptions,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
-use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -807,7 +807,7 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
 #[tokio::test]
 async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching() {
     let temp_dir = tempdir().expect("tempdir");
-    let counting = Arc::new(CountingStore::new(
+    let counting = Arc::new(RecordingStore::new(
         loonfs_objectstore::local_fs_store::LocalFsStore::new(temp_dir.path())
             .expect("create local-fs store"),
         KeyPredicate::content_blob(),

@@ -13,25 +13,18 @@
 
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{ActorRef, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetadataState {
-    #[serde(default)]
     pub inodes: Vec<InodeRecord>,
-    #[serde(default)]
     pub direntry_binds: Vec<DirentryBindRecord>,
-    #[serde(default)]
     pub direntry_unbinds: Vec<DirentryUnbindRecord>,
-    #[serde(default)]
     pub revisions: Vec<RevisionRecord>,
-    #[serde(default)]
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
-    #[serde(default)]
-    pub attribute_revisions: Vec<ModelAttributeRevision>,
+    pub attribute_revisions: Vec<AttributeRevisionRecord>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InodeRecord {
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
@@ -41,7 +34,7 @@ pub struct InodeRecord {
     pub created_at_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirentryBindRecord {
     pub parent_inode_id: InodeId,
     pub name_key: String,
@@ -51,7 +44,7 @@ pub struct DirentryBindRecord {
     pub bind_delta_index: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirentryUnbindRecord {
     pub parent_inode_id: InodeId,
     pub name_key: String,
@@ -65,7 +58,7 @@ pub struct DirentryUnbindRecord {
     pub unbind_delta_index: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
@@ -77,7 +70,7 @@ pub struct RevisionRecord {
     pub content_ref: ContentRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
     pub tombstone_seq: ChangeSeq,
@@ -92,10 +85,10 @@ pub struct SubtreeTombstoneRecord {
 
 /// Complete attribute map for one inode revision, represented with this
 /// model's independent key, value, and field types.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelAttributeRevision {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeRevisionRecord {
     pub inode_id: InodeId,
-    pub revision: u64,
+    pub revision_no: u64,
     pub committed_seq: ChangeSeq,
     pub commit_id: CommitId,
     pub delta_index: u32,
@@ -107,7 +100,7 @@ pub struct ModelAttributeRevision {
 }
 
 /// One key and its value inside an attribute map.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttributeEntry {
     pub key: String,
     pub value: String,
@@ -115,7 +108,7 @@ pub struct AttributeEntry {
 
 /// Commit position of a deletion event. A revoke uses this value to identify
 /// the exact deletion it cancels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeletionGeneration {
     pub seq: ChangeSeq,
     pub delta_index: u32,
@@ -123,14 +116,14 @@ pub struct DeletionGeneration {
 
 /// Directory binding removed by a path deletion, represented with this
 /// model's independent types.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletedBinding {
     pub parent_inode_id: InodeId,
     pub name_key: String,
     pub display_name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubtreeTombstoneAction {
     /// Deletes the subtree rooted at the record's inode and records its
     /// removed binding.
@@ -272,9 +265,9 @@ impl MetadataState {
                 } => {
                     metadata_state
                         .attribute_revisions
-                        .push(ModelAttributeRevision {
+                        .push(AttributeRevisionRecord {
                             inode_id: *inode_id,
-                            revision: attributes_revision_no.0,
+                            revision_no: attributes_revision_no.0,
                             committed_seq,
                             commit_id: commit_id.clone(),
                             delta_index: *delta_index,

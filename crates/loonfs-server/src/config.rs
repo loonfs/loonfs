@@ -635,39 +635,12 @@ mod tests {
         load_server_config, ServerConfigError, AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV,
         DISK_BLOCK_BYTES, MIN_DISK_BYTES,
     };
+    use loonfs_test_support::EnvGuard;
     use std::fs;
     use tempfile::tempdir;
 
     const AZURITE_ACCOUNT_KEY: &str =
         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
-
-    struct EnvGuard {
-        name: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(name: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(name);
-            std::env::set_var(name, value);
-            Self { name, previous }
-        }
-
-        fn unset(name: &'static str) -> Self {
-            let previous = std::env::var_os(name);
-            std::env::remove_var(name);
-            Self { name, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
 
     #[test]
     fn ambient_credential_sources_survive_loading_with_environment_credentials_set() {

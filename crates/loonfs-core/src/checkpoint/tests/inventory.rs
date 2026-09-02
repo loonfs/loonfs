@@ -392,7 +392,7 @@ async fn first_page_loads_only_the_records_needed_to_fill_it() {
         .await;
     }
     let prefix = loonfs_objectstore::keys::checkpoint_prefix(&namespace_id);
-    let store = CountingStore::new(inner, KeyPredicate::prefix(prefix));
+    let store = RecordingStore::new(inner, KeyPredicate::prefix(prefix));
 
     let page = list_checkpoints_page(
         &store,
@@ -407,7 +407,7 @@ async fn first_page_loads_only_the_records_needed_to_fill_it() {
 
     assert_eq!(page.items.len(), 2);
     assert!(page.next_cursor.is_some());
-    let counts = store.snapshot();
+    let counts = store.counts();
     assert_eq!(counts.lists, 1);
     assert_eq!(counts.gets_with_metadata, 2);
 }

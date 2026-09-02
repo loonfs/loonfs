@@ -1576,7 +1576,7 @@ async fn steady_state_reads_stay_off_the_objects_they_do_not_need() {
         .await
         .expect("create checkpoint");
 
-    let store = CountingStore::new(inner, KeyPredicate::exact(metadata_root(&namespace_id)));
+    let store = RecordingStore::new(inner, KeyPredicate::exact(metadata_root(&namespace_id)));
     load_namespace(&store, &namespace_id)
         .await
         .expect("load namespace");
@@ -1589,12 +1589,12 @@ async fn steady_state_reads_stay_off_the_objects_they_do_not_need() {
     .await
     .expect("list changes");
     assert_eq!(
-        store.snapshot().operations(OperationClass::Read),
+        store.count(OperationClass::Read),
         0,
         "status and the change feed resolve from head and floor alone"
     );
 
-    let basis_store = CountingStore::new(
+    let basis_store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("basis store"),
         KeyPredicate::exact(wal_floor(&namespace_id)),
     );
@@ -1602,7 +1602,7 @@ async fn steady_state_reads_stay_off_the_objects_they_do_not_need() {
         .await
         .expect("basis load");
     assert_eq!(
-        basis_store.snapshot().operations(OperationClass::Read),
+        basis_store.count(OperationClass::Read),
         0,
         "a basis load with a root present never reads the floor"
     );

@@ -75,7 +75,7 @@ pub(crate) mod commit_split_support {
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
     use loonfs_test_support::ids::page_limit;
-    use loonfs_test_support::stores::{CountingStore, KeyPredicate};
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
     use std::collections::HashSet;
     use std::path::Path;
 
@@ -490,8 +490,8 @@ pub(crate) mod commit_split_support {
 
     pub(crate) fn content_blob_counting_store(
         root: impl AsRef<Path>,
-    ) -> CountingStore<LocalFsStore> {
-        CountingStore::new(
+    ) -> RecordingStore<LocalFsStore> {
+        RecordingStore::new(
             LocalFsStore::new(root.as_ref()).expect("store"),
             KeyPredicate::content_blob(),
         )

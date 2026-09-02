@@ -17,7 +17,7 @@ use loonfs::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
-    CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -635,24 +635,24 @@ pub(crate) struct RuntimeStoreProbe {
     pub(crate) store: SharedObjectStore,
     pub(crate) fail_head_cas: Arc<FailStore<SharedObjectStore>>,
     pub(crate) fail_root_cas: Arc<FailStore<SharedObjectStore>>,
-    pub(crate) wal_gets: Arc<CountingStore<SharedObjectStore>>,
-    pub(crate) manifest_gets: Arc<CountingStore<SharedObjectStore>>,
-    pub(crate) head_gets: Arc<CountingStore<SharedObjectStore>>,
+    pub(crate) wal_gets: Arc<RecordingStore<SharedObjectStore>>,
+    pub(crate) manifest_gets: Arc<RecordingStore<SharedObjectStore>>,
+    pub(crate) head_gets: Arc<RecordingStore<SharedObjectStore>>,
 }
 
 impl RuntimeStoreProbe {
     pub(crate) fn new(root: &Path, namespace_id: &NamespaceId) -> Self {
         let inner: SharedObjectStore =
             Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
-        let wal_gets = Arc::new(CountingStore::new(
+        let wal_gets = Arc::new(RecordingStore::new(
             inner,
             KeyPredicate::prefix(format!("namespaces/{namespace_id}/wal/segments/")),
         ));
-        let manifest_gets = Arc::new(CountingStore::new(
+        let manifest_gets = Arc::new(RecordingStore::new(
             wal_gets.clone() as SharedObjectStore,
             KeyPredicate::prefix(format!("namespaces/{namespace_id}/metadata/manifests/")),
         ));
-        let head_gets = Arc::new(CountingStore::new(
+        let head_gets = Arc::new(RecordingStore::new(
             manifest_gets.clone() as SharedObjectStore,
             KeyPredicate::wal_head(namespace_id),
         ));

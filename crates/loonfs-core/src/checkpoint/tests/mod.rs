@@ -18,11 +18,10 @@ use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
 use super::cache::{MetadataSegmentBlockKind, MetadataSegmentCache, MetadataSegmentCacheConfig};
 use super::compaction_merge::locality_of;
 use super::compaction_retention::RetentionRule;
-use super::create::load_checkpoint_projection_metadata_state;
 use super::error::ManifestLoadError;
 use super::frozen_floor::{bind_survives_frozen_floor, unbindings_at_or_below_floor};
 use super::load::{
-    head_from_manifest, load_manifest_materialization_for_inspection,
+    append_rows_to_metadata, head_from_manifest, load_manifest_materialization_for_inspection,
     load_manifest_metadata_state_for_inspection_from_manifest, load_verified_manifest_segments,
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
@@ -46,7 +45,7 @@ use super::{
     reorganize_metadata_step, row, scan, MetadataCompactionView, MetadataReorganizeOutcome,
 };
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
-use crate::metadata::MetadataState;
+use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{
     load_head_object, load_metadata_root_object, load_wal_floor_object,
@@ -90,12 +89,36 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_test_support::stores::{
-    BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+
+async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> crate::error::Result<(HeadState, MetadataState)> {
+    let projection = super::flush::load_root_projection(store, namespace_id).await?;
+    let mut metadata_state = MetadataStateBuilder::default();
+    for family in CHECKPOINT_ROW_FAMILIES {
+        let mut rows = projection
+            .manifest_segments
+            .scan_prefix(family, "")
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
+        rows.extend(manifest_rows_for_family(&projection.tail_state, family));
+        rows.sort_by_key(|row| row.row_key_for_family(family));
+        append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
+    }
+    Ok((projection.head, metadata_state.finish()))
+}
 
 /// Every lifecycle test in this file pins as one user owner; owner-specific
 /// behavior (fork owners, distinct-owner records) is exercised explicitly

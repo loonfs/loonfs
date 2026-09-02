@@ -16,8 +16,7 @@ use loonfs_objectstore::keys::{wal_segment, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
-    ConcurrencyWatchStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
-    RecordingStore,
+    ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::borrow::Cow;
 use tempfile::tempdir;
@@ -620,7 +619,7 @@ async fn write_linked_chain(
 #[tokio::test]
 async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::new(
+    let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::any(),
     );
@@ -689,7 +688,7 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
 #[tokio::test]
 async fn a_limit_that_covers_the_chain_loads_all_of_it() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = CountingStore::new(
+    let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::any(),
     );
@@ -748,7 +747,7 @@ async fn a_failed_prefetch_costs_its_own_request_and_the_walk_loads_the_chain() 
         InjectedError::Transport("the store is flaky".to_owned()),
     );
     failing.fail_next(newest_first.len());
-    let store = CountingStore::new(failing, KeyPredicate::any());
+    let store = RecordingStore::new(failing, KeyPredicate::any());
 
     let loaded = load_wal_chain(
         &store,
@@ -804,7 +803,7 @@ async fn failed_prefetch_requests_count_against_the_limit() {
         InjectedError::Transport("the store is flaky".to_owned()),
     );
     failing.fail_all();
-    let store = CountingStore::new(failing, KeyPredicate::any());
+    let store = RecordingStore::new(failing, KeyPredicate::any());
 
     let loaded = load_wal_chain(
         &store,

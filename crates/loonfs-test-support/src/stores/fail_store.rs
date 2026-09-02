@@ -1,19 +1,18 @@
 //! Configurable failures for selected object-store operations.
 
-use super::{KeyPredicate, OperationClass, OperationContext, OperationKind};
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::stream::{self, BoxStream};
-use loonfs_api::Checksum;
-use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+use super::{
+    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationClass, OperationContext,
+    OperationKind,
 };
+use async_trait::async_trait;
+use futures::future::BoxFuture;
+use loonfs_objectstore::ObjectStoreError;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 type Predicate = dyn for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync;
+type BeforeOperation = dyn for<'a> Fn(&'a OperationContext<'a>) -> BoxFuture<'a, ()> + Send + Sync;
 
 /// Error returned by a [`FailStore`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,10 +50,11 @@ pub enum FailureMode {
     ApplyThenFail,
 }
 
-/// Injects a configured error into selected operations.
-pub struct FailStore<S> {
-    inner: S,
+/// Intercepts selected operations with callbacks and configured failures.
+pub struct FailInterceptor {
     predicate: Arc<Predicate>,
+    before_operation: Option<Arc<BeforeOperation>>,
+    before_operation_pending: AtomicBool,
     error: InjectedError,
     mode: FailureMode,
     remaining: AtomicUsize,
@@ -62,7 +62,23 @@ pub struct FailStore<S> {
     attempts: AtomicUsize,
 }
 
-impl<S> FailStore<S> {
+impl fmt::Debug for FailInterceptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FailInterceptor")
+            .field("error", &self.error)
+            .field("mode", &self.mode)
+            .field("remaining", &self.remaining)
+            .field("fail_all", &self.fail_all)
+            .field("attempts", &self.attempts)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Injects a configured error into selected operations.
+pub type FailStore<S> = InterceptStore<S, FailInterceptor>;
+
+impl<S> InterceptStore<S, FailInterceptor> {
     /// Selects operations by key predicate and operation class.
     pub fn new(
         inner: S,
@@ -83,280 +99,104 @@ impl<S> FailStore<S> {
         predicate: impl for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync + 'static,
         error: InjectedError,
     ) -> Self {
-        Self {
+        Self::with_interceptor(
             inner,
-            predicate: Arc::new(predicate),
-            error,
-            mode: FailureMode::BeforeApply,
-            remaining: AtomicUsize::new(0),
-            fail_all: AtomicBool::new(false),
-            attempts: AtomicUsize::new(0),
-        }
+            FailInterceptor {
+                predicate: Arc::new(predicate),
+                before_operation: None,
+                before_operation_pending: AtomicBool::new(false),
+                error,
+                mode: FailureMode::BeforeApply,
+                remaining: AtomicUsize::new(0),
+                fail_all: AtomicBool::new(false),
+                attempts: AtomicUsize::new(0),
+            },
+        )
+    }
+
+    /// Runs `callback` before the first matching operation.
+    pub fn before_operation(
+        mut self,
+        callback: impl for<'a> Fn(&'a OperationContext<'a>) -> BoxFuture<'a, ()> + Send + Sync + 'static,
+    ) -> Self {
+        let interceptor = Arc::get_mut(&mut self.interceptor)
+            .expect("new fail interceptor should have one owner");
+        interceptor.before_operation = Some(Arc::new(callback));
+        interceptor
+            .before_operation_pending
+            .store(true, Ordering::SeqCst);
+        self
     }
 
     /// Returns failures after selected operations have been applied.
     pub fn apply_then_fail(mut self) -> Self {
-        self.mode = FailureMode::ApplyThenFail;
+        Arc::get_mut(&mut self.interceptor)
+            .expect("new fail interceptor should have one owner")
+            .mode = FailureMode::ApplyThenFail;
         self
     }
 
     /// Fails the next `count` matching operations and resets the attempt count.
     pub fn fail_next(&self, count: usize) {
-        self.attempts.store(0, Ordering::SeqCst);
-        self.fail_all.store(false, Ordering::SeqCst);
-        self.remaining.store(count, Ordering::SeqCst);
+        let interceptor = self.interceptor();
+        interceptor.attempts.store(0, Ordering::SeqCst);
+        interceptor.fail_all.store(false, Ordering::SeqCst);
+        interceptor.remaining.store(count, Ordering::SeqCst);
     }
 
     /// Fails every matching operation until [`Self::clear`] is called.
     pub fn fail_all(&self) {
-        self.attempts.store(0, Ordering::SeqCst);
-        self.remaining.store(0, Ordering::SeqCst);
-        self.fail_all.store(true, Ordering::SeqCst);
+        let interceptor = self.interceptor();
+        interceptor.attempts.store(0, Ordering::SeqCst);
+        interceptor.remaining.store(0, Ordering::SeqCst);
+        interceptor.fail_all.store(true, Ordering::SeqCst);
     }
 
     /// Stops injecting failures.
     pub fn clear(&self) {
-        self.fail_all.store(false, Ordering::SeqCst);
-        self.remaining.store(0, Ordering::SeqCst);
+        self.interceptor().fail_all.store(false, Ordering::SeqCst);
+        self.interceptor().remaining.store(0, Ordering::SeqCst);
     }
 
     /// Returns the number of matching attempts since the most recent arming.
     pub fn attempts(&self) -> usize {
-        self.attempts.load(Ordering::SeqCst)
+        self.interceptor().attempts.load(Ordering::SeqCst)
     }
 
     /// Returns the number of failures still armed.
     pub fn remaining(&self) -> usize {
-        self.remaining.load(Ordering::SeqCst)
+        self.interceptor().remaining.load(Ordering::SeqCst)
     }
+}
 
-    /// Returns a reference to the wrapped store.
-    pub fn inner(&self) -> &S {
-        &self.inner
-    }
-
-    fn should_fail(&self, context: &OperationContext<'_>) -> bool {
+#[async_trait]
+impl Interceptor for FailInterceptor {
+    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
         if !(self.predicate)(context) {
-            return false;
+            return Intercept::Continue;
         }
         self.attempts.fetch_add(1, Ordering::SeqCst);
-        self.fail_all.load(Ordering::SeqCst)
+        if self.before_operation_pending.swap(false, Ordering::SeqCst) {
+            if let Some(callback) = &self.before_operation {
+                callback(context).await;
+            }
+        }
+        let fail = self.fail_all.load(Ordering::SeqCst)
             || self
                 .remaining
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
-                .is_ok()
-    }
-}
-
-impl<S: fmt::Debug> fmt::Debug for FailStore<S> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("FailStore")
-            .field("inner", &self.inner)
-            .field("error", &self.error)
-            .field("mode", &self.mode)
-            .field("remaining", &self.remaining)
-            .field("fail_all", &self.fail_all)
-            .field("attempts", &self.attempts)
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl<S: ObjectStore> ObjectStore for FailStore<S> {
-    async fn head_stored_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
-        let fail = self.should_fail(&OperationContext::new(key, OperationKind::Head));
-        if fail && self.mode == FailureMode::BeforeApply {
-            return Err(self.error.for_key(key));
+                .is_ok();
+        if !fail {
+            return Intercept::Continue;
         }
-        let result = self.inner.head_stored_checksum(key).await;
-        if fail {
-            result?;
-            Err(self.error.for_key(key))
+        let error = self.error.for_key(context.key());
+        if self.mode == FailureMode::ApplyThenFail && !matches!(context.kind(), OperationKind::List)
+        {
+            Intercept::FailAfter(error)
         } else {
-            result
+            Intercept::FailBefore(error)
         }
-    }
-
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        let fail = self.should_fail(&OperationContext::new(key, OperationKind::Head));
-        if fail && self.mode == FailureMode::BeforeApply {
-            return Err(self.error.for_key(key));
-        }
-        let result = self.inner.head(key).await;
-        if fail {
-            result?;
-            Err(self.error.for_key(key))
-        } else {
-            result
-        }
-    }
-
-    async fn create_multipart_upload(&self, key: &str) -> Result<String, ObjectStoreError> {
-        self.inner.create_multipart_upload(key).await
-    }
-
-    async fn complete_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-        parts: &[MultipartPart],
-        checksum: &Checksum,
-    ) -> Result<MultipartCompletion, ObjectStoreError> {
-        self.inner
-            .complete_multipart_upload(key, provider_upload_id, parts, checksum)
-            .await
-    }
-
-    async fn abort_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-    ) -> Result<(), ObjectStoreError> {
-        self.inner
-            .abort_multipart_upload(key, provider_upload_id)
-            .await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        let fail = self.should_fail(&OperationContext::new(key, OperationKind::GetWithMetadata));
-        if fail && self.mode == FailureMode::BeforeApply {
-            return Err(self.error.for_key(key));
-        }
-        let result = self.inner.get_with_metadata(key).await;
-        if fail {
-            result?;
-            Err(self.error.for_key(key))
-        } else {
-            result
-        }
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        let fail = self.should_fail(&OperationContext::new(
-            key,
-            OperationKind::Get {
-                range: range.as_ref(),
-            },
-        ));
-        if fail && self.mode == FailureMode::BeforeApply {
-            return Err(self.error.for_key(key));
-        }
-        let result = self.inner.get(key, range).await;
-        if fail {
-            result?;
-            Err(self.error.for_key(key))
-        } else {
-            result
-        }
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let fail = self.should_fail(&OperationContext::new(
-            key,
-            OperationKind::Put {
-                bytes: &bytes,
-                mode: &mode,
-            },
-        ));
-        if fail && self.mode == FailureMode::BeforeApply {
-            return Err(self.error.for_key(key));
-        }
-        let result = self.inner.put(key, bytes, mode).await;
-        if fail {
-            result?;
-            Err(self.error.for_key(key))
-        } else {
-            result
-        }
-    }
-
-    async fn put_streamed(
-        &self,
-        key: &str,
-        body: ByteStream,
-        mode: PutMode,
-    ) -> Result<u64, ObjectStoreError> {
-        let fail = self.should_fail(&OperationContext::new(
-            key,
-            OperationKind::PutStreamed { mode: &mode },
-        ));
-        if fail && self.mode == FailureMode::BeforeApply {
-            return Err(self.error.for_key(key));
-        }
-        let result = self.inner.put_streamed(key, body, mode).await;
-        if fail {
-            result?;
-            Err(self.error.for_key(key))
-        } else {
-            result
-        }
-    }
-
-    async fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let fail = self.should_fail(&OperationContext::new(
-            key,
-            OperationKind::CompareAndSwap {
-                expected_etag,
-                bytes: &bytes,
-            },
-        ));
-        if fail && self.mode == FailureMode::BeforeApply {
-            return Err(self.error.for_key(key));
-        }
-        let result = self.inner.compare_and_swap(key, expected_etag, bytes).await;
-        if fail {
-            result?;
-            Err(self.error.for_key(key))
-        } else {
-            result
-        }
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        let fail = self.should_fail(&OperationContext::new(key, OperationKind::Delete));
-        if fail && self.mode == FailureMode::BeforeApply {
-            return Err(self.error.for_key(key));
-        }
-        let result = self.inner.delete(key).await;
-        if fail {
-            result?;
-            Err(self.error.for_key(key))
-        } else {
-            result
-        }
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        if self.should_fail(&OperationContext::new(prefix, OperationKind::List)) {
-            return Box::pin(stream::once({
-                let error = self.error.for_key(prefix);
-                async move { Err(error) }
-            }));
-        }
-        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }

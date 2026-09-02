@@ -1,6 +1,7 @@
 //! Test-only support shared by object-store unit suites.
 
 use crate::timing::MonotonicTimer;
+use loonfs_test_support::EnvGuard;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Azurite's published development-account key.
@@ -67,35 +68,6 @@ static AWS_ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new((
 /// Locks AWS environment access for a test.
 pub(crate) async fn aws_environment_lock() -> tokio::sync::MutexGuard<'static, ()> {
     AWS_ENVIRONMENT.lock().await
-}
-
-/// Restores an environment variable when dropped.
-pub(crate) struct EnvGuard {
-    name: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    pub(crate) fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(name);
-        std::env::set_var(name, value);
-        Self { name, previous }
-    }
-
-    pub(crate) fn unset(name: &'static str) -> Self {
-        let previous = std::env::var_os(name);
-        std::env::remove_var(name);
-        Self { name, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => std::env::set_var(self.name, value),
-            None => std::env::remove_var(self.name),
-        }
-    }
 }
 
 /// Replaces ambient AWS credential sources for a test.
