@@ -29,7 +29,7 @@ async fn change_at(
 ) -> loonfs_api::v0::CommittedChange {
     harness
         .client
-        .list_changes(&namespace_id("demo"), ChangeSeq(0), None)
+        .list_changes(&namespace_id("demo"), ChangeSeq(0), &Default::default())
         .await
         .expect("list changes")
         .changes

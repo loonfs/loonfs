@@ -1,6 +1,7 @@
 //! Commit submission and path-oriented filesystem mutations.
 
 use super::*;
+use crate::transport::SendPolicy;
 use crate::uploads::staging::{StagedContent, UploadContinuity};
 
 fn commit_id_or_generated(commit: &CommitOptions) -> CommitId {
@@ -40,7 +41,7 @@ impl Client {
     ) -> Result<ApiCommitResponse> {
         let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
         // The request's commit id resolves an ambiguous resend through a durable receipt.
-        self.request_json::<_, ApiCommitResponse>(self.post(&url), Some(request))
+        self.request_json::<_, ApiCommitResponse>(self.post(&url), Some(request), SendPolicy::Retry)
             .await
     }
 
@@ -219,6 +220,10 @@ impl Client {
         conflict: ClientError,
     ) -> Result<ApiCommitResponse> {
         let namespace_id = spec.namespace();
+        let list_options = ListChangesOptions {
+            limit: Some(1),
+            snapshot_id: None,
+        };
         loonfs_api::reconcile_put_commit_id_reuse(
             PutRetryAttempt {
                 namespace_id,
@@ -228,7 +233,7 @@ impl Client {
                 staged: uploaded,
             },
             conflict,
-            |after_seq| self.list_changes(namespace_id, after_seq, Some(1)),
+            |after_seq| self.list_changes(namespace_id, after_seq, &list_options),
             classify_put_retry_error,
         )
         .await

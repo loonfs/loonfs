@@ -2,32 +2,27 @@
 //!
 //! It implements the same operations as the remote backend.
 
-use crate::backend_error::{
-    map_namespace_scoped_grep_error, map_namespace_scoped_runtime_error, map_runtime_error,
-    BackendError,
-};
+use crate::backend_error::{map_namespace_scoped_grep_error, map_runtime_error, NamespaceScoped};
+use crate::error::CliError;
 use crate::render::write_stderr_warning;
 use loonfs::{
     ByteStream, CheckpointPageCursor, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, DeleteNamespaceResponse,
-    DeleteOptions, FileContentStream, FsAdmin, FsReader, FsWriter,
-    ListChangesOptions as RuntimeListChangesOptions, ListChangesResponse, ListPathEntriesOptions,
-    MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenancePlan,
-    MaintenanceStepConclusion, MoveOptions, PutFileOptions, ReadFileStreamOptions,
+    DeleteOptions, FsAdmin, FsReader, FsWriter, ListChangesOptions as RuntimeListChangesOptions,
+    ListChangesResponse, ListPathEntriesOptions, MaintenanceHandle, MaintenanceJob,
+    MaintenanceJobId, MaintenancePlan, MaintenanceStepConclusion, MoveOptions, PutFileOptions,
     RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions, UndeleteOptions,
     UpdateAttributesOptions,
 };
 use loonfs_api::{
     v0::{
         GrepGcRequest, GrepGcResponse, GrepIndex, GrepIndexLifecycle, ListSnapshotsResponse,
-        ReleaseSnapshotResponse, SnapshotSummary, StoreProbeCheckOutcome, StoreProbeCheckResult,
-        StoreProbeResponse,
+        SnapshotSummary, StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
     },
     AbsolutePath, ChangeSeq, Checkpoint, CheckpointId, CommitResponse, CreateCheckpointRequest,
     EffectiveLimit, ErrorCode, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
     ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, Namespace, NamespaceId, PaginationPolicy, PathEntry,
-    ReleaseCheckpointResponse, RevisionNo,
+    MaintenanceStepResponse, Namespace, NamespaceId, PaginationPolicy, PathEntry, RevisionNo,
 };
 use loonfs_client::{NamespacePath, ReadFileOptions};
 use loonfs_grep::{
@@ -39,7 +34,7 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, Sto
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
 
-use super::progress::{wait_for_grep_index, GrepWaitStep};
+use super::step_budget::{wait_for_grep_index, GrepWaitStep};
 use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, StepBudget};
 
 /// Purpose-specific handles over one shared store client: reads go through
@@ -83,8 +78,8 @@ impl EmbeddedBackend {
     /// stderr, never as the mutation's outcome — the commit landed.
     async fn settle_background_work_after<T>(
         &self,
-        result: Result<T, BackendError>,
-    ) -> Result<T, BackendError> {
+        result: Result<T, CliError>,
+    ) -> Result<T, CliError> {
         match (result, self.writer.flush_background().await) {
             (result, Ok(())) => result,
             (Ok(value), Err(error)) => {
@@ -106,7 +101,7 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
         attempt: F,
-    ) -> Result<T, BackendError>
+    ) -> Result<T, CliError>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T, RuntimeError>>,
@@ -127,15 +122,14 @@ impl EmbeddedBackend {
                 .map_err(map_runtime_error)?;
             result = attempt().await;
         }
-        let result =
-            result.map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error));
+        let result = result.scoped(namespace_id);
         self.settle_background_work_after(result).await
     }
 
     /// A grep worker over this backend's own handles: grep's keyspace rides
     /// the writer's store client, its filesystem reads the reader, and its
     /// backfill checkpoints the admin handle.
-    fn grep_worker(&self) -> GrepWorker<SharedObjectStore> {
+    pub(super) fn grep_worker(&self) -> GrepWorker<SharedObjectStore> {
         GrepWorker::with_block_cache(
             self.writer.object_store(),
             self.reader.clone(),
@@ -147,7 +141,7 @@ impl EmbeddedBackend {
     pub(super) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<Namespace, BackendError> {
+    ) -> Result<Namespace, CliError> {
         let result = self
             .writer
             .create_namespace(namespace_id, CreateNamespaceOptions::default())
@@ -160,13 +154,13 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
         expected_head_seq: Option<ChangeSeq>,
-    ) -> Result<DeleteNamespaceResponse, BackendError> {
+    ) -> Result<DeleteNamespaceResponse, CliError> {
         let options = DeleteNamespaceOptions { expected_head_seq };
         let result = self
             .writer
             .delete_namespace(namespace_id, options)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error));
+            .scoped(namespace_id);
         self.settle_background_work_after(result).await
     }
 
@@ -174,23 +168,13 @@ impl EmbeddedBackend {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-    ) -> Result<Namespace, BackendError> {
+    ) -> Result<Namespace, CliError> {
         let result = self
             .writer
             .fork_namespace(source_namespace_id, new_namespace_id)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(source_namespace_id, error));
+            .scoped(source_namespace_id);
         self.settle_background_work_after(result).await
-    }
-
-    pub(super) async fn get_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<Namespace, BackendError> {
-        self.reader
-            .get_namespace(namespace_id)
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
     pub(super) async fn list_path_entries_page(
@@ -199,14 +183,14 @@ impl EmbeddedBackend {
         limit: Option<u32>,
         cursor: Option<&str>,
         snapshot_id: Option<&CheckpointId>,
-    ) -> Result<ListPathEntriesResponse, BackendError> {
+    ) -> Result<ListPathEntriesResponse, CliError> {
         let request = cli_page_request(limit, cursor)?;
         if let Some(snapshot_id) = snapshot_id {
             let snapshot = self
                 .reader
                 .pin_namespace_at_snapshot(spec.namespace(), snapshot_id)
                 .await
-                .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
+                .scoped(spec.namespace())?;
             return snapshot
                 .list_path_entries_page(
                     spec.absolute_path().as_str(),
@@ -214,7 +198,7 @@ impl EmbeddedBackend {
                     ListPathEntriesOptions::default(),
                 )
                 .await
-                .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error));
+                .scoped(spec.namespace());
         }
         self.reader
             .list_path_entries_page(
@@ -224,26 +208,26 @@ impl EmbeddedBackend {
                 ListPathEntriesOptions::default(),
             )
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
+            .scoped(spec.namespace())
     }
 
     pub(super) async fn get_path_entry(
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
-    ) -> Result<PathEntry, BackendError> {
+    ) -> Result<PathEntry, CliError> {
         if let Some(snapshot_id) = &options.snapshot_id {
             let snapshot = self
                 .reader
                 .pin_namespace_at_snapshot(spec.namespace(), snapshot_id)
                 .await
-                .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
+                .scoped(spec.namespace())?;
             let mut options = options.clone();
             options.snapshot_id = None;
             return snapshot
                 .get_path_entry(spec.absolute_path().as_str(), options)
                 .await
-                .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error));
+                .scoped(spec.namespace());
         }
         self.reader
             .get_path_entry(
@@ -252,30 +236,15 @@ impl EmbeddedBackend {
                 options.clone(),
             )
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
+            .scoped(spec.namespace())
     }
 
-    pub(super) async fn get_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        options: &StatPathOptions,
-    ) -> Result<PathEntry, BackendError> {
-        self.reader
-            .get_inode(namespace_id, inode_id, options.clone())
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
-    }
-
-    pub(super) async fn get_file_bytes(
-        &self,
-        spec: &NamespacePath,
-    ) -> Result<Vec<u8>, BackendError> {
+    pub(super) async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError> {
         let result = self
             .reader
             .get_file_bytes(spec.namespace(), spec.absolute_path().as_str())
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
+            .scoped(spec.namespace())?;
         Ok(result.bytes)
     }
 
@@ -283,9 +252,9 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         options: &ReadFileOptions,
-    ) -> Result<Vec<u8>, BackendError> {
+    ) -> Result<Vec<u8>, CliError> {
         if options.revision_no.is_some() && options.snapshot_id.is_some() {
-            return Err(BackendError::invalid_request(
+            return Err(CliError::invalid_request(
                 "revision_no cannot be combined with snapshot_id",
             )
             .with_param("revision_no"));
@@ -295,12 +264,12 @@ impl EmbeddedBackend {
                 .reader
                 .pin_namespace_at_snapshot(spec.namespace(), snapshot_id)
                 .await
-                .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
+                .scoped(spec.namespace())?;
             return snapshot
                 .get_file_bytes(spec.absolute_path().as_str())
                 .await
                 .map(|file| file.bytes)
-                .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error));
+                .scoped(spec.namespace());
         }
         match options.revision_no {
             Some(revision_no) => self.get_file_revision_bytes(spec, revision_no).await,
@@ -308,84 +277,55 @@ impl EmbeddedBackend {
         }
     }
 
-    /// Opens a file's content as bounded chunks, at the runtime's own chunk
-    /// size: what a download costs this process is that chunk, not the file.
-    ///
-    /// `start_offset` skips what the caller already holds; the stream still
-    /// verifies the whole object, so those bytes reach it through
-    /// [`FileContentStream::fold_resumed_prefix`] before it reads anything.
-    pub(super) async fn read_file_stream(
-        &self,
-        spec: &NamespacePath,
-        start_offset: u64,
-    ) -> Result<FileContentStream<SharedObjectStore>, BackendError> {
-        self.reader
-            .read_file_stream(
-                spec.namespace(),
-                spec.absolute_path().as_str(),
-                ReadFileStreamOptions {
-                    start_offset,
-                    ..ReadFileStreamOptions::default()
-                },
-            )
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
-    }
-
     pub(super) async fn grep(
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
         limit: Option<u32>,
-    ) -> Result<GrepResponse, BackendError> {
+    ) -> Result<GrepResponse, CliError> {
         let store = self.writer.object_store();
         let reads = NamespaceReads::new(&self.reader, namespace_id);
         self.grep
             .query(request, resolve_cli_page_limit(limit)?, &reads, &store)
             .await
-            .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
+            .scoped(namespace_id)
     }
 
     pub(super) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndex, BackendError> {
-        let grep_error = |error| map_namespace_scoped_grep_error(namespace_id, error);
+    ) -> Result<GrepIndex, CliError> {
         match self
             .grep_worker()
             .enable(namespace_id)
             .await
-            .map_err(grep_error)?
+            .scoped(namespace_id)?
         {
             GrepEnableOutcome::Enabled { .. } | GrepEnableOutcome::AlreadyEnabled { .. } => {}
             GrepEnableOutcome::Superseded => {
-                return Err(grep_error(GrepError::PublicationConflict {
-                    object_key: loonfs_grep::keyspace::root_key(namespace_id),
-                }))
+                return Err(map_namespace_scoped_grep_error(
+                    namespace_id,
+                    GrepError::PublicationConflict {
+                        object_key: loonfs_grep::keyspace::root_key(namespace_id),
+                    },
+                ));
             }
         }
         // Enabling is one compare-and-swap and nothing else, here as on a
         // server. Driving the backfill afterwards is the command's job, not
         // this call's, so an embedded caller and a remote one get the same
         // answer to the same question.
-        self.get_grep_index(namespace_id).await
-    }
-
-    pub(super) async fn get_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<GrepIndex, BackendError> {
         self.grep_worker()
             .get_grep_index(namespace_id)
             .await
-            .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
+            .scoped(namespace_id)
     }
 
     pub(super) async fn gc_grep_index(
         &self,
         namespace_id: &NamespaceId,
         request: &GrepGcRequest,
-    ) -> Result<GrepGcResponse, BackendError> {
+    ) -> Result<GrepGcResponse, CliError> {
         let report = self
             .grep_worker()
             .garbage_collect_namespace(
@@ -397,7 +337,7 @@ impl EmbeddedBackend {
                 },
             )
             .await
-            .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?;
+            .scoped(namespace_id)?;
         Ok(GrepGcResponse {
             namespace_id: namespace_id.clone(),
             deleted_segments: report.deleted_segments,
@@ -422,24 +362,21 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         target_seq: ChangeSeq,
         budget: StepBudget,
-    ) -> Result<GrepWaitProgress, BackendError> {
+    ) -> Result<GrepWaitProgress, CliError> {
         let worker = self.grep_worker();
         let job = GrepMaintenanceJob::new(worker.clone(), GramIndexBuildPolicy::default());
         wait_for_grep_index(
             target_seq,
             budget,
             || async {
-                let status = worker
-                    .lifecycle(namespace_id)
-                    .await
-                    .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?;
+                let status = worker.lifecycle(namespace_id).await.scoped(namespace_id)?;
                 Ok(GrepIndexLifecycle::from(&status))
             },
             || async {
                 let conclusion = job
                     .step(namespace_id, None)
                     .await
-                    .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?
+                    .scoped(namespace_id)?
                     .conclusion;
                 Ok(match conclusion {
                     MaintenanceStepConclusion::Progressed
@@ -459,7 +396,7 @@ impl EmbeddedBackend {
     /// The runtime's own jobs are registered by the writer; grep's is
     /// registered here, over the same worker every other index command in
     /// this process uses. After this, one lookup answers for all three.
-    fn hosted_jobs(&self, jobs: &[MaintenanceJobId]) -> Result<Vec<HostedJob>, BackendError> {
+    fn hosted_jobs(&self, jobs: &[MaintenanceJobId]) -> Result<Vec<HostedJob>, CliError> {
         if jobs.contains(&GREP_INDEX_JOB) {
             self.writer
                 .register_maintenance_job(Arc::new(GrepMaintenanceJob::new(
@@ -476,7 +413,7 @@ impl EmbeddedBackend {
         jobs.iter()
             .map(|job| {
                 let executor = self.writer.maintenance_job(*job).ok_or_else(|| {
-                    BackendError::runtime_error(format!(
+                    CliError::runtime_error(format!(
                         "no maintenance job is registered under `{job}`"
                     ))
                 })?;
@@ -499,7 +436,7 @@ impl EmbeddedBackend {
         jobs: &[MaintenanceJobId],
         poll_interval_ms: Option<u64>,
         shutdown: impl std::future::Future<Output = ()>,
-    ) -> Result<(), BackendError> {
+    ) -> Result<(), CliError> {
         let hosted = self.hosted_jobs(jobs)?;
         let interval_ms = poll_interval_ms.unwrap_or(ASSIGNMENT_INTERVAL_MS);
         let maintenance = self.writer.maintenance();
@@ -533,7 +470,7 @@ impl EmbeddedBackend {
         namespaces: &[NamespaceId],
         jobs: &[MaintenanceJobId],
         budget: StepBudget,
-    ) -> Result<MaintenanceDrainProgress, BackendError> {
+    ) -> Result<MaintenanceDrainProgress, CliError> {
         let hosted = self.hosted_jobs(jobs)?;
         self.writer.shutdown().await.map_err(map_runtime_error)?;
         let timer = StdMonotonicTimer::default();
@@ -553,7 +490,7 @@ impl EmbeddedBackend {
                     let result = executor
                         .step(namespace_id, continuation.as_deref())
                         .await
-                        .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?;
+                        .scoped(namespace_id)?;
                     steps += 1;
                     key.steps += 1;
                     key.conclusion = Some(result.conclusion);
@@ -571,20 +508,24 @@ impl EmbeddedBackend {
     pub(super) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndex, BackendError> {
-        let grep_error = |error| map_namespace_scoped_grep_error(namespace_id, error);
+    ) -> Result<GrepIndex, CliError> {
         match self
             .grep_worker()
             .disable(namespace_id)
             .await
-            .map_err(grep_error)?
+            .scoped(namespace_id)?
         {
-            GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
-                self.get_grep_index(namespace_id).await
-            }
-            GrepDisableOutcome::Superseded => Err(grep_error(GrepError::PublicationConflict {
-                object_key: loonfs_grep::keyspace::root_key(namespace_id),
-            })),
+            GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => self
+                .grep_worker()
+                .get_grep_index(namespace_id)
+                .await
+                .scoped(namespace_id),
+            GrepDisableOutcome::Superseded => Err(map_namespace_scoped_grep_error(
+                namespace_id,
+                GrepError::PublicationConflict {
+                    object_key: loonfs_grep::keyspace::root_key(namespace_id),
+                },
+            )),
         }
     }
 
@@ -592,12 +533,12 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
-    ) -> Result<Vec<u8>, BackendError> {
+    ) -> Result<Vec<u8>, CliError> {
         let result = self
             .reader
             .get_file_revision_bytes(spec.namespace(), spec.absolute_path().as_str(), revision_no)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
+            .scoped(spec.namespace())?;
         Ok(result.bytes)
     }
 
@@ -606,12 +547,12 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListTrashResponse, BackendError> {
+    ) -> Result<ListTrashResponse, CliError> {
         let request = cli_page_request(limit, cursor)?;
         self.reader
             .list_trash_page(namespace_id, request)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            .scoped(namespace_id)
     }
 
     pub(super) async fn list_file_revisions_page(
@@ -619,12 +560,12 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListFileRevisionsResponse, BackendError> {
+    ) -> Result<ListFileRevisionsResponse, CliError> {
         let request = cli_page_request(limit, cursor)?;
         self.reader
             .list_file_revisions_page(spec.namespace(), spec.absolute_path().as_str(), request)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
+            .scoped(spec.namespace())
     }
 
     pub(super) async fn put_file_bytes(
@@ -632,7 +573,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         bytes: &[u8],
         options: &PutFileOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.put_file_bytes(
                 spec.namespace(),
@@ -658,7 +599,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         body: ByteStream,
         options: &PutFileOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         let result = self
             .writer
             .put_file_stream(
@@ -668,7 +609,7 @@ impl EmbeddedBackend {
                 options.clone(),
             )
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error));
+            .scoped(spec.namespace());
         self.settle_background_work_after(result).await
     }
 
@@ -676,7 +617,7 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         options: &DeleteOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.delete_path(
                 spec.namespace(),
@@ -691,7 +632,7 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.create_directory(
                 spec.namespace(),
@@ -706,7 +647,7 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         options: &UpdateAttributesOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.update_attributes(
                 spec.namespace(),
@@ -722,7 +663,7 @@ impl EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &MoveOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.move_path(
                 from.namespace(),
@@ -739,7 +680,7 @@ impl EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &CopyOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.copy_path(
                 from.namespace(),
@@ -756,7 +697,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
         options: &RestoreRevisionOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.restore_file_revision(
                 spec.namespace(),
@@ -775,7 +716,7 @@ impl EmbeddedBackend {
         deletion_seq: ChangeSeq,
         path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         self.publish_with_maintenance_recovery(namespace_id, || {
             self.writer.undelete(
                 namespace_id,
@@ -793,7 +734,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         name: &str,
         ttl_ms: u64,
-    ) -> Result<SnapshotSummary, BackendError> {
+    ) -> Result<SnapshotSummary, CliError> {
         let now_ms = validate_embedded_snapshot_ttl(namespace_id, ttl_ms)?;
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
         let checkpoint = self
@@ -808,12 +749,10 @@ impl EmbeddedBackend {
                 EMBEDDED_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
             )
             .await
-            .map_err(|error| {
-                map_namespace_scoped_runtime_error(namespace_id, error)
-                    .with_invalid_request_param("/name")
-            })?;
+            .scoped(namespace_id)
+            .map_err(|error| error.with_invalid_request_param("/name"))?;
         SnapshotSummary::from_checkpoint(checkpoint).ok_or_else(|| {
-            BackendError::runtime_error("snapshot creation returned a non-snapshot checkpoint")
+            CliError::runtime_error("snapshot creation returned a non-snapshot checkpoint")
         })
     }
 
@@ -822,7 +761,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListSnapshotsResponse, BackendError> {
+    ) -> Result<ListSnapshotsResponse, CliError> {
         let request = loonfs_api::PageRequest {
             limit: resolve_cli_page_limit(limit)?,
             cursor: cursor
@@ -834,13 +773,13 @@ impl EmbeddedBackend {
                 })
                 .transpose()
                 .map_err(|error| {
-                    BackendError::invalid_request(error.to_string()).with_param("cursor")
+                    CliError::invalid_request(error.to_string()).with_param("cursor")
                 })?,
         };
         self.admin
             .list_snapshots_page(namespace_id, request)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            .scoped(namespace_id)
     }
 
     pub(super) async fn extend_snapshot(
@@ -848,7 +787,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         snapshot_id: &CheckpointId,
         ttl_ms: u64,
-    ) -> Result<SnapshotSummary, BackendError> {
+    ) -> Result<SnapshotSummary, CliError> {
         let now_ms = validate_embedded_snapshot_ttl(namespace_id, ttl_ms)?;
         self.admin
             .extend_snapshot(
@@ -858,18 +797,7 @@ impl EmbeddedBackend {
                 EMBEDDED_SNAPSHOT_MAX_LIFETIME_MS,
             )
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
-    }
-
-    pub(super) async fn release_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
-    ) -> Result<ReleaseSnapshotResponse, BackendError> {
-        self.admin
-            .release_snapshot(namespace_id, snapshot_id)
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            .scoped(namespace_id)
     }
 
     // The admin methods mirror the server handlers' error scoping exactly:
@@ -881,14 +809,12 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
-    ) -> Result<Checkpoint, BackendError> {
+    ) -> Result<Checkpoint, CliError> {
         self.admin
             .create_checkpoint(namespace_id, CreateCheckpointOptions::from_request(request))
             .await
-            .map_err(|error| {
-                map_namespace_scoped_runtime_error(namespace_id, error)
-                    .with_invalid_request_param("/name")
-            })
+            .scoped(namespace_id)
+            .map_err(|error| error.with_invalid_request_param("/name"))
     }
 
     pub(super) async fn list_checkpoints_page(
@@ -896,7 +822,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListCheckpointsResponse, BackendError> {
+    ) -> Result<ListCheckpointsResponse, CliError> {
         let request = loonfs_api::PageRequest {
             limit: resolve_cli_page_limit(limit)?,
             cursor: cursor
@@ -908,39 +834,27 @@ impl EmbeddedBackend {
                 })
                 .transpose()
                 .map_err(|error| {
-                    BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                    CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
                 })?,
         };
         self.admin
             .list_checkpoints_page(namespace_id, request)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
-    }
-
-    pub(super) async fn release_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
-    ) -> Result<ReleaseCheckpointResponse, BackendError> {
-        self.admin
-            .release_checkpoint(namespace_id, checkpoint_id)
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            .scoped(namespace_id)
     }
 
     pub(super) async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
-    ) -> Result<MaintenanceStepResponse, BackendError> {
-        let plan = MaintenancePlan::from_request(request).map_err(|error| {
-            map_namespace_scoped_runtime_error(namespace_id, error)
-                .with_invalid_request_param("/metadata/max_wal_tail_segments")
-        })?;
+    ) -> Result<MaintenanceStepResponse, CliError> {
+        let plan = MaintenancePlan::from_request(request)
+            .scoped(namespace_id)
+            .map_err(|error| error.with_invalid_request_param("/metadata/max_wal_tail_segments"))?;
         self.admin
             .run_maintenance(namespace_id, plan)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            .scoped(namespace_id)
     }
 
     /// Proves this profile's object store honours the contract LoonFS
@@ -958,21 +872,21 @@ impl EmbeddedBackend {
         after_seq: ChangeSeq,
         limit: Option<u32>,
         snapshot_id: Option<&CheckpointId>,
-    ) -> Result<ListChangesResponse, BackendError> {
+    ) -> Result<ListChangesResponse, CliError> {
         let limit = resolve_cli_page_limit(limit)?;
         let captured_seq = match snapshot_id {
             Some(snapshot_id) => Some(
                 self.reader
                     .pin_namespace_at_snapshot(namespace_id, snapshot_id)
                     .await
-                    .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?
+                    .scoped(namespace_id)?
                     .head_seq(),
             ),
             None => None,
         };
         if let Some(captured_seq) = captured_seq {
             if after_seq > captured_seq {
-                return Err(BackendError::invalid_request(format!(
+                return Err(CliError::invalid_request(format!(
                     "after_seq `{after_seq}` is above snapshot sequence `{captured_seq}`"
                 ))
                 .with_param("after_seq"));
@@ -995,7 +909,7 @@ impl EmbeddedBackend {
                 RuntimeListChangesOptions { limit: Some(limit) },
             )
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?;
+            .scoped(namespace_id)?;
         if let Some(captured_seq) = captured_seq {
             page.changes
                 .retain(|change| change.committed_seq <= captured_seq);
@@ -1013,24 +927,24 @@ impl EmbeddedBackend {
 fn validate_embedded_snapshot_ttl(
     namespace_id: &NamespaceId,
     ttl_ms: u64,
-) -> Result<u64, BackendError> {
+) -> Result<u64, CliError> {
     if ttl_ms == 0 || ttl_ms > EMBEDDED_SNAPSHOT_MAX_TTL_MS {
-        return Err(BackendError::invalid_request(format!(
+        return Err(CliError::invalid_request(format!(
             "ttl_ms must be greater than zero and may not exceed the `snapshot.max_ttl_ms` limit \
              of {EMBEDDED_SNAPSHOT_MAX_TTL_MS} milliseconds"
         ))
         .with_param("/ttl_ms"));
     }
     if ttl_ms > EMBEDDED_SNAPSHOT_MAX_LIFETIME_MS {
-        return Err(BackendError::invalid_request(format!(
+        return Err(CliError::invalid_request(format!(
             "ttl_ms may not exceed the `snapshot.max_lifetime_ms` limit of \
              {EMBEDDED_SNAPSHOT_MAX_LIFETIME_MS} milliseconds"
         ))
         .with_param("/ttl_ms"));
     }
-    loonfs::current_time_ms().map_err(|error| {
-        map_namespace_scoped_runtime_error(namespace_id, RuntimeError::Core(error))
-    })
+    loonfs::current_time_ms()
+        .map_err(RuntimeError::Core)
+        .scoped(namespace_id)
 }
 
 /// How long an assignment rests before it is asserted again, unless
@@ -1072,9 +986,8 @@ async fn rest_between_assignments(interval_ms: u64) {
 /// command enters wall time — the same boundary the server's HTTP handler
 /// is. Nothing durable replays through it.
 #[allow(clippy::disallowed_methods)]
-fn current_unix_ms() -> Result<u64, BackendError> {
-    let server_error =
-        |message: String| BackendError::new(ErrorCode::ServerError.as_str(), message);
+fn current_unix_ms() -> Result<u64, CliError> {
+    let server_error = |message: String| CliError::new(ErrorCode::ServerError.as_str(), message);
     let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| server_error(format!("system time is before unix epoch: {error}")))?;
@@ -1082,27 +995,26 @@ fn current_unix_ms() -> Result<u64, BackendError> {
         .map_err(|error| server_error(format!("system time does not fit in milliseconds: {error}")))
 }
 
-fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendError> {
+fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, CliError> {
     // Embedded and remote modes use the same error code for an invalid limit.
     PaginationPolicy::default()
         .resolve_limit(limit)
         .map_err(|error| {
-            BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
-                .with_param("limit")
+            CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()).with_param("limit")
         })
 }
 
 fn cli_page_request<C: loonfs_api::PageCursor>(
     limit: Option<u32>,
     cursor: Option<&str>,
-) -> Result<loonfs_api::PageRequest<C>, BackendError> {
+) -> Result<loonfs_api::PageRequest<C>, CliError> {
     Ok(loonfs_api::PageRequest {
         limit: resolve_cli_page_limit(limit)?,
         cursor: cursor
             .map(loonfs_api::decode_cursor)
             .transpose()
             .map_err(|error| {
-                BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
                     .with_param("cursor")
             })?,
     })
@@ -1238,6 +1150,7 @@ mod tests {
             .expect("enable the index without driving it");
         let head_seq = target
             .backend
+            .reader
             .get_namespace(&indexed)
             .await
             .expect("status before the drain")
@@ -1290,6 +1203,7 @@ mod tests {
         }
         let indexed_status = target
             .backend
+            .grep_worker()
             .get_grep_index(&indexed)
             .await
             .expect("index status after the drain");
@@ -1360,6 +1274,7 @@ mod tests {
             .expect("enable the index without driving it");
         let head_seq = target
             .backend
+            .reader
             .get_namespace(&namespace)
             .await
             .expect("status before hosting")
@@ -1372,6 +1287,7 @@ mod tests {
             wait_until(|| async {
                 target
                     .backend
+                    .grep_worker()
                     .get_grep_index(&namespace)
                     .await
                     .expect("index status while hosting")

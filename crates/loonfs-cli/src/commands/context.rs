@@ -1,13 +1,10 @@
 //! Shared per-command context: target resolution and common helpers.
 
-use super::output::CommandFailure;
+use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{ActorSelectorArgs, CommandKind, TargetSelectorArgs};
-use crate::backend_error::BackendError;
-use crate::config::{ConfigLocation, ConfigSource};
+use crate::config::{CliConfig, ConfigLocation, ConfigSource};
 use crate::error::CliError;
-use crate::resolve::{
-    load_cli_config, resolve_actor, resolve_namespace, resolve_target_profile_from_config,
-};
+use crate::resolve::{load_cli_config, resolve_actor, resolve_namespace, ResolvedTarget};
 use loonfs_api::{
     AbsolutePath, ActorRef, ChangeSeq, CommitResponse, ErrorCode, InodeId, InodeKind, NamespaceId,
     PublicOrdinalRangeError,
@@ -18,9 +15,9 @@ use std::path::{Path, PathBuf};
 pub(crate) struct CommandContext {
     pub(crate) profile_name: String,
     pub(crate) mode: String,
-    pub(crate) namespace: NamespaceId,
-    pub(crate) actor: ActorRef,
-    pub(crate) target: crate::resolve::ResolvedTarget,
+    pub(crate) namespace: Option<NamespaceId>,
+    pub(crate) actor: Option<ActorRef>,
+    pub(crate) target: ResolvedTarget,
 }
 
 pub(crate) enum RemoteDirectoryOutcome {
@@ -35,7 +32,7 @@ pub(crate) async fn create_directory_tolerating_existing(
     context: &CommandContext,
     spec: &NamespacePath,
     options: &CreateDirectoryOptions,
-) -> Result<RemoteDirectoryOutcome, BackendError> {
+) -> Result<RemoteDirectoryOutcome, CliError> {
     match context.target.create_directory(spec, options).await {
         Ok(result) => Ok(RemoteDirectoryOutcome::Created(result)),
         Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
@@ -87,6 +84,18 @@ pub(crate) fn parse_public_ordinal_arg<T>(
 }
 
 impl CommandContext {
+    pub(crate) fn namespace(&self) -> &NamespaceId {
+        self.namespace
+            .as_ref()
+            .expect("namespace command context should carry a namespace")
+    }
+
+    pub(crate) fn actor(&self) -> &ActorRef {
+        self.actor
+            .as_ref()
+            .expect("mutation command context should carry an actor")
+    }
+
     /// Attributes a failure to this resolved context: the profile and mode
     /// that produced it ride with the error.
     pub(crate) fn fail(&self, kind: CommandKind, error: impl Into<CliError>) -> CommandFailure {
@@ -97,6 +106,53 @@ impl CommandContext {
             error,
         )
     }
+
+    pub(crate) fn output(&self, kind: CommandKind, data: CommandData) -> CommandOutput {
+        CommandOutput {
+            kind,
+            profile: Some(self.profile_name.clone()),
+            mode: Some(self.mode.clone()),
+            data,
+        }
+    }
+}
+
+pub(crate) async fn resolve_profile_context(
+    kind: CommandKind,
+    config_path: &Path,
+    explicit_profile: Option<&str>,
+    no_retry: bool,
+) -> Result<CommandContext, CommandFailure> {
+    let loaded = load_cli_config(config_path)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let (context, _) =
+        resolve_profile_context_from_config(kind, &loaded.config, explicit_profile, no_retry)
+            .await?;
+    Ok(context)
+}
+
+pub(crate) async fn resolve_profile_context_from_config<'a>(
+    kind: CommandKind,
+    config: &'a CliConfig,
+    explicit_profile: Option<&'a str>,
+    no_retry: bool,
+) -> Result<(CommandContext, &'a crate::config::ProfileConfig), CommandFailure> {
+    let (profile_name, profile) = crate::profiles::resolve_profile(config, explicit_profile)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let target = ResolvedTarget::resolve(profile, no_retry)
+        .await
+        .map_err(|error| fail(kind, Some(profile_name.to_owned()), None, error))?;
+    let mode = target.mode_str().to_owned();
+    Ok((
+        CommandContext {
+            profile_name: profile_name.to_owned(),
+            mode,
+            namespace: None,
+            actor: None,
+            target,
+        },
+        profile,
+    ))
 }
 
 pub(crate) async fn resolve_command_context(
@@ -125,57 +181,31 @@ async fn resolve_command_context_with_actor(
     let explicit_profile = target.profile.profile.as_deref();
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let resolved = resolve_target_profile_from_config(
-        &loaded.config,
-        explicit_profile,
-        target.request.no_retry,
-    )
-    .await
-    .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
-    let (_, profile) =
-        crate::profiles::resolve_profile(&loaded.config, explicit_profile).map_err(|error| {
-            fail(
-                kind,
-                Some(resolved.profile_name.clone()),
-                Some(mode.clone()),
-                error,
-            )
-        })?;
+    let (profile_name, profile) =
+        crate::profiles::resolve_profile(&loaded.config, explicit_profile)
+            .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let profile_name = profile_name.to_owned();
+    let resolved_target = ResolvedTarget::resolve(profile, target.request.no_retry)
+        .await
+        .map_err(|error| fail(kind, Some(profile_name.clone()), None, error))?;
+    let mode = resolved_target.mode_str().to_owned();
+    let attribute = |error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error);
     let actor = resolve_actor(
         profile,
         actor.and_then(|actor| actor.actor_kind).map(Into::into),
         actor.and_then(|actor| actor.actor_id.as_deref()),
     )
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(mode.clone()),
-            error,
-        )
-    })?;
-    let namespace = resolve_namespace(
-        &loaded.config,
-        explicit_profile,
-        target.namespace.as_deref(),
-    )
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(mode.clone()),
-            error,
-        )
-    })?
-    .namespace;
+    .map_err(&attribute)?;
+    let namespace = resolve_namespace(&profile_name, profile, target.namespace.as_deref())
+        .map_err(attribute)?
+        .namespace;
 
     Ok(CommandContext {
-        profile_name: resolved.profile_name,
+        profile_name,
         mode,
-        namespace,
-        actor,
-        target: resolved.target,
+        namespace: Some(namespace),
+        actor: Some(actor),
+        target: resolved_target,
     })
 }
 
@@ -316,7 +346,8 @@ impl UndeleteHint {
         location: &ConfigLocation,
         explicit_profile: bool,
     ) -> Self {
-        let mut context_flags = format!(" --namespace {}", shell_quote(context.namespace.as_str()));
+        let mut context_flags =
+            format!(" --namespace {}", shell_quote(context.namespace().as_str()));
         // A bare invocation resolves the config's default profile, which is
         // exactly the profile this run used whenever `--profile` went
         // unspelled; spelling it means the default may be some other profile,

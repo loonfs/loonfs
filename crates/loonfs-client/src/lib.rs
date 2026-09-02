@@ -28,23 +28,22 @@ use loonfs_api::{
     v0::{
         BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
         BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse,
-        CommitResponse as ApiCommitResponse, CommittedChange, CompleteMultipartUploadRequest,
-        CompleteUploadRequest, CompletedUploadPart, ContentToken, CreateSnapshotRequest,
-        ExtendSnapshotRequest, GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse,
-        ListSnapshotsResponse, ObjectTransferAccess, ReleaseSnapshotResponse,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, SnapshotSummary,
-        StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadContentResponse,
-        UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
+        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompletedUploadPart,
+        ContentToken, CreateSnapshotRequest, ExtendSnapshotRequest, GrepGcRequest, GrepGcResponse,
+        GrepIndex, ListChangesResponse, ListSnapshotsResponse, ObjectTransferAccess,
+        ReleaseSnapshotResponse, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart,
+        SnapshotSummary, StoreProbeRequest, StoreProbeResponse, UploadContentClaim,
+        UploadContentResponse, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
     },
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, Checksum,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
     CreateCheckpointRequest, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
-    FileRevision, FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
+    FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
     ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
     Namespace, NamespaceDiagnostics, NamespaceId, PathEntry, PutRetryAttempt,
     PutRetryErrorClassification, PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo,
-    SecretString, StreamingChecksum, TrashEntry, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
+    SecretString, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
@@ -60,7 +59,9 @@ pub use reads::{
     ChangesPager, FileRevisionsPager, InodeChildrenPager, ListChangesOptions, PathEntriesPager,
     ReadFileOptions, TrashPager,
 };
-use transport::{StdMonotonicTimer, TransportRetryPolicy, WireRequest, IO_INACTIVITY_TIMEOUT};
+use transport::{
+    SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, IO_INACTIVITY_TIMEOUT,
+};
 pub use ClientError as Error;
 
 /// Per-operation options, defined once in `loonfs-api` and shared with the
@@ -162,8 +163,9 @@ impl Client {
             return Ok(document.clone());
         }
         let url = format!("{}/v0/capabilities", self.base_url);
-        let mut document: CapabilityDocument =
-            self.request_json::<(), _>(self.get(&url), None).await?;
+        let mut document: CapabilityDocument = self
+            .request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
+            .await?;
         document.retain_well_formed();
         // If a racing clone fetched first, keep its copy; both came from the
         // same server.
@@ -178,8 +180,7 @@ impl Client {
     /// Checks the server's health endpoint.
     pub async fn get_health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
-        self.call_with_transport_retry(&self.get(&url), None)
-            .await?;
+        self.call(&self.get(&url), None, SendPolicy::Retry).await?;
         Ok(())
     }
 }

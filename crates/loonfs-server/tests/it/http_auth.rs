@@ -197,7 +197,7 @@ async fn path_put_with_valid_content_token_succeeds() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&target)
+            .get_file_bytes(&target, &Default::default())
             .await
             .expect("read file"),
         bytes

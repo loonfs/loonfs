@@ -3,15 +3,15 @@
 //! [`crate::resolve::ResolvedTarget`] gives commands the same interface for
 //! both profile types. Embedded profiles call the in-process runtime, while
 //! remote profiles use the HTTP client. Both map failures to
-//! [`crate::backend_error::BackendError`].
+//! [`crate::error::CliError`].
 
 mod dispatch;
 mod download;
 mod embedded;
-mod progress;
+mod step_budget;
 
 pub(crate) use download::FileDownload;
 pub(crate) use embedded::EmbeddedBackend;
-pub(crate) use progress::{
+pub(crate) use step_budget::{
     GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, StepBudget,
 };

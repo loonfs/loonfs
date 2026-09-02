@@ -5,12 +5,12 @@ use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::FsReader;
 use crate::Result;
 use crate::{
-    ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, CommittedChange,
-    ContentRef, CoreError, CurrentFileState, FileBytes, FileContentStream, FileRevision, InodeId,
-    ListChangesOptions, ListChangesResponse, ListFileRevisionsResponse, ListInodeChildrenOptions,
+    ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, ContentRef, CoreError,
+    CurrentFileState, FileBytes, FileContentStream, InodeId, ListChangesOptions,
+    ListChangesResponse, ListFileRevisionsResponse, ListInodeChildrenOptions,
     ListInodeChildrenResponse, ListPathEntriesOptions, ListPathEntriesResponse, Namespace,
     NamespaceId, PathEntry, ReadFileStreamOptions, RevisionNo, RuntimeError, SharedObjectStore,
-    StatPathOptions, TrashEntry,
+    StatPathOptions,
 };
 use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageCursor, PageRequest,
@@ -184,331 +184,31 @@ impl FsReadSnapshot {
     }
 }
 
-/// Fetches directory pages as needed.
-///
-/// [`Self::next`] returns one page with its metadata. [`Self::collect_up_to`]
-/// returns at most the requested number of entries and saves unused entries
-/// for later calls.
-#[must_use]
-pub struct PathEntriesPager {
-    reader: FsReader,
-    namespace_id: NamespaceId,
-    absolute_path: String,
-    request: PageRequest<DirectoryPageCursor>,
-    options: ListPathEntriesOptions,
-    pending: Option<ListPathEntriesResponse>,
-    exhausted: bool,
+/// A pager over directory entries.
+pub type PathEntriesPager = loonfs_api::Pager<ListPathEntriesResponse, RuntimeError>;
+/// A pager over directory children addressed by inode.
+pub type InodeChildrenPager = loonfs_api::Pager<ListInodeChildrenResponse, RuntimeError>;
+/// A pager over retained file revisions.
+pub type FileRevisionsPager = loonfs_api::Pager<ListFileRevisionsResponse, RuntimeError>;
+/// A pager over recoverable deletions.
+pub type TrashPager = loonfs_api::Pager<loonfs_api::ListTrashResponse, RuntimeError>;
+/// A pager over committed changes.
+pub type ChangesPager = loonfs_api::Pager<ListChangesResponse, RuntimeError>;
+
+fn encoded_pager_cursor<C: PageCursor>(cursor: Option<&C>) -> Option<String> {
+    cursor.map(|cursor| loonfs_api::encode_cursor(cursor).expect("typed page cursor should encode"))
 }
 
-impl PathEntriesPager {
-    /// Returns the next directory page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<ListPathEntriesResponse>> {
-        if let Some(page) = self.pending.take() {
-            return Some(Ok(page));
-        }
-        if self.exhausted {
-            return None;
-        }
-        let page = self
-            .reader
-            .list_path_entries_page(
-                &self.namespace_id,
-                &self.absolute_path,
-                self.request.clone(),
-                self.options.clone(),
-            )
-            .await;
-        Some(page.and_then(|page| {
-            advance_typed_cursor(&mut self.request, page.next_cursor.as_deref())?;
-            self.exhausted = self.request.cursor.is_none();
-            Ok(page)
-        }))
-    }
-
-    /// Returns at most `max_items` entries.
-    ///
-    /// Unused entries from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<PathEntry>> {
-        let mut entries = Vec::new();
-        while entries.len() < max_items {
-            let Some(page) = self.next().await else {
-                break;
-            };
-            let mut page = page?;
-            let take = (max_items - entries.len()).min(page.entries.len());
-            if take < page.entries.len() {
-                let remaining = page.entries.split_off(take);
-                entries.extend(page.entries);
-                page.entries = remaining;
-                self.pending = Some(page);
-                break;
-            }
-            entries.extend(page.entries);
-        }
-        Ok(entries)
-    }
-}
-
-/// Fetches child pages of one directory inode as needed.
-///
-/// [`Self::next`] returns one page with its metadata. [`Self::collect_up_to`]
-/// returns at most the requested number of entries and saves unused entries
-/// for later calls.
-#[must_use]
-pub struct InodeChildrenPager {
-    reader: FsReader,
-    namespace_id: NamespaceId,
-    inode_id: InodeId,
-    request: PageRequest<DirectoryPageCursor>,
-    options: ListInodeChildrenOptions,
-    pending: Option<ListInodeChildrenResponse>,
-    exhausted: bool,
-}
-
-impl InodeChildrenPager {
-    /// Returns the next children page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<ListInodeChildrenResponse>> {
-        if let Some(page) = self.pending.take() {
-            return Some(Ok(page));
-        }
-        if self.exhausted {
-            return None;
-        }
-        let page = self
-            .reader
-            .list_inode_children_page(
-                &self.namespace_id,
-                self.inode_id,
-                self.request.clone(),
-                self.options.clone(),
-            )
-            .await;
-        Some(page.and_then(|page| {
-            advance_typed_cursor(&mut self.request, page.next_cursor.as_deref())?;
-            self.exhausted = self.request.cursor.is_none();
-            Ok(page)
-        }))
-    }
-
-    /// Returns at most `max_items` entries.
-    ///
-    /// Unused entries from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<PathEntry>> {
-        let mut entries = Vec::new();
-        while entries.len() < max_items {
-            let Some(page) = self.next().await else {
-                break;
-            };
-            let mut page = page?;
-            let take = (max_items - entries.len()).min(page.entries.len());
-            if take < page.entries.len() {
-                let remaining = page.entries.split_off(take);
-                entries.extend(page.entries);
-                page.entries = remaining;
-                self.pending = Some(page);
-                break;
-            }
-            entries.extend(page.entries);
-        }
-        Ok(entries)
-    }
-}
-
-enum FileRevisionsTarget {
-    Path(String),
-    Inode(InodeId),
-}
-
-/// Fetches file-revision pages as needed for a path or inode.
-#[must_use]
-pub struct FileRevisionsPager {
-    reader: FsReader,
-    namespace_id: NamespaceId,
-    target: FileRevisionsTarget,
-    request: PageRequest<FileRevisionsPageCursor>,
-    pending: Option<ListFileRevisionsResponse>,
-    exhausted: bool,
-}
-
-impl FileRevisionsPager {
-    /// Returns the next revision page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<ListFileRevisionsResponse>> {
-        if let Some(page) = self.pending.take() {
-            return Some(Ok(page));
-        }
-        if self.exhausted {
-            return None;
-        }
-        let page = match &self.target {
-            FileRevisionsTarget::Path(absolute_path) => {
-                self.reader
-                    .list_file_revisions_page(
-                        &self.namespace_id,
-                        absolute_path,
-                        self.request.clone(),
-                    )
-                    .await
-            }
-            FileRevisionsTarget::Inode(inode_id) => {
-                self.reader
-                    .list_file_revisions_by_inode_page(
-                        &self.namespace_id,
-                        *inode_id,
-                        self.request.clone(),
-                    )
-                    .await
-            }
-        };
-        Some(page.and_then(|page| {
-            advance_typed_cursor(&mut self.request, page.next_cursor.as_deref())?;
-            self.exhausted = self.request.cursor.is_none();
-            Ok(page)
-        }))
-    }
-
-    /// Returns at most `max_items` revisions.
-    ///
-    /// Unused revisions from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<FileRevision>> {
-        let mut revisions = Vec::new();
-        while revisions.len() < max_items {
-            let Some(page) = self.next().await else {
-                break;
-            };
-            let mut page = page?;
-            let take = (max_items - revisions.len()).min(page.revisions.len());
-            if take < page.revisions.len() {
-                let remaining = page.revisions.split_off(take);
-                revisions.extend(page.revisions);
-                page.revisions = remaining;
-                self.pending = Some(page);
-                break;
-            }
-            revisions.extend(page.revisions);
-        }
-        Ok(revisions)
-    }
-}
-
-/// Fetches recoverable-deletion pages as needed.
-#[must_use]
-pub struct TrashPager {
-    reader: FsReader,
-    namespace_id: NamespaceId,
-    request: PageRequest<TrashPageCursor>,
-    pending: Option<loonfs_api::ListTrashResponse>,
-    exhausted: bool,
-}
-
-impl TrashPager {
-    /// Returns the next trash page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<loonfs_api::ListTrashResponse>> {
-        if let Some(page) = self.pending.take() {
-            return Some(Ok(page));
-        }
-        if self.exhausted {
-            return None;
-        }
-        let page = self
-            .reader
-            .list_trash_page(&self.namespace_id, self.request.clone())
-            .await;
-        Some(page.and_then(|page| {
-            advance_typed_cursor(&mut self.request, page.next_cursor.as_deref())?;
-            self.exhausted = self.request.cursor.is_none();
-            Ok(page)
-        }))
-    }
-
-    /// Returns at most `max_items` deletions.
-    ///
-    /// Unused deletions from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<TrashEntry>> {
-        let mut entries = Vec::new();
-        while entries.len() < max_items {
-            let Some(page) = self.next().await else {
-                break;
-            };
-            let mut page = page?;
-            let take = (max_items - entries.len()).min(page.entries.len());
-            if take < page.entries.len() {
-                let remaining = page.entries.split_off(take);
-                entries.extend(page.entries);
-                page.entries = remaining;
-                self.pending = Some(page);
-                break;
-            }
-            entries.extend(page.entries);
-        }
-        Ok(entries)
-    }
-}
-
-/// Fetches change-feed pages as needed, using sequence numbers to resume.
-#[must_use]
-pub struct ChangesPager {
-    reader: FsReader,
-    namespace_id: NamespaceId,
-    after_seq: ChangeSeq,
-    options: ListChangesOptions,
-    pending: Option<ListChangesResponse>,
-    exhausted: bool,
-}
-
-impl ChangesPager {
-    /// Returns the next change page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<ListChangesResponse>> {
-        if let Some(page) = self.pending.take() {
-            return Some(Ok(page));
-        }
-        if self.exhausted {
-            return None;
-        }
-        let page = self
-            .reader
-            .list_changes(&self.namespace_id, self.after_seq, self.options.clone())
-            .await;
-        Some(page.inspect(|page| {
-            self.exhausted = page.next_after_seq.is_none();
-            if let Some(next_after_seq) = page.next_after_seq {
-                self.after_seq = next_after_seq;
-            }
-        }))
-    }
-
-    /// Returns at most `max_items` changes.
-    ///
-    /// Unused changes from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<CommittedChange>> {
-        let mut changes = Vec::new();
-        while changes.len() < max_items {
-            let Some(page) = self.next().await else {
-                break;
-            };
-            let mut page = page?;
-            let take = (max_items - changes.len()).min(page.changes.len());
-            if take < page.changes.len() {
-                let remaining = page.changes.split_off(take);
-                changes.extend(page.changes);
-                page.changes = remaining;
-                self.pending = Some(page);
-                break;
-            }
-            changes.extend(page.changes);
-        }
-        Ok(changes)
-    }
-}
-
-fn advance_typed_cursor<C: PageCursor>(
-    request: &mut PageRequest<C>,
-    next_cursor: Option<&str>,
-) -> Result<()> {
-    request.cursor = next_cursor
+fn pager_request<C: PageCursor>(
+    limit: loonfs_api::EffectiveLimit,
+    cursor: Option<String>,
+) -> Result<PageRequest<C>> {
+    let cursor = cursor
+        .as_deref()
         .map(loonfs_api::decode_cursor)
         .transpose()
         .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
-    Ok(())
+    Ok(PageRequest { limit, cursor })
 }
 
 impl FsReader {
@@ -700,15 +400,27 @@ impl FsReader {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> PathEntriesPager {
-        PathEntriesPager {
-            reader: self.clone(),
-            namespace_id: namespace_id.clone(),
-            absolute_path: absolute_path.to_owned(),
-            request,
-            options,
-            pending: None,
-            exhausted: false,
-        }
+        let cursor = encoded_pager_cursor(request.cursor.as_ref());
+        let limit = request.limit;
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            let absolute_path = absolute_path.clone();
+            let options = options.clone();
+            async move {
+                reader
+                    .list_path_entries_page(
+                        &namespace_id,
+                        &absolute_path,
+                        pager_request(limit, cursor)?,
+                        options,
+                    )
+                    .await
+            }
+        })
     }
 
     /// Lists one page of a directory, projecting what `options` asks for.
@@ -783,15 +495,25 @@ impl FsReader {
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> InodeChildrenPager {
-        InodeChildrenPager {
-            reader: self.clone(),
-            namespace_id: namespace_id.clone(),
-            inode_id,
-            request,
-            options,
-            pending: None,
-            exhausted: false,
-        }
+        let cursor = encoded_pager_cursor(request.cursor.as_ref());
+        let limit = request.limit;
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            let options = options.clone();
+            async move {
+                reader
+                    .list_inode_children_page(
+                        &namespace_id,
+                        inode_id,
+                        pager_request(limit, cursor)?,
+                        options,
+                    )
+                    .await
+            }
+        })
     }
 
     /// Lists one page of a directory's children by inode, projecting what
@@ -1109,13 +831,19 @@ impl FsReader {
         namespace_id: &NamespaceId,
         request: PageRequest<TrashPageCursor>,
     ) -> TrashPager {
-        TrashPager {
-            reader: self.clone(),
-            namespace_id: namespace_id.clone(),
-            request,
-            pending: None,
-            exhausted: false,
-        }
+        let cursor = encoded_pager_cursor(request.cursor.as_ref());
+        let limit = request.limit;
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                reader
+                    .list_trash_page(&namespace_id, pager_request(limit, cursor)?)
+                    .await
+            }
+        })
     }
 
     /// Lists one page of a file path's revision history.
@@ -1160,14 +888,25 @@ impl FsReader {
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> FileRevisionsPager {
-        FileRevisionsPager {
-            reader: self.clone(),
-            namespace_id: namespace_id.clone(),
-            target: FileRevisionsTarget::Path(absolute_path.to_owned()),
-            request,
-            pending: None,
-            exhausted: false,
-        }
+        let cursor = encoded_pager_cursor(request.cursor.as_ref());
+        let limit = request.limit;
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            let absolute_path = absolute_path.clone();
+            async move {
+                reader
+                    .list_file_revisions_page(
+                        &namespace_id,
+                        &absolute_path,
+                        pager_request(limit, cursor)?,
+                    )
+                    .await
+            }
+        })
     }
 
     /// Lists one page of retained revisions for a file inode.
@@ -1209,14 +948,23 @@ impl FsReader {
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> FileRevisionsPager {
-        FileRevisionsPager {
-            reader: self.clone(),
-            namespace_id: namespace_id.clone(),
-            target: FileRevisionsTarget::Inode(inode_id),
-            request,
-            pending: None,
-            exhausted: false,
-        }
+        let cursor = encoded_pager_cursor(request.cursor.as_ref());
+        let limit = request.limit;
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                reader
+                    .list_file_revisions_by_inode_page(
+                        &namespace_id,
+                        inode_id,
+                        pager_request(limit, cursor)?,
+                    )
+                    .await
+            }
+        })
     }
 
     /// Reads the content of one historical file revision by path.
@@ -1325,13 +1073,21 @@ impl FsReader {
         after_seq: ChangeSeq,
         options: ListChangesOptions,
     ) -> ChangesPager {
-        ChangesPager {
-            reader: self.clone(),
-            namespace_id: namespace_id.clone(),
-            after_seq,
-            options,
-            pending: None,
-            exhausted: false,
-        }
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(Some(after_seq), move |after_seq| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            let options = options.clone();
+            async move {
+                reader
+                    .list_changes(
+                        &namespace_id,
+                        after_seq.expect("change pager should carry a sequence"),
+                        options,
+                    )
+                    .await
+            }
+        })
     }
 }

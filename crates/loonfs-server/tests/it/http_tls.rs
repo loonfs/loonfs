@@ -49,7 +49,7 @@ async fn a_client_trusting_the_server_certificate_round_trips_over_tls() {
 
     let bytes = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("read file");
     assert_eq!(bytes, b"ciphertext in flight");

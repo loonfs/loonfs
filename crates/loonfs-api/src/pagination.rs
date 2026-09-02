@@ -4,8 +4,194 @@ use crate::capability::{LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX};
 use crate::{ChangeSeq, InodeId, NameKey, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use thiserror::Error;
+
+/// A response that carries items and a continuation position.
+pub trait PagedResponse: Send + 'static {
+    /// One item in the response.
+    type Item: Send + 'static;
+    /// The position passed to the next request.
+    type Cursor: Clone + Send + 'static;
+
+    /// Returns the response items for collection or splitting.
+    fn items_mut(&mut self) -> &mut Vec<Self::Item>;
+
+    /// Returns the response items.
+    fn items(&self) -> &[Self::Item];
+
+    /// Returns the next request position.
+    fn next_cursor(&self) -> Option<Self::Cursor>;
+
+    /// Appends a later page and adopts its continuation metadata.
+    fn absorb(&mut self, later: Self);
+}
+
+enum PagerState<C> {
+    NotStarted,
+    More(C),
+    Done,
+}
+
+type PageFuture<P, E> = Pin<Box<dyn Future<Output = Result<P, E>> + Send>>;
+type PageFetcher<P, E> =
+    Box<dyn FnMut(Option<<P as PagedResponse>::Cursor>) -> PageFuture<P, E> + Send>;
+
+/// Fetches pages and retains unused items between bounded collections.
+#[must_use]
+pub struct Pager<P: PagedResponse, E> {
+    fetch: PageFetcher<P, E>,
+    state: PagerState<P::Cursor>,
+    pending: Option<P>,
+}
+
+impl<P: PagedResponse, E> Pager<P, E> {
+    /// Creates a pager beginning at `cursor`.
+    pub fn new<F, Fut>(cursor: Option<P::Cursor>, mut fetch: F) -> Self
+    where
+        F: FnMut(Option<P::Cursor>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<P, E>> + Send + 'static,
+    {
+        let state = match cursor {
+            Some(cursor) => PagerState::More(cursor),
+            None => PagerState::NotStarted,
+        };
+        Self {
+            fetch: Box::new(move |cursor| Box::pin(fetch(cursor))),
+            state,
+            pending: None,
+        }
+    }
+
+    /// Returns the next page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<P, E>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        let cursor = match &self.state {
+            PagerState::NotStarted => None,
+            PagerState::More(cursor) => Some(cursor.clone()),
+            PagerState::Done => return None,
+        };
+        let page = (self.fetch)(cursor).await;
+        if let Ok(page) = &page {
+            self.state = match page.next_cursor() {
+                Some(cursor) => PagerState::More(cursor),
+                None => PagerState::Done,
+            };
+        }
+        Some(page)
+    }
+
+    /// Returns at most `max_items` items.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<P::Item>, E> {
+        let mut items = Vec::new();
+        while items.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let page_items = page.items_mut();
+            let take = (max_items - items.len()).min(page_items.len());
+            if take < page_items.len() {
+                let remaining = page_items.split_off(take);
+                items.append(page_items);
+                *page.items_mut() = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            items.append(page_items);
+        }
+        Ok(items)
+    }
+}
+
+macro_rules! string_cursor_response {
+    ($response:path, $item:ty, $field:ident $(, $metadata:ident)*) => {
+        impl PagedResponse for $response {
+            type Item = $item;
+            type Cursor = String;
+
+            fn items_mut(&mut self) -> &mut Vec<Self::Item> {
+                &mut self.$field
+            }
+
+            fn items(&self) -> &[Self::Item] {
+                &self.$field
+            }
+
+            fn next_cursor(&self) -> Option<Self::Cursor> {
+                self.next_cursor.clone()
+            }
+
+            fn absorb(&mut self, mut later: Self) {
+                $(self.$metadata = later.$metadata;)*
+                self.$field.append(&mut later.$field);
+                self.next_cursor = later.next_cursor;
+            }
+        }
+    };
+}
+
+string_cursor_response!(
+    crate::ListPathEntriesResponse,
+    crate::PathEntry,
+    entries,
+    head_seq
+);
+string_cursor_response!(
+    crate::ListInodeChildrenResponse,
+    crate::PathEntry,
+    entries,
+    head_seq
+);
+string_cursor_response!(
+    crate::ListFileRevisionsResponse,
+    crate::FileRevision,
+    revisions,
+    head_seq
+);
+string_cursor_response!(
+    crate::ListTrashResponse,
+    crate::TrashEntry,
+    entries,
+    head_seq
+);
+string_cursor_response!(
+    crate::ListCheckpointsResponse,
+    crate::Checkpoint,
+    checkpoints
+);
+string_cursor_response!(
+    crate::v0::ListSnapshotsResponse,
+    crate::v0::SnapshotSummary,
+    snapshots
+);
+
+impl PagedResponse for crate::v0::ListChangesResponse {
+    type Item = crate::v0::CommittedChange;
+    type Cursor = ChangeSeq;
+
+    fn items_mut(&mut self) -> &mut Vec<Self::Item> {
+        &mut self.changes
+    }
+
+    fn items(&self) -> &[Self::Item] {
+        &self.changes
+    }
+
+    fn next_cursor(&self) -> Option<Self::Cursor> {
+        self.next_after_seq
+    }
+
+    fn absorb(&mut self, mut later: Self) {
+        self.through_seq = later.through_seq;
+        self.next_after_seq = later.next_after_seq;
+        self.changes.append(&mut later.changes);
+    }
+}
 
 /// Contract page size for endpoints that omit a caller-supplied limit.
 ///

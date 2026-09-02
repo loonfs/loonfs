@@ -1,6 +1,9 @@
 //! Pagination shared by CLI listing commands.
 
-use crate::args::PaginationArgs;
+use crate::args::{PaginationArgs, SeqPaginationArgs};
+use crate::error::CliError;
+use loonfs_api::PagedResponse;
+use std::future::Future;
 use std::io::{self, Write};
 
 /// Tracks the total result limit and the size of each request.
@@ -9,6 +12,77 @@ pub(super) struct PagePlan {
     page_size: Option<u32>,
     follow_to_end: bool,
     emitted: u32,
+}
+
+pub(super) enum PagedListing<P> {
+    Streamed,
+    Collected(P),
+}
+
+/// Fetches pages until the plan is satisfied and returns them as one response.
+pub(super) async fn collect_pages<P, F, Fut, O>(
+    mut plan: PagePlan,
+    cursor: Option<P::Cursor>,
+    mut fetch: F,
+    mut observe: O,
+) -> Result<P, CliError>
+where
+    P: PagedResponse,
+    F: FnMut(Option<P::Cursor>, Option<u32>) -> Fut,
+    Fut: Future<Output = Result<P, CliError>>,
+    O: FnMut(&P),
+{
+    let mut collected = fetch(cursor, plan.request_size()).await?;
+    observe(&collected);
+    plan.record(collected.items().len());
+    loop {
+        let cursor = collected.next_cursor();
+        if !plan.should_continue(cursor.is_some()) {
+            return Ok(collected);
+        }
+        let page = fetch(cursor, plan.request_size()).await?;
+        observe(&page);
+        plan.record(page.items().len());
+        collected.absorb(page);
+    }
+}
+
+/// Writes each page to stdout as JSON lines when `jsonl` is set, and
+/// collects the pages otherwise.
+pub(super) async fn collect_or_stream_pages<P, F, Fut, O>(
+    mut plan: PagePlan,
+    cursor: Option<P::Cursor>,
+    jsonl: bool,
+    mut fetch: F,
+    mut observe: O,
+) -> Result<PagedListing<P>, CliError>
+where
+    P: PagedResponse,
+    P::Item: serde::Serialize,
+    F: FnMut(Option<P::Cursor>, Option<u32>) -> Fut,
+    Fut: Future<Output = Result<P, CliError>>,
+    O: FnMut(&P),
+{
+    if !jsonl {
+        return collect_pages(plan, cursor, fetch, observe)
+            .await
+            .map(PagedListing::Collected);
+    }
+    let stdout = io::stdout();
+    let mut stdout = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+    let mut page = fetch(cursor, plan.request_size()).await?;
+    observe(&page);
+    plan.record(page.items().len());
+    loop {
+        write_jsonl_page(&mut stdout, page.items()).map_err(CliError::io)?;
+        let cursor = page.next_cursor();
+        if !plan.should_continue(cursor.is_some()) {
+            return Ok(PagedListing::Streamed);
+        }
+        page = fetch(cursor, plan.request_size()).await?;
+        observe(&page);
+        plan.record(page.items().len());
+    }
 }
 
 /// Writes one JSON item per line and flushes the page before the next request.
@@ -25,10 +99,18 @@ pub(super) fn write_jsonl_page<T: serde::Serialize>(
 
 impl PagePlan {
     pub(super) fn new(args: &PaginationArgs) -> Self {
+        Self::from_values(args.limit, args.page_size, args.all, args.jsonl)
+    }
+
+    pub(super) fn for_sequence(args: &SeqPaginationArgs) -> Self {
+        Self::from_values(args.limit, args.page_size, args.all, args.jsonl)
+    }
+
+    fn from_values(limit: Option<u32>, page_size: Option<u32>, all: bool, jsonl: bool) -> Self {
         Self {
-            limit: args.limit,
-            page_size: args.page_size,
-            follow_to_end: args.all || args.jsonl,
+            limit,
+            page_size,
+            follow_to_end: all || jsonl,
             emitted: 0,
         }
     }
@@ -67,6 +149,7 @@ mod tests {
 
     fn args(limit: Option<u32>, page_size: Option<u32>, all: bool) -> PaginationArgs {
         PaginationArgs {
+            cursor: None,
             limit,
             page_size,
             all,

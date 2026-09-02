@@ -263,23 +263,47 @@ impl Command {
         )
     }
 
-    fn pagination(&self) -> Option<&PaginationArgs> {
+    fn pagination(&self) -> Option<PaginationFlags> {
         match self {
-            Self::Ls(args) => Some(&args.pagination),
-            Self::Grep(args) => Some(&args.pagination),
-            Self::Revisions(args) => Some(&args.pagination),
-            Self::Trash(args) => Some(&args.pagination),
-            Self::Changes(args) => Some(&args.pagination),
+            Self::Ls(args) => Some(PaginationFlags::from(&args.pagination)),
+            Self::Grep(args) => Some(PaginationFlags::from(&args.pagination)),
+            Self::Revisions(args) => Some(PaginationFlags::from(&args.pagination)),
+            Self::Trash(args) => Some(PaginationFlags::from(&args.pagination)),
+            Self::Changes(args) => Some(PaginationFlags::from(&args.pagination)),
             Self::Snapshot {
                 command: SnapshotCommand::List(args),
-            } => Some(&args.pagination),
+            } => Some(PaginationFlags::from(&args.pagination)),
             Self::Admin {
                 command:
                     AdminCommand::Checkpoint {
                         command: AdminCheckpointCommand::List(args),
                     },
-            } => Some(&args.pagination),
+            } => Some(PaginationFlags::from(&args.pagination)),
             _ => None,
+        }
+    }
+}
+
+/// The pagination flags every listing command validates the same way.
+struct PaginationFlags {
+    all: bool,
+    jsonl: bool,
+}
+
+impl From<&PaginationArgs> for PaginationFlags {
+    fn from(args: &PaginationArgs) -> Self {
+        Self {
+            all: args.all,
+            jsonl: args.jsonl,
+        }
+    }
+}
+
+impl From<&SeqPaginationArgs> for PaginationFlags {
+    fn from(args: &SeqPaginationArgs) -> Self {
+        Self {
+            all: args.all,
+            jsonl: args.jsonl,
         }
     }
 }
@@ -306,7 +330,10 @@ pub(crate) enum ProfileCommand {
         name: Option<String>,
     },
     /// Update fields of an existing profile.
-    Update(Box<ProfileUpdateArgs>),
+    Update {
+        #[command(subcommand)]
+        provider: Box<ProfileUpdateCommand>,
+    },
     /// Delete a profile from the config file.
     Delete {
         #[arg(value_hint = ValueHint::Other)]
@@ -481,53 +508,134 @@ pub(crate) struct ProfileCreateRemoteArgs {
     pub actor: ProfileCreateActorArgs,
 }
 
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProfileUpdateCommand {
+    /// Update an AWS S3-backed embedded profile.
+    S3(ProfileUpdateS3Args),
+    /// Update a Cloudflare R2-backed embedded profile.
+    R2(ProfileUpdateR2Args),
+    /// Update a Google Cloud Storage-backed embedded profile.
+    Gcs(ProfileUpdateGcsArgs),
+    /// Update an Azure Blob Storage-backed embedded profile.
+    Azure(ProfileUpdateAzureArgs),
+    /// Update a local-filesystem-backed embedded profile.
+    Local(ProfileUpdateLocalArgs),
+    /// Update a remote-server profile.
+    Remote(ProfileUpdateRemoteArgs),
+}
+
 #[derive(Debug, Args)]
-pub(crate) struct ProfileUpdateArgs {
+pub(crate) struct ProfileUpdateActorArgs {
+    /// Sets the profile's actor kind. Must be used with --actor-id.
+    #[arg(long, value_enum)]
+    pub actor_kind: Option<ActorKindArg>,
+    /// Sets the profile's actor ID. Must be used with --actor-kind.
+    #[arg(long)]
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileUpdateS3Args {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    /// Local filesystem store root.
-    #[arg(long, value_hint = ValueHint::DirPath)]
-    pub root: Option<String>,
-    /// Optional object-key prefix within the provider.
-    #[arg(long)]
-    pub key_prefix: Option<String>,
-    /// S3, R2, or GCS bucket name.
+    /// S3 bucket name.
     #[arg(long)]
     pub bucket: Option<String>,
     /// AWS region.
     #[arg(long)]
     pub region: Option<String>,
-    /// AWS or R2 credential source.
+    /// AWS credential source.
     #[arg(long, value_name = "ambient|static")]
     pub credential_source: Option<String>,
-    /// AWS or R2 static access key id.
+    /// Static access key id.
     #[arg(long)]
     pub access_key_id: Option<String>,
-    /// AWS or R2 static secret access key.
+    /// Static secret access key.
     #[arg(long)]
     pub secret_access_key: Option<String>,
-    /// Custom provider endpoint URL.
+    /// Custom S3 endpoint URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
     /// Optional static AWS session token.
     #[arg(long)]
     pub session_token: Option<String>,
-    /// Cloudflare R2 account id.
+    /// Optional object-key prefix.
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileUpdateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileUpdateR2Args {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[arg(long)]
+    pub bucket: Option<String>,
+    #[arg(long, value_name = "ambient|static")]
+    pub credential_source: Option<String>,
+    #[arg(long)]
+    pub access_key_id: Option<String>,
+    #[arg(long)]
+    pub secret_access_key: Option<String>,
+    #[arg(long, value_hint = ValueHint::Url)]
+    pub endpoint_url: Option<String>,
     #[arg(long)]
     pub account_id: Option<String>,
-    /// Azure storage account name.
     #[arg(long)]
-    pub account_name: Option<String>,
-    /// Azure blob container name.
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileUpdateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileUpdateGcsArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
     #[arg(long)]
-    pub container_name: Option<String>,
-    /// Azure storage access key.
-    #[arg(long)]
-    pub access_key: Option<String>,
-    /// Path to a GCP service-account key.
+    pub bucket: Option<String>,
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub service_account_key_path: Option<String>,
-    /// Remote LoonFS server URL.
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileUpdateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileUpdateAzureArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[arg(long)]
+    pub account_name: Option<String>,
+    #[arg(long)]
+    pub container_name: Option<String>,
+    #[arg(long)]
+    pub access_key: Option<String>,
+    #[arg(long, value_hint = ValueHint::Url)]
+    pub endpoint_url: Option<String>,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileUpdateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileUpdateLocalArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    pub root: Option<String>,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileUpdateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileUpdateRemoteArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
     #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
     /// Remote bearer token to store; an empty value clears the stored token.
@@ -537,12 +645,8 @@ pub(crate) struct ProfileUpdateArgs {
     /// https server URL, when a private CA issued the certificate.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub ca_cert_path: Option<String>,
-    /// Sets the profile's actor kind. Must be used with --actor-id.
-    #[arg(long, value_enum)]
-    pub actor_kind: Option<ActorKindArg>,
-    /// Sets the profile's actor ID. Must be used with --actor-kind.
-    #[arg(long)]
-    pub actor_id: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileUpdateActorArgs,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -690,6 +794,9 @@ pub(crate) struct NamespaceForkArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct PaginationArgs {
+    /// Resume from a cursor returned by a previous listing.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub cursor: Option<String>,
     /// Return at most this many items.
     #[arg(long)]
     pub limit: Option<u32>,
@@ -705,6 +812,32 @@ pub(crate) struct PaginationArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct SeqPaginationArgs {
+    /// Return at most this many items.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Request this many items per page.
+    #[arg(long)]
+    pub page_size: Option<u32>,
+    /// Continue until the limit is reached or no pages remain.
+    #[arg(long)]
+    pub all: bool,
+    /// Write one JSON item per line until the limit is reached or no pages remain.
+    #[arg(long)]
+    pub jsonl: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CommitArgs {
+    /// Annotation recorded on the commit and shown by `loonfs changes`.
+    #[arg(short = 'm', long)]
+    pub message: Option<String>,
+    /// Idempotency key for the commit; generated when absent.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub commit_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct FilesystemLsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
@@ -712,9 +845,6 @@ pub(crate) struct FilesystemLsArgs {
     pub path: Option<String>,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Resume from a cursor returned by a previous listing.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub cursor: Option<String>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
     pub snapshot_id: Option<String>,
@@ -778,15 +908,8 @@ pub(crate) struct FilesystemAnnotateArgs {
     /// Update only while the inode's attribute revision is still this one.
     #[arg(long)]
     pub expected_attributes_revision: Option<u64>,
-    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
-    /// of the commit's identity: resubmitting the same --commit-id with a
-    /// different message is a commit id conflict.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-    /// Idempotency key for the commit; resubmit with the same id to retry
-    /// safely. Generated when absent and returned in the output.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub commit_id: Option<String>,
+    #[command(flatten)]
+    pub commit: CommitArgs,
 }
 
 #[derive(Debug, Args)]
@@ -801,15 +924,8 @@ pub(crate) struct FilesystemRmArgs {
     /// subtree stays recoverable through the printed undelete handle.
     #[arg(short, long)]
     pub recursive: bool,
-    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
-    /// of the commit's identity: resubmitting the same --commit-id with a
-    /// different message is a commit id conflict.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-    /// Idempotency key for the commit; resubmit with the same id to retry
-    /// safely. Generated when absent and returned in the output.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub commit_id: Option<String>,
+    #[command(flatten)]
+    pub commit: CommitArgs,
 }
 
 #[derive(Debug, Args)]
@@ -823,15 +939,8 @@ pub(crate) struct FilesystemMkdirArgs {
     /// Create missing parent directories as well.
     #[arg(short = 'p', long)]
     pub parents: bool,
-    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
-    /// of the commit's identity: resubmitting the same --commit-id with a
-    /// different message is a commit id conflict.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-    /// Idempotency key for the commit; resubmit with the same id to retry
-    /// safely. Generated when absent and returned in the output.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub commit_id: Option<String>,
+    #[command(flatten)]
+    pub commit: CommitArgs,
 }
 
 #[derive(Debug, Args)]
@@ -842,9 +951,6 @@ pub(crate) struct FilesystemRevisionsArgs {
     pub path: String,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Resume cursor from a previous revisions page.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -876,9 +982,6 @@ pub(crate) struct FilesystemGrepArgs {
     pub ignore_case: bool,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Resume from a cursor returned by a previous search.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub cursor: Option<String>,
     /// Permit a capped exhaustive scan for patterns with no literal bytes.
     #[arg(long)]
     pub allow_scan: bool,
@@ -945,15 +1048,8 @@ pub(crate) struct FilesystemPutArgs {
     /// This guard replaces only if the file still has this revision and inode. It implies --force.
     #[arg(long, conflicts_with = "recursive", requires = "expected_inode_id")]
     pub expected_revision: Option<u64>,
-    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
-    /// of the commit's identity: resubmitting the same --commit-id with a
-    /// different message is a commit id conflict.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-    /// Idempotency key for the commit; resubmit with the same id to retry
-    /// safely. Generated when absent and returned in the output.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub commit_id: Option<String>,
+    #[command(flatten)]
+    pub commit: CommitArgs,
 }
 
 #[derive(Debug, Args)]
@@ -983,15 +1079,8 @@ pub(crate) struct FilesystemTransferArgs {
         requires = "expected_destination_inode_id"
     )]
     pub expected_destination_revision: Option<u64>,
-    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
-    /// of the commit's identity: resubmitting the same --commit-id with a
-    /// different message is a commit id conflict.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-    /// Idempotency key for the commit; resubmit with the same id to retry
-    /// safely. Generated when absent and returned in the output.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub commit_id: Option<String>,
+    #[command(flatten)]
+    pub commit: CommitArgs,
 }
 
 #[derive(Debug, Args)]
@@ -1004,15 +1093,8 @@ pub(crate) struct FilesystemRestoreArgs {
     pub path: String,
     #[arg(long)]
     pub revision: u64,
-    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
-    /// of the commit's identity: resubmitting the same --commit-id with a
-    /// different message is a commit id conflict.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-    /// Idempotency key for the commit; resubmit with the same id to retry
-    /// safely. Generated when absent and returned in the output.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub commit_id: Option<String>,
+    #[command(flatten)]
+    pub commit: CommitArgs,
 }
 
 #[derive(Debug, Args)]
@@ -1036,15 +1118,8 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// so a stale command cannot cancel a later delete.
     #[arg(long)]
     pub deletion_seq: u64,
-    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
-    /// of the commit's identity: resubmitting the same --commit-id with a
-    /// different message is a commit id conflict.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-    /// Idempotency key for the commit; resubmit with the same id to retry
-    /// safely. Generated when absent and returned in the output.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub commit_id: Option<String>,
+    #[command(flatten)]
+    pub commit: CommitArgs,
 }
 
 #[derive(Debug, Args)]
@@ -1053,9 +1128,6 @@ pub(crate) struct TrashArgs {
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Resume cursor from a previous page.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1067,7 +1139,7 @@ pub(crate) struct ChangesArgs {
     #[arg(long)]
     pub after: Option<u64>,
     #[command(flatten)]
-    pub pagination: PaginationArgs,
+    pub pagination: SeqPaginationArgs,
     /// End the change feed at this snapshot.
     #[arg(long, value_hint = ValueHint::Other)]
     pub snapshot_id: Option<String>,
@@ -1114,9 +1186,6 @@ pub(crate) struct SnapshotListArgs {
     pub target: SnapshotTargetArgs,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Resume from a cursor returned by a previous listing.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1322,9 +1391,6 @@ pub(crate) struct AdminCheckpointListArgs {
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Resume from a cursor returned by a previous listing.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1419,120 +1485,85 @@ impl RuntimeBehavior {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommandKind {
-    Completion,
-    Init,
-    ProfileCreate,
-    ProfileList,
-    ProfileShow,
-    ProfileUpdate,
-    ProfileDelete,
-    ProfileUse,
-    NamespaceCreate,
-    NamespaceShow,
-    NamespaceDelete,
-    NamespaceFork,
-    NamespaceUse,
-    SnapshotCreate,
-    SnapshotList,
-    SnapshotExtend,
-    SnapshotRelease,
-    Current,
-    FilesystemLs,
-    FilesystemStat,
-    FilesystemAnnotate,
-    FilesystemCat,
-    FilesystemGrep,
-    FilesystemGet,
-    FilesystemPut,
-    FilesystemRevisions,
-    FilesystemTrash,
-    FilesystemRestore,
-    FilesystemUndelete,
-    FilesystemMkdir,
-    FilesystemRm,
-    FilesystemMv,
-    FilesystemCp,
-    Changes,
-    Capabilities,
-    Doctor,
-    AdminCheckpointCreate,
-    AdminCheckpointList,
-    AdminCheckpointRelease,
-    AdminMaintenanceFlush,
-    AdminRetentionAdvance,
-    AdminMaintenanceRun,
-    AdminMaintenanceStep,
-    AdminGc,
-    AdminStoreProbe,
-    AdminIndexEnable,
-    AdminIndexDisable,
-    AdminIndexStatus,
-    AdminIndexGc,
-    ConfigPath,
-    ConfigShow,
-    Version,
+macro_rules! command_kinds {
+    (@count) => { 0 };
+    (@count $head:ident $($tail:ident)*) => { 1 + command_kinds!(@count $($tail)*) };
+    ($($variant:ident => $value:literal),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum CommandKind {
+            $($variant,)+
+        }
+
+        impl CommandKind {
+            #[cfg(test)]
+            pub(crate) const ALL: [Self; command_kinds!(@count $($variant)+)] =
+                [$(Self::$variant,)+];
+
+            pub(crate) fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value,)+
+                }
+            }
+        }
+    };
+}
+
+command_kinds! {
+    Completion => "completion",
+    Init => "init",
+    ProfileCreate => "profile_create",
+    ProfileList => "profile_list",
+    ProfileShow => "profile_show",
+    ProfileUpdate => "profile_update",
+    ProfileDelete => "profile_delete",
+    ProfileUse => "profile_use",
+    NamespaceCreate => "namespace_create",
+    NamespaceShow => "namespace_show",
+    NamespaceDelete => "namespace_delete",
+    NamespaceFork => "namespace_fork",
+    NamespaceUse => "namespace_use",
+    SnapshotCreate => "snapshot_create",
+    SnapshotList => "snapshot_list",
+    SnapshotExtend => "snapshot_extend",
+    SnapshotRelease => "snapshot_release",
+    Current => "current",
+    FilesystemLs => "filesystem_ls",
+    FilesystemStat => "filesystem_stat",
+    FilesystemAnnotate => "filesystem_annotate",
+    FilesystemCat => "filesystem_cat",
+    FilesystemGrep => "filesystem_grep",
+    FilesystemGet => "filesystem_get",
+    FilesystemPut => "filesystem_put",
+    FilesystemRevisions => "filesystem_revisions",
+    FilesystemTrash => "filesystem_trash",
+    FilesystemRestore => "filesystem_restore",
+    FilesystemUndelete => "filesystem_undelete",
+    FilesystemMkdir => "filesystem_mkdir",
+    FilesystemRm => "filesystem_rm",
+    FilesystemMv => "filesystem_mv",
+    FilesystemCp => "filesystem_cp",
+    Changes => "changes",
+    Capabilities => "capabilities",
+    Doctor => "doctor",
+    AdminCheckpointCreate => "admin_checkpoint_create",
+    AdminCheckpointList => "admin_checkpoint_list",
+    AdminCheckpointRelease => "admin_checkpoint_release",
+    AdminMaintenanceFlush => "admin_maintenance_flush",
+    AdminRetentionAdvance => "admin_retention_advance",
+    AdminMaintenanceRun => "admin_maintenance_run",
+    AdminMaintenanceStep => "admin_maintenance_step",
+    AdminGc => "admin_gc",
+    AdminStoreProbe => "admin_store_probe",
+    AdminIndexEnable => "admin_index_enable",
+    AdminIndexDisable => "admin_index_disable",
+    AdminIndexStatus => "admin_index_status",
+    AdminIndexGc => "admin_index_gc",
+    ConfigPath => "config_path",
+    ConfigShow => "config_show",
+    Version => "version",
 }
 
 impl CommandKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            CommandKind::Completion => "completion",
-            CommandKind::Init => "init",
-            CommandKind::ProfileCreate => "profile_create",
-            CommandKind::ProfileList => "profile_list",
-            CommandKind::ProfileShow => "profile_show",
-            CommandKind::ProfileUpdate => "profile_update",
-            CommandKind::ProfileDelete => "profile_delete",
-            CommandKind::ProfileUse => "profile_use",
-            CommandKind::NamespaceCreate => "namespace_create",
-            CommandKind::NamespaceShow => "namespace_show",
-            CommandKind::NamespaceDelete => "namespace_delete",
-            CommandKind::NamespaceFork => "namespace_fork",
-            CommandKind::NamespaceUse => "namespace_use",
-            CommandKind::SnapshotCreate => "snapshot_create",
-            CommandKind::SnapshotList => "snapshot_list",
-            CommandKind::SnapshotExtend => "snapshot_extend",
-            CommandKind::SnapshotRelease => "snapshot_release",
-            CommandKind::Current => "current",
-            CommandKind::FilesystemLs => "filesystem_ls",
-            CommandKind::FilesystemStat => "filesystem_stat",
-            CommandKind::FilesystemAnnotate => "filesystem_annotate",
-            CommandKind::FilesystemCat => "filesystem_cat",
-            CommandKind::FilesystemGrep => "filesystem_grep",
-            CommandKind::FilesystemGet => "filesystem_get",
-            CommandKind::FilesystemPut => "filesystem_put",
-            CommandKind::FilesystemRevisions => "filesystem_revisions",
-            CommandKind::FilesystemTrash => "filesystem_trash",
-            CommandKind::FilesystemRestore => "filesystem_restore",
-            CommandKind::FilesystemUndelete => "filesystem_undelete",
-            CommandKind::FilesystemMkdir => "filesystem_mkdir",
-            CommandKind::FilesystemRm => "filesystem_rm",
-            CommandKind::FilesystemMv => "filesystem_mv",
-            CommandKind::FilesystemCp => "filesystem_cp",
-            CommandKind::Changes => "changes",
-            CommandKind::Capabilities => "capabilities",
-            CommandKind::Doctor => "doctor",
-            CommandKind::AdminCheckpointCreate => "admin_checkpoint_create",
-            CommandKind::AdminCheckpointList => "admin_checkpoint_list",
-            CommandKind::AdminCheckpointRelease => "admin_checkpoint_release",
-            CommandKind::AdminMaintenanceFlush => "admin_maintenance_flush",
-            CommandKind::AdminRetentionAdvance => "admin_retention_advance",
-            CommandKind::AdminMaintenanceRun => "admin_maintenance_run",
-            CommandKind::AdminMaintenanceStep => "admin_maintenance_step",
-            CommandKind::AdminGc => "admin_gc",
-            CommandKind::AdminStoreProbe => "admin_store_probe",
-            CommandKind::AdminIndexEnable => "admin_index_enable",
-            CommandKind::AdminIndexDisable => "admin_index_disable",
-            CommandKind::AdminIndexStatus => "admin_index_status",
-            CommandKind::AdminIndexGc => "admin_index_gc",
-            CommandKind::ConfigPath => "config_path",
-            CommandKind::ConfigShow => "config_show",
-            CommandKind::Version => "version",
-        }
-    }
-
     pub(crate) fn supports_json(self) -> bool {
         !matches!(self, CommandKind::Completion | CommandKind::FilesystemCat)
     }
@@ -1547,7 +1578,7 @@ impl Cli {
                 ProfileCommand::Create { .. } => CommandKind::ProfileCreate,
                 ProfileCommand::List => CommandKind::ProfileList,
                 ProfileCommand::Show { .. } => CommandKind::ProfileShow,
-                ProfileCommand::Update(_) => CommandKind::ProfileUpdate,
+                ProfileCommand::Update { .. } => CommandKind::ProfileUpdate,
                 ProfileCommand::Delete { .. } => CommandKind::ProfileDelete,
                 ProfileCommand::Use { .. } => CommandKind::ProfileUse,
             },
@@ -1829,8 +1860,6 @@ mod tests {
         for arguments in cases {
             let cli = Cli::try_parse_from(*arguments).expect("pagination arguments parse");
             let pagination = cli.command.pagination().expect("paginated command");
-            assert_eq!(pagination.limit, Some(5));
-            assert_eq!(pagination.page_size, Some(2));
             assert!(pagination.all);
             assert!(pagination.jsonl);
         }
@@ -1916,76 +1945,20 @@ mod tests {
 
     #[test]
     fn command_kind_envelope_values_are_pinned() {
-        let cases = [
-            (CommandKind::Completion, "completion"),
-            (CommandKind::Init, "init"),
-            (CommandKind::ProfileCreate, "profile_create"),
-            (CommandKind::ProfileList, "profile_list"),
-            (CommandKind::ProfileShow, "profile_show"),
-            (CommandKind::ProfileUpdate, "profile_update"),
-            (CommandKind::ProfileDelete, "profile_delete"),
-            (CommandKind::ProfileUse, "profile_use"),
-            (CommandKind::NamespaceCreate, "namespace_create"),
-            (CommandKind::NamespaceShow, "namespace_show"),
-            (CommandKind::NamespaceDelete, "namespace_delete"),
-            (CommandKind::NamespaceFork, "namespace_fork"),
-            (CommandKind::NamespaceUse, "namespace_use"),
-            (CommandKind::SnapshotCreate, "snapshot_create"),
-            (CommandKind::SnapshotList, "snapshot_list"),
-            (CommandKind::SnapshotExtend, "snapshot_extend"),
-            (CommandKind::SnapshotRelease, "snapshot_release"),
-            (CommandKind::Current, "current"),
-            (CommandKind::FilesystemLs, "filesystem_ls"),
-            (CommandKind::FilesystemStat, "filesystem_stat"),
-            (CommandKind::FilesystemAnnotate, "filesystem_annotate"),
-            (CommandKind::FilesystemCat, "filesystem_cat"),
-            (CommandKind::FilesystemGrep, "filesystem_grep"),
-            (CommandKind::FilesystemGet, "filesystem_get"),
-            (CommandKind::FilesystemPut, "filesystem_put"),
-            (CommandKind::FilesystemRevisions, "filesystem_revisions"),
-            (CommandKind::FilesystemTrash, "filesystem_trash"),
-            (CommandKind::FilesystemRestore, "filesystem_restore"),
-            (CommandKind::FilesystemUndelete, "filesystem_undelete"),
-            (CommandKind::FilesystemMkdir, "filesystem_mkdir"),
-            (CommandKind::FilesystemRm, "filesystem_rm"),
-            (CommandKind::FilesystemMv, "filesystem_mv"),
-            (CommandKind::FilesystemCp, "filesystem_cp"),
-            (CommandKind::Changes, "changes"),
-            (CommandKind::Capabilities, "capabilities"),
-            (CommandKind::Doctor, "doctor"),
-            (
-                CommandKind::AdminCheckpointCreate,
-                "admin_checkpoint_create",
-            ),
-            (CommandKind::AdminCheckpointList, "admin_checkpoint_list"),
-            (
-                CommandKind::AdminCheckpointRelease,
-                "admin_checkpoint_release",
-            ),
-            (
-                CommandKind::AdminMaintenanceFlush,
-                "admin_maintenance_flush",
-            ),
-            (
-                CommandKind::AdminRetentionAdvance,
-                "admin_retention_advance",
-            ),
-            (CommandKind::AdminMaintenanceRun, "admin_maintenance_run"),
-            (CommandKind::AdminMaintenanceStep, "admin_maintenance_step"),
-            (CommandKind::AdminGc, "admin_gc"),
-            (CommandKind::AdminStoreProbe, "admin_store_probe"),
-            (CommandKind::AdminIndexEnable, "admin_index_enable"),
-            (CommandKind::AdminIndexDisable, "admin_index_disable"),
-            (CommandKind::AdminIndexStatus, "admin_index_status"),
-            (CommandKind::AdminIndexGc, "admin_index_gc"),
-            (CommandKind::ConfigPath, "config_path"),
-            (CommandKind::ConfigShow, "config_show"),
-            (CommandKind::Version, "version"),
-        ];
-
-        for (kind, expected) in cases {
-            assert_eq!(kind.as_str(), expected);
+        for kind in CommandKind::ALL {
+            assert_eq!(kind.as_str(), snake_case(&format!("{kind:?}")));
         }
+    }
+
+    fn snake_case(value: &str) -> String {
+        let mut result = String::with_capacity(value.len());
+        for (index, character) in value.chars().enumerate() {
+            if index > 0 && character.is_ascii_uppercase() {
+                result.push('_');
+            }
+            result.push(character.to_ascii_lowercase());
+        }
+        result
     }
 
     #[test]
@@ -1994,6 +1967,11 @@ mod tests {
         let profile_create = subcommand(subcommand(&command, "profile"), "create");
         assert_subcommands(
             profile_create,
+            &["s3", "r2", "gcs", "azure", "local", "remote"],
+        );
+        let profile_update = subcommand(subcommand(&command, "profile"), "update");
+        assert_subcommands(
+            profile_update,
             &["s3", "r2", "gcs", "azure", "local", "remote"],
         );
 

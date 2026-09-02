@@ -543,10 +543,10 @@ impl Client {
         }
 
         let response = self
-            .complete_multipart_upload(
+            .complete_upload(
                 namespace_id,
                 &upload_id,
-                &CompleteMultipartUploadRequest {
+                &CompleteUploadRequest::DirectMultipart {
                     content: UploadContentClaim {
                         size_bytes: uploaded.size_bytes,
                         checksum: uploaded.checksum,

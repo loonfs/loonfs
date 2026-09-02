@@ -1,89 +1,28 @@
-//! Shared backend errors and runtime error conversion.
+//! Runtime and client error conversion for CLI backends.
 
+use crate::error::CliError;
 use loonfs::RuntimeError;
-use loonfs_api::{ErrorCode, ErrorDetails, NamespaceId};
+use loonfs_api::{ErrorCode, NamespaceId};
 use loonfs_client::ClientError;
 use loonfs_grep::GrepError;
-use thiserror::Error;
 
-/// Error returned by either CLI backend.
-///
-/// `code` is either a shared [`loonfs_api::ErrorCode`] or a backend-local code.
-/// Shared codes come from the registry so embedded and remote profiles report
-/// the same code for the same failure.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("{code}: {message}")]
-pub(crate) struct BackendError {
-    /// Registry or backend-local error code.
-    pub code: String,
-    /// Feature key for `not_supported` errors.
-    pub feature: Option<String>,
-    /// Human-readable description of the failure.
-    pub message: String,
-    /// Identifies the invalid input. Body fields use JSON Pointer paths;
-    /// query and path parameters use their names; CLI errors use the flag or
-    /// argument as written.
-    pub param: Option<String>,
-    /// Correlation id the server assigned to the failed request. Always
-    /// `None` for embedded and local failures, which have no server hop.
-    pub request_id: Option<String>,
-    /// Structured context for the code, when the transport carried any.
-    pub details: Option<Box<ErrorDetails>>,
+pub(crate) trait NamespaceScoped<T> {
+    fn scoped(self, namespace_id: &NamespaceId) -> Result<T, CliError>;
 }
 
-impl BackendError {
-    /// Builds an error carrying a registry code verbatim.
-    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            feature: None,
-            message: message.into(),
-            param: None,
-            request_id: None,
-            details: None,
-        }
-    }
-
-    /// A backend configuration that could not be loaded or used.
-    pub(crate) fn invalid_config(message: impl Into<String>) -> Self {
-        Self::new("invalid_config", message)
-    }
-
-    /// Caller input rejected before it reached a backend.
-    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
-        Self::new(ErrorCode::InvalidRequest.as_str(), message)
-    }
-
-    /// Transport failure between a client and a remote server.
-    pub(crate) fn client_error(message: impl Into<String>) -> Self {
-        Self::new("client_error", message)
-    }
-
-    /// Local i/o failure while moving bytes for a backend call.
-    pub(crate) fn io_error(message: impl Into<String>) -> Self {
-        Self::new("io_error", message)
-    }
-
-    /// Embedded-runtime failure without a registry code.
-    pub(crate) fn runtime_error(message: impl Into<String>) -> Self {
-        Self::new("runtime_error", message)
-    }
-
-    pub(crate) fn with_param(mut self, param: impl Into<String>) -> Self {
-        self.param = Some(param.into());
-        self
-    }
-
-    pub(crate) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
-        if self.code == ErrorCode::InvalidRequest.as_str() {
-            self.with_param(param)
-        } else {
-            self
-        }
+impl<T> NamespaceScoped<T> for Result<T, RuntimeError> {
+    fn scoped(self, namespace_id: &NamespaceId) -> Result<T, CliError> {
+        self.map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 }
 
-impl From<ClientError> for BackendError {
+impl<T> NamespaceScoped<T> for Result<T, GrepError> {
+    fn scoped(self, namespace_id: &NamespaceId) -> Result<T, CliError> {
+        self.map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
+    }
+}
+
+impl From<ClientError> for CliError {
     fn from(error: ClientError) -> Self {
         match error {
             ClientError::ConfigIo(message) | ClientError::ConfigDecode(message) => {
@@ -96,12 +35,6 @@ impl From<ClientError> for BackendError {
                 Self::invalid_config(format!("invalid `{field}`: {reason}"))
             }
             ClientError::InvalidNamespacePath(message) => Self::invalid_request(message),
-            ClientError::InvalidCommitId(message) | ClientError::InvalidCheckpointId(message) => {
-                // The registry code core and server report for a malformed
-                // id, so pre-flight client validation matches backend
-                // behavior.
-                Self::new(ErrorCode::InvalidRequest.as_str(), message)
-            }
             ClientError::Http(message)
             | ClientError::Json(message)
             | ClientError::Protocol(message) => Self::client_error(message),
@@ -136,15 +69,15 @@ impl From<ClientError> for BackendError {
     }
 }
 
-pub(crate) fn map_runtime_error(error: RuntimeError) -> BackendError {
+pub(crate) fn map_runtime_error(error: RuntimeError) -> CliError {
     let public_message = error.public_message().into_owned();
     match error {
-        RuntimeError::Config(_) => BackendError::invalid_config(public_message),
-        RuntimeError::RuntimeTask(_) => BackendError::runtime_error(public_message),
+        RuntimeError::Config(_) => CliError::invalid_config(public_message),
+        RuntimeError::RuntimeTask(_) => CliError::runtime_error(public_message),
         // The embedded surface reports the same structured details a server
         // puts in its error envelope for the same condition, so `--json`
         // consumers read one contract from both backends.
-        error => BackendError {
+        error => CliError {
             code: error.code().as_str().to_owned(),
             feature: None,
             message: public_message,
@@ -158,9 +91,9 @@ pub(crate) fn map_runtime_error(error: RuntimeError) -> BackendError {
 pub(crate) fn map_namespace_scoped_runtime_error(
     namespace_id: &NamespaceId,
     error: RuntimeError,
-) -> BackendError {
+) -> CliError {
     if error.code() == ErrorCode::NamespaceNotFound {
-        return BackendError::new(
+        return CliError::new(
             ErrorCode::NamespaceNotFound.as_str(),
             format!("namespace `{namespace_id}` does not exist"),
         );
@@ -175,7 +108,7 @@ pub(crate) fn map_namespace_scoped_runtime_error(
 pub(crate) fn map_namespace_scoped_grep_error(
     namespace_id: &NamespaceId,
     error: GrepError,
-) -> BackendError {
+) -> CliError {
     match error {
         GrepError::Runtime(error) => {
             let cursor_is_invalid = matches!(
@@ -191,14 +124,14 @@ pub(crate) fn map_namespace_scoped_grep_error(
         }
         error => {
             let message = error.public_message().into_owned();
-            BackendError::new(error.code().as_str(), message)
+            CliError::new(error.code().as_str(), message)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{map_runtime_error, BackendError, ClientError};
+    use super::{map_runtime_error, CliError, ClientError};
     use loonfs::RuntimeError;
     use loonfs_api::ChangeSeq;
 
@@ -219,7 +152,7 @@ mod tests {
 
     #[test]
     fn api_errors_pass_their_code_and_message_through_verbatim() {
-        let error = BackendError::from(ClientError::Api {
+        let error = CliError::from(ClientError::Api {
             status: 404,
             code: "namespace_not_found".to_owned(),
             feature: None,
@@ -235,20 +168,20 @@ mod tests {
 
     #[test]
     fn config_and_transport_errors_map_to_backend_local_codes() {
-        let error = BackendError::from(ClientError::MissingConfigField {
+        let error = CliError::from(ClientError::MissingConfigField {
             field: "server_url",
         });
         assert_eq!(error.code, "invalid_config");
         assert_eq!(error.message, "missing `server_url`");
 
-        let error = BackendError::from(ClientError::Http("connection refused".to_owned()));
+        let error = CliError::from(ClientError::Http("connection refused".to_owned()));
         assert_eq!(error.code, "client_error");
 
-        let error = BackendError::from(ClientError::Io("read failed".to_owned()));
+        let error = CliError::from(ClientError::Io("read failed".to_owned()));
         assert_eq!(error.code, "io_error");
         assert_eq!(error.message, "i/o error: read failed");
 
-        let error = BackendError::from(ClientError::UploadTooLarge {
+        let error = CliError::from(ClientError::UploadTooLarge {
             size_bytes: 1024,
             reason: "proxied and direct limits are lower".to_owned(),
         });
@@ -257,7 +190,7 @@ mod tests {
 
     #[test]
     fn invalid_namespace_paths_map_to_the_registry_request_code() {
-        let error = BackendError::from(ClientError::InvalidNamespacePath(
+        let error = CliError::from(ClientError::InvalidNamespacePath(
             "path must be absolute".to_owned(),
         ));
 

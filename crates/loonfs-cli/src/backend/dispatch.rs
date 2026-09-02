@@ -1,13 +1,14 @@
 //! Dispatches each resolved operation to its embedded or remote implementation.
 
-use super::progress::{rest_between_status_checks, wait_for_grep_index, GrepWaitStep};
+use super::step_budget::{rest_between_status_checks, wait_for_grep_index, GrepWaitStep};
 use super::{FileDownload, GrepWaitProgress, MaintenanceDrainProgress, StepBudget};
-use crate::backend_error::BackendError;
+use crate::backend_error::NamespaceScoped;
+use crate::error::CliError;
 use crate::payload::LocalPayload;
 use crate::progress::ProgressReporter;
 use crate::resolve::ResolvedTarget;
 use crate::uploads::UploadJournal;
-use loonfs::MaintenanceJobId;
+use loonfs::{MaintenanceJobId, ReadFileStreamOptions};
 use loonfs_api::{
     v0::{
         GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
@@ -33,15 +34,15 @@ use std::sync::Arc;
 /// Remote profiles cannot host local maintenance because the server already
 /// schedules it. Embedded profiles do not expose upload sessions because
 /// they stage content directly in-process.
-fn upload_sessions_need_a_remote_profile() -> BackendError {
-    BackendError::new(
+fn upload_sessions_need_a_remote_profile() -> CliError {
+    CliError::new(
         loonfs_api::ErrorCode::NotSupported.as_str(),
         "upload sessions belong to a server; an embedded profile stages content itself",
     )
 }
 
-fn maintenance_host_needs_an_embedded_profile() -> BackendError {
-    BackendError::new(
+fn maintenance_host_needs_an_embedded_profile() -> CliError {
+    CliError::new(
         loonfs_api::ErrorCode::NotSupported.as_str(),
         "`admin maintenance run` requires an embedded profile because remote servers run their \
          own maintenance; use `loonfs admin maintenance step` for one pass or `loonfs admin \
@@ -56,7 +57,7 @@ fn maintenance_host_needs_an_embedded_profile() -> BackendError {
 /// the same error-code registry, which keeps command output consistent.
 impl ResolvedTarget {
     /// Returns the capabilities reported by the selected deployment.
-    pub(crate) async fn get_capabilities(&self) -> Result<CapabilityDocument, BackendError> {
+    pub(crate) async fn get_capabilities(&self) -> Result<CapabilityDocument, CliError> {
         match self {
             Self::Embedded(target) => Ok(target.backend.reader.get_capabilities()),
             Self::Remote(target) => Ok(target.client.get_capabilities().await?),
@@ -67,7 +68,7 @@ impl ResolvedTarget {
     ///
     /// Any API response means the connection succeeded. A separate check
     /// determines whether the health endpoint returned a successful status.
-    pub(crate) async fn remote_connectivity(&self) -> Result<(), BackendError> {
+    pub(crate) async fn remote_connectivity(&self) -> Result<(), CliError> {
         match self {
             Self::Embedded(_) => Ok(()),
             Self::Remote(target) => match target.client.get_health().await {
@@ -78,7 +79,7 @@ impl ResolvedTarget {
     }
 
     /// Checks the remote server's public health endpoint.
-    pub(crate) async fn remote_health(&self) -> Result<(), BackendError> {
+    pub(crate) async fn remote_health(&self) -> Result<(), CliError> {
         match self {
             Self::Embedded(_) => Ok(()),
             Self::Remote(target) => Ok(target.client.get_health().await?),
@@ -89,7 +90,7 @@ impl ResolvedTarget {
     pub(crate) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<Namespace, BackendError> {
+    ) -> Result<Namespace, CliError> {
         match self {
             Self::Embedded(target) => target.backend.create_namespace(namespace_id).await,
             Self::Remote(target) => Ok(target.client.create_namespace(namespace_id).await?),
@@ -102,7 +103,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         expected_head_seq: Option<ChangeSeq>,
-    ) -> Result<DeleteNamespaceResponse, BackendError> {
+    ) -> Result<DeleteNamespaceResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -122,7 +123,7 @@ impl ResolvedTarget {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-    ) -> Result<Namespace, BackendError> {
+    ) -> Result<Namespace, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -141,9 +142,14 @@ impl ResolvedTarget {
     pub(crate) async fn get_namespace(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<Namespace, BackendError> {
+    ) -> Result<Namespace, CliError> {
         match self {
-            Self::Embedded(target) => target.backend.get_namespace(namespace_id).await,
+            Self::Embedded(target) => target
+                .backend
+                .reader
+                .get_namespace(namespace_id)
+                .await
+                .scoped(namespace_id),
             Self::Remote(target) => Ok(target.client.get_namespace(namespace_id).await?),
         }
     }
@@ -155,7 +161,7 @@ impl ResolvedTarget {
         limit: Option<u32>,
         cursor: Option<&str>,
         snapshot_id: Option<&CheckpointId>,
-    ) -> Result<ListPathEntriesResponse, BackendError> {
+    ) -> Result<ListPathEntriesResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -183,7 +189,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         snapshot_id: Option<&CheckpointId>,
-    ) -> Result<PathEntry, BackendError> {
+    ) -> Result<PathEntry, CliError> {
         self.get_path_entry_projected(
             spec,
             &StatPathOptions {
@@ -199,14 +205,14 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-    ) -> Result<PathEntry, BackendError> {
+    ) -> Result<PathEntry, CliError> {
         match self {
-            Self::Embedded(target) => {
-                target
-                    .backend
-                    .get_inode(namespace_id, inode_id, &StatPathOptions::default())
-                    .await
-            }
+            Self::Embedded(target) => target
+                .backend
+                .reader
+                .get_inode(namespace_id, inode_id, StatPathOptions::default())
+                .await
+                .scoped(namespace_id),
             Self::Remote(target) => Ok(target
                 .client
                 .get_inode(namespace_id, inode_id, &StatPathOptions::default())
@@ -218,7 +224,7 @@ impl ResolvedTarget {
     pub(crate) async fn get_path_entry_without_attributes(
         &self,
         spec: &NamespacePath,
-    ) -> Result<PathEntry, BackendError> {
+    ) -> Result<PathEntry, CliError> {
         self.get_path_entry_without_attributes_at_snapshot(spec, None)
             .await
     }
@@ -227,7 +233,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         snapshot_id: Option<&CheckpointId>,
-    ) -> Result<PathEntry, BackendError> {
+    ) -> Result<PathEntry, CliError> {
         self.get_path_entry_projected(
             spec,
             &StatPathOptions {
@@ -242,7 +248,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
-    ) -> Result<PathEntry, BackendError> {
+    ) -> Result<PathEntry, CliError> {
         match self {
             Self::Embedded(target) => target.backend.get_path_entry(spec, options).await,
             Self::Remote(target) => Ok(target.client.get_path_entry(spec, options).await?),
@@ -254,7 +260,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         options: &ReadFileOptions,
-    ) -> Result<Vec<u8>, BackendError> {
+    ) -> Result<Vec<u8>, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -262,10 +268,7 @@ impl ResolvedTarget {
                     .get_file_bytes_with_options(spec, options)
                     .await
             }
-            Self::Remote(target) => Ok(target
-                .client
-                .get_file_bytes_with_options(spec, options)
-                .await?),
+            Self::Remote(target) => Ok(target.client.get_file_bytes(spec, options).await?),
         }
     }
 
@@ -285,12 +288,12 @@ impl ResolvedTarget {
         snapshot_id: Option<&CheckpointId>,
         size_bytes: Option<u64>,
         start_offset: u64,
-    ) -> Result<FileDownload, BackendError> {
+    ) -> Result<FileDownload, CliError> {
         if let (Self::Remote(target), Some(size_bytes)) = (self, size_bytes) {
             if target.client.offers_direct_download(size_bytes).await? {
                 let grant = target
                     .client
-                    .create_download_with_options(
+                    .create_download(
                         spec,
                         &DownloadOptions {
                             revision_no,
@@ -324,11 +327,28 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => Ok(FileDownload::Streamed {
                 namespace_id: spec.namespace().clone(),
-                stream: Box::new(target.backend.read_file_stream(spec, start_offset).await?),
+                stream: Box::new(
+                    target
+                        .backend
+                        .reader
+                        .read_file_stream(
+                            spec.namespace(),
+                            spec.absolute_path().as_str(),
+                            ReadFileStreamOptions {
+                                start_offset,
+                                ..ReadFileStreamOptions::default()
+                            },
+                        )
+                        .await
+                        .scoped(spec.namespace())?,
+                ),
                 resumed_from: start_offset,
             }),
             Self::Remote(target) => Ok(FileDownload::Whole(
-                target.client.get_file_bytes(spec).await?,
+                target
+                    .client
+                    .get_file_bytes(spec, &ReadFileOptions::default())
+                    .await?,
             )),
         }
     }
@@ -339,7 +359,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         request: &GrepRequest,
         limit: Option<u32>,
-    ) -> Result<GrepResponse, BackendError> {
+    ) -> Result<GrepResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.grep(namespace_id, request, limit).await,
             Self::Remote(target) => Ok(target.client.grep(namespace_id, request, limit).await?),
@@ -350,7 +370,7 @@ impl ResolvedTarget {
     pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndex, BackendError> {
+    ) -> Result<GrepIndex, CliError> {
         match self {
             Self::Embedded(target) => target.backend.enable_grep_index(namespace_id).await,
             Self::Remote(target) => Ok(target.client.enable_grep_index(namespace_id).await?),
@@ -361,7 +381,7 @@ impl ResolvedTarget {
     pub(crate) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndex, BackendError> {
+    ) -> Result<GrepIndex, CliError> {
         match self {
             Self::Embedded(target) => target.backend.disable_grep_index(namespace_id).await,
             Self::Remote(target) => Ok(target.client.disable_grep_index(namespace_id).await?),
@@ -372,9 +392,14 @@ impl ResolvedTarget {
     pub(crate) async fn get_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<GrepIndex, BackendError> {
+    ) -> Result<GrepIndex, CliError> {
         match self {
-            Self::Embedded(target) => target.backend.get_grep_index(namespace_id).await,
+            Self::Embedded(target) => target
+                .backend
+                .grep_worker()
+                .get_grep_index(namespace_id)
+                .await
+                .scoped(namespace_id),
             Self::Remote(target) => Ok(target.client.get_grep_index(namespace_id).await?),
         }
     }
@@ -384,7 +409,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         request: &GrepGcRequest,
-    ) -> Result<GrepGcResponse, BackendError> {
+    ) -> Result<GrepGcResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.gc_grep_index(namespace_id, request).await,
             Self::Remote(target) => Ok(target.client.gc_grep_index(namespace_id, request).await?),
@@ -402,7 +427,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         target_seq: ChangeSeq,
         budget: StepBudget,
-    ) -> Result<GrepWaitProgress, BackendError> {
+    ) -> Result<GrepWaitProgress, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -434,7 +459,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListTrashResponse, BackendError> {
+    ) -> Result<ListTrashResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.list_trash(namespace_id, limit, cursor).await,
             Self::Remote(target) => Ok(target
@@ -450,7 +475,7 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListFileRevisionsResponse, BackendError> {
+    ) -> Result<ListFileRevisionsResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -473,7 +498,7 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         bytes: &[u8],
         options: &PutFileOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.put_file_bytes(spec, bytes, options).await,
             Self::Remote(target) => Ok(target.client.put_file_bytes(spec, bytes, options).await?),
@@ -493,7 +518,7 @@ impl ResolvedTarget {
         options: &PutFileOptions,
         progress: &Arc<ProgressReporter>,
         journal: Option<&UploadJournal>,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 let body = payload.open_byte_stream(progress).await?;
@@ -518,7 +543,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<UploadSession, BackendError> {
+    ) -> Result<UploadSession, CliError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
             Self::Remote(target) => Ok(target.client.get_upload(namespace_id, upload_id).await?),
@@ -532,7 +557,7 @@ impl ResolvedTarget {
         content_ref: ContentRef,
         content_token: Option<loonfs_api::v0::ContentToken>,
         options: &PutFileOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
             Self::Remote(target) => Ok(target
@@ -547,7 +572,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.create_directory(spec, options).await,
             Self::Remote(target) => Ok(target.client.create_directory(spec, options).await?),
@@ -561,7 +586,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         options: &DeleteOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.delete_path(spec, options).await,
             Self::Remote(target) => Ok(target.client.delete_path(spec, options).await?),
@@ -573,7 +598,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         options: &UpdateAttributesOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.update_attributes(spec, options).await,
             Self::Remote(target) => Ok(target.client.update_attributes(spec, options).await?),
@@ -586,7 +611,7 @@ impl ResolvedTarget {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &MoveOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.move_path(from, to, options).await,
             Self::Remote(target) => Ok(target.client.move_path(from, to, options).await?),
@@ -599,7 +624,7 @@ impl ResolvedTarget {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &CopyOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.copy_path(from, to, options).await,
             Self::Remote(target) => Ok(target.client.copy_path(from, to, options).await?),
@@ -612,7 +637,7 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
         options: &RestoreRevisionOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -636,7 +661,7 @@ impl ResolvedTarget {
         deletion_seq: ChangeSeq,
         path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
-    ) -> Result<CommitResponse, BackendError> {
+    ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -657,7 +682,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         name: &str,
         ttl_ms: u64,
-    ) -> Result<SnapshotSummary, BackendError> {
+    ) -> Result<SnapshotSummary, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -678,7 +703,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListSnapshotsResponse, BackendError> {
+    ) -> Result<ListSnapshotsResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -699,7 +724,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         snapshot_id: &CheckpointId,
         ttl_ms: u64,
-    ) -> Result<SnapshotSummary, BackendError> {
+    ) -> Result<SnapshotSummary, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -719,14 +744,14 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         snapshot_id: &CheckpointId,
-    ) -> Result<ReleaseSnapshotResponse, BackendError> {
+    ) -> Result<ReleaseSnapshotResponse, CliError> {
         match self {
-            Self::Embedded(target) => {
-                target
-                    .backend
-                    .release_snapshot(namespace_id, snapshot_id)
-                    .await
-            }
+            Self::Embedded(target) => target
+                .backend
+                .admin
+                .release_snapshot(namespace_id, snapshot_id)
+                .await
+                .scoped(namespace_id),
             Self::Remote(target) => Ok(target
                 .client
                 .release_snapshot(namespace_id, snapshot_id)
@@ -742,7 +767,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
-    ) -> Result<Checkpoint, BackendError> {
+    ) -> Result<Checkpoint, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -763,7 +788,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListCheckpointsResponse, BackendError> {
+    ) -> Result<ListCheckpointsResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -783,14 +808,14 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
-    ) -> Result<ReleaseCheckpointResponse, BackendError> {
+    ) -> Result<ReleaseCheckpointResponse, CliError> {
         match self {
-            Self::Embedded(target) => {
-                target
-                    .backend
-                    .release_checkpoint(namespace_id, checkpoint_id)
-                    .await
-            }
+            Self::Embedded(target) => target
+                .backend
+                .admin
+                .release_checkpoint(namespace_id, checkpoint_id)
+                .await
+                .scoped(namespace_id),
             Self::Remote(target) => Ok(target
                 .client
                 .release_checkpoint(namespace_id, checkpoint_id)
@@ -806,7 +831,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
-    ) -> Result<MaintenanceStepResponse, BackendError> {
+    ) -> Result<MaintenanceStepResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.run_maintenance(namespace_id, request).await,
             Self::Remote(target) => Ok(target
@@ -821,7 +846,7 @@ impl ResolvedTarget {
     /// This operation is store-scoped and does not require a namespace.
     /// Embedded profiles probe their configured store directly. Remote
     /// profiles ask the server to probe its configured store.
-    pub(crate) async fn probe_store(&self) -> Result<StoreProbeResponse, BackendError> {
+    pub(crate) async fn probe_store(&self) -> Result<StoreProbeResponse, CliError> {
         match self {
             Self::Embedded(target) => Ok(target.backend.probe_store().await),
             Self::Remote(target) => Ok(target.client.probe_store(&StoreProbeRequest {}).await?),
@@ -841,7 +866,7 @@ impl ResolvedTarget {
         jobs: &[MaintenanceJobId],
         poll_interval_ms: Option<u64>,
         shutdown: impl std::future::Future<Output = ()>,
-    ) -> Result<(), BackendError> {
+    ) -> Result<(), CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -859,7 +884,7 @@ impl ResolvedTarget {
         namespaces: &[NamespaceId],
         jobs: &[MaintenanceJobId],
         budget: StepBudget,
-    ) -> Result<MaintenanceDrainProgress, BackendError> {
+    ) -> Result<MaintenanceDrainProgress, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -878,7 +903,7 @@ impl ResolvedTarget {
         after_seq: ChangeSeq,
         limit: Option<u32>,
         snapshot_id: Option<&CheckpointId>,
-    ) -> Result<ListChangesResponse, BackendError> {
+    ) -> Result<ListChangesResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -888,7 +913,7 @@ impl ResolvedTarget {
             }
             Self::Remote(target) => Ok(target
                 .client
-                .list_changes_with_options(
+                .list_changes(
                     namespace_id,
                     after_seq,
                     &ListChangesOptions {

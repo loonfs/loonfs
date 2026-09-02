@@ -1,6 +1,7 @@
 //! Download results shared by embedded and remote profiles.
 
-use crate::backend_error::{map_namespace_scoped_runtime_error, BackendError};
+use crate::backend_error::map_namespace_scoped_runtime_error;
+use crate::error::CliError;
 use bytes::Bytes;
 use loonfs::{FileContentStream, RuntimeError, SharedObjectStore};
 use loonfs_api::NamespaceId;
@@ -33,7 +34,7 @@ impl FileDownload {
     /// Streamed downloads verify length and checksum when the final call reaches
     /// the end. Stopping early does not complete verification. Buffered bytes
     /// were verified before this method receives them.
-    pub(crate) async fn next_chunk(&mut self) -> Result<Option<Bytes>, BackendError> {
+    pub(crate) async fn next_chunk(&mut self) -> Result<Option<Bytes>, CliError> {
         match self {
             Self::Streamed {
                 namespace_id,
@@ -42,7 +43,7 @@ impl FileDownload {
             } => stream.next_chunk().await.map_err(|error| {
                 map_namespace_scoped_runtime_error(namespace_id, RuntimeError::Core(error))
             }),
-            Self::Direct { stream, .. } => stream.next_chunk().await.map_err(BackendError::from),
+            Self::Direct { stream, .. } => stream.next_chunk().await.map_err(CliError::from),
             Self::Whole(bytes) if bytes.is_empty() => Ok(None),
             Self::Whole(bytes) => Ok(Some(Bytes::from(std::mem::take(bytes)))),
         }
@@ -65,7 +66,7 @@ impl FileDownload {
     /// Streaming downloads verify the complete object, including bytes read
     /// by an earlier attempt. Buffered responses do not resume and ignore the
     /// prefix.
-    pub(crate) fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), BackendError> {
+    pub(crate) fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), CliError> {
         match self {
             Self::Streamed {
                 namespace_id,

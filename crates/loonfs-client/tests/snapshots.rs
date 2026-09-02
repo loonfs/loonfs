@@ -172,7 +172,7 @@ async fn snapshot_file_read_returns_the_captured_state() {
     assert_eq!(entry.head_seq, snapshot.head_seq);
     let bytes = harness
         .client
-        .get_file_bytes_with_options(
+        .get_file_bytes(
             &path,
             &ReadFileOptions {
                 revision_no: None,
@@ -185,7 +185,7 @@ async fn snapshot_file_read_returns_the_captured_state() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&path)
+            .get_file_bytes(&path, &Default::default())
             .await
             .expect("current content"),
         b"current"

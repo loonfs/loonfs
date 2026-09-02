@@ -436,14 +436,14 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     assert_eq!(entry.content_ref(), Some(&first_content_ref));
     let bytes = harness
         .client
-        .get_file_bytes(&target)
+        .get_file_bytes(&target, &Default::default())
         .await
         .expect("read restored file");
     assert_eq!(bytes, b"first bytes\n");
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), None)
+        .list_changes(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("list changes");
     assert_eq!(changes.changes.len(), 3);
@@ -466,7 +466,14 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let first_page = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), Some(2))
+        .list_changes(
+            &namespace,
+            ChangeSeq(0),
+            &loonfs_client::ListChangesOptions {
+                limit: Some(2),
+                snapshot_id: None,
+            },
+        )
         .await
         .expect("list first changes page");
     assert_eq!(first_page.after_seq, ChangeSeq(0));
@@ -479,7 +486,10 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .list_changes(
             &namespace,
             first_page.next_after_seq.expect("next page"),
-            Some(2),
+            &loonfs_client::ListChangesOptions {
+                limit: Some(2),
+                snapshot_id: None,
+            },
         )
         .await
         .expect("list second changes page");
@@ -545,7 +555,13 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
     assert_eq!(
         harness
             .client
-            .get_file_revision_bytes(&target, RevisionNo(1))
+            .get_file_bytes(
+                &target,
+                &loonfs_client::ReadFileOptions {
+                    revision_no: Some(RevisionNo(1)),
+                    snapshot_id: None
+                }
+            )
             .await
             .expect("read path revision"),
         b"one"
@@ -595,7 +611,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&moved)
+            .get_file_bytes(&moved, &Default::default())
             .await
             .expect("read restored file"),
         b"one"

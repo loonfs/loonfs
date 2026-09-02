@@ -1,6 +1,6 @@
 //! Progress and budget state for iterative maintenance and grep operations.
 
-use crate::backend_error::BackendError;
+use crate::error::CliError;
 use loonfs::{MaintenanceJobId, MaintenanceStepConclusion};
 use loonfs_api::v0::GrepIndexLifecycle;
 use loonfs_api::{ChangeSeq, NamespaceId};
@@ -95,12 +95,12 @@ pub(super) async fn wait_for_grep_index<Read, ReadTurn, Step, StepTurn>(
     budget: StepBudget,
     read: Read,
     step: Step,
-) -> Result<GrepWaitProgress, BackendError>
+) -> Result<GrepWaitProgress, CliError>
 where
     Read: Fn() -> ReadTurn,
-    ReadTurn: Future<Output = Result<GrepIndexLifecycle, BackendError>>,
+    ReadTurn: Future<Output = Result<GrepIndexLifecycle, CliError>>,
     Step: Fn() -> StepTurn,
-    StepTurn: Future<Output = Result<GrepWaitStep, BackendError>>,
+    StepTurn: Future<Output = Result<GrepWaitStep, CliError>>,
 {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();

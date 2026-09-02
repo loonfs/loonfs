@@ -1,6 +1,7 @@
 //! Direct-download negotiation, grants, and verified response streams.
 
 use super::*;
+use crate::transport::{QueryBuilder, SendPolicy};
 
 /// Selects a retained revision or snapshot for a download. Set at most one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -122,37 +123,21 @@ impl Client {
                 .is_some_and(|proxy_cap| size_bytes > *proxy_cap))
     }
 
-    /// Requests short-lived direct access to a file's content object.
-    pub async fn create_download(
-        &self,
-        spec: &NamespacePath,
-        revision_no: Option<RevisionNo>,
-    ) -> Result<BeginDownloadResponse> {
-        self.create_download_with_options(
-            spec,
-            &DownloadOptions {
-                revision_no,
-                snapshot_id: None,
-            },
-        )
-        .await
-    }
-
     /// Requests short-lived direct access to a revision or snapshot.
-    pub async fn create_download_with_options(
+    pub async fn create_download(
         &self,
         spec: &NamespacePath,
         options: &DownloadOptions,
     ) -> Result<BeginDownloadResponse> {
-        let mut url = format!(
+        let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{}/filesystem/downloads",
             self.base_url,
             spec.namespace().as_str()
-        );
+        ));
         if let Some(snapshot_id) = &options.snapshot_id {
-            url.push_str("?snapshot_id=");
-            url.push_str(snapshot_id.as_str());
+            query.push("snapshot_id", snapshot_id.as_str());
         }
+        let url = query.finish();
         let request = match options.revision_no {
             Some(revision_no) => {
                 BeginDownloadRequest::for_revision(spec.absolute_path().clone(), revision_no)
@@ -161,8 +146,12 @@ impl Client {
         };
         // A grant creates nothing and names nothing new, so asking twice
         // costs two URLs and changes no state: this one may be resent.
-        self.request_json::<_, BeginDownloadResponse>(self.post(&url), Some(&request))
-            .await
+        self.request_json::<_, BeginDownloadResponse>(
+            self.post(&url),
+            Some(&request),
+            SendPolicy::Retry,
+        )
+        .await
     }
 
     /// Requests direct access to one retained inode revision.
@@ -180,6 +169,7 @@ impl Client {
         self.request_json::<_, BeginDownloadByInodeResponse>(
             self.post(&url),
             Some(&BeginDownloadByInodeRequest {}),
+            SendPolicy::Retry,
         )
         .await
     }

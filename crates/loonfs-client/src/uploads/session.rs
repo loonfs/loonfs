@@ -2,6 +2,7 @@
 
 use super::super::*;
 use super::staging::presigned_put_request;
+use crate::transport::SendPolicy;
 
 impl Client {
     /// Starts an upload session using the transport selected by the request.
@@ -12,8 +13,12 @@ impl Client {
     ) -> Result<BeginUploadResponse> {
         let url = format!("{}/v0/namespaces/{namespace_id}/uploads", self.base_url);
         // Do not retry automatically because each request creates a session.
-        self.request_json_once::<_, BeginUploadResponse>(self.post(&url), Some(request))
-            .await
+        self.request_json::<_, BeginUploadResponse>(
+            self.post(&url),
+            Some(request),
+            SendPolicy::Once,
+        )
+        .await
     }
 
     /// Starts a direct upload of bytes the caller already has.
@@ -65,6 +70,7 @@ impl Client {
         self.request_json::<_, SignUploadPartsResponse>(
             self.post(&url),
             Some(&SignUploadPartsRequest { parts }),
+            SendPolicy::Retry,
         )
         .await
     }
@@ -100,7 +106,7 @@ impl Client {
         // provider takes the last write, and the checksum rides the
         // signature either way.
         let response = self
-            .call_content_with_transport_retry_headers(&request, Some(&bytes))
+            .call(&request, Some(&bytes), SendPolicy::RetryUnbounded)
             .await?;
         let etag = response
             .get(http::header::ETAG)
@@ -124,9 +130,13 @@ impl Client {
     ) -> Result<()> {
         let request = presigned_put_request(access)?;
         // A successful create-only PUT may replay as a provider precondition error, not success.
-        self.call_once(&request, Some(&Bytes::copy_from_slice(bytes)))
-            .await
-            .map(|_| ())
+        self.call(
+            &request,
+            Some(&Bytes::copy_from_slice(bytes)),
+            SendPolicy::Once,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Writes one whole object to a presigned URL from a source read in
@@ -158,9 +168,13 @@ impl Client {
         // Proxied uploads are the request most likely to hit the server's
         // concurrency cap; staging the same bytes again is idempotent.
         let response = self
-            .call_content_with_transport_retry(&request, Some(&Bytes::copy_from_slice(bytes)))
+            .call(
+                &request,
+                Some(&Bytes::copy_from_slice(bytes)),
+                SendPolicy::RetryUnbounded,
+            )
             .await?;
-        serde_json::from_slice(&response).map_err(|err| ClientError::Json(err.to_string()))
+        serde_json::from_slice(&response.bytes).map_err(|err| ClientError::Json(err.to_string()))
     }
 
     /// Stages a payload that arrives in pieces, forwarding it to the server
@@ -217,7 +231,7 @@ impl Client {
             self.base_url
         );
         // Aborting is idempotent: a repeat reports the abort that stands.
-        self.request_json::<(), UploadSession>(self.post(&url), None)
+        self.request_json::<(), UploadSession>(self.post(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -235,7 +249,7 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}",
             self.base_url
         );
-        self.request_json::<(), UploadSession>(self.get(&url), None)
+        self.request_json::<(), UploadSession>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -253,28 +267,7 @@ impl Client {
             self.base_url
         );
         // The durable completed-session record replays an identical completion without new effect.
-        self.request_json::<_, UploadSession>(self.post(&url), Some(request))
+        self.request_json::<_, UploadSession>(self.post(&url), Some(request), SendPolicy::Retry)
             .await
-    }
-
-    /// Completes a direct-multipart upload session.
-    pub async fn complete_multipart_upload(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-        request: &CompleteMultipartUploadRequest,
-    ) -> Result<UploadSession> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
-            self.base_url
-        );
-        self.request_json::<_, UploadSession>(
-            self.post(&url),
-            Some(&CompleteUploadRequest::DirectMultipart {
-                content: request.content.clone(),
-                parts: request.parts.clone(),
-            }),
-        )
-        .await
     }
 }

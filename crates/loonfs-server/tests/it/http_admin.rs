@@ -273,16 +273,22 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(repeated.status_before.retention_floor_seq, advanced);
     assert_eq!(retention_floor(repeated), advanced);
 
-    let bytes = client.get_file_bytes(&target).await.expect("read file");
+    let bytes = client
+        .get_file_bytes(&target, &Default::default())
+        .await
+        .expect("read file");
     assert_eq!(bytes, b"hello admin\n");
 
-    match client.list_changes(&namespace, ChangeSeq(0), None).await {
+    match client
+        .list_changes(&namespace, ChangeSeq(0), &Default::default())
+        .await
+    {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
         other => panic!("expected rebootstrap_required, got {other:?}"),
     }
 
     let empty = client
-        .list_changes(&namespace, ChangeSeq(1), None)
+        .list_changes(&namespace, ChangeSeq(1), &Default::default())
         .await
         .expect("changes after floor");
     assert_eq!(empty.changes, Vec::new());
@@ -339,7 +345,10 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
     assert!(!report.retention_degraded);
     assert!(report.next_cursor.is_none());
 
-    let bytes = client.get_file_bytes(&target).await.expect("read file");
+    let bytes = client
+        .get_file_bytes(&target, &Default::default())
+        .await
+        .expect("read file");
     assert_eq!(bytes, b"hello gc\n");
 
     harness.server.abort();
@@ -414,7 +423,10 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
     assert_eq!(gc.deleted.wal_segments, 0);
     assert!(!gc.retention_degraded);
 
-    let bytes = client.get_file_bytes(&target).await.expect("read file");
+    let bytes = client
+        .get_file_bytes(&target, &Default::default())
+        .await
+        .expect("read file");
     assert_eq!(bytes, b"hello step\n");
 
     harness.server.abort();

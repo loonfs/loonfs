@@ -135,7 +135,7 @@ Profile management
     Show one profile with secrets redacted. Without a name, show the profile
     selected by LOONFS_PROFILE or the configured default.
 
-  loonfs profile update <name> [update-options]
+  loonfs profile update <provider> <name> [update-options]
     Change fields of an existing profile; with no flags on a terminal it
     asks for each field instead
 
@@ -439,7 +439,7 @@ Profile create options
 
 Update options
   Used by:
-    loonfs profile update <name>
+    loonfs profile update <provider> <name>
 
   A flag that does not apply to the profile's own store is rejected, and the
   mode, the store kind, and --force-path-style are fixed when the profile is

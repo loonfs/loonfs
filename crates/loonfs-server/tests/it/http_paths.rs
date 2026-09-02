@@ -133,7 +133,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
     assert_eq!(source_entry.content_ref(), dest_entry.content_ref());
     let dest_bytes = harness
         .client
-        .get_file_bytes(&destination)
+        .get_file_bytes(&destination, &Default::default())
         .await
         .expect("read copied file");
     assert_eq!(dest_bytes, b"forced overwrite\n");

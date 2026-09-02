@@ -1,115 +1,12 @@
 //! Snapshots, checkpoints, maintenance, store probes, and grep administration.
 
 use super::*;
-use crate::transport::{append_optional_pagination_query, append_query_param};
+use crate::transport::{QueryBuilder, SendPolicy};
 
-/// Fetches active-checkpoint pages as needed.
-#[must_use]
-pub struct CheckpointsPager {
-    client: Client,
-    namespace_id: NamespaceId,
-    page_size: Option<u32>,
-    cursor: Option<String>,
-    pending: Option<ListCheckpointsResponse>,
-    exhausted: bool,
-}
-
-impl CheckpointsPager {
-    /// Returns the next checkpoint page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<ListCheckpointsResponse>> {
-        if let Some(page) = self.pending.take() {
-            return Some(Ok(page));
-        }
-        if self.exhausted {
-            return None;
-        }
-        let page = self
-            .client
-            .list_checkpoints_page(&self.namespace_id, self.page_size, self.cursor.as_deref())
-            .await;
-        Some(page.inspect(|page| {
-            self.cursor = page.next_cursor.clone();
-            self.exhausted = self.cursor.is_none();
-        }))
-    }
-
-    /// Returns at most `max_items` checkpoints.
-    ///
-    /// Unused checkpoints from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<Checkpoint>> {
-        let mut checkpoints = Vec::new();
-        while checkpoints.len() < max_items {
-            let Some(page) = self.next().await else {
-                break;
-            };
-            let mut page = page?;
-            let take = (max_items - checkpoints.len()).min(page.checkpoints.len());
-            if take < page.checkpoints.len() {
-                let remaining = page.checkpoints.split_off(take);
-                checkpoints.extend(page.checkpoints);
-                page.checkpoints = remaining;
-                self.pending = Some(page);
-                break;
-            }
-            checkpoints.extend(page.checkpoints);
-        }
-        Ok(checkpoints)
-    }
-}
-
-/// Fetches live-snapshot pages as needed.
-#[must_use]
-pub struct SnapshotsPager {
-    client: Client,
-    namespace_id: NamespaceId,
-    page_size: Option<u32>,
-    cursor: Option<String>,
-    pending: Option<ListSnapshotsResponse>,
-    exhausted: bool,
-}
-
-impl SnapshotsPager {
-    /// Returns the next snapshot page, or `None` after exhaustion.
-    pub async fn next(&mut self) -> Option<Result<ListSnapshotsResponse>> {
-        if let Some(page) = self.pending.take() {
-            return Some(Ok(page));
-        }
-        if self.exhausted {
-            return None;
-        }
-        let page = self
-            .client
-            .list_snapshots_page(&self.namespace_id, self.page_size, self.cursor.as_deref())
-            .await;
-        Some(page.inspect(|page| {
-            self.cursor = page.next_cursor.clone();
-            self.exhausted = self.cursor.is_none();
-        }))
-    }
-
-    /// Returns at most `max_items` snapshots.
-    ///
-    /// Unused snapshots from the last page remain available to later calls.
-    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<SnapshotSummary>> {
-        let mut snapshots = Vec::new();
-        while snapshots.len() < max_items {
-            let Some(page) = self.next().await else {
-                break;
-            };
-            let mut page = page?;
-            let take = (max_items - snapshots.len()).min(page.snapshots.len());
-            if take < page.snapshots.len() {
-                let remaining = page.snapshots.split_off(take);
-                snapshots.extend(page.snapshots);
-                page.snapshots = remaining;
-                self.pending = Some(page);
-                break;
-            }
-            snapshots.extend(page.snapshots);
-        }
-        Ok(snapshots)
-    }
-}
+/// A pager over active checkpoints.
+pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, ClientError>;
+/// A pager over live snapshots.
+pub type SnapshotsPager = loonfs_api::Pager<ListSnapshotsResponse, ClientError>;
 
 impl Client {
     /// Saves the namespace's current state for a limited time.
@@ -121,12 +18,13 @@ impl Client {
         ttl_ms: u64,
     ) -> Result<SnapshotSummary> {
         let url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
-        self.request_json_once(
+        self.request_json(
             self.post(&url),
             Some(&CreateSnapshotRequest {
                 name: name.to_owned(),
                 ttl_ms,
             }),
+            SendPolicy::Once,
         )
         .await
     }
@@ -138,14 +36,17 @@ impl Client {
         page_size: Option<u32>,
         cursor: Option<String>,
     ) -> SnapshotsPager {
-        SnapshotsPager {
-            client: self.clone(),
-            namespace_id: namespace_id.clone(),
-            page_size,
-            cursor,
-            pending: None,
-            exhausted: false,
-        }
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                client
+                    .list_snapshots_page(&namespace_id, page_size, cursor.as_deref())
+                    .await
+            }
+        })
     }
 
     /// Lists one bounded page of available snapshots.
@@ -155,10 +56,13 @@ impl Client {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListSnapshotsResponse> {
-        let mut url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
-        let mut has_query = false;
-        append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
-        self.request_json::<(), ListSnapshotsResponse>(self.get(&url), None)
+        let mut query = QueryBuilder::new(format!(
+            "{}/v0/namespaces/{namespace_id}/snapshots",
+            self.base_url
+        ));
+        query.pagination(limit, cursor);
+        let url = query.finish();
+        self.request_json::<(), ListSnapshotsResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -173,8 +77,12 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
             self.base_url
         );
-        self.request_json(self.post(&url), Some(&ExtendSnapshotRequest { ttl_ms }))
-            .await
+        self.request_json(
+            self.post(&url),
+            Some(&ExtendSnapshotRequest { ttl_ms }),
+            SendPolicy::Retry,
+        )
+        .await
     }
 
     /// Releases a snapshot. Releasing it again succeeds.
@@ -187,7 +95,7 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
             self.base_url
         );
-        self.request_json::<(), ReleaseSnapshotResponse>(self.post(&url), None)
+        self.request_json::<(), ReleaseSnapshotResponse>(self.post(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -200,7 +108,7 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/diagnostics",
             self.base_url
         );
-        self.request_json::<(), NamespaceDiagnostics>(self.get(&url), None)
+        self.request_json::<(), NamespaceDiagnostics>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -219,7 +127,8 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
             self.base_url
         );
-        self.request_json_once(self.post(&url), Some(request)).await
+        self.request_json(self.post(&url), Some(request), SendPolicy::Once)
+            .await
     }
 
     /// Creates a checkpoint pager beginning at `cursor` (admin plane).
@@ -229,14 +138,17 @@ impl Client {
         page_size: Option<u32>,
         cursor: Option<String>,
     ) -> CheckpointsPager {
-        CheckpointsPager {
-            client: self.clone(),
-            namespace_id: namespace_id.clone(),
-            page_size,
-            cursor,
-            pending: None,
-            exhausted: false,
-        }
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                client
+                    .list_checkpoints_page(&namespace_id, page_size, cursor.as_deref())
+                    .await
+            }
+        })
     }
 
     /// Lists one bounded page of active checkpoint records (admin plane).
@@ -246,13 +158,13 @@ impl Client {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListCheckpointsResponse> {
-        let mut url = format!(
+        let mut query = QueryBuilder::new(format!(
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
             self.base_url
-        );
-        let mut has_query = false;
-        append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
-        self.request_json::<(), ListCheckpointsResponse>(self.get(&url), None)
+        ));
+        query.pagination(limit, cursor);
+        let url = query.finish();
+        self.request_json::<(), ListCheckpointsResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -267,7 +179,7 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
             self.base_url
         );
-        self.request_json::<(), ReleaseCheckpointResponse>(self.post(&url), None)
+        self.request_json::<(), ReleaseCheckpointResponse>(self.post(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -286,7 +198,8 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/maintenance/run",
             self.base_url
         );
-        self.request_json_once(self.post(&url), Some(request)).await
+        self.request_json(self.post(&url), Some(request), SendPolicy::Once)
+            .await
     }
 
     /// Proves the server's backing store honours the object-store contract
@@ -299,7 +212,8 @@ impl Client {
     /// Retrying this request starts a distinct attempt.
     pub async fn probe_store(&self, request: &StoreProbeRequest) -> Result<StoreProbeResponse> {
         let url = format!("{}/v0/admin/store/probe", self.base_url);
-        self.request_json_once(self.post(&url), Some(request)).await
+        self.request_json(self.post(&url), Some(request), SendPolicy::Once)
+            .await
     }
 
     /// Content search over the namespace's grep index (query plane).
@@ -312,42 +226,21 @@ impl Client {
         request: &GrepRequest,
         limit: Option<u32>,
     ) -> Result<GrepResponse> {
-        let mut url = format!("{}/v0/namespaces/{namespace_id}/grep", self.base_url);
-        let mut has_query = false;
-        append_query_param(&mut url, &mut has_query, "pattern", &request.pattern);
-        append_query_param(
-            &mut url,
-            &mut has_query,
-            "case_insensitive",
-            &request.case_insensitive.to_string(),
-        );
+        let mut query = QueryBuilder::new(format!(
+            "{}/v0/namespaces/{namespace_id}/grep",
+            self.base_url
+        ));
+        query.push("pattern", &request.pattern);
+        query.push("case_insensitive", request.case_insensitive);
         if let Some(path_prefix) = &request.path_prefix {
-            append_query_param(
-                &mut url,
-                &mut has_query,
-                "path_prefix",
-                path_prefix.as_str(),
-            );
+            query.push("path_prefix", path_prefix.as_str());
         }
-        append_query_param(
-            &mut url,
-            &mut has_query,
-            "allow_scan",
-            &request.allow_scan.to_string(),
-        );
-        append_query_param(
-            &mut url,
-            &mut has_query,
-            "allow_stale",
-            &request.allow_stale.to_string(),
-        );
-        append_optional_pagination_query(
-            &mut url,
-            &mut has_query,
-            limit,
-            request.cursor.as_deref(),
-        );
-        self.request_json::<(), _>(self.get(&url), None).await
+        query.push("allow_scan", request.allow_scan);
+        query.push("allow_stale", request.allow_stale);
+        query.pagination(limit, request.cursor.as_deref());
+        let url = query.finish();
+        self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
+            .await
     }
 
     /// Returns whether the namespace's grep index is disabled, being built,
@@ -357,7 +250,7 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/grep/index",
             self.base_url
         );
-        self.request_json::<(), GrepIndex>(self.get(&url), None)
+        self.request_json::<(), GrepIndex>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -368,7 +261,7 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/enable",
             self.base_url
         );
-        self.request_json::<(), GrepIndex>(self.post(&url), None)
+        self.request_json::<(), GrepIndex>(self.post(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -379,7 +272,7 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/disable",
             self.base_url
         );
-        self.request_json::<(), GrepIndex>(self.post(&url), None)
+        self.request_json::<(), GrepIndex>(self.post(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -397,6 +290,7 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/gc",
             self.base_url
         );
-        self.request_json_once(self.post(&url), Some(request)).await
+        self.request_json(self.post(&url), Some(request), SendPolicy::Once)
+            .await
     }
 }

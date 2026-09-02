@@ -33,12 +33,6 @@ pub enum ClientError {
     /// A path is invalid or cannot be used with the requested namespace.
     #[error("invalid namespace path `{0}`")]
     InvalidNamespacePath(String),
-    /// A commit ID is invalid.
-    #[error("invalid commit_id `{0}`")]
-    InvalidCommitId(String),
-    /// A checkpoint ID is invalid.
-    #[error("invalid checkpoint_id `{0}`")]
-    InvalidCheckpointId(String),
     /// Sending an HTTP request or reading its response failed.
     #[error("http error: {0}")]
     Http(String),
