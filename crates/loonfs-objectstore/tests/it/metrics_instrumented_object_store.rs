@@ -13,7 +13,8 @@ use loonfs_objectstore::metrics::{
     VecObjectStoreMetricsRecorder,
 };
 use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorClass,
+    PutMode,
 };
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
@@ -26,6 +27,53 @@ const SECRET_KEY_SEGMENT: &str = "secret-segment";
 
 fn secret_key() -> String {
     format!("namespaces/ns-1/wal/{SECRET_KEY_SEGMENT}.wal.zst")
+}
+
+#[test]
+fn metric_result_classes_preserve_every_error_class() {
+    let cases = [
+        (
+            ObjectStoreErrorClass::NotFound,
+            ObjectStoreResultClass::NotFound,
+        ),
+        (
+            ObjectStoreErrorClass::InvalidRequest,
+            ObjectStoreResultClass::InvalidRequest,
+        ),
+        (
+            ObjectStoreErrorClass::InvalidKey,
+            ObjectStoreResultClass::InvalidKey,
+        ),
+        (
+            ObjectStoreErrorClass::PreconditionFailed,
+            ObjectStoreResultClass::PreconditionFailed,
+        ),
+        (
+            ObjectStoreErrorClass::PermissionDenied,
+            ObjectStoreResultClass::PermissionDenied,
+        ),
+        (
+            ObjectStoreErrorClass::StoredChecksumMissing,
+            ObjectStoreResultClass::StoredChecksumMissing,
+        ),
+        (
+            ObjectStoreErrorClass::Unsupported,
+            ObjectStoreResultClass::Unsupported,
+        ),
+        (
+            ObjectStoreErrorClass::Configuration,
+            ObjectStoreResultClass::Configuration,
+        ),
+        (
+            ObjectStoreErrorClass::RetryableTransport,
+            ObjectStoreResultClass::RetryableTransport,
+        ),
+        (ObjectStoreErrorClass::Other, ObjectStoreResultClass::Other),
+    ];
+
+    for (error_class, result_class) in cases {
+        assert_eq!(ObjectStoreResultClass::from(error_class), result_class);
+    }
 }
 
 #[tokio::test]

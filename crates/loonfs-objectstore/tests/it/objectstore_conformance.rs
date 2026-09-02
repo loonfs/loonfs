@@ -8,13 +8,13 @@ use crate::provider_env::{
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use loonfs_api::{Checksum, ContentId};
-use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
-use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
+use loonfs_objectstore::abs::{azure_abs, AzureAbsStoreConfig};
+use loonfs_objectstore::gcs::{gcp_gcs, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
 use loonfs_objectstore::s3_compatible::{
-    AwsS3StoreConfig, CloudflareR2StoreConfig, S3CompatibleStore,
+    aws_s3, cloudflare_r2, AwsS3StoreConfig, CloudflareR2StoreConfig,
 };
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{AwsS3Credentials, ObjectStore};
@@ -67,7 +67,7 @@ async fn local_fs_streamed_write_round_trips() {
 async fn aws_s3_real_provider_conformance() {
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
-    let store = S3CompatibleStore::aws_s3(AwsS3StoreConfig {
+    let store = aws_s3(AwsS3StoreConfig {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
@@ -88,7 +88,7 @@ async fn aws_s3_real_provider_conformance() {
 async fn aws_s3_streamed_write_round_trips() {
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
-    let store = S3CompatibleStore::aws_s3(AwsS3StoreConfig {
+    let store = aws_s3(AwsS3StoreConfig {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
@@ -109,7 +109,7 @@ async fn aws_s3_streamed_write_round_trips() {
 async fn cloudflare_r2_streamed_write_round_trips() {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
-    let store = S3CompatibleStore::cloudflare_r2(CloudflareR2StoreConfig {
+    let store = cloudflare_r2(CloudflareR2StoreConfig {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,
@@ -126,7 +126,7 @@ async fn cloudflare_r2_streamed_write_round_trips() {
 async fn aws_s3_put_stores_a_trustworthy_checksum() {
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
-    let store = S3CompatibleStore::aws_s3(AwsS3StoreConfig {
+    let store = aws_s3(AwsS3StoreConfig {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
@@ -147,7 +147,7 @@ async fn aws_s3_put_stores_a_trustworthy_checksum() {
 async fn cloudflare_r2_checksumless_put_stores_a_trustworthy_checksum() {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
-    let store = S3CompatibleStore::cloudflare_r2(CloudflareR2StoreConfig {
+    let store = cloudflare_r2(CloudflareR2StoreConfig {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,
@@ -164,7 +164,7 @@ async fn cloudflare_r2_checksumless_put_stores_a_trustworthy_checksum() {
 async fn gcp_gcs_checksumless_put_stores_a_trustworthy_checksum() {
     let config = GcpGcsConformanceConfig::from_env()
         .expect("load GCP GCS real-provider conformance environment");
-    let store = GcpGcsStore::new(GcpGcsStoreConfig {
+    let store = gcp_gcs(GcpGcsStoreConfig {
         bucket: config.bucket,
         service_account_key_path: config.service_account_key_path,
         key_prefix: Some(config.prefix),
@@ -182,7 +182,7 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
     // caller runtime topology, so alternating runtimes stays fast.
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
-    let store = S3CompatibleStore::aws_s3(AwsS3StoreConfig {
+    let store = aws_s3(AwsS3StoreConfig {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
@@ -241,7 +241,7 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
 async fn cloudflare_r2_real_provider_conformance() {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
-    let store = S3CompatibleStore::cloudflare_r2(CloudflareR2StoreConfig {
+    let store = cloudflare_r2(CloudflareR2StoreConfig {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,
@@ -258,7 +258,7 @@ async fn cloudflare_r2_real_provider_conformance() {
 async fn gcp_gcs_real_provider_conformance() {
     let config = GcpGcsConformanceConfig::from_env()
         .expect("load GCP GCS real-provider conformance environment");
-    let store = GcpGcsStore::new(GcpGcsStoreConfig {
+    let store = gcp_gcs(GcpGcsStoreConfig {
         bucket: config.bucket,
         service_account_key_path: config.service_account_key_path,
         key_prefix: Some(config.prefix),
@@ -272,7 +272,7 @@ async fn gcp_gcs_real_provider_conformance() {
 async fn gcp_gcs_streamed_write_round_trips() {
     let config = GcpGcsConformanceConfig::from_env()
         .expect("load GCP GCS real-provider conformance environment");
-    let store = GcpGcsStore::new(GcpGcsStoreConfig {
+    let store = gcp_gcs(GcpGcsStoreConfig {
         bucket: config.bucket,
         service_account_key_path: config.service_account_key_path,
         key_prefix: Some(config.prefix),
@@ -286,7 +286,7 @@ async fn gcp_gcs_streamed_write_round_trips() {
 async fn azure_abs_real_provider_conformance() {
     let config = AzureAbsConformanceConfig::from_env()
         .expect("load Azure Blob Storage real-provider conformance environment");
-    let store = AzureAbsStore::new(AzureAbsStoreConfig {
+    let store = azure_abs(AzureAbsStoreConfig {
         account_name: config.account_name,
         container_name: config.container_name,
         access_key: config.access_key,
@@ -302,7 +302,7 @@ async fn azure_abs_real_provider_conformance() {
 async fn azure_abs_streamed_write_round_trips() {
     let config = AzureAbsConformanceConfig::from_env()
         .expect("load Azure Blob Storage real-provider conformance environment");
-    let store = AzureAbsStore::new(AzureAbsStoreConfig {
+    let store = azure_abs(AzureAbsStoreConfig {
         account_name: config.account_name,
         container_name: config.container_name,
         access_key: config.access_key,

@@ -8,15 +8,18 @@ use crate::keyspace::{
 };
 use crate::object_store::Result;
 use crate::retry::{
-    next_retry_backoff, transport_retry_pause, OperationDeadline, TransportRetryPolicy,
+    provider_transport_retryable, with_transport_retry, OperationDeadline, TransportRetryPolicy,
 };
+use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::{
-    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartCompletion, MultipartPart,
+    ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt};
+use loonfs_api::Checksum;
 use object_store as provider_store;
 use provider_store::multipart::{MultipartStore, PartId};
 use provider_store::path::Path;
@@ -145,15 +148,42 @@ impl MultipartGeometry {
     };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompareToken {
+    Etag,
+    Generation,
+}
+
+#[async_trait]
+pub(crate) trait StoredChecksumReader: Send + Sync {
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>>;
+}
+
+#[async_trait]
+pub(crate) trait MultipartController: Send + Sync {
+    async fn create_multipart_upload(&self, key: &str) -> Result<String>;
+
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        checksum: &Checksum,
+    ) -> Result<MultipartCompletion>;
+
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()>;
+}
+
 /// Adapts the upstream `object_store` provider surface to the narrower LoonFS contract.
 #[derive(Clone)]
 pub struct ProviderObjectStore {
     inner: Arc<dyn provider_store::ObjectStore>,
-    /// The provider's native multipart surface, used for payloads at or
-    /// above [`PROVIDER_MULTIPART_THRESHOLD_BYTES`]. `None` only for
-    /// providers without one; their large puts stay whole-object PUTs under
-    /// the payload-scaled bounds.
-    multipart: Option<Arc<dyn MultipartStore>>,
+    multipart: Arc<dyn MultipartStore>,
+    checksum_reader: Option<Arc<dyn StoredChecksumReader>>,
+    multipart_controller: Option<Arc<dyn MultipartController>>,
+    compare_token: CompareToken,
+    kind: ConfiguredObjectStoreKind,
+    io_runtime: StoreIoRuntime,
     multipart_geometry: MultipartGeometry,
     key_prefix: Option<String>,
     transport_retry: TransportRetryPolicy,
@@ -163,30 +193,59 @@ pub struct ProviderObjectStore {
 impl fmt::Debug for ProviderObjectStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProviderObjectStore")
+            .field("kind", &self.kind.as_str())
             .field("key_prefix", &self.key_prefix)
-            .field("multipart_upload", &self.multipart.is_some())
+            .field("io_runtime", &self.io_runtime)
             .finish_non_exhaustive()
     }
 }
 
 impl ProviderObjectStore {
-    /// Wraps a provider client and optional native multipart surface.
+    /// Wraps a provider client and its native multipart surface.
     ///
     /// Construction fails when `config.key_prefix` is not a normalized,
     /// non-escaping logical prefix.
-    pub fn new(
+    pub(crate) fn new(
         inner: Arc<dyn provider_store::ObjectStore>,
-        multipart: Option<Arc<dyn MultipartStore>>,
+        multipart: Arc<dyn MultipartStore>,
         config: ProviderObjectStoreConfig,
+        kind: ConfiguredObjectStoreKind,
+        io_runtime: StoreIoRuntime,
     ) -> Result<Self> {
         Ok(Self {
             inner,
             multipart,
+            checksum_reader: None,
+            multipart_controller: None,
+            compare_token: CompareToken::Etag,
+            kind,
+            io_runtime,
             multipart_geometry: MultipartGeometry::DEFAULT,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
             transport_retry: TransportRetryPolicy::DEFAULT,
             timer: Arc::new(StdMonotonicTimer::default()),
         })
+    }
+
+    pub(crate) fn compare_token(mut self, compare_token: CompareToken) -> Self {
+        self.compare_token = compare_token;
+        self
+    }
+
+    pub(crate) fn checksum_reader(
+        mut self,
+        checksum_reader: Arc<dyn StoredChecksumReader>,
+    ) -> Self {
+        self.checksum_reader = Some(checksum_reader);
+        self
+    }
+
+    pub(crate) fn multipart_controller(
+        mut self,
+        multipart_controller: Arc<dyn MultipartController>,
+    ) -> Self {
+        self.multipart_controller = Some(multipart_controller);
+        self
     }
 
     #[cfg(test)]
@@ -218,10 +277,6 @@ impl ProviderObjectStore {
         })
     }
 
-    pub(crate) fn validate_key(&self, key: &str) -> Result<()> {
-        self.to_path(key).map(|_| ())
-    }
-
     fn list_path(&self, prefix: &str) -> Result<Option<Path>> {
         let scoped = scope_list_prefix(self.key_prefix.as_deref(), prefix)?;
         if scoped.is_empty() {
@@ -235,22 +290,45 @@ impl ProviderObjectStore {
             })
     }
 
-    fn from_meta(meta: ObjectMeta) -> ObjectMetadata {
-        ObjectMetadata {
+    fn metadata_from_meta(&self, meta: ObjectMeta) -> ObjectMetadata {
+        self.with_compare_token(ObjectMetadata {
             etag: meta.e_tag,
             version: meta.version,
             size_bytes: meta.size,
             last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
-        }
+        })
     }
 
-    fn from_put_result(result: PutResult, size_bytes: u64) -> ObjectMetadata {
-        ObjectMetadata {
+    fn metadata_from_put_result(&self, result: PutResult, size_bytes: u64) -> ObjectMetadata {
+        self.with_compare_token(ObjectMetadata {
             etag: result.e_tag,
             version: result.version,
             size_bytes,
             last_modified_ms: None,
+        })
+    }
+
+    fn with_compare_token(&self, metadata: ObjectMetadata) -> ObjectMetadata {
+        match self.compare_token {
+            CompareToken::Etag => metadata,
+            CompareToken::Generation => ObjectMetadata {
+                etag: metadata.version.clone(),
+                ..metadata
+            },
         }
+    }
+
+    fn validate_compare_token(&self, key: &str, mode: &PutMode) -> Result<()> {
+        if self.compare_token == CompareToken::Generation {
+            if let PutMode::CompareAndSwap { expected_etag } = mode {
+                expected_etag
+                    .parse::<u64>()
+                    .map_err(|_| ObjectStoreError::PreconditionFailed {
+                        object_key: key.to_owned(),
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     async fn ranged_get(&self, path: &Path, start: u64, end: u64) -> RangedGet {
@@ -448,33 +526,21 @@ impl MultipartWrite<'_> {
             self.store.timer.as_ref(),
             self.store.transport_retry.operation_deadline,
         );
-        let mut retries: u32 = 0;
-        loop {
-            let err = match self.multipart.create_multipart(self.path).await {
-                Ok(upload_id) => {
-                    return Ok(AbortUploadOnDrop::new(
-                        Arc::clone(&self.multipart),
-                        self.path.clone(),
-                        upload_id,
-                    ));
-                }
-                Err(err) => err,
-            };
-            if !provider_transport_retryable(&err) {
-                return Err(map_provider_error(self.key, err));
-            }
-            let Some(backoff) = next_retry_backoff(
-                &self.store.transport_retry,
-                self.key,
-                "create_multipart",
-                payload_bytes,
-                &mut retries,
-                Some(&deadline),
-            ) else {
-                return Err(map_provider_error(self.key, err));
-            };
-            transport_retry_pause(backoff).await;
-        }
+        let upload_id = with_transport_retry(
+            &self.store.transport_retry,
+            self.key,
+            "create_multipart",
+            payload_bytes,
+            Some(&deadline),
+            || self.multipart.create_multipart(self.path),
+        )
+        .await
+        .map_err(|error| map_provider_error(self.key, error))?;
+        Ok(AbortUploadOnDrop::new(
+            Arc::clone(&self.multipart),
+            self.path.clone(),
+            upload_id,
+        ))
     }
 
     /// Uploads a stream as fixed-size parts while retaining at most one part.
@@ -599,36 +665,23 @@ impl MultipartWrite<'_> {
             self.store.timer.as_ref(),
             self.store.transport_retry.operation_deadline,
         );
-        let mut retries: u32 = 0;
-        loop {
-            let err = match self
-                .multipart
-                .put_part(
+        with_transport_retry(
+            &self.store.transport_retry,
+            self.key,
+            "put_part",
+            payload_bytes,
+            Some(&deadline),
+            || {
+                self.multipart.put_part(
                     self.path,
                     upload_id,
                     part_index,
                     PutPayload::from(payload.clone()),
                 )
-                .await
-            {
-                Ok(part_id) => return Ok(part_id),
-                Err(err) => err,
-            };
-            if !provider_transport_retryable(&err) {
-                return Err(map_provider_error(self.key, err));
-            }
-            let Some(backoff) = next_retry_backoff(
-                &self.store.transport_retry,
-                self.key,
-                "put_part",
-                payload_bytes,
-                &mut retries,
-                Some(&deadline),
-            ) else {
-                return Err(map_provider_error(self.key, err));
-            };
-            transport_retry_pause(backoff).await;
-        }
+            },
+        )
+        .await
+        .map_err(|error| map_provider_error(self.key, error))
     }
 
     async fn complete(
@@ -643,7 +696,7 @@ impl MultipartWrite<'_> {
             .complete_multipart(self.path, upload_id, parts)
             .await
         {
-            Ok(result) => Ok(ProviderObjectStore::from_put_result(result, size_bytes)),
+            Ok(result) => Ok(self.store.metadata_from_put_result(result, size_bytes)),
             Err(err) if provider_transport_retryable(&err) => {
                 self.resolve_ambiguous_completion(upload_id, bytes, err)
                     .await
@@ -728,9 +781,59 @@ impl ObjectStore for ProviderObjectStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let path = self.to_path(key)?;
         match self.inner.head(&path).await {
-            Ok(meta) => Ok(Some(Self::from_meta(meta))),
+            Ok(meta) => Ok(Some(self.metadata_from_meta(meta))),
             Err(err) if provider_not_found(&err) => Ok(None),
             Err(err) => Err(map_provider_error(key, err)),
+        }
+    }
+
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+        match &self.checksum_reader {
+            Some(reader) => reader.head_stored_checksum(key).await,
+            None => Err(ObjectStoreError::Unsupported(
+                "stored full-object checksum readback",
+            )),
+        }
+    }
+
+    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        match &self.multipart_controller {
+            Some(controller) => controller.create_multipart_upload(key).await,
+            None => Err(ObjectStoreError::Unsupported(
+                "client-driven multipart upload",
+            )),
+        }
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        checksum: &Checksum,
+    ) -> Result<MultipartCompletion> {
+        match &self.multipart_controller {
+            Some(controller) => {
+                controller
+                    .complete_multipart_upload(key, provider_upload_id, parts, checksum)
+                    .await
+            }
+            None => Err(ObjectStoreError::Unsupported(
+                "client-driven multipart upload",
+            )),
+        }
+    }
+
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        match &self.multipart_controller {
+            Some(controller) => {
+                controller
+                    .abort_multipart_upload(key, provider_upload_id)
+                    .await
+            }
+            None => Err(ObjectStoreError::Unsupported(
+                "client-driven multipart upload",
+            )),
         }
     }
 
@@ -738,7 +841,7 @@ impl ObjectStore for ProviderObjectStore {
         let path = self.to_path(key)?;
         match self.inner.get(&path).await {
             Ok(result) => {
-                let metadata = Self::from_meta(result.meta.clone());
+                let metadata = self.metadata_from_meta(result.meta.clone());
                 let bytes = result
                     .bytes()
                     .await
@@ -831,13 +934,14 @@ impl ObjectStore for ProviderObjectStore {
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         let path = self.to_path(key)?;
+        self.validate_compare_token(key, &mode)?;
         let size_bytes = bytes.len() as u64;
         if matches!(mode, PutMode::Overwrite)
             && size_bytes >= self.multipart_geometry.threshold_bytes
         {
-            if let Some(multipart) = self.multipart.clone() {
-                return self.put_large_multipart(multipart, key, &path, bytes).await;
-            }
+            return self
+                .put_large_multipart(Arc::clone(&self.multipart), key, &path, bytes)
+                .await;
         }
         // Raw flat writes are deliberately one attempt. In particular, a
         // mutable overwrite cannot be replayed after an ambiguous transport
@@ -845,7 +949,7 @@ impl ObjectStore for ProviderObjectStore {
         // `put_immutable_verified`, whose name supplies the retry invariant.
         let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
         let options = PutOptions {
-            mode: map_put_mode(mode),
+            mode: self.map_put_mode(mode),
             ..Default::default()
         };
         match self
@@ -853,7 +957,7 @@ impl ObjectStore for ProviderObjectStore {
             .put_opts(&path, PutPayload::from(bytes), options)
             .await
         {
-            Ok(result) => Ok(Self::from_put_result(result, size_bytes)),
+            Ok(result) => Ok(self.metadata_from_put_result(result, size_bytes)),
             Err(err) if compare_and_swap && provider_not_found(&err) => {
                 Err(ObjectStoreError::PreconditionFailed {
                     object_key: key.to_owned(),
@@ -877,20 +981,9 @@ impl ObjectStore for ProviderObjectStore {
     /// consumed and immediately before completion.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         let path = self.to_path(key)?;
+        self.validate_compare_token(key, &mode)?;
         let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
         let head = reader.next_part().await?.unwrap_or_else(Bytes::new);
-        let Some(multipart) = self.multipart.clone() else {
-            // No provider multipart surface: fall back to the buffered
-            // contract rather than pretend, exactly as the default does.
-            let mut bytes = bytes::BytesMut::from(head.as_ref());
-            while let Some(part) = reader.next_part().await? {
-                bytes.extend_from_slice(&part);
-            }
-            let bytes = bytes.freeze();
-            let size_bytes = bytes.len() as u64;
-            self.put(key, bytes, mode).await?;
-            return Ok(size_bytes);
-        };
         if reader.exhausted() {
             let size_bytes = head.len() as u64;
             self.put(key, head, mode).await?;
@@ -899,7 +992,7 @@ impl ObjectStore for ProviderObjectStore {
 
         let upload = MultipartWrite {
             store: self,
-            multipart,
+            multipart: Arc::clone(&self.multipart),
             key,
             path: &path,
         };
@@ -926,31 +1019,21 @@ impl ObjectStore for ProviderObjectStore {
         let path = self.to_path(key)?;
         let deadline =
             OperationDeadline::start(self.timer.as_ref(), self.transport_retry.operation_deadline);
-        let mut retries: u32 = 0;
-        loop {
-            // Delete is idempotent under this contract: not-found already
-            // reports success, so a retry after an attempt that landed
-            // converges to the same outcome.
-            let err = match self.inner.delete(&path).await {
-                Ok(()) => return Ok(()),
-                Err(err) if provider_not_found(&err) => return Ok(()),
-                Err(err) => err,
-            };
-            if !provider_transport_retryable(&err) {
-                return Err(map_provider_error(key, err));
-            }
-            let Some(backoff) = next_retry_backoff(
-                &self.transport_retry,
-                key,
-                "delete",
-                0,
-                &mut retries,
-                Some(&deadline),
-            ) else {
-                return Err(map_provider_error(key, err));
-            };
-            transport_retry_pause(backoff).await;
-        }
+        with_transport_retry(
+            &self.transport_retry,
+            key,
+            "delete",
+            0,
+            Some(&deadline),
+            || async {
+                match self.inner.delete(&path).await {
+                    Err(error) if provider_not_found(&error) => Ok(()),
+                    result => result,
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_provider_error(key, error))
     }
 
     fn list_prefix_from_stream(
@@ -1005,19 +1088,24 @@ impl ObjectStore for ProviderObjectStore {
     }
 }
 
-fn map_put_mode(mode: PutMode) -> provider_store::PutMode {
-    match mode {
-        PutMode::Overwrite => provider_store::PutMode::Overwrite,
-        PutMode::CreateIfAbsent => provider_store::PutMode::Create,
-        PutMode::CompareAndSwap { expected_etag } => {
-            // The compare token is opaque and provider-issued: S3-family
-            // backends condition on `e_tag`, GCS conditions on `version`
-            // (its generation). Populate both so each backend reads the
-            // field it understands.
-            provider_store::PutMode::Update(UpdateVersion {
-                e_tag: Some(expected_etag.clone()),
-                version: Some(expected_etag),
-            })
+impl ProviderObjectStore {
+    fn map_put_mode(&self, mode: PutMode) -> provider_store::PutMode {
+        match mode {
+            PutMode::Overwrite => provider_store::PutMode::Overwrite,
+            PutMode::CreateIfAbsent => provider_store::PutMode::Create,
+            PutMode::CompareAndSwap { expected_etag } => {
+                let version = match self.compare_token {
+                    CompareToken::Etag => UpdateVersion {
+                        e_tag: Some(expected_etag),
+                        version: None,
+                    },
+                    CompareToken::Generation => UpdateVersion {
+                        e_tag: None,
+                        version: Some(expected_etag),
+                    },
+                };
+                provider_store::PutMode::Update(version)
+            }
         }
     }
 }
@@ -1043,17 +1131,6 @@ enum RangedGet {
 
 fn provider_not_found(err: &provider_store::Error) -> bool {
     matches!(err, provider_store::Error::NotFound { .. })
-}
-
-fn provider_transport_retryable(err: &provider_store::Error) -> bool {
-    // `Generic` is where the provider client surfaces request failures after
-    // its own retry policy gives up: for writes that includes mid-flight
-    // transport errors it refuses to re-send because a non-idempotent HTTP
-    // request may already have reached the store. The remaining variants are
-    // definite outcomes (not-found, already-exists, precondition), hard
-    // rejections (auth, invalid path, unsupported), or the store IO runtime
-    // shutting down (join error); re-sending those is wrong or futile.
-    matches!(err, provider_store::Error::Generic { .. })
 }
 
 fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectStoreError {
@@ -1191,10 +1268,12 @@ mod tests {
         let inner = Arc::new(InMemory::default());
         ProviderObjectStore::new(
             Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
-            Some(inner),
+            inner,
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
             },
+            ConfiguredObjectStoreKind::LocalFs,
+            StoreIoRuntime::new().expect("store io runtime"),
         )
         .expect("provider store")
     }
@@ -1219,6 +1298,26 @@ mod tests {
             map_provider_error("private-key", auth_rejection(&path)).class(),
             crate::ObjectStoreErrorClass::PermissionDenied
         );
+    }
+
+    #[test]
+    fn compare_tokens_populate_only_the_matching_provider_field() {
+        for (compare_token, expected_etag, expected_version) in [
+            (CompareToken::Etag, Some("token"), None),
+            (CompareToken::Generation, None, Some("token")),
+        ] {
+            let store = memory_store().compare_token(compare_token);
+            let provider_store::PutMode::Update(version) =
+                store.map_put_mode(PutMode::CompareAndSwap {
+                    expected_etag: "token".to_owned(),
+                })
+            else {
+                panic!("compare-and-swap maps to an update")
+            };
+
+            assert_eq!(version.e_tag.as_deref(), expected_etag);
+            assert_eq!(version.version.as_deref(), expected_version);
+        }
     }
 
     #[test]
@@ -1743,10 +1842,12 @@ mod tests {
     fn retrying_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
         ProviderObjectStore::new(
             Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
-            Some(flaky),
+            flaky,
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
             },
+            ConfiguredObjectStoreKind::LocalFs,
+            StoreIoRuntime::new().expect("store io runtime"),
         )
         .expect("provider store")
         .transport_retry(TransportRetryPolicy {

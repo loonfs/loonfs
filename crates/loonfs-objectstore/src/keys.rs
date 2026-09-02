@@ -1,6 +1,11 @@
-//! Key construction for every durable object family.
+//! Key construction for every [durable object family].
+//!
+//! [durable object family]: ../../../docs/specs/format.md#12-durable-object-families
 
-use crate::layout::ObjectLayout;
+use crate::layout::{
+    metadata_compaction_job_id_from_key as parse_metadata_compaction_job_id,
+    wal_segment_id_from_key as parse_wal_segment_id,
+};
 use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{
     CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
@@ -8,102 +13,77 @@ use loonfs_api::{
 };
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().namespace_root_prefix(namespace_id)
+    format!("namespaces/{namespace_id}/")
 }
 
 /// Builds the authoritative WAL head key for one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn wal_head(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().wal_head(namespace_id)
+    format!("namespaces/{namespace_id}/wal/head.json")
 }
 
 /// Builds the retained-history floor key for one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn wal_floor(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().wal_floor(namespace_id)
+    format!("namespaces/{namespace_id}/wal/floor.json")
 }
 
 /// Builds the immutable WAL object key for a segment identity.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn wal_segment(namespace_id: &NamespaceId, wal_segment_id: &WalSegmentId) -> String {
-    ObjectLayout::new().wal_segment(namespace_id, wal_segment_id)
+    format!("namespaces/{namespace_id}/wal/segments/{wal_segment_id}.wal.zst")
 }
 
 /// Builds the listing prefix containing only WAL segment objects for one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn wal_segment_prefix(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().wal_segment_prefix(namespace_id)
+    format!("namespaces/{namespace_id}/wal/segments/")
 }
 
 /// Extracts a segment identity from a current-format WAL object key.
 ///
-/// Returns `None` for foreign or differently suffixed objects. See
-/// [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+/// Returns `None` for foreign or differently suffixed objects.
 pub fn wal_segment_id_from_key(key: &str) -> Option<&str> {
-    ObjectLayout::new().wal_segment_id_from_key(key)
+    parse_wal_segment_id(key)
 }
 
 /// Builds the materialized metadata-root key for one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_root(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().metadata_root(namespace_id)
+    format!("namespaces/{namespace_id}/metadata/root.json")
 }
 
 /// Builds the listing prefix containing namespace-manifest candidates.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_manifest_prefix(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().metadata_manifest_prefix(namespace_id)
+    format!("namespaces/{namespace_id}/metadata/manifests/")
 }
 
 /// Builds the listing prefix containing metadata segment objects owned by one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_segment_prefix(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().metadata_segment_prefix(namespace_id)
+    format!("namespaces/{namespace_id}/metadata/segments/")
 }
 
 /// Builds the immutable manifest key for one speculative manifest identity.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_manifest_object(
     namespace_id: &NamespaceId,
     manifest_object_id: &ManifestObjectId,
 ) -> String {
-    ObjectLayout::new().metadata_manifest_object(namespace_id, manifest_object_id)
+    format!("namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json")
 }
 
 /// Builds the immutable metadata segment key for one segment identity.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_segment(
     namespace_id: &NamespaceId,
     metadata_segment_id: &MetadataSegmentId,
 ) -> String {
-    ObjectLayout::new().metadata_segment(namespace_id, metadata_segment_id)
+    format!("namespaces/{namespace_id}/metadata/segments/{metadata_segment_id}.sst.zst")
 }
 
 /// Builds the immutable staging key one streaming compaction job writes a
 /// metadata segment to before any manifest references it.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_compaction_segment(
     namespace_id: &NamespaceId,
     metadata_compaction_id: &MetadataCompactionId,
     metadata_segment_id: &MetadataSegmentId,
 ) -> String {
-    ObjectLayout::new().metadata_compaction_segment(
-        namespace_id,
-        metadata_compaction_id,
-        metadata_segment_id,
+    format!(
+        "namespaces/{namespace_id}/metadata/compactions/{metadata_compaction_id}/segments/{metadata_segment_id}.sst.zst"
     )
 }
 
@@ -111,8 +91,6 @@ pub fn metadata_compaction_segment(
 ///
 /// `compaction_job_id` selects the compaction prefix. Descriptors without a
 /// job id use the namespace's `metadata/segments/` prefix.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
     match &descriptor.compaction_job_id {
         Some(compaction_job_id) => metadata_compaction_segment(
@@ -126,65 +104,51 @@ pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
 
 /// Builds the mutable lease key one streaming compaction job holds over its
 /// own prefix.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_compaction_lease(
     namespace_id: &NamespaceId,
     metadata_compaction_id: &MetadataCompactionId,
 ) -> String {
-    ObjectLayout::new().metadata_compaction_lease(namespace_id, metadata_compaction_id)
+    format!("namespaces/{namespace_id}/metadata/compactions/{metadata_compaction_id}/lease.json")
 }
 
 /// Builds the listing prefix containing every streaming compaction job's
 /// objects for one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_compaction_prefix(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().metadata_compaction_prefix(namespace_id)
+    format!("namespaces/{namespace_id}/metadata/compactions/")
 }
 
 /// Extracts the job id from a key under one namespace's compaction prefix.
 ///
 /// Returns `None` for a key under the prefix that is neither a job's lease
-/// nor one of its staged segments. See
-/// [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+/// nor one of its staged segments.
 pub fn metadata_compaction_job_id_from_key(key: &str) -> Option<&str> {
-    ObjectLayout::new().metadata_compaction_job_id_from_key(key)
+    parse_metadata_compaction_job_id(key)
 }
 
 /// Builds the mutable lifecycle key for one checkpoint record.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn checkpoint_record(namespace_id: &NamespaceId, checkpoint_id: &CheckpointId) -> String {
-    ObjectLayout::new().checkpoint_record(namespace_id, checkpoint_id)
+    format!("namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json")
 }
 
 /// Builds the listing prefix containing checkpoint records for one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn checkpoint_prefix(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().checkpoint_prefix(namespace_id)
+    format!("namespaces/{namespace_id}/checkpoints/")
 }
 
 /// Builds the listing prefix containing durable upload sessions for one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn upload_session_prefix(namespace_id: &NamespaceId) -> String {
-    ObjectLayout::new().upload_session_prefix(namespace_id)
+    format!("namespaces/{namespace_id}/uploads/")
 }
 
 /// Builds the mutable lifecycle key for one upload session.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn upload_session(namespace_id: &NamespaceId, upload_id: &UploadId) -> String {
-    ObjectLayout::new().upload_session(namespace_id, upload_id)
+    format!("namespaces/{namespace_id}/uploads/{upload_id}.json")
 }
 
 /// Builds the immutable content-object key for one content identity.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn content_blob(content_store_id: &ContentStoreId, content_id: &ContentId) -> String {
-    ObjectLayout::new().content_blob(content_store_id, content_id)
+    let [first_shard, second_shard] = content_id.shard_prefixes();
+    format!("content-stores/{content_store_id}/objects/{first_shard}/{second_shard}/{content_id}")
 }
 
 #[cfg(test)]

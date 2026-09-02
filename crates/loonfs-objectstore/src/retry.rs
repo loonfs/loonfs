@@ -3,6 +3,7 @@
 use crate::attempts::count_retry_attempt;
 use crate::timing::MonotonicTimer;
 use crate::PROVIDER_OPERATION_DEADLINE;
+use std::future::Future;
 use std::time::Duration;
 
 /// Bounded retry configuration matching the provider client's read budget.
@@ -79,6 +80,45 @@ pub(crate) fn next_retry_backoff(
         "transient object store write failure, backing off before retry",
     );
     Some(backoff)
+}
+
+pub(crate) async fn with_transport_retry<T, F, Fut>(
+    policy: &TransportRetryPolicy,
+    key: &str,
+    operation: &'static str,
+    payload_bytes: u64,
+    deadline: Option<&OperationDeadline<'_>>,
+    mut attempt: F,
+) -> object_store::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = object_store::Result<T>>,
+{
+    let mut retries = 0;
+    loop {
+        let error = match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        if !provider_transport_retryable(&error) {
+            return Err(error);
+        }
+        let Some(backoff) = next_retry_backoff(
+            policy,
+            key,
+            operation,
+            payload_bytes,
+            &mut retries,
+            deadline,
+        ) else {
+            return Err(error);
+        };
+        transport_retry_pause(backoff).await;
+    }
+}
+
+pub(crate) fn provider_transport_retryable(error: &object_store::Error) -> bool {
+    matches!(error, object_store::Error::Generic { .. })
 }
 
 /// Elapsed-time state for one logical operation's retry loop.

@@ -2,28 +2,25 @@
 
 use super::{
     DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, PresignedGetRequest,
-    PresignedPartRequest, PresignedPutRequest, PresignedUrl, MAX_PRESIGN_EXPIRY,
+    PresignedPartRequest, PresignedPutRequest, PresignedUrl,
 };
 use crate::aws_credentials::{
     aws_credentials_source, AwsSigningCredentials, SharedAwsCredentialsSource,
 };
 use crate::crypto::hmac_sha256;
-use crate::keyspace::{
-    normalize_key_prefix, parse_endpoint_url, scope_object_key, virtual_hosted_authority,
-};
+use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
+use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
-    canonical_query_string, hex_lower, normalize_header_value, percent_encode_path,
-    percent_encode_segment, signing_dates, unix_ms,
+    hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
+    V4RequestParts, V4Scheme,
 };
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use base64::Engine as _;
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::{Checksum, ChecksumAlgorithm};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::time::{Duration, SystemTime};
 
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
@@ -106,16 +103,6 @@ impl S3CompatiblePresigner {
         mut config: S3PresignerConfig,
         credentials: SharedAwsCredentialsSource,
     ) -> Result<Self> {
-        if config.bucket.trim().is_empty() {
-            return Err(ObjectStoreError::Configuration(
-                "bucket must not be empty".to_owned(),
-            ));
-        }
-        if config.region.trim().is_empty() {
-            return Err(ObjectStoreError::Configuration(
-                "region must not be empty".to_owned(),
-            ));
-        }
         config.key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
         Ok(Self {
             config,
@@ -273,20 +260,6 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        // Expiry comes from deployment configuration, not the transport:
-        // a bad value is a config bug and must not look like network
-        // weather.
-        if expires_in.is_zero() {
-            return Err(ObjectStoreError::Configuration(
-                "presigned URL expiry must be greater than zero".to_owned(),
-            ));
-        }
-        if expires_in.as_secs() > MAX_PRESIGN_EXPIRY {
-            return Err(ObjectStoreError::Configuration(format!(
-                "presigned URL expiry must not exceed {MAX_PRESIGN_EXPIRY} seconds"
-            )));
-        }
-
         let endpoint = self.endpoint(object_key)?;
         let dates = signing_dates(object_key, now)?;
         let credential_scope = format!(
@@ -298,64 +271,38 @@ impl S3CompatiblePresigner {
             credentials.access_key_id.expose(),
             credential_scope
         );
-
-        let mut headers_to_sign = BTreeMap::from([("host".to_owned(), endpoint.host.clone())]);
-        for (name, value) in &request_parts.required_headers {
-            headers_to_sign.insert(name.to_ascii_lowercase(), normalize_header_value(value));
-        }
-        let signed_headers = headers_to_sign
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(";");
-        let mut canonical_headers = String::new();
-        for (name, value) in &headers_to_sign {
-            writeln!(&mut canonical_headers, "{name}:{value}")
-                .expect("writing to a String should not fail");
-        }
-
-        let mut query = request_parts.operation_query;
-        query.extend([
-            ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
-            ("X-Amz-Credential".to_owned(), credential),
-            ("X-Amz-Date".to_owned(), dates.timestamp.clone()),
-            ("X-Amz-Expires".to_owned(), expires_in.as_secs().to_string()),
-            ("X-Amz-SignedHeaders".to_owned(), signed_headers.clone()),
-        ]);
+        let mut extra_query = BTreeMap::new();
         if let Some(token) = &credentials.session_token {
-            query.insert("X-Amz-Security-Token".to_owned(), token.expose().to_owned());
+            extra_query.insert("X-Amz-Security-Token".to_owned(), token.expose().to_owned());
         }
-        let canonical_query = canonical_query_string(&query);
-        let canonical_request = format!(
-            "{}\n{}\n{}\n{}\n{}\nUNSIGNED-PAYLOAD",
-            method, endpoint.canonical_uri, canonical_query, canonical_headers, signed_headers
-        );
-        let hashed_request = hex_lower(&Sha256::digest(canonical_request.as_bytes()));
-        let string_to_sign = format!(
-            "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-            dates.timestamp, credential_scope, hashed_request
-        );
         let signing_key = signing_key(
             credentials.secret_access_key.expose(),
             &dates.short_date,
             &self.config.region,
         );
-        let signature = hex_lower(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
-        let url = format!(
-            "{}://{}{}?{}&X-Amz-Signature={}",
-            endpoint.scheme, endpoint.host, endpoint.canonical_uri, canonical_query, signature
-        );
-        let expires_at_ms = unix_ms(object_key, now)? + expires_in.as_millis() as u64;
-
-        Ok(PresignedUrl {
-            method: method.to_owned(),
-            url,
-            headers: request_parts.required_headers,
-            expires_at_ms,
-        })
+        presign_v4(
+            V4Scheme {
+                algorithm: "AWS4-HMAC-SHA256",
+                query_prefix: "X-Amz",
+                credential,
+                credential_scope,
+                extra_query,
+                signing_dates: dates,
+            },
+            endpoint,
+            method,
+            V4RequestParts {
+                object_key,
+                operation_query: request_parts.operation_query,
+                required_headers: request_parts.required_headers,
+            },
+            expires_in,
+            now,
+            |message| Ok(hex_lower(&hmac_sha256(&signing_key, message))),
+        )
     }
 
-    fn endpoint(&self, object_key: &str) -> Result<S3Endpoint> {
+    fn endpoint(&self, object_key: &str) -> Result<V4Endpoint> {
         let scoped_key = scope_object_key(self.config.key_prefix.as_deref(), object_key)?;
         let encoded_key = percent_encode_path(&scoped_key);
 
@@ -368,7 +315,7 @@ impl S3CompatiblePresigner {
                     format!("/{}", parsed.path)
                 };
                 if self.config.force_path_style {
-                    Ok(S3Endpoint {
+                    Ok(V4Endpoint {
                         scheme: parsed.scheme.to_owned(),
                         host: parsed.authority.to_owned(),
                         canonical_uri: format!(
@@ -379,7 +326,7 @@ impl S3CompatiblePresigner {
                         ),
                     })
                 } else {
-                    Ok(S3Endpoint {
+                    Ok(V4Endpoint {
                         scheme: parsed.scheme.to_owned(),
                         host: virtual_hosted_authority(&self.config.bucket, parsed.authority),
                         canonical_uri: format!("{}/{}", base_path, encoded_key),
@@ -389,7 +336,7 @@ impl S3CompatiblePresigner {
             None => {
                 let scheme = "https".to_owned();
                 if self.config.force_path_style {
-                    Ok(S3Endpoint {
+                    Ok(V4Endpoint {
                         scheme,
                         host: format!("s3.{}.amazonaws.com", self.config.region),
                         canonical_uri: format!(
@@ -399,7 +346,7 @@ impl S3CompatiblePresigner {
                         ),
                     })
                 } else {
-                    Ok(S3Endpoint {
+                    Ok(V4Endpoint {
                         scheme,
                         host: format!(
                             "{}.s3.{}.amazonaws.com",
@@ -516,13 +463,6 @@ pub(crate) fn base64_crc64nvme(checksum: &Checksum) -> Result<String> {
 
 fn invalid_direct_put_content(message: &str) -> ObjectStoreError {
     ObjectStoreError::InvalidContentRef(message.to_owned())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct S3Endpoint {
-    scheme: String,
-    host: String,
-    canonical_uri: String,
 }
 
 fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {

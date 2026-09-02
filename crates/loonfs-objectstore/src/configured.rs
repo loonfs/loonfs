@@ -1,16 +1,16 @@
 //! [`ConfiguredObjectStore`]: one provider client built from configuration,
 //! paired with the direct transfers that provider can authorize.
 
-use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
+use crate::abs::{azure_abs, AzureAbsStoreConfig};
 use crate::aws_credentials::{aws_credentials_source, static_aws_credentials_source};
-use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
+use crate::gcs::{gcp_gcs_with_issuers, GcpGcsStoreConfig};
 use crate::local_fs_store::LocalFsStore;
 use crate::object_store::{Result, SharedObjectStore};
-use crate::presign::{
-    DirectTransferIssuers, GcsPresignerConfig, GcsV4Presigner, S3CompatiblePresigner,
-    S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+use crate::presign::DirectTransferIssuers;
+use crate::s3_compatible::{
+    aws_s3_with_credentials, cloudflare_r2_with_credentials, AwsS3StoreConfig,
+    CloudflareR2StoreConfig,
 };
-use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig, S3CompatibleStore};
 use http::Uri;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -83,24 +83,10 @@ impl ConfiguredObjectStore {
     /// Construction fails when signing, provider, runtime, or key-prefix configuration is invalid.
     pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self> {
         let credentials = aws_credentials_source(&config.credentials, &config.region)?;
-        let direct_transfers =
-            endpoint_is_proven(config.endpoint_url.as_deref(), AWS_S3_PROVEN_DOMAINS)
-                .then(|| {
-                    S3CompatiblePresigner::with_credentials(
-                        S3PresignerConfig {
-                            bucket: config.bucket.clone(),
-                            region: config.region.clone(),
-                            endpoint_url: config.endpoint_url.clone(),
-                            key_prefix: config.key_prefix.clone(),
-                            force_path_style: config.force_path_style,
-                            direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
-                        },
-                        Arc::clone(&credentials),
-                    )
-                    .map(s3_compatible_transfers)
-                })
-                .transpose()?;
-        let store = S3CompatibleStore::aws_s3_with_credentials(config, credentials)?;
+        let direct_transfers_enabled =
+            endpoint_is_proven(config.endpoint_url.as_deref(), AWS_S3_PROVEN_DOMAINS);
+        let (store, issuers) = aws_s3_with_credentials(config, credentials)?;
+        let direct_transfers = direct_transfers_enabled.then_some(issuers);
         Ok(Self {
             inner: Arc::new(store),
             direct_transfers,
@@ -117,26 +103,12 @@ impl ConfiguredObjectStore {
             config.secret_access_key.clone(),
             None,
         );
-        let direct_transfers = endpoint_is_proven(
+        let direct_transfers_enabled = endpoint_is_proven(
             Some(config.endpoint_url.as_str()),
             CLOUDFLARE_R2_PROVEN_DOMAINS,
-        )
-        .then(|| {
-            S3CompatiblePresigner::with_credentials(
-                S3PresignerConfig {
-                    bucket: config.bucket.clone(),
-                    region: "auto".to_owned(),
-                    endpoint_url: Some(config.endpoint_url.clone()),
-                    key_prefix: config.key_prefix.clone(),
-                    force_path_style: true,
-                    direct_put_max_content_bytes: CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
-                },
-                Arc::clone(&credentials),
-            )
-            .map(s3_compatible_transfers)
-        })
-        .transpose()?;
-        let store = S3CompatibleStore::cloudflare_r2_with_credentials(config, credentials)?;
+        );
+        let (store, issuers) = cloudflare_r2_with_credentials(config, credentials)?;
+        let direct_transfers = direct_transfers_enabled.then_some(issuers);
         Ok(Self {
             inner: Arc::new(store),
             direct_transfers,
@@ -153,7 +125,7 @@ impl ConfiguredObjectStore {
     /// carries no endpoint override, so every capability is `https` to
     /// Google's own host.
     ///
-    /// Construction fails when credentials, provider runtime, or key-prefix configuration is invalid.
+    /// Construction fails when the key file, provider, runtime, or key prefix is invalid.
     pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self> {
         Self::gcp_gcs_proven(config, GCS_DIRECT_TRANSFERS_PROVEN)
     }
@@ -167,24 +139,19 @@ impl ConfiguredObjectStore {
     /// at the first transfer — so `proven` decides only whether the bundle is
     /// handed out, never whether it exists.
     fn gcp_gcs_proven(config: GcpGcsStoreConfig, proven: bool) -> Result<Self> {
-        let presigner = Arc::new(GcsV4Presigner::new(GcsPresignerConfig {
-            bucket: config.bucket.clone(),
-            service_account_key_path: config.service_account_key_path.clone(),
-            key_prefix: config.key_prefix.clone(),
-        })?);
-        let store = GcpGcsStore::new(config)?;
+        let (store, issuers) = gcp_gcs_with_issuers(config)?;
+        let direct_transfers = proven.then_some(issuers);
         Ok(Self {
             inner: Arc::new(store),
-            direct_transfers: proven
-                .then(|| DirectTransferIssuers::read_only(presigner.clone()).with_put(presigner)),
+            direct_transfers,
         })
     }
 
     /// Builds a native Azure Blob store without direct-transfer issuance.
     ///
-    /// Construction fails when credentials, provider runtime, or key-prefix configuration is invalid.
+    /// Construction fails when the endpoint, provider, runtime, or key prefix is invalid.
     pub fn azure_abs(config: AzureAbsStoreConfig) -> Result<Self> {
-        let store = AzureAbsStore::new(config)?;
+        let store = azure_abs(config)?;
         Ok(Self {
             inner: Arc::new(store),
             direct_transfers: None,
@@ -208,14 +175,6 @@ impl ConfiguredObjectStore {
     pub fn into_shared(self) -> SharedObjectStore {
         self.inner
     }
-}
-
-/// The S3-compatible providers sign all three directions with one presigner.
-fn s3_compatible_transfers(presigner: S3CompatiblePresigner) -> DirectTransferIssuers {
-    let presigner = Arc::new(presigner);
-    DirectTransferIssuers::read_only(presigner.clone())
-        .with_put(presigner.clone())
-        .with_multipart(presigner)
 }
 
 /// Returns whether an endpoint uses TLS and belongs to a provider domain
@@ -460,7 +419,11 @@ mod tests {
             )
             .expect("presigner"),
         );
-        let transfers = DirectTransferIssuers::read_only(presigner.clone()).with_put(presigner);
+        let transfers = DirectTransferIssuers {
+            get: presigner.clone(),
+            put: Some(presigner),
+            multipart: None,
+        };
 
         assert!(transfers.put.is_some());
         assert!(transfers.multipart.is_none());

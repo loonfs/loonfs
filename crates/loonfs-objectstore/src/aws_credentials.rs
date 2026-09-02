@@ -51,33 +51,13 @@ pub(crate) fn aws_credentials_source(
             access_key_id,
             secret_access_key,
             session_token,
-        } => {
-            if access_key_id.expose().trim().is_empty() {
-                return Err(ObjectStoreError::Configuration(
-                    "access key id must not be empty".to_owned(),
-                ));
-            }
-            if secret_access_key.expose().trim().is_empty() {
-                return Err(ObjectStoreError::Configuration(
-                    "secret access key must not be empty".to_owned(),
-                ));
-            }
-            if session_token
-                .as_ref()
-                .is_some_and(|token| token.expose().trim().is_empty())
-            {
-                return Err(ObjectStoreError::Configuration(
-                    "session token must not be empty".to_owned(),
-                ));
-            }
-            Ok(Arc::new(StaticAwsCredentialsSource::new(
-                AwsSigningCredentials {
-                    access_key_id: access_key_id.clone(),
-                    secret_access_key: secret_access_key.clone(),
-                    session_token: session_token.clone(),
-                },
-            )))
-        }
+        } => Ok(Arc::new(StaticAwsCredentialsSource::new(
+            AwsSigningCredentials {
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                session_token: session_token.clone(),
+            },
+        ))),
     }
 }
 
