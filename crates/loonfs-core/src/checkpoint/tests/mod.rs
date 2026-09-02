@@ -14,9 +14,7 @@ mod manifest_round_trips;
 mod retention;
 mod streaming_compaction;
 
-use super::build::{
-    build_manifest_segments, build_manifest_segments_from_rows, MetadataSegmentation,
-};
+use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
 use super::cache::{MetadataSegmentBlockKind, MetadataSegmentCache, MetadataSegmentCacheConfig};
 use super::compaction_merge::locality_of;
 use super::compaction_retention::RetentionRule;
@@ -94,7 +92,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_test_support::stores::{
-    CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -863,6 +861,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
                         head_seq,
                         previous.manifest.payload.head_seq,
                         metadata_state,
+                        policy.max_rows_per_segment,
                     )
                     .await?,
                 ));

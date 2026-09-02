@@ -1138,8 +1138,24 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.write_row(kept, &mut writers).await?;
         }
 
-        for writer in writers.into_values() {
-            let segments = writer.finish(self.store).await?;
+        for (family, writer) in writers {
+            let segments = match index_pair(self.group) {
+                Some((canonical, _)) if family == canonical => {
+                    writer
+                        .finish(self.store, &mut |encoded_row| {
+                            self.canonical_digest.fold(encoded_row);
+                        })
+                        .await?
+                }
+                Some((_, index)) if family == index => {
+                    writer
+                        .finish(self.store, &mut |encoded_row| {
+                            self.index_digest.fold(encoded_row);
+                        })
+                        .await?
+                }
+                _ => writer.finish(self.store, &mut |_| {}).await?,
+            };
             self.result.output_bytes = self
                 .result
                 .output_bytes
@@ -1192,7 +1208,6 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         (family, row): KeptRow,
         writers: &mut BTreeMap<MetadataRowFamily, MergeSegmentWriter<'_>>,
     ) -> Result<()> {
-        self.fold_into_index_digests(family, &row)?;
         *self
             .result
             .rows_written_by_family
@@ -1203,7 +1218,27 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .get_mut(&family)
             .expect("a cluster writes only the families it merges");
         writer.push(row);
-        writer.roll_full_segments(self.store, self.policy).await
+        match index_pair(self.group) {
+            Some((canonical, _)) if family == canonical => {
+                writer
+                    .roll_full_segments(self.store, self.policy, &mut |encoded_row| {
+                        self.canonical_digest.fold(encoded_row);
+                    })
+                    .await
+            }
+            Some((_, index)) if family == index => {
+                writer
+                    .roll_full_segments(self.store, self.policy, &mut |encoded_row| {
+                        self.index_digest.fold(encoded_row);
+                    })
+                    .await
+            }
+            _ => {
+                writer
+                    .roll_full_segments(self.store, self.policy, &mut |_| {})
+                    .await
+            }
+        }
     }
 
     /// Remembers a below-floor unbind for the reverse pass, when the merge is
@@ -1334,24 +1369,6 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         Ok(rows)
     }
 
-    /// Folds a written row into the digest of its side of the group's index
-    /// pair, when the group has one.
-    fn fold_into_index_digests(
-        &mut self,
-        family: MetadataRowFamily,
-        row: &MetadataRow,
-    ) -> Result<()> {
-        let Some((canonical, index)) = index_pair(self.group) else {
-            return Ok(());
-        };
-        if family == canonical {
-            self.canonical_digest.fold(row)?;
-        } else if family == index {
-            self.index_digest.fold(row)?;
-        }
-        Ok(())
-    }
-
     /// Refuses to hand back a run whose secondary index does not hold the same
     /// rows as its canonical family.
     ///
@@ -1395,8 +1412,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
 /// and, for the bind pair, in different passes. This is corruption detection,
 /// not a signature: what it has to catch is a merge that wrote a secondary
 /// index rows its canonical family does not hold, including a row differing in one
-/// field. Nothing durable carries it, so the input is the row's serde
-/// encoding.
+/// field. Nothing durable carries it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct RowDigest {
     value: u128,
@@ -1404,18 +1420,12 @@ struct RowDigest {
 }
 
 impl RowDigest {
-    fn fold(&mut self, row: &MetadataRow) -> Result<()> {
-        let encoded = serde_json::to_vec(row).map_err(|err| {
-            CoreError::Internal(format!(
-                "failed to encode a metadata row for digesting: {err}"
-            ))
-        })?;
-        let digest = Sha256::digest(&encoded);
+    fn fold(&mut self, encoded_row: &[u8]) {
+        let digest = Sha256::digest(encoded_row);
         let mut head = [0u8; 16];
         head.copy_from_slice(&digest[..16]);
         self.value = self.value.wrapping_add(u128::from_be_bytes(head));
         self.rows += 1;
-        Ok(())
     }
 
     fn spell(&self) -> String {
@@ -1497,6 +1507,10 @@ mod tests {
         }
     }
 
+    fn fold_row(digest: &mut RowDigest, row: &MetadataRow) {
+        digest.fold(&serde_json::to_vec(row).expect("encode row"));
+    }
+
     #[test]
     fn the_row_digest_ignores_order_and_notices_one_changed_field() {
         let rows = [
@@ -1507,10 +1521,10 @@ mod tests {
         let mut forward = RowDigest::default();
         let mut backward = RowDigest::default();
         for row in &rows {
-            forward.fold(row).expect("digest");
+            fold_row(&mut forward, row);
         }
         for row in rows.iter().rev() {
-            backward.fold(row).expect("digest");
+            fold_row(&mut backward, row);
         }
         assert_eq!(forward, backward);
 
@@ -1522,12 +1536,12 @@ mod tests {
         ]
         .iter()
         {
-            changed.fold(row).expect("digest");
+            fold_row(&mut changed, row);
         }
         assert_ne!(forward, changed);
 
         let mut short = RowDigest::default();
-        short.fold(&rows[0]).expect("digest");
+        fold_row(&mut short, &rows[0]);
         assert_ne!(forward, short);
     }
 }

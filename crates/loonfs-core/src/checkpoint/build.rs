@@ -37,9 +37,7 @@ pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
         run_seq,
         level,
         |family| manifest_rows_for_family(metadata_state, family),
-        MetadataSegmentation::Base {
-            max_rows_per_segment,
-        },
+        max_rows_per_segment,
     )
     .await
 }
@@ -74,6 +72,7 @@ pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
     run_seq: ChangeSeq,
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
+    max_rows_per_segment: NonZeroUsize,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
@@ -82,15 +81,9 @@ pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
         run_seq,
         CHECKPOINT_DELTA_RUN_LEVEL,
         |family| manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
-        MetadataSegmentation::Full,
+        max_rows_per_segment,
     )
     .await
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) enum MetadataSegmentation {
-    Base { max_rows_per_segment: NonZeroUsize },
-    Full,
 }
 
 pub(super) struct MetadataSegmentRows {
@@ -111,7 +104,7 @@ pub(super) async fn build_manifest_segments_from_rows<S, RowsForFamily>(
     run_seq: ChangeSeq,
     level: u32,
     mut rows_for_family: RowsForFamily,
-    segmentation: MetadataSegmentation,
+    max_rows_per_segment: NonZeroUsize,
 ) -> Result<Vec<MetadataFamilySegments>>
 where
     S: ObjectStore + ?Sized,
@@ -129,7 +122,7 @@ where
             continue;
         }
 
-        let segments = segment_manifest_rows(rows, segmentation);
+        let segments = segment_rows_by_row_key_range(rows, max_rows_per_segment);
         let mut requests = Vec::with_capacity(segments.len());
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
@@ -238,16 +231,30 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
     request: MetadataSegmentWriteRequest<'_>,
 ) -> Result<MetadataSegmentRef> {
+    write_manifest_segment_with_encoded_rows(store, request, |_| {}).await
+}
+
+pub(super) async fn write_manifest_segment_with_encoded_rows<
+    S: ObjectStore + ?Sized,
+    FoldEncodedRow: FnMut(&[u8]),
+>(
+    store: &S,
+    request: MetadataSegmentWriteRequest<'_>,
+    mut fold_encoded_row: FoldEncodedRow,
+) -> Result<MetadataSegmentRef> {
     let segment_id = request.segment_id;
     let mut builder = SegmentBlocksBuilder::default();
     for row in &request.rows {
         let row_key = row.row_key_for_family(request.family);
         let filter_key = row.filter_key_for_family(request.family);
-        builder.push(&row_key, &filter_key, row).map_err(|err| {
-            CoreError::Internal(format!(
-                "failed to build metadata segment `{segment_id}`: {err}"
-            ))
-        })?;
+        let encoded_row = builder
+            .push_with_encoded_row(&row_key, &filter_key, row)
+            .map_err(|err| {
+                CoreError::Internal(format!(
+                    "failed to build metadata segment `{segment_id}`: {err}"
+                ))
+            })?;
+        fold_encoded_row(&encoded_row);
     }
     let built = builder.finish().map_err(|err| {
         CoreError::Internal(format!(
@@ -282,18 +289,6 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         )
         .await?;
     Ok(descriptor)
-}
-
-pub(super) fn segment_manifest_rows(
-    rows: Vec<MetadataRow>,
-    segmentation: MetadataSegmentation,
-) -> Vec<MetadataSegmentRows> {
-    match segmentation {
-        MetadataSegmentation::Full => vec![MetadataSegmentRows { rows }],
-        MetadataSegmentation::Base {
-            max_rows_per_segment,
-        } => segment_rows_by_row_key_range(rows, max_rows_per_segment),
-    }
 }
 
 pub(super) fn segment_rows_by_row_key_range(

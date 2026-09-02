@@ -5,6 +5,7 @@ use super::durable_cache::{
     BindingCacheKey, DurableVisibilityCache, ParentNameCacheKey, SharedRows,
 };
 use super::manifest_index;
+use super::view_session::LeafRevisionPrefetch;
 use super::visibility::{self, MetadataVisibilityReads};
 use crate::checkpoint::VerifiedMetadataSegments;
 use crate::error::CoreError;
@@ -240,7 +241,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         absolute_path: &AbsolutePath,
     ) -> Result<ResolvedVisiblePath, CoreError> {
-        visibility::resolve_visible_path(&mut self.reads(), absolute_path).await
+        self.session()
+            .resolve_visible_path(absolute_path, LeafRevisionPrefetch::Skip)
+            .await
     }
 
     pub(crate) async fn visible_child(

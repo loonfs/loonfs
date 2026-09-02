@@ -1026,6 +1026,113 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
 }
 
 #[tokio::test]
+async fn root_cas_permission_error_surfaces_when_a_newer_root_was_published() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let raw_store = LocalFsStore::new(temp_dir.path()).expect("raw store");
+    bootstrap_namespace(&raw_store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &raw_store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+
+    let materialization = load_current_projection(&raw_store, &namespace_id)
+        .await
+        .expect("materialization");
+    let candidate_manifest_no = ManifestNo(materialization.root.manifest.manifest_no.0 + 1);
+    let candidate_manifest = build_manifest_from_projection(
+        &raw_store,
+        &namespace_id,
+        &materialization,
+        candidate_manifest_no,
+    )
+    .await;
+    let competing_manifest = build_manifest_from_projection(
+        &raw_store,
+        &namespace_id,
+        &materialization,
+        ManifestNo(candidate_manifest_no.0 + 1),
+    )
+    .await;
+    write_namespace_manifest(&raw_store, &candidate_manifest)
+        .await
+        .expect("write candidate manifest");
+    write_namespace_manifest(&raw_store, &competing_manifest)
+        .await
+        .expect("write competing manifest");
+    let competing_root = MetadataRootState {
+        namespace_id: namespace_id.clone(),
+        manifest: ManifestRef {
+            owner_namespace_id: namespace_id.clone(),
+            manifest_no: competing_manifest.payload.manifest_no,
+            manifest_object_id: competing_manifest.payload.manifest_object_id.clone(),
+            manifest_head_seq: competing_manifest.payload.head_seq,
+            manifest_payload_checksum: competing_manifest.payload_checksum.clone(),
+        },
+        updated_at_ms: context.now_ms + 1,
+    };
+    let root_key = metadata_root(&namespace_id);
+    let failing = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(root_key.clone()),
+        OperationClass::CompareAndSwap,
+        InjectedError::PermissionDenied("root write forbidden".to_owned()),
+    );
+    failing.fail_all();
+    let store = BlockingStore::new(
+        failing,
+        KeyPredicate::exact(root_key.clone()),
+        OperationClass::CompareAndSwap,
+    );
+    store.block_next();
+
+    let (publication, ()) = tokio::join!(
+        publish_metadata_root(
+            &store,
+            &namespace_id,
+            &candidate_manifest,
+            Some(materialization.root.manifest.manifest_object_id.clone()),
+            context.now_ms,
+        ),
+        async {
+            store.wait_until_blocked().await;
+            let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
+                loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
+                competing_root,
+            )
+            .expect("metadata root envelope");
+            let bytes = loonfs_api::wire::control::encode_control_object(&envelope)
+                .expect("encode metadata root");
+            raw_store
+                .put(&root_key, Bytes::from(bytes), PutMode::Overwrite)
+                .await
+                .expect("install competing root");
+            store.release();
+        }
+    );
+
+    let error = publication.expect_err("permission-denied root CAS must fail");
+    assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
+    assert!(matches!(
+        error,
+        CoreError::Store {
+            class: loonfs_objectstore::ObjectStoreErrorClass::PermissionDenied,
+            ..
+        }
+    ));
+    assert_eq!(store.inner().attempts(), 1);
+}
+
+#[tokio::test]
 async fn first_root_create_recovers_when_the_write_lands_ambiguously() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

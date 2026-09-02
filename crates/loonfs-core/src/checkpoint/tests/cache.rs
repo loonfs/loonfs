@@ -1124,7 +1124,7 @@ fn seed_decoded_blocks(
                 MetadataSegmentBlockKind::Data,
                 handle.offset,
             ),
-            data_block_load::decoded_data_cache_block(descriptor.family, decoded),
+            data_block_load::decoded_data_cache_block(decoded),
         );
     }
 }

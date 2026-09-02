@@ -91,17 +91,25 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
             Some((row_key, _)) => lower_bound = format!("{row_key}\0"),
             None => break,
         }
-        for (row_key, row) in rows {
-            let MetadataRow::Inode {
-                inode_id,
-                inode_kind,
-                ..
-            } = row
-            else {
-                return Err(CoreError::NamespaceCorrupt(format!(
+        let inode_rows = rows
+            .into_iter()
+            .map(|(row_key, row)| match row {
+                MetadataRow::Inode {
+                    inode_id,
+                    inode_kind,
+                    ..
+                } => Ok((inode_id, inode_kind)),
+                _ => Err(CoreError::NamespaceCorrupt(format!(
                     "inodes family returned a non-inode row at `{row_key}`"
-                )));
-            };
+                ))),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let inode_ids = inode_rows
+            .iter()
+            .map(|(inode_id, _)| *inode_id)
+            .collect::<Vec<_>>();
+        session.preload_visibility(&inode_ids).await?;
+        for (inode_id, inode_kind) in inode_rows {
             if inode_kind != InodeKind::File {
                 continue;
             }

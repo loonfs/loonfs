@@ -9,7 +9,7 @@
 //! publishing them. A merge completed within one maintenance step writes to
 //! `metadata/segments/` because it publishes those segments in the same step.
 
-use super::build::{write_manifest_segment, MetadataSegmentDestination};
+use super::build::{write_manifest_segment_with_encoded_rows, MetadataSegmentDestination};
 use super::reorganize::MergePlacement;
 use super::runs::MetadataLsmPolicy;
 use crate::error::Result;
@@ -51,37 +51,43 @@ impl<'a> MergeSegmentWriter<'a> {
         self.rows.push(row);
     }
 
-    pub(super) async fn roll_full_segments<S: ObjectStore + ?Sized>(
+    pub(super) async fn roll_full_segments<
+        S: ObjectStore + ?Sized,
+        FoldEncodedRow: FnMut(&[u8]),
+    >(
         &mut self,
         store: &S,
         policy: MetadataLsmPolicy,
+        fold_encoded_row: &mut FoldEncodedRow,
     ) -> Result<()> {
         let max_rows = policy.max_rows_per_segment.get();
         while self.rows.len() >= max_rows {
             let rest = self.rows.split_off(max_rows);
             let full = std::mem::replace(&mut self.rows, rest);
-            self.write_segment(store, full).await?;
+            self.write_segment(store, full, fold_encoded_row).await?;
         }
         Ok(())
     }
 
-    pub(super) async fn finish<S: ObjectStore + ?Sized>(
+    pub(super) async fn finish<S: ObjectStore + ?Sized, FoldEncodedRow: FnMut(&[u8])>(
         mut self,
         store: &S,
+        fold_encoded_row: &mut FoldEncodedRow,
     ) -> Result<Vec<MetadataSegmentRef>> {
         let rest = std::mem::take(&mut self.rows);
         if !rest.is_empty() {
-            self.write_segment(store, rest).await?;
+            self.write_segment(store, rest, fold_encoded_row).await?;
         }
         Ok(self.segments)
     }
 
-    async fn write_segment<S: ObjectStore + ?Sized>(
+    async fn write_segment<S: ObjectStore + ?Sized, FoldEncodedRow: FnMut(&[u8])>(
         &mut self,
         store: &S,
         rows: Vec<MetadataRow>,
+        fold_encoded_row: &mut FoldEncodedRow,
     ) -> Result<()> {
-        let descriptor = write_manifest_segment(
+        let descriptor = write_manifest_segment_with_encoded_rows(
             store,
             self.destination.write_request(
                 self.run_no,
@@ -91,6 +97,7 @@ impl<'a> MergeSegmentWriter<'a> {
                 self.next_segment_index,
                 rows,
             ),
+            fold_encoded_row,
         )
         .await?;
         self.next_segment_index += 1;
