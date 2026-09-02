@@ -1425,7 +1425,7 @@ async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> Chan
         .status()
         .active_watermark()
         .expect("an active grep root has a watermark")
-        .0
+        .built_through_seq()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

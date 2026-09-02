@@ -1,6 +1,6 @@
 //! GC configuration.
 
-use super::cursor::GcCursor;
+use super::cursor::{initial_cursor, GcCursor};
 use crate::error::{CoreError, Result};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use loonfs_api::NamespaceId;
@@ -94,7 +94,7 @@ impl GcPolicy {
         config.validate()?;
         let resume = match config.cursor.as_deref() {
             Some(token) => GcCursor::decode(token, namespace_id)?,
-            None => GcCursor::initial(namespace_id),
+            None => initial_cursor(namespace_id),
         };
         Ok(Self {
             grace_window_ms: config.grace_window_ms,

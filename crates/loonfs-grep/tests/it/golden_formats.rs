@@ -211,6 +211,7 @@ pub(crate) fn segment_ref(
         run_seq: ChangeSeq(7 + u64::from(number)),
         level,
         segment_index,
+        row_count: 99,
         min_row_key: "gram-616263-00000000000000000001".to_owned(),
         max_row_key: "gram-7a7a7a-00000000000000000099".to_owned(),
         index_block: BlockHandle {

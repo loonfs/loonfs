@@ -197,10 +197,9 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
             })
         })
         .await?;
-    match decoded {
-        DecodedGrepBlock::Filter { filter, .. } => Ok(filter),
-        _ => Err(cache_kind_corrupt(object_key, "filter")),
-    }
+    decoded
+        .filter()
+        .ok_or_else(|| cache_kind_corrupt(object_key, "filter"))
 }
 
 pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
@@ -246,10 +245,9 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
             })
         })
         .await?;
-    match decoded {
-        DecodedGrepBlock::Index { entries, .. } => Ok(entries),
-        _ => Err(cache_kind_corrupt(object_key, "index")),
-    }
+    decoded
+        .index()
+        .ok_or_else(|| cache_kind_corrupt(object_key, "index"))
 }
 
 pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
@@ -273,10 +271,9 @@ pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
             })
         })
         .await?;
-    match decoded {
-        DecodedGrepBlock::Data { block, .. } => Ok(block),
-        _ => Err(cache_kind_corrupt(object_key, "data")),
-    }
+    decoded
+        .data()
+        .ok_or_else(|| cache_kind_corrupt(object_key, "data"))
 }
 
 fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {

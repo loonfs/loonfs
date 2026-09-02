@@ -4,7 +4,7 @@
 use super::budget::PassBudget;
 use super::compaction_staging::CompactionLeases;
 use super::config::{GcConfig, GcPolicy};
-use super::cursor::{CandidateFamily, GcCursor};
+use super::cursor::{cursor_after, CandidateFamily, GcCursor};
 use super::fork_checkpoints::{
     maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
     MissingBasisCheckpointSweep,
@@ -177,8 +177,8 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
     }
 
     async fn walk_candidates(&mut self) -> Result<PassEnd> {
-        let resume_family = self.policy.resume.family;
-        let resume_last_key = self.policy.resume.last_key.clone();
+        let resume_family = self.policy.resume.keyspace().family;
+        let resume_last_key = self.policy.resume.last_key().map(str::to_owned);
 
         // Data precedes mutable records. A crash or bounded return can
         // therefore leave data protected for an extra pass, never a readable
@@ -212,7 +212,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                 // past it. A content-reference scan that exhausts the budget
                 // retains its session instead of pinning the cursor forever.
                 self.budget.charge();
-                self.position = Some(GcCursor::after(self.namespace_id, family, key));
+                self.position = Some(cursor_after(self.namespace_id, family, key));
             }
         }
         Ok(PassEnd::Complete)

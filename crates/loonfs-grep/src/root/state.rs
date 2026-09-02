@@ -96,12 +96,12 @@ pub enum GrepIndexStatus {
 
 impl GrepIndexStatus {
     /// Returns the index position for the active status.
-    pub fn active_watermark(&self) -> Option<(ChangeSeq, u32)> {
+    pub fn active_watermark(&self) -> Option<ChangeFeedResume> {
         match self {
             Self::Active {
                 built_through_seq,
                 next_event_index,
-            } => Some((*built_through_seq, *next_event_index)),
+            } => Some(ChangeFeedResume::new(*built_through_seq, *next_event_index)),
             Self::Backfilling { .. } | Self::Disabled {} => None,
         }
     }
@@ -168,20 +168,20 @@ pub struct GrepIndexState {
 /// already represented event prefix, keeping feed selection and event
 /// selection complementary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ChangeFeedResume {
+pub struct ChangeFeedResume {
     built_through_seq: ChangeSeq,
     next_event_index: u32,
 }
 
 impl ChangeFeedResume {
-    pub(crate) fn new(built_through_seq: ChangeSeq, next_event_index: u32) -> Self {
+    pub fn new(built_through_seq: ChangeSeq, next_event_index: u32) -> Self {
         Self {
             built_through_seq,
             next_event_index,
         }
     }
 
-    pub(crate) fn after_seq(self) -> ChangeSeq {
+    pub fn after_seq(self) -> ChangeSeq {
         if self.next_event_index == 0 {
             self.built_through_seq
         } else {
@@ -189,7 +189,11 @@ impl ChangeFeedResume {
         }
     }
 
-    pub(crate) fn start_event_index(
+    pub fn built_through_seq(self) -> ChangeSeq {
+        self.built_through_seq
+    }
+
+    pub fn start_event_index(
         self,
         change_seq: ChangeSeq,
     ) -> std::result::Result<usize, std::num::TryFromIntError> {
@@ -200,7 +204,7 @@ impl ChangeFeedResume {
         }
     }
 
-    pub(crate) fn next_event_index(self) -> u32 {
+    pub fn next_event_index(self) -> u32 {
         self.next_event_index
     }
 }
@@ -213,6 +217,7 @@ pub struct GrepSegmentRef {
     pub run_seq: ChangeSeq,
     pub level: u32,
     pub segment_index: u32,
+    pub row_count: u64,
     pub min_row_key: String,
     pub max_row_key: String,
     /// Entry point for the segment's data-block index and its CRC.

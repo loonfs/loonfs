@@ -297,7 +297,7 @@ pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> 
 
 /// Advances the manifest's run allocator after a producer has taken
 /// `current`.
-pub(super) fn next_run_no_after(current: RunNo) -> Result<RunNo> {
+pub fn next_run_no_after(current: RunNo) -> Result<RunNo> {
     current
         .successor()
         .map_err(|error| CoreError::Internal(format!("run number {error}")))
@@ -305,7 +305,7 @@ pub(super) fn next_run_no_after(current: RunNo) -> Result<RunNo> {
 
 /// Refuses to initiate a root compare-and-swap once the publication budget
 /// is spent (format spec, "Garbage collection", rule 1).
-pub(super) fn ensure_metadata_publication_budget(
+pub fn ensure_metadata_publication_budget(
     timer: &dyn MonotonicTimer,
     publication_started_ms: u64,
     namespace_id: &NamespaceId,

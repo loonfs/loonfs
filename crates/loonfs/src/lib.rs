@@ -104,10 +104,12 @@ pub use loonfs_core::limits::{
 };
 pub use loonfs_core::time::current_time_ms;
 pub use loonfs_core::{
-    delete_if_aged, BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage,
-    CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState, DeleteNamespaceOptions,
-    Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig, GraceAge,
-    MetadataCompactionJobOutcome, MetadataViewError, PassBudget, StoreFailureClass, WriterFence,
+    delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
+    select_next_iterator, write_segments_in_waves, BootstrapNamespaceError, CheckpointFile,
+    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState,
+    DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig,
+    GcCursorKeyspace, GraceAge, MetadataCompactionJobOutcome, MetadataViewError, NamespaceGcCursor,
+    PassBudget, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, WriterFence,
     CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};

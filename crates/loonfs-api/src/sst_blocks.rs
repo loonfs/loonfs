@@ -93,6 +93,31 @@ pub struct BuiltSegmentBlocks {
     pub max_row_key: String,
 }
 
+impl BuiltSegmentBlocks {
+    /// Encodes a small stored filter for an inline segment descriptor.
+    pub fn inline_filter_hex(&self) -> Option<String> {
+        (self.filter.stored_len <= DEFAULT_INLINE_FILTER_MAX_BYTES).then(|| {
+            let start = self.filter.offset as usize;
+            crate::wire::hex::hex_encode_bytes(
+                &self.bytes[start..start + self.filter.stored_len as usize],
+            )
+        })
+    }
+}
+
+/// Returns whether a non-empty segment key range can intersect a query range.
+pub fn key_range_may_intersect(
+    min_row_key: &str,
+    max_row_key: &str,
+    row_count: u64,
+    lower_bound: &str,
+    upper_bound: Option<&str>,
+) -> bool {
+    row_count != 0
+        && max_row_key >= lower_bound
+        && upper_bound.is_none_or(|upper_bound| min_row_key < upper_bound)
+}
+
 /// One decoded data block: row keys and rows, parallel and in key order.
 /// The row type defaults to [`MetadataRow`]; index segments decode their
 /// own row payload through [`decode_data_block_rows`].

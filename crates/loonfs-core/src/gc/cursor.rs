@@ -13,6 +13,13 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use serde::{Deserialize, Serialize};
 
+/// Defines the namespace key prefix and token kind for a GC cursor.
+pub trait GcCursorKeyspace {
+    const CURSOR_KIND: &'static str;
+
+    fn prefix(&self, namespace_id: &NamespaceId) -> String;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum CandidateFamily {
@@ -82,21 +89,30 @@ impl CandidateFamily {
     }
 }
 
-/// Cursor payloads are short-lived API tokens, not durable objects. Serde's
-/// default unknown-field handling makes decoding tolerant of additive fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct GcCursor {
+#[serde(bound(
+    serialize = "Keyspace: Serialize",
+    deserialize = "Keyspace: Deserialize<'de>"
+))]
+pub struct NamespaceGcCursor<Keyspace> {
     namespace_id: NamespaceId,
-    pub(super) family: CandidateFamily,
+    #[serde(flatten)]
+    keyspace: Keyspace,
     #[serde(default)]
-    pub(super) last_key: Option<String>,
+    last_key: Option<String>,
 }
 
-impl PageCursor for GcCursor {
-    const KIND: &'static str = "core_gc";
+impl<Keyspace> PageCursor for NamespaceGcCursor<Keyspace>
+where
+    Keyspace: GcCursorKeyspace + Serialize + for<'de> Deserialize<'de>,
+{
+    const KIND: &'static str = Keyspace::CURSOR_KIND;
 }
 
-impl NamespaceCursor for GcCursor {
+impl<Keyspace> NamespaceCursor for NamespaceGcCursor<Keyspace>
+where
+    Keyspace: GcCursorKeyspace + Serialize + for<'de> Deserialize<'de>,
+{
     fn namespace_id(&self) -> &NamespaceId {
         &self.namespace_id
     }
@@ -106,38 +122,84 @@ impl NamespaceCursor for GcCursor {
     }
 
     fn key_prefix(&self) -> String {
-        self.family.prefix(&self.namespace_id)
+        self.keyspace.prefix(&self.namespace_id)
     }
 }
 
-impl GcCursor {
-    pub(super) fn initial(namespace_id: &NamespaceId) -> Self {
+impl<Keyspace> NamespaceGcCursor<Keyspace>
+where
+    Keyspace: GcCursorKeyspace + Serialize + for<'de> Deserialize<'de>,
+{
+    pub fn initial(namespace_id: &NamespaceId, keyspace: Keyspace) -> Self {
         Self {
             namespace_id: namespace_id.clone(),
-            family: CandidateFamily::WalSegments,
+            keyspace,
             last_key: None,
         }
     }
 
-    pub(super) fn after(namespace_id: &NamespaceId, family: CandidateFamily, key: String) -> Self {
+    pub fn after(namespace_id: &NamespaceId, keyspace: Keyspace, key: String) -> Self {
         Self {
             namespace_id: namespace_id.clone(),
-            family,
+            keyspace,
             last_key: Some(key),
         }
     }
 
-    pub(super) fn decode(token: &str, namespace_id: &NamespaceId) -> Result<Self> {
-        decode_namespace_cursor(token, namespace_id).map_err(|error| match error {
-            NamespaceCursorError::ForeignNamespace => CoreError::InvalidGcConfig(error.to_string()),
-            _ => invalid_cursor(),
+    pub fn decode(token: &str, namespace_id: &NamespaceId) -> Result<Self> {
+        decode_namespace_cursor(token, namespace_id).map_err(|error| {
+            if matches!(error, NamespaceCursorError::ForeignNamespace) {
+                CoreError::InvalidGcConfig(error.to_string())
+            } else {
+                invalid_cursor()
+            }
         })
     }
 
-    pub(super) fn encode(&self) -> Result<String> {
+    pub fn encode(&self) -> Result<String> {
         encode_cursor(self)
-            .map_err(|error| CoreError::Internal(format!("failed to encode GC cursor: {error}")))
+            .map_err(|error| CoreError::Internal(format!("failed to encode gc cursor: {error}")))
     }
+
+    pub fn keyspace(&self) -> &Keyspace {
+        &self.keyspace
+    }
+
+    pub fn last_key(&self) -> Option<&str> {
+        self.last_key.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct CoreGcKeyspace {
+    pub(super) family: CandidateFamily,
+}
+
+impl GcCursorKeyspace for CoreGcKeyspace {
+    const CURSOR_KIND: &'static str = "core_gc";
+
+    fn prefix(&self, namespace_id: &NamespaceId) -> String {
+        self.family.prefix(namespace_id)
+    }
+}
+
+pub(super) type GcCursor = NamespaceGcCursor<CoreGcKeyspace>;
+
+pub(super) fn initial_cursor(namespace_id: &NamespaceId) -> GcCursor {
+    GcCursor::initial(
+        namespace_id,
+        CoreGcKeyspace {
+            family: CandidateFamily::WalSegments,
+        },
+    )
+}
+
+pub(super) fn cursor_after(
+    namespace_id: &NamespaceId,
+    family: CandidateFamily,
+    key: String,
+) -> GcCursor {
+    GcCursor::after(namespace_id, CoreGcKeyspace { family }, key)
 }
 
 fn invalid_cursor() -> CoreError {
@@ -166,9 +228,9 @@ mod tests {
         }));
 
         let cursor = GcCursor::decode(&token, &namespace_id).expect("decode cursor");
-        assert_eq!(cursor.family, CandidateFamily::MetadataSegments);
+        assert_eq!(cursor.keyspace().family, CandidateFamily::MetadataSegments);
         assert_eq!(
-            cursor.last_key.as_deref(),
+            cursor.last_key(),
             Some("namespaces/demo/metadata/segments/segment.sst.zst")
         );
     }
@@ -177,7 +239,7 @@ mod tests {
     fn cursor_is_bound_to_its_namespace_and_family_prefix() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let other_namespace_id = NamespaceId::parse("other").expect("namespace id");
-        let cursor = GcCursor::after(
+        let cursor = cursor_after(
             &namespace_id,
             CandidateFamily::WalSegments,
             "namespaces/demo/wal/segments/segment.wal.zst".to_owned(),

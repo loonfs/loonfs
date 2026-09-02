@@ -54,6 +54,29 @@ pub enum DecodedGrepBlock {
     },
 }
 
+impl DecodedGrepBlock {
+    pub(crate) fn filter(self) -> Option<Arc<SegmentFilter>> {
+        match self {
+            Self::Filter { filter, .. } => Some(filter),
+            Self::Manifest { .. } | Self::Index { .. } | Self::Data { .. } => None,
+        }
+    }
+
+    pub(crate) fn index(self) -> Option<Arc<Vec<SegmentIndexEntry>>> {
+        match self {
+            Self::Index { entries, .. } => Some(entries),
+            Self::Manifest { .. } | Self::Filter { .. } | Self::Data { .. } => None,
+        }
+    }
+
+    pub(crate) fn data(self) -> Option<Arc<DecodedDataBlock<IndexRow>>> {
+        match self {
+            Self::Data { block, .. } => Some(block),
+            Self::Manifest { .. } | Self::Filter { .. } | Self::Index { .. } => None,
+        }
+    }
+}
+
 impl DecodedBlock for DecodedGrepBlock {
     fn decoded_bytes(&self) -> usize {
         match self {
