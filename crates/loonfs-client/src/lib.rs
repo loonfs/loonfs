@@ -40,7 +40,7 @@ use loonfs_api::{
     CreateCheckpointRequest, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
     FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
     ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    ListPathEntriesResponse, ListTrashResponse, MaintenanceRunRequest, MaintenanceRunResponse,
     Namespace, NamespaceDiagnostics, NamespaceId, PathEntry, PutRetryAttempt,
     PutRetryErrorClassification, PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo,
     SecretString, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,

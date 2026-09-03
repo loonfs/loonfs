@@ -10,11 +10,12 @@ use loonfs::{
     AdvanceRetentionResponse, BeginUploadResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm,
     CommitResponse, ContentRef, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, FsAdmin,
-    FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, ListChangesResponse, MaintenancePlan,
-    MaintenanceStepResponse, MetadataMaintenanceResponse, MoveOptions, NamespaceDiagnostics,
-    NamespaceId, PageRequest, PaginationPolicy, PathEntry, PutFileOptions, RuntimeError,
-    SharedObjectStore, UploadContentResponse, UploadId, UploadSession,
+    FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, ListChangesResponse,
+    MaintenanceRunRequest, MaintenanceRunResponse, MetadataMaintenanceResponse, MoveOptions,
+    NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PathEntry, PutFileOptions,
+    RuntimeError, SharedObjectStore, UploadContentResponse, UploadId, UploadSession,
 };
+use loonfs_api::MetadataMaintenanceRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
@@ -80,22 +81,19 @@ pub(crate) async fn collect_checkpoints(
     Ok(response)
 }
 
-/// The upkeep report a step that selected metadata is obliged to carry.
-pub(crate) fn upkeep(step: &MaintenanceStepResponse) -> &MetadataMaintenanceResponse {
-    step.metadata_maintenance
-        .as_ref()
-        .expect("a plan selecting metadata upkeep reports it")
+/// The upkeep report returned by a metadata maintenance request.
+pub(crate) fn upkeep(response: &MaintenanceRunResponse) -> &MetadataMaintenanceResponse {
+    let MaintenanceRunResponse::Metadata(metadata) = response else {
+        panic!("metadata request returned a different response")
+    };
+    metadata
 }
 
-/// A plan selecting metadata upkeep alone, at an explicit flush threshold.
-pub(crate) fn metadata_plan(max_wal_tail_segments: u64) -> MaintenancePlan {
-    MaintenancePlan {
-        metadata: Some(loonfs::MetadataMaintenanceOptions {
-            max_wal_tail_segments: std::num::NonZeroU64::new(max_wal_tail_segments)
-                .expect("a flush threshold is non-zero"),
-        }),
-        ..MaintenancePlan::default()
-    }
+/// A metadata request with an explicit flush threshold.
+pub(crate) fn metadata_request(max_wal_tail_segments: u64) -> MaintenanceRunRequest {
+    MaintenanceRunRequest::Metadata(MetadataMaintenanceRequest {
+        max_wal_tail_segments: Some(max_wal_tail_segments),
+    })
 }
 
 /// One handle set per test fixture: a writer, its derived reader, and an
@@ -315,11 +313,11 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<NamespaceDiagnostics>;
-    fn maintenance_step_namespace_blocking(
+    fn maintenance_run_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        plan: MaintenancePlan,
-    ) -> loonfs::Result<MaintenanceStepResponse>;
+        request: MaintenanceRunRequest,
+    ) -> loonfs::Result<MaintenanceRunResponse>;
     fn flush_wal_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -433,12 +431,12 @@ impl RuntimeTestExt for TestRuntime {
         block_on(self.admin.get_namespace_diagnostics(namespace_id))
     }
 
-    fn maintenance_step_namespace_blocking(
+    fn maintenance_run_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        plan: MaintenancePlan,
-    ) -> loonfs::Result<MaintenanceStepResponse> {
-        block_on(self.admin.run_maintenance(namespace_id, plan))
+        request: MaintenanceRunRequest,
+    ) -> loonfs::Result<MaintenanceRunResponse> {
+        block_on(self.admin.run_maintenance(namespace_id, request))
     }
 
     fn flush_wal_blocking(

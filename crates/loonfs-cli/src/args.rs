@@ -256,6 +256,7 @@ impl Command {
                         | MaintenanceCommand::Step(_)
                         | MaintenanceCommand::Flush(_)
                         | MaintenanceCommand::Retention { .. }
+                        | MaintenanceCommand::Compact(_)
                         | MaintenanceCommand::Gc(_),
                 }
         )
@@ -1215,6 +1216,8 @@ pub(crate) enum MaintenanceCommand {
     Step(MaintenanceStepArgs),
     /// Flush the WAL tail into a durable segment.
     Flush(MaintenanceNamespaceArgs),
+    /// Run one full metadata compaction.
+    Compact(MaintenanceNamespaceArgs),
     /// Create, list, or release checkpoint pins.
     Checkpoint {
         #[command(subcommand)]
@@ -1399,13 +1402,6 @@ pub(crate) struct MaintenanceStepArgs {
     /// segments (server default when omitted).
     #[arg(long)]
     pub max_wal_tail_segments: Option<u64>,
-    /// Advance the retention floor after the step's flush work. This discards
-    /// replay history below the flushed manifest head.
-    #[arg(long)]
-    pub retention: bool,
-    /// Run a garbage-collection pass after the step's flush work.
-    #[arg(long)]
-    pub gc: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1541,6 +1537,7 @@ command_kinds! {
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
     MaintenanceRun => "maintenance_run",
     MaintenanceStep => "maintenance_step",
+    MaintenanceCompact => "maintenance_compact",
     MaintenanceGc => "maintenance_gc",
     MaintenanceStoreProbe => "maintenance_store_probe",
     MaintenanceIndexEnable => "maintenance_index_enable",
@@ -1607,6 +1604,7 @@ impl Cli {
                 MaintenanceCommand::Run(_) => CommandKind::MaintenanceRun,
                 MaintenanceCommand::Step(_) => CommandKind::MaintenanceStep,
                 MaintenanceCommand::Flush(_) => CommandKind::MaintenanceFlush,
+                MaintenanceCommand::Compact(_) => CommandKind::MaintenanceCompact,
                 MaintenanceCommand::Checkpoint { command } => match command {
                     MaintenanceCheckpointCommand::Create(_) => {
                         CommandKind::MaintenanceCheckpointCreate
@@ -1981,6 +1979,7 @@ mod tests {
                 "run",
                 "step",
                 "flush",
+                "compact",
                 "checkpoint",
                 "index",
                 "retention",

@@ -43,16 +43,20 @@ fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_api::GcRespons
     post_gc_with(server_url, namespace, serde_json::json!({}))
 }
 
-fn upkeep(step: &loonfs_api::MaintenanceStepResponse) -> &loonfs_api::MetadataMaintenanceResponse {
-    step.metadata_maintenance
-        .as_ref()
-        .expect("a step selecting metadata upkeep reports it")
+fn upkeep(
+    response: &loonfs_api::MaintenanceRunResponse,
+) -> &loonfs_api::MetadataMaintenanceResponse {
+    let loonfs_api::MaintenanceRunResponse::Metadata(metadata) = response else {
+        panic!("metadata request returned a different response")
+    };
+    metadata
 }
 
-fn retention_floor(step: loonfs_api::MaintenanceStepResponse) -> ChangeSeq {
-    step.retention
-        .expect("a step selecting the retention advance reports it")
-        .retention_floor_seq
+fn retention_floor(response: loonfs_api::MaintenanceRunResponse) -> ChangeSeq {
+    let loonfs_api::MaintenanceRunResponse::Retention(retention) = response else {
+        panic!("retention request returned a different response")
+    };
+    retention.retention_floor_seq
 }
 
 fn post_gc_with(
@@ -60,47 +64,53 @@ fn post_gc_with(
     namespace: &str,
     gc: serde_json::Value,
 ) -> ApiResult<loonfs_api::GcResponse> {
-    let step: ApiResult<loonfs_api::MaintenanceStepResponse> = post_maintenance_json_body(
+    let mut request = gc;
+    request
+        .as_object_mut()
+        .expect("GC options are an object")
+        .insert("kind".to_owned(), serde_json::json!("gc"));
+    let response: ApiResult<loonfs_api::MaintenanceRunResponse> = post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
-        serde_json::json!({ "gc": gc }),
+        request,
     );
-    step.map(|step| {
-        step.gc
-            .expect("a step selecting collection reports its pass")
+    response.map(|response| {
+        let loonfs_api::MaintenanceRunResponse::Gc(gc) = response else {
+            panic!("GC request returned a different response")
+        };
+        gc
     })
 }
 
 fn post_maintenance_step(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
+) -> ApiResult<loonfs_api::MaintenanceRunResponse> {
     post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
-        serde_json::json!({ "metadata_maintenance": {} }),
+        serde_json::json!({ "kind": "metadata" }),
     )
 }
 
-fn post_empty_maintenance_step(
+fn post_missing_maintenance_body(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
-    post_maintenance_json_body(
+) -> ApiResult<loonfs_api::MaintenanceRunResponse> {
+    post_maintenance_json(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
-        serde_json::json!({}),
     )
 }
 
 fn post_retention_advance(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
+) -> ApiResult<loonfs_api::MaintenanceRunResponse> {
     post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
-        serde_json::json!({ "retention": {} }),
+        serde_json::json!({ "kind": "retention" }),
     )
 }
 
@@ -270,10 +280,9 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     );
     assert_eq!(advanced, ChangeSeq(1));
 
-    // Both calls reach the same floor, although they start from different floors.
+    // Both calls reach the same floor.
     let repeated =
         post_retention_advance(&server_url, namespace.as_str()).expect("repeat retention");
-    assert_eq!(repeated.status_before.retention_floor_seq, advanced);
     assert_eq!(retention_floor(repeated), advanced);
 
     let bytes = client
@@ -380,33 +389,22 @@ async fn http_maintenance_step_reports_outcomes_not_errors() {
         .await
         .expect("write file");
 
-    let empty = post_empty_maintenance_step(&server_url, namespace.as_str())
-        .expect_err("a body selecting nothing is refused");
+    let empty = post_missing_maintenance_body(&server_url, namespace.as_str())
+        .expect_err("a missing body is refused");
     assert_eq!(empty.code, "invalid_request");
-    assert!(empty.message.contains("at least one action"));
 
     let idle = post_maintenance_step(&server_url, namespace.as_str()).expect("idle step");
-    assert_eq!(idle.namespace_id, namespace);
-    assert_eq!(idle.status_before.wal_tail_segments, 1);
     assert_eq!(
         upkeep(&idle).wal_flush,
         loonfs_api::WalFlushStepOutcome::NotNeeded
     );
-    // Only requested actions appear in the response.
-    assert!(idle.gc.is_none());
-    assert!(idle.retention.is_none());
 
-    // A one-segment threshold flushes the WAL before retention and GC run.
-    let forced: loonfs_api::MaintenanceStepResponse = client
+    let forced = client
         .run_maintenance(
             &namespace,
-            &loonfs_api::MaintenanceStepRequest {
-                metadata_maintenance: Some(loonfs_api::MetadataMaintenanceRequest {
-                    max_wal_tail_segments: Some(1),
-                }),
-                retention: Some(loonfs_api::AdvanceRetentionRequest::default()),
-                gc: Some(loonfs_api::GcRequest::default()),
-            },
+            &loonfs_api::MaintenanceRunRequest::Metadata(loonfs_api::MetadataMaintenanceRequest {
+                max_wal_tail_segments: Some(1),
+            }),
         )
         .await
         .expect("forced step");
@@ -416,13 +414,19 @@ async fn http_maintenance_step_reports_outcomes_not_errors() {
             manifest_head_seq: ChangeSeq(1),
         }
     );
-    // Retention advances monotonically.
-    assert!(retention_floor(forced.clone()) >= forced.status_before.retention_floor_seq);
     assert_eq!(
         upkeep(&forced).reorganize,
         loonfs_api::ReorganizeStepOutcome::NotNeeded
     );
-    let gc = forced.gc.clone().expect("gc report present when opted in");
+    let retention = client
+        .run_maintenance(
+            &namespace,
+            &loonfs_api::MaintenanceRunRequest::Retention(loonfs_api::AdvanceRetentionRequest {}),
+        )
+        .await
+        .expect("advance retention");
+    assert_eq!(retention_floor(retention), ChangeSeq(1));
+    let gc = post_gc(&server_url, namespace.as_str()).expect("GC run");
     assert_eq!(gc.deleted.wal_segments, 0);
     assert!(!gc.retention_degraded);
 

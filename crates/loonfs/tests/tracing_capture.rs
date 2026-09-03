@@ -115,12 +115,7 @@ fn background_step_conclusions_emit_debug_events() {
     // made of it. Fields are matched with their `=` so a span carrying the
     // same word cannot satisfy the assertion.
     let step = find_event(&log, "metadata maintenance step concluded");
-    for field in [
-        "wal_flush=",
-        "reorganize=",
-        "wal_tail_segments_before=",
-        "conclusion=",
-    ] {
+    for field in ["wal_flush=", "reorganize=", "wal_tail_segments_before="] {
         assert!(step.contains(field), "missing `{field}` in: {step}");
     }
     let admission = find_event(&log, "maintenance step settled");
@@ -142,16 +137,12 @@ fn background_step_conclusions_emit_debug_events() {
     for field in ["dispatched=", "ready_queued=", "oldest_queued_ms="] {
         assert!(dispatch.contains(field), "missing `{field}` in: {dispatch}");
     }
-    // Record both the maintenance operation and its WAL flush phase.
-    for span_evidence in [
-        "loonfs.maintenance.step",
-        "loonfs.phase{phase=\"wal_flush\"",
-    ] {
-        assert!(
-            log.contains(span_evidence),
-            "missing span evidence `{span_evidence}` in:\n{log}"
-        );
-    }
+    // Record the WAL flush phase.
+    let span_evidence = "loonfs.phase{phase=\"wal_flush\"";
+    assert!(
+        log.contains(span_evidence),
+        "missing span evidence `{span_evidence}` in:\n{log}"
+    );
     assert!(
         !log.contains("compaction"),
         "maintenance still traces as compaction:\n{log}"

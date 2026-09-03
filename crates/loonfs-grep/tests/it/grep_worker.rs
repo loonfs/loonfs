@@ -7,8 +7,8 @@ use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost
 use bytes::Bytes;
 use loonfs::{
     CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsReader,
-    FsWriter, GcConfig, MaintenancePlan, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
-    RuntimeError, SharedObjectStore,
+    FsWriter, GcConfig, MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError,
+    SharedObjectStore,
 };
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
 use loonfs_api::{
@@ -115,29 +115,18 @@ async fn new_query_page(
 
 async fn flush_wal_and_advance_retention(admin: &FsAdmin, namespace_id: &NamespaceId) -> ChangeSeq {
     admin
-        .run_maintenance(
+        .maintain_metadata(
             namespace_id,
-            MaintenancePlan {
-                metadata: Some(MetadataMaintenanceOptions {
-                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
-                }),
-                ..MaintenancePlan::default()
+            MetadataMaintenanceOptions {
+                max_wal_tail_segments: std::num::NonZeroU64::MIN,
             },
         )
         .await
         .expect("flush wal");
     admin
-        .run_maintenance(
-            namespace_id,
-            MaintenancePlan {
-                advance_retention: true,
-                ..MaintenancePlan::default()
-            },
-        )
+        .advance_retention_floor(namespace_id)
         .await
         .expect("advance retention")
-        .retention
-        .expect("retention selected")
         .retention_floor_seq
 }
 

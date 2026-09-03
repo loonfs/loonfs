@@ -9,18 +9,19 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsWriter, GcConfig,
-    MaintenancePlan, MetadataCompactionOutcome, MetadataMaintenanceOptions, MoveOptions,
+    CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsWriter,
+    MaintenanceRunRequest, MaintenanceRunResponse, MetadataCompactionOutcome, MoveOptions,
     NamespaceId, PutFileOptions, ReorganizeStepOutcome, SharedObjectStore,
 };
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily, RunTier};
+use loonfs_api::{GcRequest, MetadataMaintenanceRequest};
 use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use std::collections::BTreeSet;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -80,13 +81,10 @@ fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u
     value
 }
 
-fn metadata_plan() -> MaintenancePlan {
-    MaintenancePlan {
-        metadata: Some(MetadataMaintenanceOptions {
-            max_wal_tail_segments: NonZeroU64::MIN,
-        }),
-        ..MaintenancePlan::default()
-    }
+fn metadata_request() -> MaintenanceRunRequest {
+    MaintenanceRunRequest::Metadata(MetadataMaintenanceRequest {
+        max_wal_tail_segments: Some(1),
+    })
 }
 
 #[tokio::test]
@@ -109,17 +107,15 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
         .expect("write a live GC candidate");
 
     assert_eq!(counter(&recorder.snapshot(), "loonfs.gc.retained", &[]), 0);
-    let step = admin
-        .run_maintenance(
-            &namespace,
-            MaintenancePlan {
-                gc: Some(GcConfig::default()),
-                ..MaintenancePlan::default()
-            },
-        )
+    let response = admin
+        .run_maintenance(&namespace, MaintenanceRunRequest::Gc(GcRequest::default()))
         .await
         .expect("run the admin GC step");
-    let gc = step.gc.expect("a GC plan reports its pass");
+    let gc = match response {
+        MaintenanceRunResponse::Gc(gc) => Some(gc),
+        _ => None,
+    }
+    .expect("a GC request should return a GC response");
     assert!(
         gc.retained_candidates > 0,
         "the live namespace gives the pass candidates to retain"
@@ -364,14 +360,17 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
     // A writer's own step, under the same budget and the same namespace
     // shape, publishes the delta merge. That is what proves the merge was
     // there to take.
-    let step = scheduled
-        .run_maintenance(&automatic, metadata_plan())
+    let response = scheduled
+        .run_maintenance(&automatic, metadata_request())
         .await
         .expect("run a writer-scheduled step");
+    let metadata = match response {
+        MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
+        _ => None,
+    }
+    .expect("a metadata request should return a metadata response");
     assert_eq!(
-        step.metadata_maintenance
-            .expect("a metadata plan reports its upkeep")
-            .reorganize,
+        metadata.reorganize,
         ReorganizeStepOutcome::UnitPublished,
         "an amortizing planner takes the delta merge above the frozen base"
     );
@@ -387,12 +386,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         .await
         .expect("run the explicit compaction");
     assert!(
-        matches!(
-            outcome,
-            MetadataCompactionOutcome::Ran(
-                loonfs_core::MetadataCompactionJobOutcome::Published { .. }
-            )
-        ),
+        matches!(outcome.outcome, MetadataCompactionOutcome::Published { .. }),
         "the explicit call must run and publish the job rather than a delta merge, got {outcome:?}"
     );
 
@@ -446,14 +440,17 @@ async fn a_standalone_step_reports_the_compaction_the_explicit_call_runs() {
     let standalone = standalone.starve_reorganization_row_budget(budget);
     sustained_writes(&writer, &standalone, &namespace).await;
 
-    let step = standalone
-        .run_maintenance(&namespace, metadata_plan())
+    let response = standalone
+        .run_maintenance(&namespace, metadata_request())
         .await
         .expect("run a standalone step");
+    let metadata = match response {
+        MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
+        _ => None,
+    }
+    .expect("a metadata request should return a metadata response");
     assert_eq!(
-        step.metadata_maintenance
-            .expect("a metadata plan reports its upkeep")
-            .reorganize,
+        metadata.reorganize,
         ReorganizeStepOutcome::CompactionRequired,
         "a step with nowhere to run a job says the namespace needs one"
     );
@@ -463,12 +460,7 @@ async fn a_standalone_step_reports_the_compaction_the_explicit_call_runs() {
         .await
         .expect("run the explicit compaction");
     assert!(
-        matches!(
-            outcome,
-            MetadataCompactionOutcome::Ran(
-                loonfs_core::MetadataCompactionJobOutcome::Published { .. }
-            )
-        ),
+        matches!(outcome.outcome, MetadataCompactionOutcome::Published { .. }),
         "and the explicit call runs it, got {outcome:?}"
     );
 }

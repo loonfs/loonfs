@@ -7,15 +7,16 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CheckpointOwnerSummary, CommitId, CreateCheckpointOptions, CreateNamespaceOptions,
-    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsWriter, MaintenancePlan,
-    ManifestNo, MetadataCompactionOutcome, NamespaceId, PutFileOptions, ReorganizeStepOutcome,
-    RuntimeError, SharedObjectStore, WalFlushStepOutcome,
+    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsWriter,
+    MaintenanceRunRequest, MaintenanceRunResponse, ManifestNo, MetadataCompactionOutcome,
+    NamespaceId, PutFileOptions, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
 };
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectEnvelope, ControlObjectKind,
     HeadState, HeadStateEnvelope,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
+use loonfs_api::{AdvanceRetentionRequest, GcRequest, MetadataCompactionRequest};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, wal_head, wal_segment_prefix,
 };
@@ -154,12 +155,6 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
         .expect("read diagnostics");
     assert_eq!(diagnostics.live_snapshots, 1);
     assert_eq!(diagnostics.live_checkpoints, 2);
-
-    let step = fs
-        .maintenance_step_namespace_blocking(&source, MaintenancePlan::metadata())
-        .expect("run maintenance");
-    assert_eq!(step.status_before.live_snapshots, 0);
-    assert_eq!(step.status_before.live_checkpoints, 0);
 }
 
 /// Pointers a head published before the accelerator was sized to cover the
@@ -255,7 +250,14 @@ fn namespace_diagnostics_and_step_reject_missing_namespace() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_step_namespace_blocking(&namespace_id, MaintenancePlan::metadata()),
+        fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1)),
+        ErrorCode::NamespaceNotFound,
+    );
+    assert_core_error_kind(
+        fs.maintenance_run_namespace_blocking(
+            &namespace_id,
+            MaintenanceRunRequest::Gc(GcRequest::default()),
+        ),
         ErrorCode::NamespaceNotFound,
     );
 }
@@ -277,9 +279,32 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_head_is_gone() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_step_namespace_blocking(&namespace_id, MaintenancePlan::metadata()),
+        fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1)),
         ErrorCode::NamespaceNotFound,
     );
+    assert_core_error_kind(
+        fs.maintenance_run_namespace_blocking(
+            &namespace_id,
+            MaintenanceRunRequest::Gc(GcRequest::default()),
+        ),
+        ErrorCode::NamespaceNotFound,
+    );
+
+    let deleted_namespace = NamespaceId::parse("deleted").expect("namespace id");
+    fs.create_namespace_blocking(&deleted_namespace, CreateNamespaceOptions::default())
+        .expect("create namespace for deletion");
+    block_on(
+        fs.writer
+            .delete_namespace(&deleted_namespace, DeleteNamespaceOptions::default()),
+    )
+    .expect("delete namespace");
+    let response = fs
+        .maintenance_run_namespace_blocking(
+            &deleted_namespace,
+            MaintenanceRunRequest::Gc(GcRequest::default()),
+        )
+        .expect("GC accepts a deleted namespace");
+    assert!(matches!(response, MaintenanceRunResponse::Gc(_)));
 }
 
 #[test]
@@ -298,12 +323,10 @@ fn maintenance_step_below_threshold_is_not_needed() {
     )
     .expect("put file");
 
-    let step = fs
-        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(2))
+    let response = fs
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
         .expect("maintenance step");
-    assert_eq!(step.namespace_id, namespace_id);
-    assert_eq!(step.status_before.wal_tail_segments, 1);
-    assert_eq!(upkeep(&step).wal_flush, WalFlushStepOutcome::NotNeeded);
+    assert_eq!(upkeep(&response).wal_flush, WalFlushStepOutcome::NotNeeded);
 }
 
 #[test]
@@ -322,12 +345,11 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     )
     .expect("put file");
 
-    let step = fs
-        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+    let response = fs
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("maintenance step");
-    assert_eq!(step.status_before.head_seq, ChangeSeq(1));
     assert_eq!(
-        upkeep(&step).wal_flush,
+        upkeep(&response).wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(1)
         }
@@ -353,7 +375,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
 }
 
 #[test]
-fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
+fn metadata_run_does_not_advance_retention() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "step-retention-opt-in-test");
     let namespace_id = namespace_id("demo");
@@ -368,18 +390,15 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
     )
     .expect("put file");
 
-    // A plan that names only upkeep flushes, and reports no retention at
-    // all — replay history is never surrendered unnamed.
-    let step = fs
-        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+    let response = fs
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("step without retention");
     assert_eq!(
-        upkeep(&step).wal_flush,
+        upkeep(&response).wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(1)
         }
     );
-    assert_eq!(step.retention, None);
     assert_eq!(
         fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status")
@@ -387,22 +406,16 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
         ChangeSeq(0)
     );
 
-    // Naming it advances the floor to the flushed manifest head.
-    let step = fs
-        .maintenance_step_namespace_blocking(
+    let response = fs
+        .maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenancePlan {
-                advance_retention: true,
-                ..metadata_plan(1)
-            },
+            MaintenanceRunRequest::Retention(AdvanceRetentionRequest {}),
         )
         .expect("step with retention");
-    assert_eq!(
-        step.retention
-            .expect("retention selected")
-            .retention_floor_seq,
-        ChangeSeq(1)
-    );
+    let MaintenanceRunResponse::Retention(retention) = response else {
+        panic!("retention request returned a different response")
+    };
+    assert_eq!(retention.retention_floor_seq, ChangeSeq(1));
 
     // A plan naming retention alone is the same opt-in.
     fs.put_file_bytes_blocking(
@@ -412,48 +425,18 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put second file");
-    fs.maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+    fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("flush second segment");
-    let step = fs
-        .maintenance_step_namespace_blocking(
+    let response = fs
+        .maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenancePlan {
-                advance_retention: true,
-                ..MaintenancePlan::default()
-            },
+            MaintenanceRunRequest::Retention(AdvanceRetentionRequest {}),
         )
         .expect("retention-only step");
-    assert_eq!(
-        step.retention
-            .expect("retention selected")
-            .retention_floor_seq,
-        ChangeSeq(2)
-    );
-    assert_eq!(
-        step.metadata_maintenance, None,
-        "an unnamed action reports nothing"
-    );
-}
-
-#[test]
-fn a_plan_that_names_nothing_is_rejected() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "empty-plan-test");
-    let namespace_id = namespace_id("demo");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    let error = fs
-        .maintenance_step_namespace_blocking(&namespace_id, MaintenancePlan::default())
-        .expect_err("an empty plan should fail");
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    match error {
-        RuntimeError::Config(message) => assert!(
-            message.contains("at least one action"),
-            "unexpected message: {message}"
-        ),
-        other => panic!("expected config error, got {other:?}"),
-    }
+    let MaintenanceRunResponse::Retention(retention) = response else {
+        panic!("retention request returned a different response")
+    };
+    assert_eq!(retention.retention_floor_seq, ChangeSeq(2));
 }
 
 #[test]
@@ -494,8 +477,6 @@ fn the_typed_wrappers_are_single_action_steps() {
         "the upkeep pass reports its reorganization half rather than hiding it"
     );
 
-    // The same request written out longhand: a metadata-only plan at a
-    // one-segment threshold, which is all the wrapper is.
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/second.txt",
@@ -503,19 +484,17 @@ fn the_typed_wrappers_are_single_action_steps() {
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put second file");
-    let longhand = fs
-        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+    let metadata = fs
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("upkeep-only step");
     assert_eq!(
-        upkeep(&longhand).wal_flush,
+        upkeep(&metadata).wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(2)
         },
-        "the wrapper and the step it delegates to are the same request"
+        "the metadata request runs only metadata maintenance"
     );
 
-    // Retention keeps a name of its own because of what it costs, and the
-    // floor it reports is the one the restricted step reports.
     let checkpoint = fs
         .create_checkpoint_blocking(&namespace_id)
         .expect("create checkpoint");
@@ -523,23 +502,35 @@ fn the_typed_wrappers_are_single_action_steps() {
         .advance_retention_floor_blocking(&namespace_id)
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, checkpoint.checkpoint_seq);
-    let longhand = fs
-        .maintenance_step_namespace_blocking(
+    let retention = fs
+        .maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenancePlan {
-                advance_retention: true,
-                ..MaintenancePlan::default()
-            },
+            MaintenanceRunRequest::Retention(AdvanceRetentionRequest {}),
         )
         .expect("retention-only step");
-    assert_eq!(
-        longhand
-            .retention
-            .expect("retention selected")
-            .retention_floor_seq,
-        advanced.retention_floor_seq,
-        "advancing an already-advanced floor is idempotent through either name"
-    );
+    let MaintenanceRunResponse::Retention(retention) = retention else {
+        panic!("retention request returned a different response")
+    };
+    assert_eq!(retention.retention_floor_seq, advanced.retention_floor_seq);
+
+    let gc = fs
+        .maintenance_run_namespace_blocking(
+            &namespace_id,
+            MaintenanceRunRequest::Gc(GcRequest::default()),
+        )
+        .expect("GC run");
+    assert!(matches!(gc, MaintenanceRunResponse::Gc(_)));
+
+    let compaction = fs
+        .maintenance_run_namespace_blocking(
+            &namespace_id,
+            MaintenanceRunRequest::MetadataCompaction(MetadataCompactionRequest {}),
+        )
+        .expect("metadata compaction run");
+    assert!(matches!(
+        compaction,
+        MaintenanceRunResponse::MetadataCompaction(_)
+    ));
     assert_eq!(
         fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status")
@@ -563,7 +554,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put first file");
-    fs.maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+    fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("first maintenance step");
 
     fs.put_file_bytes_blocking(
@@ -574,7 +565,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     )
     .expect("put second file");
     let step = fs
-        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("second maintenance step");
     assert_eq!(
         upkeep(&step).wal_flush,
@@ -624,8 +615,10 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
         .expect("create namespace");
     // A namespace that has published no manifest has no runs to rebuild.
     assert_eq!(
-        block_on(fs.admin.compact_metadata(&namespace_id)).expect("compact an empty namespace"),
-        MetadataCompactionOutcome::NoWork
+        block_on(fs.admin.compact_metadata(&namespace_id))
+            .expect("compact an empty namespace")
+            .outcome,
+        MetadataCompactionOutcome::NotNeeded
     );
 
     // Enough flushes to put the manifest's delta run count over the fold
@@ -650,7 +643,9 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
     // this call reports exactly that: it published the unit the planner
     // chose, as the next maintenance step would have, and ran no job.
     assert_eq!(
-        block_on(fs.admin.compact_metadata(&namespace_id)).expect("plan a compaction"),
+        block_on(fs.admin.compact_metadata(&namespace_id))
+            .expect("plan a compaction")
+            .outcome,
         MetadataCompactionOutcome::BoundedMergePublished
     );
     assert_ne!(
@@ -697,21 +692,19 @@ fn maintenance_step_counts_segments_not_commits() {
     assert_eq!(status.head_seq, ChangeSeq(2));
     assert_eq!(status.wal_tail_segments, 1);
 
-    let step = fs
-        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(2))
+    let response = fs
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
         .expect("maintenance step");
-    assert_eq!(upkeep(&step).wal_flush, WalFlushStepOutcome::NotNeeded);
+    assert_eq!(upkeep(&response).wal_flush, WalFlushStepOutcome::NotNeeded);
 
     fs.mutate_blocking(&namespace_id, create_directory_request("create-c", "/c"))
         .expect("second segment commit");
 
-    let step = fs
-        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(2))
+    let response = fs
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
         .expect("maintenance step at segment threshold");
-    assert_eq!(step.status_before.head_seq, ChangeSeq(3));
-    assert_eq!(step.status_before.wal_tail_segments, 2);
     assert_eq!(
-        upkeep(&step).wal_flush,
+        upkeep(&response).wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(3)
         }
@@ -738,7 +731,7 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
 
     raw_store.fail_root_cas();
     let step = fs
-        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("maintenance step should not fail on metadata root publish race");
 
     assert_eq!(

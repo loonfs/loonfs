@@ -83,7 +83,8 @@ pub use loonfs_api::{
     DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileBytes, FileRevision,
     FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcResponse, InodeId, InodeKind,
     ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListSnapshotsResponse, MaintenanceStepResponse, ManifestNo,
+    ListPathEntriesResponse, ListSnapshotsResponse, MaintenanceRunRequest, MaintenanceRunResponse,
+    ManifestNo, MetadataCompactionOutcome, MetadataCompactionRequest, MetadataCompactionResponse,
     MetadataMaintenanceResponse, NameKey, Namespace, NamespaceDiagnostics, NamespaceId, Page,
     PageRequest, PaginationPolicy, PathEntry, PathEntryKind, ReleaseCheckpointResponse,
     ReleaseSnapshotResponse, ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates,
@@ -119,7 +120,8 @@ pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 pub mod wire {
     pub use loonfs_api::{
         AdvanceRetentionRequest, CreateCheckpointRequest, CreateSnapshotRequest,
-        ExtendSnapshotRequest, GcRequest, MaintenanceStepRequest, MetadataMaintenanceRequest,
+        ExtendSnapshotRequest, GcRequest, MaintenanceRunRequest, MetadataCompactionRequest,
+        MetadataMaintenanceRequest,
     };
 }
 
@@ -194,7 +196,7 @@ pub use cache::RuntimeCacheStats;
 pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
-    MetadataCompactionOutcome, PathEntriesPager, TrashPager,
+    PathEntriesPager, TrashPager,
 };
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use maintenance_runner::{
@@ -202,11 +204,12 @@ pub use maintenance_runner::{
     MaintenanceStepConclusion, MaintenanceStepReport, NamespacePublication,
 };
 pub use options::{
-    CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, CreateSnapshotOptions, DeleteOptions, DirectMultipartUploadOptions,
-    ListChangesOptions, ListInodeChildrenOptions, ListPathEntriesOptions, MaintenancePlan,
-    MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
-    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
+    gc_config_from_request, CommitOptions, CopyOptions, CreateCheckpointOptions,
+    CreateDirectoryOptions, CreateNamespaceOptions, CreateSnapshotOptions, DeleteOptions,
+    DirectMultipartUploadOptions, ListChangesOptions, ListInodeChildrenOptions,
+    ListPathEntriesOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
+    ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

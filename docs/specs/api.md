@@ -157,7 +157,7 @@ hoc.
 | `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable`, `disable`, and `gc` routes. | The maintenance half of the grep capability, and independent of `query.grep`: searching an index and keeping one built are separately deployable, so a deployment may advertise either key alone. A deployment that maintains no index answers all four routes `not_supported` with this key. |
 | `filesystem.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `filesystem.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
+| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance run with `kind` set to `gc` (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
 | `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `filesystem.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. |
 | `filesystem.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
@@ -769,7 +769,7 @@ The table below lists the retry class for every v0 operation.
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
 | Release a checkpoint | `release_checkpoint` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; records owned by another operation are rejected) |
-| Run maintenance | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs` |
+| Run one maintenance job | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs`; the body names one job with `kind` |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable`; idempotent |
@@ -805,32 +805,25 @@ segment reorganization is in progress. A client waiting for the index to catch u
 captures one sequence before it starts waiting and stops there, rather than
 chasing a head that keeps moving.
 
-A maintenance step selects its actions by naming them, and runs the ones it
-named in a fixed order:
+A maintenance run body names exactly one job with `kind`:
 
-| Field | Action |
-| --- | --- |
-| `metadata_maintenance` | Folds the visible WAL tail into metadata segments and advances the metadata root once the tail reaches `max_wal_tail_segments`, then merges one bounded metadata reorganization unit. The two are one action: folding a tail is what creates the delta runs a merge consumes. |
-| `retention` | Advances the retention floor to the flushed manifest head. |
-| `gc` | Runs one bounded garbage-collection pass. |
+| `kind` | Fields | Result |
+| --- | --- | --- |
+| `metadata` | Optional `max_wal_tail_segments` | `wal_flush` and `reorganize` outcomes |
+| `metadata_compaction` | None | Compaction `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
+| `gc` | Optional `grace_window_ms`, `max_objects`, and `cursor` | The collection result |
+| `retention` | None | `retention_floor_seq` |
 
-Every field above is an options object. Include a field to select that action; an empty object uses the server defaults. `retention` has no options yet, so its value must be an empty object.
-
-A body that names no action is rejected as `invalid_request`, which includes
-sending no body at all. None of the actions creates a checkpoint record.
-
-This request selects all three actions:
+The response carries the same `kind` and that job's result. None of the jobs creates a checkpoint record.
 
 ```json
-{"metadata_maintenance":{"max_wal_tail_segments":8},"retention":{},"gc":{"max_objects":1024}}
+{"kind":"gc","max_objects":1024}
 ```
 
-Each selected action reports under the same field that selected it. `metadata_maintenance` contains `wal_flush` and `reorganize`, `retention` contains `retention_floor_seq`, and `gc` contains the collection result. An absent field means the action was not selected. `status_before.live_snapshots` and `status_before.live_checkpoints` are zero because a maintenance step does not list checkpoints. Compare `retention.retention_floor_seq` with `status_before.retention_floor_seq` to see whether the floor moved. Races and supersessions are outcomes, not errors.
+Races and supersessions are outcomes, not errors.
 
-Outcome names describe what the step observed. The same name has the same meaning in every maintenance response.
-
-A deleted namespace accepts a step that names `gc` alone, which is how its
-reclaimable state is collected; naming anything else is refused with
+A deleted namespace accepts only a run with `kind` set to `gc`, which is how
+its reclaimable state is collected; naming anything else is refused with
 `namespace_deleted`, because a tombstone has nothing to flush, reorganize,
 or retain.
 
@@ -853,7 +846,7 @@ self-hosting guide names the call.
 
 `root_advanced` means another publisher updated the metadata root first. The manifest written by this step remains unreferenced, and a later GC pass can delete it. A later maintenance step retries the reorganization.
 
-Inside `metadata_maintenance`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request includes `retention`. Inside `gc`, `grace_window_ms` overrides the grace window, `max_objects` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
+For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the run uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window, `max_objects` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
 `max_objects` bounds the whole pass, from its first read to its last, and
 not only the candidates it enumerates. Building the live root set spends it
 too: the head and metadata root together, the retention floor, each
@@ -1053,7 +1046,7 @@ independent.
 The first is the **metadata retention floor**. It limits how far back clients
 can replay the WAL. Advancing the floor makes older WAL segments eligible for
 garbage collection. It advances only through an explicit request:
-`POST .../runs` with a body naming `retention`, or
+`POST .../runs` with body `{"kind":"retention"}`, or
 `loonfs maintenance retention advance`. It does not remove file revisions.
 
 The second is the **content reclamation grace**, which is slightly longer than
@@ -1463,7 +1456,7 @@ releasable after deletion. Releasing a fork-owned checkpoint remains rejected.
 Deletion itself reclaims nothing, but a deleted namespace's derived state —
 WAL segments, metadata segments and manifests, and checkpoint records that
 protect nothing live — becomes garbage once the tombstone is in place. A
-maintenance step that selects `gc` alone runs against the tombstone and ages
+maintenance run with `kind` set to `gc` runs against the tombstone and ages
 that state out under the normal grace rules; the head survives as the
 tombstone so the id stays retired. Content blobs live in a shared content
 store outside the namespace prefix, and the same pass reclaims each one

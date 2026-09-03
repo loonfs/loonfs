@@ -12,7 +12,8 @@ use crate::NamespaceDiagnostics;
 use crate::{
     AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions,
     CreateSnapshotOptions, ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse,
-    ListSnapshotsResponse, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceOptions,
+    ListSnapshotsResponse, MaintenanceRunRequest, MaintenanceRunResponse,
+    MetadataCompactionOutcome, MetadataCompactionResponse, MetadataMaintenanceOptions,
     MetadataMaintenanceResponse, NamespaceId, ReleaseCheckpointResponse, ReleaseSnapshotResponse,
     ReorganizeStepOutcome, SharedObjectStore, SnapshotSummary, WalFlushStepOutcome,
 };
@@ -27,29 +28,6 @@ use tracing::Instrument;
 #[cfg(test)]
 mod tests;
 
-/// What one explicit [`FsAdmin::compact_metadata`] call did.
-///
-/// The job's own endings are [`loonfs_core::MetadataCompactionJobOutcome`],
-/// unchanged from what background work reports for the same job. The three
-/// variants beside it are the ways a call runs no job at all.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MetadataCompactionOutcome {
-    /// No family group has outgrown a bounded reorganization step and nothing
-    /// was published: either the namespace needed no upkeep at all, or the
-    /// bounded unit the planner chose lost the root race and a later call
-    /// takes it again.
-    NoWork,
-    /// The planner chose a bounded merge instead, and this call published it,
-    /// exactly as an ordinary maintenance step would have. No family group
-    /// has outgrown a step, so no job ran.
-    BoundedMergePublished,
-    /// A job already holds this namespace's compaction slot. One runs at a
-    /// time per namespace, so this call ran none.
-    AlreadyRunning,
-    /// A job ran here, and this is how it ended.
-    Ran(loonfs_core::MetadataCompactionJobOutcome),
-}
-
 /// What one reorganization unit left for its caller.
 enum ReorganizationStep {
     /// The unit is finished, and this is what it did.
@@ -61,6 +39,39 @@ enum ReorganizationStep {
 
 /// A pager over active checkpoints.
 pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, RuntimeError>;
+
+fn metadata_compaction_response(
+    outcome: loonfs_core::MetadataCompactionJobOutcome,
+) -> MetadataCompactionResponse {
+    let outcome = match outcome {
+        loonfs_core::MetadataCompactionJobOutcome::Published {
+            manifest_no,
+            rows_read,
+            rows_written,
+            input_bytes,
+            output_bytes,
+            output_segments,
+        } => MetadataCompactionOutcome::Published {
+            manifest_no,
+            rows_read,
+            rows_written,
+            input_bytes,
+            output_bytes,
+            output_segments: u64::try_from(output_segments).unwrap_or(u64::MAX),
+        },
+        loonfs_core::MetadataCompactionJobOutcome::Cancelled => {
+            MetadataCompactionOutcome::Cancelled
+        }
+        loonfs_core::MetadataCompactionJobOutcome::Abandoned => {
+            MetadataCompactionOutcome::Abandoned
+        }
+        loonfs_core::MetadataCompactionJobOutcome::Fenced => MetadataCompactionOutcome::Fenced,
+        loonfs_core::MetadataCompactionJobOutcome::Superseded => {
+            MetadataCompactionOutcome::Superseded
+        }
+    };
+    MetadataCompactionResponse { outcome }
+}
 
 impl FsAdmin {
     /// A mutating engine under this handle's actor identity.
@@ -180,7 +191,7 @@ impl FsAdmin {
         }
     }
 
-    async fn load_maintenance_status_before(
+    async fn load_maintenance_status(
         &self,
         namespace_id: &NamespaceId,
         collects_only: bool,
@@ -203,22 +214,16 @@ impl FsAdmin {
         Ok(Self::namespace_diagnostics(diagnostics, 0, 0))
     }
 
-    /// Runs one bounded maintenance step against a namespace.
-    ///
-    /// The step runs the actions present in `plan`, in this order: metadata
-    /// maintenance, retention advancement, then garbage collection. A plan
-    /// with no actions is rejected.
-    ///
-    /// Each selected action has its own report. Concurrent publication is
-    /// reported as an outcome rather than an error.
+    /// Runs one maintenance job for one namespace.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.step",
+        name = "loonfs.maintenance.run",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.step",
+            operation = "maintenance.run",
             namespace_id = %namespace_id,
+            kind = tracing::field::Empty,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
@@ -226,65 +231,66 @@ impl FsAdmin {
     pub async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
-        mut plan: MaintenancePlan,
-    ) -> Result<MaintenanceStepResponse> {
+        request: MaintenanceRunRequest,
+    ) -> Result<MaintenanceRunResponse> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        if plan.is_empty() {
-            return Err(RuntimeError::Config(
-                "a maintenance step must select at least one action".to_owned(),
-            ));
+        let kind = match &request {
+            MaintenanceRunRequest::Metadata(_) => "metadata",
+            MaintenanceRunRequest::MetadataCompaction(_) => "metadata_compaction",
+            MaintenanceRunRequest::Gc(_) => "gc",
+            MaintenanceRunRequest::Retention(_) => "retention",
+        };
+        span.record("kind", kind);
+        match request {
+            MaintenanceRunRequest::Metadata(request) => {
+                let options = MetadataMaintenanceOptions::from_request(request)?;
+                self.maintain_metadata(namespace_id, options)
+                    .await
+                    .map(MaintenanceRunResponse::Metadata)
+            }
+            MaintenanceRunRequest::MetadataCompaction(_) => self
+                .compact_metadata(namespace_id)
+                .await
+                .map(MaintenanceRunResponse::MetadataCompaction),
+            MaintenanceRunRequest::Gc(request) => {
+                self.load_maintenance_status(namespace_id, true).await?;
+                let mut config = crate::options::gc_config_from_request(request);
+                config
+                    .max_objects
+                    .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
+                self.gc_namespace(namespace_id, &config)
+                    .await
+                    .map(MaintenanceRunResponse::Gc)
+            }
+            MaintenanceRunRequest::Retention(_) => {
+                self.load_maintenance_status(namespace_id, false).await?;
+                self.run_retention(namespace_id)
+                    .await
+                    .map(MaintenanceRunResponse::Retention)
+            }
         }
-        if let Some(gc) = &mut plan.gc {
-            // Maintenance steps always bound GC work. Direct `gc_namespace`
-            // calls remain unbounded unless the caller sets a limit.
-            gc.max_objects
-                .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
-        }
-        let collects_only = plan.gc.is_some() && plan.metadata.is_none() && !plan.advance_retention;
-        let status_before = self
-            .load_maintenance_status_before(namespace_id, collects_only)
-            .await?;
-
-        let metadata_maintenance = if let Some(options) = plan.metadata {
-            Some(
-                self.run_metadata(namespace_id, options, &status_before)
-                    .await?,
-            )
-        } else {
-            None
-        };
-        let retention = if plan.advance_retention {
-            Some(self.run_retention(namespace_id).await?)
-        } else {
-            None
-        };
-        let gc = if let Some(config) = &plan.gc {
-            Some(self.gc_namespace(namespace_id, config).await?)
-        } else {
-            None
-        };
-
-        Ok(MaintenanceStepResponse {
-            namespace_id: namespace_id.clone(),
-            status_before,
-            metadata_maintenance,
-            retention,
-            gc,
-        })
     }
 
-    /// Flushes the visible WAL tail after it reaches the threshold, then runs
+    /// Flushes the WAL tail once it reaches `options.max_wal_tail_segments`, then runs
     /// one bounded reorganization step.
-    async fn run_metadata(
+    pub async fn maintain_metadata(
         &self,
         namespace_id: &NamespaceId,
         options: MetadataMaintenanceOptions,
-        status_before: &NamespaceDiagnostics,
     ) -> Result<MetadataMaintenanceResponse> {
-        let flush = options.flush_is_due(status_before.wal_tail_segments);
-        self.flush_then_reorganize(namespace_id, flush, status_before.head_seq)
-            .await
+        let status = self.load_maintenance_status(namespace_id, false).await?;
+        let flush = options.flush_is_due(status.wal_tail_segments);
+        let response = self
+            .flush_then_reorganize(namespace_id, flush, status.head_seq)
+            .await?;
+        tracing::debug!(
+            wal_tail_segments_before = status.wal_tail_segments,
+            wal_flush = ?response.wal_flush,
+            reorganize = ?response.reorganize,
+            "metadata maintenance step concluded"
+        );
+        Ok(response)
     }
 
     /// Optionally flushes the WAL tail, then runs one reorganization step.
@@ -509,7 +515,7 @@ impl FsAdmin {
     pub async fn compact_metadata(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<MetadataCompactionOutcome> {
+    ) -> Result<MetadataCompactionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let spec = match self
             .reorganize_once(
@@ -520,9 +526,15 @@ impl FsAdmin {
         {
             ReorganizationStep::CompactionPlanned(spec) => spec,
             ReorganizationStep::Concluded(ReorganizeStepOutcome::UnitPublished) => {
-                return Ok(MetadataCompactionOutcome::BoundedMergePublished)
+                return Ok(MetadataCompactionResponse {
+                    outcome: MetadataCompactionOutcome::BoundedMergePublished,
+                })
             }
-            ReorganizationStep::Concluded(_) => return Ok(MetadataCompactionOutcome::NoWork),
+            ReorganizationStep::Concluded(_) => {
+                return Ok(MetadataCompactionResponse {
+                    outcome: MetadataCompactionOutcome::NotNeeded,
+                })
+            }
         };
         let Some(writer) = &self.writer else {
             // Standalone handles have no shared concurrency limit.
@@ -530,15 +542,17 @@ impl FsAdmin {
             let outcome = self
                 .run_streaming_compaction(namespace_id, &spec, &cancellation)
                 .await;
-            return Ok(MetadataCompactionOutcome::Ran(outcome?));
+            return outcome.map(metadata_compaction_response);
         };
         let Some(mut claim) = writer.compactions.claim(namespace_id, &spec) else {
-            return Ok(MetadataCompactionOutcome::AlreadyRunning);
+            return Ok(MetadataCompactionResponse {
+                outcome: MetadataCompactionOutcome::AlreadyRunning,
+            });
         };
         if !claim.admitted().await {
             let outcome = loonfs_core::MetadataCompactionJobOutcome::Cancelled;
             self.core.instruments().compaction_not_admitted();
-            return Ok(MetadataCompactionOutcome::Ran(outcome));
+            return Ok(metadata_compaction_response(outcome));
         }
         let outcome = self
             .run_streaming_compaction(namespace_id, &spec, claim.cancellation())
@@ -547,7 +561,7 @@ impl FsAdmin {
             outcome,
             Ok(loonfs_core::MetadataCompactionJobOutcome::Published { .. })
         ));
-        Ok(MetadataCompactionOutcome::Ran(outcome?))
+        outcome.map(metadata_compaction_response)
     }
 
     /// Runs one streaming compaction to its end and says what that end was.
@@ -624,10 +638,8 @@ impl FsAdmin {
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.
     ///
     /// Bounded calls return an enumeration cursor; every resume rebuilds the
-    /// current live roots. A step sweeps only when asked — here, or through
-    /// [`MaintenancePlan::gc`] — and the one thing that asks on its own is a
-    /// writer's collection job, which schedules a pass for each upload
-    /// deadline that writer created.
+    /// current live roots. A pass runs only when asked here or by a writer's
+    /// collection job, which schedules one for each upload deadline it created.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.gc_namespace",
@@ -1052,12 +1064,8 @@ impl FsAdmin {
     /// Advances the namespace retention floor when a verified checkpoint
     /// makes it safe.
     ///
-    /// One name over the one step path: exactly [`Self::run_maintenance`]
-    /// with a retention-only plan. It keeps a name of its own because of what
-    /// it costs — advancing the floor abandons the replay history below it,
-    /// which is a decision rather than upkeep. Nothing schedules it: no
-    /// maintenance job exists for retention, so an unattended deployment keeps
-    /// its whole history until a call arrives here.
+    /// Advancing the floor abandons the replay history below it. Nothing
+    /// schedules it, so an unattended deployment keeps its whole history.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.advance_retention_floor",
@@ -1075,18 +1083,8 @@ impl FsAdmin {
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let step = self
-            .run_maintenance(
-                namespace_id,
-                MaintenancePlan {
-                    advance_retention: true,
-                    ..MaintenancePlan::default()
-                },
-            )
-            .await?;
-        Ok(step
-            .retention
-            .expect("a plan selecting a retention advance reports it"))
+        self.load_maintenance_status(namespace_id, false).await?;
+        self.run_retention(namespace_id).await
     }
 
     /// Shared implementation for metadata maintenance and [`Self::flush_wal`].
@@ -1104,9 +1102,7 @@ impl FsAdmin {
         .await
     }
 
-    /// The one implementation both the step and
-    /// [`Self::advance_retention_floor`] reach. Reached only through a plan
-    /// that names it: nothing surrenders replay history without being asked.
+    /// Shared implementation for retention maintenance operations.
     async fn run_retention(&self, namespace_id: &NamespaceId) -> Result<AdvanceRetentionResponse> {
         let result = self
             .engine(namespace_id)

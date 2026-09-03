@@ -8,7 +8,9 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::CommitRequest as CoreCommitRequest;
 use loonfs::{CreateNamespaceOptions, FsWriter, ListChangesOptions, StoreConfig};
-use loonfs_api::v0::{AdvanceRetentionRequest, CreateCheckpointRequest, MaintenanceStepRequest};
+use loonfs_api::v0::{
+    AdvanceRetentionRequest, CreateCheckpointRequest, MaintenanceRunRequest, MaintenanceRunResponse,
+};
 use loonfs_api::{
     v0::{CommittedChange, FilesystemChange},
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, ContentRef,
@@ -376,15 +378,13 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
         .client
         .run_maintenance(
             &namespace,
-            &MaintenanceStepRequest {
-                retention: Some(AdvanceRetentionRequest::default()),
-                ..MaintenanceStepRequest::default()
-            },
+            &MaintenanceRunRequest::Retention(AdvanceRetentionRequest {}),
         )
         .await
-        .expect("advance retention floor")
-        .retention
-        .expect("a step selecting the retention advance reports it");
+        .expect("advance retention floor");
+    let MaintenanceRunResponse::Retention(advanced) = advanced else {
+        panic!("retention request returned a different response")
+    };
     assert!(
         advanced.retention_floor_seq >= committed.committed_seq,
         "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",

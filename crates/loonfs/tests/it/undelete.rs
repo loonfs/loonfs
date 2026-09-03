@@ -387,7 +387,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         // this short history; force the flush so reopen reads Set and
         // Revoke rows out of durable segments, not WAL replay.
         let step = fs
-            .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+            .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
             .expect("checkpoint the revoke into durable segments");
         let step = upkeep(&step);
         assert!(
@@ -423,7 +423,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .committed_seq;
         assert!(second_deletion > deletion);
         let step = fs
-            .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+            .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
             .expect("checkpoint the deletion");
         let step = upkeep(&step);
         assert!(
@@ -441,7 +441,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         ))
         .expect("undelete a checkpointed deletion after reopen");
         let step = fs
-            .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+            .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
             .expect("checkpoint the second revoke");
         let step = upkeep(&step);
         assert!(

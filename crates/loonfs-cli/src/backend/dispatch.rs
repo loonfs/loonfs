@@ -18,7 +18,7 @@ use loonfs_api::{
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, CommitResponse,
     ContentRef, CreateCheckpointRequest, DeleteNamespaceResponse, GrepRequest, GrepResponse,
     InodeId, ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse,
-    ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse, Namespace, NamespaceId,
+    ListTrashResponse, MaintenanceRunRequest, MaintenanceRunResponse, Namespace, NamespaceId,
     PathEntry, ReleaseCheckpointResponse, RevisionNo, UploadId,
 };
 use loonfs_client::{
@@ -823,15 +823,12 @@ impl ResolvedTarget {
         }
     }
 
-    /// Runs one bounded maintenance step: WAL flush, metadata
-    /// reorganization, retention advance, and — when `request.gc` opts in —
-    /// one garbage-collection pass. `request.only` restricts it to a single
-    /// sub-step.
+    /// Runs one maintenance job.
     pub(crate) async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceStepRequest,
-    ) -> Result<MaintenanceStepResponse, CliError> {
+        request: MaintenanceRunRequest,
+    ) -> Result<MaintenanceRunResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.run_maintenance(namespace_id, request).await,
             Self::Remote(target) => Ok(target
