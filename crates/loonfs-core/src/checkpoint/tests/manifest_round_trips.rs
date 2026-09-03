@@ -40,7 +40,6 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
 
     let snapshot = crate::WalFoldSnapshot {
         head: projection.head.clone(),
-        head_etag: projection.head_etag().to_owned(),
         basis: projection.basis().clone(),
         retention_floor_seq: projection.retention_floor_seq,
         tail_state: Arc::clone(&projection.tail_state),

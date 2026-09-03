@@ -180,7 +180,6 @@ pub struct NamespaceCommitEnginePublishResult {
 #[derive(Debug, Clone)]
 pub struct WalFoldSnapshot {
     pub head: HeadState,
-    pub head_etag: String,
     pub basis: MetadataBasis,
     pub retention_floor_seq: Option<ChangeSeq>,
     pub tail_state: Arc<MetadataState>,
@@ -300,7 +299,6 @@ impl NamespaceCommitEngine {
             .as_ref()
             .map(|projection| WalFoldSnapshot {
                 head: projection.head.clone(),
-                head_etag: projection.head_etag().to_owned(),
                 basis: projection.basis().clone(),
                 retention_floor_seq: projection.retention_floor_seq,
                 tail_state: Arc::clone(&projection.tail_state),

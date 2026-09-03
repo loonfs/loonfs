@@ -1453,6 +1453,13 @@ impl NamespacePublisher {
                     state.admission = PublisherAdmissionState::Deleted;
                     take_queued_waiters(&mut state)
                 };
+                if let Err(error) = self.wait_for_fold().await {
+                    tracing::info!(
+                        namespace_id = %self.namespace_id,
+                        error = %error,
+                        "wal fold failed while the namespace was deleted"
+                    );
+                }
                 // The publisher is terminal; drop it from the registry map
                 // so the map stays bounded by live namespaces. Clones still
                 // in flight fail fast on `Deleted`, and a later submission

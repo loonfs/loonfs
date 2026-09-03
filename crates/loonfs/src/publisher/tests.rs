@@ -17,7 +17,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
 use loonfs_api::{AbsolutePath, ActorId, ActorRef, ChangeSeq, DestinationBehavior};
+use loonfs_core::test_support::append_wal_segments;
+use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
+use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
@@ -1879,9 +1882,14 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn successful_delete_evicts_the_namespace_publisher() {
+async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publisher() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let blocking = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::family(DurableObjectFamily::MetadataManifest),
+        OperationClass::Put,
+    ));
+    let store = blocking.clone() as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer(store.clone()).await;
     writer
@@ -1889,18 +1897,58 @@ async fn successful_delete_evicts_the_namespace_publisher() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
+    append_wal_segments(
+        blocking.inner(),
+        &namespace_id,
+        CHECKPOINT_AT_WAL_SEGMENTS - 1,
+        &MutationContext {
+            writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+            now_ms: 1_000,
+        },
+    )
+    .await
+    .expect("seed the WAL tail below the fold threshold");
 
+    blocking.block_next();
     registry
         .submit_candidate(
             namespace_id.clone(),
             CommitCandidate::new(create_directory_request("before", "before")),
         )
         .await
-        .expect("commit before delete");
+        .expect("threshold-crossing commit before delete");
+    blocking.wait_until_blocked().await;
     assert_eq!(registry.shared.lock_state().publishers.len(), 1);
+    let publisher = registry
+        .shared
+        .lock_state()
+        .publishers
+        .get(&namespace_id)
+        .cloned()
+        .expect("publisher exists while the fold is parked");
 
-    registry
-        .submit_delete(namespace_id.clone(), DeleteNamespaceOptions::default())
+    let mut delete = {
+        let registry = registry.clone();
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move {
+            registry
+                .submit_delete(namespace_id, DeleteNamespaceOptions::default())
+                .await
+        })
+    };
+    while !matches!(
+        publisher_state(&publisher).admission,
+        PublisherAdmissionState::Deleted
+    ) {
+        tokio::task::yield_now().await;
+    }
+    if let Ok(completed) = timeout(Duration::from_millis(100), &mut delete).await {
+        blocking.release();
+        panic!("delete completed while its earlier fold was parked: {completed:?}");
+    }
+
+    blocking.release();
+    settle_delete(delete, "delete waiting for the earlier fold")
         .await
         .expect("delete namespace");
     assert!(
@@ -1918,8 +1966,7 @@ async fn successful_delete_evicts_the_namespace_publisher() {
         .await
         .expect_err("submission after delete");
     assert_eq!(late.code(), ErrorCode::NamespaceDeleted);
-    registry.close_admission();
-    registry.drain().await.expect("drain after delete");
+    writer.shutdown().await.expect("shut down after delete");
 }
 
 #[tokio::test(flavor = "current_thread")]
