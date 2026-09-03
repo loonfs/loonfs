@@ -166,12 +166,26 @@ async fn build_folded_namespace(
     decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest")
 }
 
-fn manifest_segment_keys(manifest: &NamespaceManifestEnvelope) -> BTreeSet<String> {
+/// The families the open-time tail wave covers; the rest load lazily.
+const OPEN_PREFETCH_FAMILIES: [MetadataRowFamily; 6] = [
+    MetadataRowFamily::DirentryBinds,
+    MetadataRowFamily::Inodes,
+    MetadataRowFamily::DirentryChildBinds,
+    MetadataRowFamily::DirentryUnbinds,
+    MetadataRowFamily::Revisions,
+    MetadataRowFamily::RevisionsByInodeDesc,
+];
+
+fn manifest_segment_keys(
+    manifest: &NamespaceManifestEnvelope,
+    prefetched: bool,
+) -> BTreeSet<String> {
     manifest
         .payload
         .runs
         .iter()
         .flat_map(|run| &run.segments)
+        .filter(|descriptor| OPEN_PREFETCH_FAMILIES.contains(&descriptor.family) == prefetched)
         .map(metadata_segment_object_key)
         .collect()
 }
@@ -195,8 +209,10 @@ async fn open_prefetches_segment_tails_in_one_wave_and_zero_disables_it() {
     ] {
         assert!(families.contains(&family));
     }
-    let segment_keys = manifest_segment_keys(&manifest);
+    let segment_keys = manifest_segment_keys(&manifest, true);
+    let lazy_keys = manifest_segment_keys(&manifest, false);
     assert!(segment_keys.len() > 1);
+    assert!(!lazy_keys.is_empty());
 
     let recording = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("open local-fs store"),
@@ -223,6 +239,7 @@ async fn open_prefetches_segment_tails_in_one_wave_and_zero_disables_it() {
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(open_segment_gets.len(), segment_keys.len());
+    assert!(open_gets.iter().all(|(key, _)| !lazy_keys.contains(key)));
     assert_eq!(
         open_segment_gets
             .iter()
@@ -287,7 +304,7 @@ async fn segment_tail_prefetch_failures_do_not_fail_open() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("prefetch-failure").expect("valid namespace id");
     let manifest = build_folded_namespace(temp_dir.path(), &namespace_id).await;
-    let segment_count = manifest_segment_keys(&manifest).len();
+    let segment_count = manifest_segment_keys(&manifest, true).len();
     let failing = Arc::new(FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("open local-fs store"),
         KeyPredicate::metadata_segment(),

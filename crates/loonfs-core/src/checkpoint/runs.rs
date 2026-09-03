@@ -32,18 +32,16 @@ pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 10] = [
     MetadataRowFamily::Attributes,
 ];
 
-/// Path resolution families come first so open prefetching serves point lookups first.
-pub(super) const OPEN_PREFETCH_ROW_FAMILIES: [MetadataRowFamily; 10] = [
+/// The families the open-time tail wave fetches, path walk first. The other
+/// four families load lazily: reads touch them rarely, and every tail the
+/// wave fetches is paid by the read that opened the view.
+pub(super) const OPEN_PREFETCH_ROW_FAMILIES: [MetadataRowFamily; 6] = [
     MetadataRowFamily::DirentryBinds,
     MetadataRowFamily::Inodes,
     MetadataRowFamily::DirentryChildBinds,
     MetadataRowFamily::DirentryUnbinds,
     MetadataRowFamily::Revisions,
     MetadataRowFamily::RevisionsByInodeDesc,
-    MetadataRowFamily::Tombstones,
-    MetadataRowFamily::ActiveDeletions,
-    MetadataRowFamily::CommitReceipts,
-    MetadataRowFamily::Attributes,
 ];
 
 /// Metadata families merged together as one consistency unit.
