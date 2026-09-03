@@ -11,11 +11,12 @@ use crate::{
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page, PageCursor,
-    PaginationPolicy, WriterId, FEATURE_ATTRIBUTES, FEATURE_INODES_LIST_CHILDREN,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_SNAPSHOTS, LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
+    PaginationPolicy, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    FEATURE_ATTRIBUTES, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
+    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    PLANE_FILESYSTEM_V0, PLANE_MAINTENANCE_V0, PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     MetadataSegmentCache, StoredMetadataBlockCache, WalTailProjectionCache,
@@ -205,9 +206,9 @@ impl ReadCore {
     pub(crate) fn get_capabilities(&self) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
-            planes: vec![
-                PLANE_FILESYSTEM_V0.to_owned(),
-                PLANE_MAINTENANCE_V0.to_owned(),
+            api_groups: vec![
+                API_GROUP_FILESYSTEM_V0.to_owned(),
+                API_GROUP_MAINTENANCE_V0.to_owned(),
             ],
             features: BTreeMap::from([
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),

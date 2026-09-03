@@ -1,4 +1,4 @@
-//! The `query/v0` plane: derived-index reads.
+//! The `query/v0` API group: derived-index reads.
 
 use super::handlers_uploads::current_unix_ms;
 use super::query_params::{parse_boolean_query_param, required_query_param, resolve_page_limit};
@@ -86,7 +86,7 @@ pub(super) async fn grep(
     let service = state.grep_service();
     // Grep's own segments come off the instrumented store every LoonFS
     // request in this process is measured on; its filesystem reads go
-    // through the same reader handle the core planes serve from.
+    // through the same reader handle the core API groups serve from.
     let store = state.writer.object_store();
     let reads = NamespaceReads::new(&state.reader, &namespace_id);
     let response = service

@@ -553,7 +553,7 @@ mod tests {
     fn capability_document(protocol_version: &str) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: protocol_version.to_owned(),
-            planes: vec!["filesystem/v0".to_owned()],
+            api_groups: vec!["filesystem/v0".to_owned()],
             features: BTreeMap::new(),
             limits: BTreeMap::new(),
         }

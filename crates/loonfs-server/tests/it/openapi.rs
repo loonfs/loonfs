@@ -959,7 +959,7 @@ fn proxy_cursor_list_operations_keep_pagination_metadata() {
 }
 
 #[test]
-fn openapi_publishes_namespace_diagnostics_in_the_maintenance_plane() {
+fn openapi_publishes_namespace_diagnostics_in_the_maintenance_api_group() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
     )

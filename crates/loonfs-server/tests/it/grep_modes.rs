@@ -9,10 +9,9 @@ use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions};
 use loonfs::{FsMaintenance, FsReader};
 use loonfs_api::v0::{GrepGcResponse, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
-    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId,
+    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, API_GROUP_QUERY_V0,
     FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, LIMIT_QUERY_GREP_DEFAULT,
     LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    PLANE_QUERY_V0,
 };
 use loonfs_grep::root::{load_grep_root, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
@@ -46,9 +45,12 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
         .features
         .contains_key(FEATURE_MAINTENANCE_GREP_INDEX));
     assert!(
-        !capabilities.planes.iter().any(|p| p == PLANE_QUERY_V0),
+        !capabilities
+            .api_groups
+            .iter()
+            .any(|api_group| api_group == API_GROUP_QUERY_V0),
         "a deployment that answers `not_supported` on every query route must not advertise \
-         the plane"
+         the API group"
     );
     for limit in grep_limits() {
         assert!(!capabilities.limits.contains_key(limit));
@@ -258,7 +260,10 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         capabilities.supports(FEATURE_MAINTENANCE_GREP_INDEX),
         "a deployment doing both jobs advertises both keys"
     );
-    assert!(capabilities.planes.iter().any(|p| p == PLANE_QUERY_V0));
+    assert!(capabilities
+        .api_groups
+        .iter()
+        .any(|api_group| api_group == API_GROUP_QUERY_V0));
     for limit in grep_limits() {
         assert!(capabilities.limits.contains_key(limit));
     }
@@ -463,7 +468,10 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
     // maintenance no.
     let capabilities = capabilities(&router).await;
     assert!(capabilities.supports(FEATURE_QUERY_GREP));
-    assert!(capabilities.planes.iter().any(|p| p == PLANE_QUERY_V0));
+    assert!(capabilities
+        .api_groups
+        .iter()
+        .any(|api_group| api_group == API_GROUP_QUERY_V0));
     assert!(
         !capabilities
             .features
@@ -555,12 +563,15 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         capabilities.supports(FEATURE_MAINTENANCE_GREP_INDEX),
         "the index this deployment maintains is maintained through these routes"
     );
-    // The maintenance key is parented by the maintenance plane the runtime
+    // The maintenance key is parented by the maintenance API group the runtime
     // already advertises, which is why a deployment that serves no searches
-    // can still advertise it: a `query.` key here would name a plane this
+    // can still advertise it: a `query.` key here would name an API group this
     // document does not carry.
     assert!(
-        !capabilities.planes.iter().any(|p| p == PLANE_QUERY_V0),
+        !capabilities
+            .api_groups
+            .iter()
+            .any(|api_group| api_group == API_GROUP_QUERY_V0),
         "maintaining an index is not serving one"
     );
     let error = assert_not_supported(
@@ -766,7 +777,7 @@ async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
 
 /// This deployment's capability document, checked for well-formedness on
 /// the way past: every advertised feature key has to be parented by an
-/// advertised plane, and each grep mode advertises a different set.
+/// advertised API group, and each grep mode advertises a different set.
 async fn capabilities(router: &Router) -> CapabilityDocument {
     let document: CapabilityDocument =
         response_json(send(router, Method::GET, "/v0/capabilities", None).await).await;
@@ -929,7 +940,7 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
 }
 
 /// The api.md section 2.1 example describes a reference deployment: the
-/// runtime's filesystem and maintenance planes plus the query plane the server composes
+/// runtime's filesystem and maintenance API groups plus the query API group the server composes
 /// from `loonfs-grep`. `loonfs`'s `capability_conformance` pins the
 /// runtime's half; this pins the merged document a served deployment
 /// answers with. A deployment adds its own limits on top, so the example is
@@ -956,8 +967,8 @@ fn assert_served_document_covers_the_spec_example(served: &CapabilityDocument) {
     served.validate().expect("served document is well-formed");
     assert_eq!(served.protocol_version, expected.protocol_version);
     assert_eq!(
-        served.planes, expected.planes,
-        "the served planes drifted from the api.md section 2.1 example"
+        served.api_groups, expected.api_groups,
+        "the served API groups drifted from the api.md section 2.1 example"
     );
     assert_eq!(
         served_features, expected.features,

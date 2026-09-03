@@ -32,7 +32,7 @@ Control-plane state should still be durable when losing it on restart would viol
 
 ## 3. Client usage patterns
 
-A client pattern is defined by the protocol surface a client uses, not by what the client is: a CLI, desktop app, or service may implement several. (API *planes* — `filesystem/v0`, `maintenance/v0` — are a different concept; see `api.md`.)
+A client pattern is defined by the protocol surface a client uses, not by what the client is: a CLI, desktop app, or service may implement several. (API groups — `filesystem/v0`, `maintenance/v0` — are a different concept; see `api.md`.)
 
 | Client pattern | Primary surface | Typical state |
 | --- | --- | --- |

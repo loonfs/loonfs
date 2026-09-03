@@ -366,7 +366,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Enables the grep index on a namespace (maintenance plane).
+    /// Enables the grep index on a namespace (maintenance API group).
     pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -377,7 +377,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Disables the grep index on a namespace (maintenance plane).
+    /// Disables the grep index on a namespace (maintenance API group).
     pub(crate) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -388,7 +388,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Reads the namespace's grep-index lifecycle (maintenance plane).
+    /// Reads the namespace's grep-index lifecycle (maintenance API group).
     pub(crate) async fn get_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -404,7 +404,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Runs one bounded grep-index garbage-collection pass (maintenance plane).
+    /// Runs one bounded grep-index garbage-collection pass (maintenance API group).
     pub(crate) async fn gc_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -759,7 +759,7 @@ impl ResolvedTarget {
         }
     }
 
-    // --- maintenance plane (`maintenance/v0`) ---
+    // --- maintenance API group (`maintenance/v0`) ---
 
     /// Creates or reuses a named, user-owned checkpoint pinning the
     /// namespace's current view.

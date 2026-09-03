@@ -26,7 +26,7 @@ fn embedded_capabilities_are_the_canonical_document() {
     let data = json_data(&output);
     assert_eq!(data["kind"], "capabilities");
     assert_eq!(data["protocol_version"], PROTOCOL_VERSION);
-    assert!(data["planes"]
+    assert!(data["api_groups"]
         .as_array()
         .is_some_and(|rows| !rows.is_empty()));
     assert!(data["features"].is_object());
@@ -37,7 +37,7 @@ fn embedded_capabilities_are_the_canonical_document() {
     let rendered = stdout_string(&human);
     for heading in [
         "protocol version",
-        "planes",
+        "API groups",
         "enabled features",
         "disabled features",
         "limits",
@@ -137,7 +137,7 @@ fn remote_doctor_checks_transport_auth_health_and_capabilities() {
     let harness = Harness::new();
     let document = CapabilityDocument {
         protocol_version: PROTOCOL_VERSION.to_owned(),
-        planes: vec!["filesystem/v0".to_owned()],
+        api_groups: vec!["filesystem/v0".to_owned()],
         features: BTreeMap::new(),
         limits: BTreeMap::new(),
     };

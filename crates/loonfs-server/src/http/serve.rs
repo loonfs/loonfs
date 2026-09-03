@@ -276,7 +276,7 @@ pub async fn app(
     // installed on: a directory that cannot be owned fails startup here
     // rather than after a runtime is already running on it.
     let local_cache = open_local_cache(&config, &metrics).await?;
-    // Grep reads and checkpoints through the same handles the HTTP planes
+    // Grep reads and checkpoints through the same handles the HTTP API groups
     // use, so it is composed after them. Nothing has to be wired back into
     // the writer for its publications to reach the index: the job says on
     // the trait that publications concern it, and registering it is what

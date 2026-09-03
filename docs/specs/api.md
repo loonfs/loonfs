@@ -1,9 +1,9 @@
 # LoonFS API Specification
 
 This document is the normative specification of the LoonFS client-facing API:
-planes, capability discovery, the standard error contract, operation
+API groups, capability discovery, the standard error contract, operation
 statefulness, and the representative v0 HTTP binding. It is **normative where implemented** — a
-deployment chooses which optional planes to expose, but every op it does
+deployment chooses which optional API groups to expose, but every op it does
 expose must have the shape specified here.
 
 The companion document is `format.md` — the durable format, mandatory for
@@ -14,32 +14,32 @@ server: both expose the same operations, advertise their capabilities the
 same way, and report unsupported surface area with the same errors. The only
 difference a client observes is *which* capabilities a deployment advertises.
 
-## 1. Planes
+## 1. API groups
 
-Planes are coherent areas of responsibility with their own endpoint sets,
-not resource types. They are **all-or-nothing** conformance units: a deployment MUST NOT advertise a
-plane unless every required op in it is implemented. Optional behavior
-within a plane is expressed as **named features** (section 2).
+API groups are coherent areas of responsibility with their own endpoint sets,
+not resource types. They are **all-or-nothing** conformance units: a deployment MUST NOT advertise an
+API group unless every required op in it is implemented. Optional behavior
+within an API group is expressed as **named features** (section 2).
 
-| Plane | Ops | Status |
+| API group | Ops | Status |
 | --- | --- | --- |
 | `filesystem/v0` | Path and inode reads, path mutations, uploads, the change feed, namespace state, capability discovery, and standard errors. Namespace lifecycle, snapshots, attributes, inode child listing, and direct transfers are features. | **Mandatory** for any conforming deployment |
 | `maintenance/v0` | Namespace diagnostics, checkpoints, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep-index maintenance as a feature. | Optional |
 | `query/v0` | Content search over derived indexes as the `query.grep` feature. | Optional |
 
-Planes are client contracts. They do not describe node roles or deployment topology.
+API groups are client contracts. They do not describe node roles or deployment topology.
 
 Notes:
 
 - An embedded engine is `filesystem/v0` (with the namespace-management features enabled) plus
   `maintenance/v0` (maintenance is manually triggerable). A minimal server that
-  wraps the embedded engine over HTTP advertises the same two planes and is
+  wraps the embedded engine over HTTP advertises the same two API groups and is
   fully conformant.
 - A hosted server may disable individual features per tenant and typically
   hides `maintenance/v0` because maintenance runs automatically. Both choices are
   fully conformant.
-- Planes version independently (`filesystem/v0` could coexist with a future
-  `maintenance/v1`). The plane name — the segment before the slash — is the stable
+- API groups version independently (`filesystem/v0` could coexist with a future
+  `maintenance/v1`). The group name — the segment before the slash — is the stable
   identity that feature keys reference.
 - No queue or job-scheduling semantics exist in this document. `maintenance/v0`
   exposes *trigger* and *status* shapes only; how work is scheduled is
@@ -52,7 +52,7 @@ When new behavior arrives, three questions decide where it belongs:
 1. Does it change bytes or metadata another implementation must interpret?
    It belongs in `format.md`, and it is mandatory.
 2. Is it a client-visible operation whose shape should be uniform wherever it
-   exists? It belongs here, inside a plane or as a named feature.
+   exists? It belongs here, inside an API group or as a named feature.
 3. Is it about *how* work gets done — queues, schedulers, caches? That is
    implementation freedom and belongs in no specification document.
 
@@ -66,16 +66,16 @@ embedded engine exposes the same document as a constant. SDK gating logic is
 therefore identical for both backends.
 
 The example below is the reference deployment: the runtime's own `filesystem/v0`
-and `maintenance/v0` planes plus the `query/v0` plane the server composes from the
+and `maintenance/v0` API groups plus the `query/v0` API group the server composes from the
 grep extension. A host that composes no extension advertises neither that
-plane nor the two grep feature keys: `query.grep` for searching an index
+API group nor the two grep feature keys: `query.grep` for searching an index
 and `maintenance.grep.index` for administering one. Clients gate on the document
 either way.
 
 ```json
 {
   "protocol_version": "v0",
-  "planes": ["filesystem/v0", "maintenance/v0", "query/v0"],
+  "api_groups": ["filesystem/v0", "maintenance/v0", "query/v0"],
   "features": {
     "maintenance.grep.index": true,
     "filesystem.namespaces.create": true,
@@ -105,17 +105,17 @@ either way.
 | Field | Meaning |
 | --- | --- |
 | `protocol_version` | The protocol generation, currently `v0`. |
-| `planes` | The advertised planes. Each entry is `plane/version`. |
+| `api_groups` | The advertised API groups. Each entry is `group/version`. |
 | `features` | Named features and whether this deployment supports them. An absent key means unsupported. |
 | `limits` | Advisory numeric limits clients may use to pre-validate requests. May be empty. |
 
 Rules:
 
-- Planes are all-or-nothing for their required ops; clients never probe
-  op-by-op inside an advertised plane.
+- API groups are all-or-nothing for their required ops; clients never probe
+  op-by-op inside an advertised API group.
 - **Feature-key rule (normative):** every feature key is dotted and its first
-  segment MUST be the plane name of an advertised plane. A feature whose
-  first segment does not match an advertised plane is malformed; clients
+  segment MUST be the group name of an advertised API group. A feature whose
+  first segment does not match an advertised API group is malformed; clients
   MUST reject the document or ignore that key.
 - Clients must ignore unknown feature keys and unknown document fields.
 - Limits are advisory; the authoritative outcome is the server's response to
@@ -166,7 +166,7 @@ hoc.
 | `filesystem.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
-`maintenance/v0`'s only feature key is `maintenance.grep.index`; the rest of that plane
+`maintenance/v0`'s only feature key is `maintenance.grep.index`; the rest of that API group
 is required ops.
 
 Namespace listing is intentionally not supported in v0. Callers must address
@@ -363,11 +363,11 @@ opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
   `not_supported` error with its `feature` name, so gating logic — check the
   capability document, fall back on `not_supported` — is identical against
   either backend.
-- Generated SDKs group operations by resource, not by plane. `capabilities`,
+- Generated SDKs group operations by resource, not by API group. `capabilities`,
   `namespaces`, `snapshots`, `commits`, `changes`, `files`, `inodes`, `trash`,
-  and `uploads` sit at the client root. The `maintenance` plane keeps its prefix as
+  and `uploads` sit at the client root. The `maintenance` API group keeps its prefix as
   a nested group, as in `maintenance.checkpoints.create`, because a hosted
-  deployment may hide the whole plane. A method on a group's own resource is
+  deployment may hide the whole API group. A method on a group's own resource is
   a bare verb: `create`, `retrieve`, `list`, `delete`, or the action, as in
   `fork` and `grep`. A sub-resource of one file or inode is verb plus noun on
   the parent, as in `files.listRevisions` and `inodes.listChildren`. The
@@ -680,7 +680,7 @@ API that implements them.
 HTTP is one transport binding for these abstract operations. It is not the
 underlying semantics.
 
-GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `release`, `enable`, `disable`, `gc`, `abort`, `complete`, and `probe`. `/v0/maintenance/` is the only plane prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
+GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `release`, `enable`, `disable`, `gc`, `abort`, `complete`, and `probe`. `/v0/maintenance/` is the only API group prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
 
 Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `release_checkpoint`. Operation IDs are the wire registry only. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, which every operation must appear in or be explicitly excluded from.
 
@@ -973,7 +973,7 @@ uploads. That trust comes from the endpoint allowlist behind the
 `uploads.direct_put` capability, because a probe exercises the server's own
 request path and never a presigned capability handed to a client.
 
-Routes under `/v0/maintenance/` belong to the `maintenance/v0` plane. `GET /v0/namespaces/{ns}/grep` belongs to `query/v0`. Everything else shown belongs to `filesystem/v0`.
+Routes under `/v0/maintenance/` belong to the `maintenance/v0` API group. `GET /v0/namespaces/{ns}/grep` belongs to `query/v0`. Everything else shown belongs to `filesystem/v0`.
 
 When a GC pass sees a future reclamation deadline, its response includes
 `next_reclamation_at_ms`, the soonest time still ahead of the pass at which
@@ -2579,8 +2579,8 @@ A conforming server must:
    out of namespace history and the change feed;
 10. preserve per-commit idempotency, ordering, and change-feed identity even
     when physically batching logical commits in a WAL segment;
-11. advertise its planes and features truthfully through the capability
-    document, never advertising a plane whose required ops are not
+11. advertise its API groups and features truthfully through the capability
+    document, never advertising an API group whose required ops are not
     implemented; and
 12. answer unimplemented or disabled surface area with `not_supported` (and
     its `feature` name), never with undefined behavior.
@@ -2607,7 +2607,7 @@ reconciliation logic.
 These patterns are defined by the surface a client uses, not by whether the
 implementation is a CLI, desktop app, web app, SDK, or service. A single
 client may implement more than one pattern. (These are usage patterns, not
-the conformance planes of section 1.)
+the conformance API groups of section 1.)
 
 ### 8.1 Path-oriented client
 
@@ -2785,7 +2785,7 @@ matter.
 | Commit validation | Authoritative | Supplies preconditions and commit ids where needed. |
 | Namespace visibility | Authoritative | Observes committed sequence receipts and change-feed deltas. |
 | Long-running transfer progress | Authoritative for sessions that affect correctness | Responsible for local temp files, local progress, retry behavior, and any higher-level orchestration outside the core model. |
-| Capability truthfulness | Advertises only implemented planes and features. | Gates on the capability document; reconciles via `not_supported`. |
+| Capability truthfulness | Advertises only implemented API groups and features. | Gates on the capability document; reconciles via `not_supported`. |
 
 ## 11. Extension points
 
@@ -2794,7 +2794,7 @@ such as indexers, notification services, preview builders, or policy engines
 should consume committed changes rather than becoming part of the core
 mutation path.
 
-New client-visible operations arrive as plane ops or named features here;
+New client-visible operations arrive as API group ops or named features here;
 new durable state arrives in `format.md`; new scheduling machinery is
 implementation freedom. Cross-store discovery — naming authority, search,
 ownership, quotas — is out of scope for this specification.
