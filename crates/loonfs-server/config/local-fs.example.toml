@@ -73,6 +73,13 @@ writer_id = "loonfs-server-local"
 # Decoded-byte budget for the metadata segment cache; unlimited by default.
 #metadata_segment_cache_max_decoded_bytes = 268435456
 
+# Optional reader anchor staleness window in milliseconds. A read may serve a
+# head up to this old; a write through this server is visible to its own reads
+# immediately because publishing seeds the anchor. The default is strong
+# consistency, which revalidates the cached anchor for every read.
+#[read_consistency]
+#bounded_staleness_ms = 500
+
 # Optional node-local cache of encoded metadata blocks, on this machine's own
 # disk. Omit the table and there is none: every metadata block the decoded
 # cache misses is read from object storage.

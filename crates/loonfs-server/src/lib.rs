@@ -12,8 +12,8 @@ mod trace;
 
 pub use config::{
     load_server_config, parse_server_config, GrepConfig, GrepMode, LocalCacheConfig,
-    MaintenanceMode, RuntimeCacheConfigOverrides, ServerConfig, ServerConfigError, StoreConfig,
-    TlsServerConfig,
+    MaintenanceMode, ReadConsistencyConfig, RuntimeCacheConfigOverrides, ServerConfig,
+    ServerConfigError, StoreConfig, TlsServerConfig,
 };
 #[cfg(feature = "openapi")]
 pub use http::openapi_document;

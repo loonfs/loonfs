@@ -8,7 +8,8 @@ use crate::fs::{should_invalidate_after_result, ReadCore};
 use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
 use crate::{
-    ChangeSeq, CheckpointId, CommitResponse, CoreError, NamespaceId, Recency, RuntimeCacheConfig,
+    ChangeSeq, CheckpointId, CommitResponse, CoreError, NamespaceId, ReadConsistency, Recency,
+    RuntimeCacheConfig,
 };
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
@@ -44,6 +45,19 @@ pub(crate) struct CachedControl<T> {
 pub(crate) struct CachedNamespaceAnchor {
     pub(crate) head: CachedControl<HeadState>,
     pub(crate) basis: MetadataBasis,
+    pub(crate) validated_at: tokio::time::Instant,
+}
+
+pub(crate) enum AnchorReuse {
+    /// Revalidate the cached anchor against the store before using it.
+    Revalidate,
+    /// Reuse the cached anchor when its head seq is at or above this seq.
+    /// A lower cached seq means the head has moved past the anchor, so the
+    /// anchor is revalidated whatever the configured consistency says.
+    AtLeast(ChangeSeq),
+    /// Reuse the cached anchor when the configured `ReadConsistency`
+    /// allows it; otherwise revalidate.
+    Configured,
 }
 
 /// Snapshot of runtime cache counters.
@@ -219,12 +233,11 @@ fn namespace_slot_is_live(
 }
 
 impl ReadCore {
-    /// Reuses the cached anchor when a cursor's head seq is at or below the cached head seq.
-    /// Revalidates every other cached anchor against the store.
+    /// Reuses or revalidates a cached namespace anchor as requested.
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
-        min_head_seq: Option<ChangeSeq>,
+        anchor_reuse: AnchorReuse,
     ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
         let cache_config = &self.inner.config.runtime_cache;
         if !self.control_cache_enabled() {
@@ -238,14 +251,34 @@ impl ReadCore {
             .control_cache()
             .cached_namespace_head(namespace_id);
         if let Some(head) = cached {
-            if min_head_seq.is_some_and(|min| head.head.state.seq >= min) {
+            let reuse = match anchor_reuse {
+                AnchorReuse::AtLeast(seq) => head.head.state.seq >= seq,
+                AnchorReuse::Configured => matches!(
+                    &self.inner.config.read_consistency,
+                    ReadConsistency::BoundedStaleness(window)
+                        if head.validated_at.elapsed() < *window
+                ),
+                AnchorReuse::Revalidate => false,
+            };
+            if reuse {
                 return Ok(head);
             }
             match self
                 .cached_control_identity_matches(&wal_head(namespace_id), &head.head.etag)
                 .await
             {
-                Ok(true) => return Ok(head),
+                Ok(true) => {
+                    let head = CachedNamespaceAnchor {
+                        validated_at: anchor_clock(),
+                        ..head
+                    };
+                    self.inner.control_cache().insert_namespace_head(
+                        namespace_id,
+                        head.clone(),
+                        cache_config.max_cached_namespaces,
+                    );
+                    return Ok(head);
+                }
                 Ok(false) => self
                     .inner
                     .control_cache()
@@ -282,9 +315,9 @@ impl ReadCore {
     pub(crate) async fn head_for_metadata_read(
         &self,
         namespace_id: &NamespaceId,
-        min_head_seq: Option<ChangeSeq>,
+        anchor_reuse: AnchorReuse,
     ) -> Result<CachedNamespaceAnchor> {
-        self.load_namespace_head_cached(namespace_id, min_head_seq)
+        self.load_namespace_head_cached(namespace_id, anchor_reuse)
             .await
             .map_err(|error| {
                 RuntimeError::Core(CoreError::MetadataProjection(
@@ -351,13 +384,13 @@ impl ReadCore {
     pub(crate) async fn pinned_read(
         &self,
         namespace_id: &NamespaceId,
-        min_head_seq: Option<ChangeSeq>,
+        anchor_reuse: AnchorReuse,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
         let anchor = self
-            .head_for_metadata_read(namespace_id, min_head_seq)
+            .head_for_metadata_read(namespace_id, anchor_reuse)
             .await?;
         let read_context = self.runtime_read_context(&anchor);
         Ok((self.reader_engine(namespace_id), read_context))
@@ -372,7 +405,9 @@ impl ReadCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.head_for_metadata_read(namespace_id, None).await?;
+        let live = self
+            .head_for_metadata_read(namespace_id, AnchorReuse::Configured)
+            .await?;
         let pinned = load_checkpoint_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -393,7 +428,9 @@ impl ReadCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.head_for_metadata_read(namespace_id, None).await?;
+        let live = self
+            .head_for_metadata_read(namespace_id, AnchorReuse::Configured)
+            .await?;
         let pinned = load_snapshot_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -419,6 +456,7 @@ impl ReadCore {
                 state: pinned.head,
             },
             basis: pinned.basis,
+            validated_at: anchor_clock(),
         });
         (self.reader_engine(namespace_id), read_context)
     }
@@ -427,12 +465,12 @@ impl ReadCore {
     pub(crate) async fn pinned_metadata_read(
         &self,
         namespace_id: &NamespaceId,
-        min_head_seq: Option<ChangeSeq>,
+        anchor_reuse: AnchorReuse,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let pinned = self.pinned_read(namespace_id, min_head_seq).await?;
+        let pinned = self.pinned_read(namespace_id, anchor_reuse).await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(pinned)
     }
@@ -442,10 +480,10 @@ impl ReadCore {
     pub(crate) async fn load_namespace_catalog_cached(
         &self,
         namespace_id: &NamespaceId,
-        min_head_seq: Option<ChangeSeq>,
+        anchor_reuse: AnchorReuse,
     ) -> Result<VerifiedNamespaceCatalogEntry> {
         let anchor = self
-            .head_for_metadata_read(namespace_id, min_head_seq)
+            .head_for_metadata_read(namespace_id, anchor_reuse)
             .await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(&anchor.head.state))
     }
@@ -483,6 +521,7 @@ impl ReadCore {
                     state: state.head,
                 },
                 basis: state.basis,
+                validated_at: anchor_clock(),
             },
             max_cached_namespaces,
         );
@@ -536,5 +575,13 @@ fn cached_anchor(
             state: head.state,
         },
         basis,
+        validated_at: anchor_clock(),
     }
+}
+
+#[allow(clippy::disallowed_methods)]
+// Anchor age is measured here and nowhere else; it decides when to look
+// at the store again, never what the store holds.
+fn anchor_clock() -> tokio::time::Instant {
+    tokio::time::Instant::now()
 }

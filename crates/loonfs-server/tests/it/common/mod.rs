@@ -11,7 +11,8 @@ use loonfs_api::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use loonfs_client::{Client, ClientConfig, ListPathEntriesOptions, NamespacePath};
 use loonfs_server::{
     app, serve_with_shutdown, AppOptions, GrepConfig, GrepMode, MaintenanceMode,
-    RuntimeCacheConfigOverrides, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
+    ReadConsistencyConfig, RuntimeCacheConfigOverrides, ServeError, ServerConfig, StoreConfig,
+    TlsServerConfig,
 };
 use loonfs_test_support::http::raw_agent;
 use std::collections::BTreeMap;
@@ -304,6 +305,7 @@ pub(crate) fn test_config(
         content_token_secret: content_token_secret.into(),
         writer_id: writer_id.to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        read_consistency: ReadConsistencyConfig::default(),
         local_cache: None,
         grep: GrepConfig {
             mode: GrepMode::ServeAndMaintain,

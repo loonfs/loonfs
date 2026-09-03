@@ -7,7 +7,7 @@ use super::{
     app, build_handles, request_log_severity, AppOptions, AppState, RequestLogSeverity,
     SharedObjectStore,
 };
-use crate::config::RuntimeCacheConfigOverrides;
+use crate::config::{ReadConsistencyConfig, RuntimeCacheConfigOverrides};
 use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -3519,6 +3519,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         content_token_secret: "test-content-token-secret".into(),
         writer_id: writer_id.to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        read_consistency: ReadConsistencyConfig::default(),
         local_cache: None,
         grep: crate::config::GrepConfig {
             mode: crate::config::GrepMode::ServeAndMaintain,

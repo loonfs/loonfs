@@ -2,7 +2,7 @@
 //! store, and runtime cache overrides.
 
 use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
-use loonfs::RuntimeCacheConfig;
+use loonfs::{ReadConsistency, RuntimeCacheConfig};
 use loonfs_api::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
 use loonfs_api::SecretString;
 use loonfs_grep::GrepWorkerConfig;
@@ -12,6 +12,7 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 use thiserror::Error;
 
 pub use loonfs_objectstore::StoreConfig;
@@ -44,6 +45,8 @@ pub struct ServerConfig {
     pub writer_id: String,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
+    #[serde(default)]
+    pub read_consistency: ReadConsistencyConfig,
     /// The node-local cache of encoded metadata blocks, if this deployment
     /// keeps one. Absent means no local cache: every metadata block read
     /// that misses the decoded cache goes to object storage, which is the
@@ -243,6 +246,12 @@ pub struct RuntimeCacheConfigOverrides {
     pub metadata_segment_cache_max_decoded_bytes: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadConsistencyConfig {
+    pub bounded_staleness_ms: Option<u64>,
+}
+
 /// Controls whether this server schedules maintenance automatically.
 ///
 /// `automatic` schedules metadata, garbage collection, and enabled grep
@@ -405,6 +414,14 @@ impl ServerConfig {
             config.metadata_segment_cache.max_decoded_bytes = value;
         }
         config
+    }
+
+    /// Resolves the reader consistency selected by this server.
+    pub fn read_consistency(&self) -> ReadConsistency {
+        match self.read_consistency.bounded_staleness_ms {
+            Some(window_ms) => ReadConsistency::BoundedStaleness(Duration::from_millis(window_ms)),
+            None => ReadConsistency::Strong,
+        }
     }
 
     /// Builds the object store selected by this server configuration.
@@ -637,6 +654,7 @@ mod tests {
     };
     use loonfs_test_support::EnvGuard;
     use std::fs;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     const AZURITE_ACCOUNT_KEY: &str =
@@ -1548,6 +1566,43 @@ root = "/tmp/loonfs-server"
             config.runtime_cache_config(),
             loonfs::RuntimeCacheConfig::default()
         );
+    }
+
+    #[test]
+    fn read_consistency_reaches_the_writer_setting_and_defaults_to_strong() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[read_consistency]
+bounded_staleness_ms = 500
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let config = load_server_config(&path).expect("load bounded staleness config");
+        assert_eq!(
+            config.read_consistency(),
+            loonfs::ReadConsistency::BoundedStaleness(Duration::from_millis(500))
+        );
+
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let config = load_server_config(&path).expect("load strong config");
+        assert_eq!(config.read_consistency(), loonfs::ReadConsistency::Strong);
     }
 
     #[test]

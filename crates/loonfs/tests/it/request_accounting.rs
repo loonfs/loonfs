@@ -6,7 +6,7 @@
 use loonfs::{
     CreateDirectoryOptions, CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
     MetadataMaintenanceOptions, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions,
-    SharedObjectStore,
+    ReadConsistency, SharedObjectStore,
 };
 use loonfs_api::AbsolutePath;
 
@@ -14,8 +14,9 @@ use loonfs_api::wire::manifest::{decode_namespace_manifest_json, RunTier};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordedGet, RecordingStore};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 const FILES: usize = 10_000;
@@ -238,6 +239,311 @@ async fn continuation_pages_reuse_the_cached_anchor() {
         ),
         (1, Some("/a")),
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn bounded_staleness_revalidates_once_per_window_and_delays_external_writes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let log = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = log.clone();
+    let namespace_id = NamespaceId::parse("bounded-reader").expect("valid namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("bounded-reader-setup")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("build setup writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .create_directory(
+            &namespace_id,
+            "/old",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create old directory");
+
+    let window = Duration::from_millis(500);
+    let reader = FsReader::builder_with_store(store.clone())
+        .read_consistency(ReadConsistency::BoundedStaleness(window))
+        .build()
+        .await
+        .expect("build bounded reader");
+    reader
+        .get_path_entry(&namespace_id, "/", Default::default())
+        .await
+        .expect("warm reader anchor");
+
+    tokio::time::advance(window + Duration::from_millis(1)).await;
+    log.reset();
+    for _ in 0..2 {
+        reader
+            .get_path_entry(&namespace_id, "/", Default::default())
+            .await
+            .expect("stat inside window");
+    }
+    assert_eq!(log.count(OperationClass::Head), 1);
+
+    tokio::time::advance(window + Duration::from_millis(1)).await;
+    reader
+        .get_path_entry(&namespace_id, "/", Default::default())
+        .await
+        .expect("stat after window");
+    assert_eq!(log.count(OperationClass::Head), 2);
+
+    let second_writer = FsWriter::builder_with_store(store)
+        .writer_id("bounded-reader-external")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("build external writer");
+    second_writer
+        .create_directory(
+            &namespace_id,
+            "/new",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create new directory");
+
+    let limit = PaginationPolicy::default()
+        .resolve_limit(Some(10))
+        .expect("valid limit");
+    log.reset();
+    let stale = reader
+        .list_path_entries_page(
+            &namespace_id,
+            "/",
+            PageRequest {
+                limit,
+                cursor: None,
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list inside window");
+    assert_eq!(
+        stale
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["/old"]),
+    );
+    assert_eq!(log.count(OperationClass::Head), 0);
+
+    tokio::time::advance(window + Duration::from_millis(1)).await;
+    let fresh = reader
+        .list_path_entries_page(
+            &namespace_id,
+            "/",
+            PageRequest {
+                limit,
+                cursor: None,
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list after window");
+    assert_eq!(
+        fresh
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["/new", "/old"]),
+    );
+    assert_eq!(log.count(OperationClass::Head), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cursor_ahead_of_a_bounded_anchor_revalidates_inside_the_window() {
+    let temp_dir = tempdir().expect("tempdir");
+    let log = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = log.clone();
+    let namespace_id = NamespaceId::parse("bounded-cursor").expect("valid namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("bounded-cursor-setup")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("build setup writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    for path in ["/b", "/c"] {
+        writer
+            .create_directory(
+                &namespace_id,
+                path,
+                CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("create directory");
+    }
+    let bounded = FsReader::builder_with_store(store.clone())
+        .read_consistency(ReadConsistency::BoundedStaleness(Duration::from_millis(
+            500,
+        )))
+        .build()
+        .await
+        .expect("build bounded reader");
+    bounded
+        .get_path_entry(&namespace_id, "/", Default::default())
+        .await
+        .expect("warm the bounded anchor");
+
+    writer
+        .create_directory(
+            &namespace_id,
+            "/a",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("advance the head past the bounded anchor");
+    let limit = PaginationPolicy::default()
+        .resolve_limit(Some(1))
+        .expect("valid limit");
+    let first = FsReader::builder_with_store(store)
+        .build()
+        .await
+        .expect("build strong reader")
+        .list_path_entries_page(
+            &namespace_id,
+            "/",
+            PageRequest {
+                limit,
+                cursor: None,
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list the first page at the new head");
+    let cursor: loonfs_api::DirectoryPageCursor = loonfs_api::decode_cursor(
+        first
+            .next_cursor
+            .as_deref()
+            .expect("first page has a cursor"),
+    )
+    .expect("decode the cursor");
+
+    log.reset();
+    let second = bounded
+        .list_path_entries_page(
+            &namespace_id,
+            "/",
+            PageRequest {
+                limit,
+                cursor: Some(cursor),
+            },
+            Default::default(),
+        )
+        .await
+        .expect("a cursor ahead of the cached anchor is served, not rejected");
+    assert_eq!(
+        (
+            log.count(OperationClass::Head),
+            second.entries.first().map(|entry| entry.path.as_str()),
+        ),
+        (1, Some("/b")),
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn strong_consistency_revalidates_every_stat_by_default() {
+    let temp_dir = tempdir().expect("tempdir");
+    let log = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = log.clone();
+    let namespace_id = NamespaceId::parse("strong-reader").expect("valid namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("strong-reader-setup")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("build setup writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+
+    let reader = FsReader::builder_with_store(store)
+        .build()
+        .await
+        .expect("build strong reader");
+    reader
+        .get_path_entry(&namespace_id, "/", Default::default())
+        .await
+        .expect("warm reader anchor");
+
+    log.reset();
+    for _ in 0..2 {
+        reader
+            .get_path_entry(&namespace_id, "/", Default::default())
+            .await
+            .expect("stat inside window");
+    }
+    assert_eq!(log.count(OperationClass::Head), 2);
+
+    tokio::time::advance(Duration::from_millis(501)).await;
+    reader
+        .get_path_entry(&namespace_id, "/", Default::default())
+        .await
+        .expect("stat after window");
+    assert_eq!(log.count(OperationClass::Head), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn writer_seeded_anchor_is_immediately_visible_without_revalidation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let log = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = log.clone();
+    let namespace_id = NamespaceId::parse("seeded-bounded-reader").expect("valid namespace id");
+    let writer = FsWriter::builder_with_store(store)
+        .writer_id("seeded-bounded-reader-writer")
+        .min_publish_interval_ms(0)
+        .read_consistency(ReadConsistency::BoundedStaleness(Duration::from_millis(
+            500,
+        )))
+        .build()
+        .await
+        .expect("build writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .create_directory(
+            &namespace_id,
+            "/new",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create directory");
+
+    log.reset();
+    let entry = writer
+        .reader()
+        .get_path_entry(&namespace_id, "/new", Default::default())
+        .await
+        .expect("read seeded directory");
+    assert_eq!(entry.path.as_str(), "/new");
+    assert_eq!(log.count(OperationClass::Head), 0);
 }
 
 #[allow(clippy::print_stdout)]

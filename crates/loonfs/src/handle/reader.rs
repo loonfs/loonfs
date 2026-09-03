@@ -4,8 +4,8 @@ use super::HandleBuilderCore;
 use crate::fs::ReadCore;
 use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::{
-    CapabilityDocument, Result, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
-    StoreConfig, TraceMode, TraceStoreKind,
+    CapabilityDocument, ReadConsistency, Result, RuntimeCacheConfig, RuntimeCacheStats,
+    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -13,8 +13,8 @@ use std::sync::Arc;
 ///
 /// `FsReader` reads namespace state, paths, content, revisions, and the change
 /// feed. It has no writer identity or session, cannot publish changes, and
-/// does not schedule maintenance. Reads check cached control state against
-/// durable state, so a standalone reader does not need writer coordination.
+/// does not schedule maintenance. Reads follow the configured consistency
+/// policy, which revalidates cached control state by default.
 ///
 /// The handle is runtime-bound: open it with `build().await` inside the
 /// Tokio runtime that will drive its reads. `FsReader` is cheap to clone.
@@ -72,6 +72,12 @@ impl FsReaderBuilder {
     /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.core.runtime_cache = runtime_cache;
+        self
+    }
+
+    /// Sets how reads revalidate cached namespace anchors.
+    pub fn read_consistency(mut self, read_consistency: ReadConsistency) -> Self {
+        self.core.read_consistency = read_consistency;
         self
     }
 

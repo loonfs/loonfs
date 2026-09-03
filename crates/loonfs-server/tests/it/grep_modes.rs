@@ -18,8 +18,8 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, AppOptions, GrepConfig, GrepMode, MaintenanceMode, RuntimeCacheConfigOverrides,
-    ServerConfig, StoreConfig,
+    app, AppOptions, GrepConfig, GrepMode, MaintenanceMode, ReadConsistencyConfig,
+    RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
 };
 use serde::de::DeserializeOwned;
 use std::num::NonZeroUsize;
@@ -679,6 +679,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         content_token_secret: "test-content-token-secret".into(),
         writer_id: format!("grep-mode-{mode:?}"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        read_consistency: ReadConsistencyConfig::default(),
         local_cache: None,
         grep: GrepConfig {
             mode,

@@ -169,6 +169,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
         ReadConfig {
             max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
+            read_consistency: crate::ReadConsistency::Strong,
             trace_mode: TraceMode::Remote,
             trace_store_kind: TraceStoreKind::LocalFs,
         },

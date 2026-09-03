@@ -7,8 +7,8 @@ use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver, PublisherRegistry};
 use crate::{
     CapabilityDocument, FsBackgroundWork, MaintenanceHandle, MaintenanceJob, MaintenanceJobId,
-    Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
-    TraceMode, TraceStoreKind,
+    ReadConsistency, Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError,
+    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::{MetadataSegmentCache, StoredMetadataBlockCache};
 use std::num::NonZeroUsize;
@@ -302,6 +302,13 @@ impl FsWriterBuilder {
     /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.core.runtime_cache = runtime_cache;
+        self
+    }
+
+    /// Sets consistency for reads through readers derived from this writer.
+    /// The writer's mutation paths always revalidate cached anchors.
+    pub fn read_consistency(mut self, read_consistency: ReadConsistency) -> Self {
+        self.core.read_consistency = read_consistency;
         self
     }
 

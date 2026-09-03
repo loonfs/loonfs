@@ -2,6 +2,7 @@
 
 use crate::trace::{TraceMode, TraceStoreKind};
 use crate::MetadataSegmentCacheConfig;
+use std::time::Duration;
 
 /// Default maximum namespaces retained in runtime caches.
 pub(crate) const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
@@ -35,10 +36,26 @@ pub(crate) struct ReadConfig {
     pub max_read_content_bytes: Option<u64>,
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
+    /// Cached namespace anchor consistency.
+    pub read_consistency: ReadConsistency,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
     /// Object-store kind label used by tracing.
     pub trace_store_kind: TraceStoreKind,
+}
+
+/// Controls how [`FsReader`](crate::FsReader) revalidates cached namespace
+/// anchors.
+///
+/// When [`RuntimeCacheConfig::max_cached_namespaces`] is zero, no anchor is
+/// cached, so every read loads fresh state regardless of this setting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ReadConsistency {
+    /// Every read revalidates its cached anchor against the store.
+    #[default]
+    Strong,
+    /// A read may reuse an anchor validated within this window.
+    BoundedStaleness(Duration),
 }
 
 /// Cache configuration for the embedded runtime. Every cache disables the

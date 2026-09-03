@@ -403,6 +403,7 @@ pub(super) async fn build_handles(
         .max_read_content_bytes(config.max_download_bytes)
         .max_concurrent_maintenance(config.max_concurrent_maintenance)
         .runtime_cache(config.runtime_cache_config())
+        .read_consistency(config.read_consistency())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());

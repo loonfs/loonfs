@@ -7,8 +7,8 @@ use crate::metrics::{
     fan_out_object_store_recorder, MetricsRecorder, ObjectStoreMetricsRecorder, RuntimeInstruments,
 };
 use crate::{
-    Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
-    TraceStoreKind,
+    ReadConsistency, Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
+    TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::{MetadataSegmentCache, StoredMetadataBlockCache};
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
@@ -29,6 +29,7 @@ pub(super) struct HandleBuilderCore {
     pub(super) source: StoreSource,
     pub(super) max_read_content_bytes: Option<u64>,
     pub(super) runtime_cache: RuntimeCacheConfig,
+    pub(super) read_consistency: ReadConsistency,
     /// An existing decoded-block cache to share instead of sizing a fresh
     /// one from `runtime_cache`; see [`ReadCore::open`].
     pub(super) shared_metadata_segment_cache: Option<Arc<MetadataSegmentCache>>,
@@ -55,6 +56,7 @@ impl HandleBuilderCore {
             source,
             max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
+            read_consistency: ReadConsistency::default(),
             shared_metadata_segment_cache: None,
             stored_metadata_block_cache: None,
             trace_mode: TraceMode::Embedded,
@@ -99,6 +101,7 @@ impl HandleBuilderCore {
             ReadConfig {
                 max_read_content_bytes: self.max_read_content_bytes,
                 runtime_cache: self.runtime_cache,
+                read_consistency: self.read_consistency,
                 trace_mode: self.trace_mode,
                 trace_store_kind,
             },

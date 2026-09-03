@@ -1,6 +1,7 @@
 //! [`FsWriter`]'s path mutations, commits, and the publication pipeline.
 
 use super::core::{ReadCore, WriterBits};
+use crate::cache::AnchorReuse;
 use crate::maintenance_runner::NamespacePublication;
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
 use crate::trace::phase_span;
@@ -539,7 +540,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::control::VerifiedNamespaceCatalogEntry> {
         self.core
-            .load_namespace_catalog_cached(namespace_id, None)
+            .load_namespace_catalog_cached(namespace_id, AnchorReuse::Revalidate)
             .await
     }
 
