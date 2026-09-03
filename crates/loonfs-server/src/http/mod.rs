@@ -262,7 +262,7 @@ fn router(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(get_health))
         .route("/readiness", get(get_readiness));
-    let authenticated = Router::new()
+    let mut authenticated = Router::new()
         .route("/metrics", get(get_metrics))
         .route(
             "/v0/capabilities",
@@ -285,10 +285,6 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
             post(release_snapshot),
-        )
-        .route(
-            "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
-            get(get_namespace_diagnostics),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/entries",
@@ -314,38 +310,6 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/namespaces/{namespace_id}/grep",
             gated(serves_grep, get(grep), get(grep_queries_not_served)),
-        )
-        .route(
-            "/v0/maintenance/namespaces/{namespace_id}/grep/index",
-            gated(
-                maintains_index,
-                get(get_grep_index),
-                get(grep_index_not_maintained),
-            ),
-        )
-        .route(
-            "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
-            gated(
-                maintains_index,
-                post(enable_grep_index),
-                post(grep_index_not_maintained),
-            ),
-        )
-        .route(
-            "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
-            gated(
-                maintains_index,
-                post(disable_grep_index),
-                post(grep_index_not_maintained),
-            ),
-        )
-        .route(
-            "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
-            gated(
-                maintains_index,
-                post(gc_grep_index),
-                post(grep_index_not_maintained),
-            ),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/revisions",
@@ -404,25 +368,65 @@ fn router(state: AppState) -> Router {
             "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
             get(get_upload),
         )
-        .route("/v0/namespaces/{namespace_id}/changes", get(list_changes))
-        .route(
-            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
-            post(create_checkpoint).get(list_checkpoints),
-        )
-        .route(
-            "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
-            post(release_checkpoint),
-        )
-        .route(
-            "/v0/maintenance/namespaces/{namespace_id}/runs",
-            post(run_maintenance),
-        )
-        // The one maintenance route whose subject is the store rather than a
-        // namespace, so it sits beside them rather than under one.
-        .route(
-            "/v0/maintenance/store/probe",
-            post(handlers_store::probe_store),
-        )
+        .route("/v0/namespaces/{namespace_id}/changes", get(list_changes));
+    if state.config.serve_maintenance {
+        authenticated = authenticated
+            .route(
+                "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
+                get(get_namespace_diagnostics),
+            )
+            .route(
+                "/v0/maintenance/namespaces/{namespace_id}/grep/index",
+                gated(
+                    maintains_index,
+                    get(get_grep_index),
+                    get(grep_index_not_maintained),
+                ),
+            )
+            .route(
+                "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
+                gated(
+                    maintains_index,
+                    post(enable_grep_index),
+                    post(grep_index_not_maintained),
+                ),
+            )
+            .route(
+                "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
+                gated(
+                    maintains_index,
+                    post(disable_grep_index),
+                    post(grep_index_not_maintained),
+                ),
+            )
+            .route(
+                "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
+                gated(
+                    maintains_index,
+                    post(gc_grep_index),
+                    post(grep_index_not_maintained),
+                ),
+            )
+            .route(
+                "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+                post(create_checkpoint).get(list_checkpoints),
+            )
+            .route(
+                "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
+                post(release_checkpoint),
+            )
+            .route(
+                "/v0/maintenance/namespaces/{namespace_id}/runs",
+                post(run_maintenance),
+            )
+            // The one maintenance route whose subject is the store rather than a
+            // namespace, so it sits beside them rather than under one.
+            .route(
+                "/v0/maintenance/store/probe",
+                post(handlers_store::probe_store),
+            );
+    }
+    let authenticated = authenticated
         .route_layer(middleware::from_fn(move |request: Request, next: Next| {
             with_request_deadline(request_deadline_ms, request, next)
         }))

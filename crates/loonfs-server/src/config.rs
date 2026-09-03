@@ -63,6 +63,12 @@ pub struct ServerConfig {
     /// Automatic by default; see [`MaintenanceMode`].
     #[serde(default)]
     pub maintenance: MaintenanceMode,
+    /// Whether this server mounts the maintenance API group: the routes under
+    /// `/v0/maintenance/`. Default true. A serving node behind a control plane
+    /// that runs maintenance elsewhere sets it false; the node still maintains
+    /// what it touches when `maintenance = "automatic"`.
+    #[serde(default = "default_true")]
+    pub serve_maintenance: bool,
     /// Minimum interval between publication starts per namespace, in
     /// milliseconds. A cold namespace publishes immediately; the interval
     /// paces follow-up batches so hot namespaces amortize into fewer,
@@ -206,6 +212,10 @@ fn default_max_concurrent_downloads() -> usize {
 
 fn default_max_concurrent_maintenance() -> usize {
     loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The server's `[local_cache]` table: where the node-local cache of encoded
@@ -414,13 +424,18 @@ impl ServerConfig {
 
     /// The line `loonfs-server --check-config` prints when the config loads.
     ///
-    /// It names the two things an operator checks first: the address the
-    /// server would bind and the provider it would talk to.
+    /// It names the address, provider, and maintenance settings.
     pub fn check_summary(&self) -> String {
+        let maintenance = match self.maintenance {
+            MaintenanceMode::Automatic => "automatic",
+            MaintenanceMode::Manual => "manual",
+        };
         format!(
-            "config ok: bind {}, store {}",
+            "config ok: bind {}, store {}, maintenance {}, serve_maintenance {}",
             self.bind.trim(),
-            self.store.kind().as_str()
+            self.store.kind().as_str(),
+            maintenance,
+            self.serve_maintenance
         )
     }
 
@@ -677,6 +692,7 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path).expect("valid config");
         assert_eq!(config.maintenance, super::MaintenanceMode::Automatic);
         assert!(config.maintenance.runs_automatically());
+        assert!(config.serve_maintenance);
 
         let path = write_config(
             r#"
@@ -684,6 +700,7 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 maintenance = "manual"
+serve_maintenance = false
 
 [store]
 kind = "local-fs"
@@ -697,6 +714,7 @@ root = "/tmp/loonfs-server"
             "write-serving nodes can hand maintenance to a dedicated process"
         );
         assert!(!config.maintenance.runs_automatically());
+        assert!(!config.serve_maintenance);
     }
 
     #[test]

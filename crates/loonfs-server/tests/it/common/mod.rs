@@ -311,6 +311,7 @@ pub(crate) fn test_config(
             ..GrepConfig::default()
         },
         maintenance: MaintenanceMode::Automatic,
+        serve_maintenance: true,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,
