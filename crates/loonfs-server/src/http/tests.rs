@@ -1084,7 +1084,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn embedded_shutdown_drains_an_active_grep_step() {
+async fn embedded_runner_shutdown_drains_an_active_grep_step() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-shutdown");
     let blocking_store = Arc::new(BlockingStore::new(
@@ -1117,8 +1117,8 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
     blocking_store.wait_until_blocked().await;
 
     let shutdown = tokio::runtime::Handle::current().spawn({
-        let writer = state.writer.clone();
-        async move { writer.shutdown().await }
+        let runner = state.runner.clone().expect("automatic runner");
+        async move { runner.shutdown().await }
     });
     tokio::task::yield_now().await;
     assert!(
@@ -1130,6 +1130,7 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
         .await
         .expect("join shutdown")
         .expect("drain grep step");
+    state.writer.shutdown().await.expect("shutdown writer");
 }
 
 /// A job that does nothing but count the steps the runner admitted for it.

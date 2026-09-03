@@ -127,9 +127,9 @@ impl http_body::Body for DrainedBody {
 /// Request handles built over one shared store client.
 ///
 /// Read handlers use `reader`, mutations use `writer`, and maintenance uses
-/// `maintenance`. The host also shuts down `writer` after the listener drains.
-/// `reader` is stored separately because most handlers require only read
-/// access.
+/// `maintenance`. After the listener drains, the host shuts down the writer
+/// and the optional maintenance runner. `reader` is stored separately because
+/// most handlers require only read access.
 #[derive(Clone)]
 pub struct AppState {
     pub(super) config: Arc<ServerConfig>,
@@ -234,11 +234,10 @@ pub struct AppOptions {
 
 /// Builds the router and returns its state.
 ///
-/// After an embedded listener drains, the host must call
-/// [`FsWriter::shutdown`] on [`AppState::writer`] to settle publication and
-/// maintenance tasks, then close [`AppState::local_cache`] so in-memory
-/// entries are flushed. [`serve`] performs both steps automatically. The
-/// cache is present only when `[local_cache]` is configured.
+/// After an embedded listener drains, the host must shut down
+/// [`AppState::writer`] and [`AppState::runner`], then close
+/// [`AppState::local_cache`] so in-memory entries are flushed. [`serve`]
+/// performs these steps automatically. The runner and cache are optional.
 pub async fn app(
     config: ServerConfig,
     options: AppOptions,

@@ -71,8 +71,8 @@ const MAX_BATCH_CANDIDATES: usize = 1024;
 /// registry returned by [`FsWriter::publisher`](crate::FsWriter::publisher).
 ///
 /// Shutdown closes admission and then drains admitted work. Prefer
-/// [`FsWriter::shutdown`](crate::FsWriter::shutdown), which also coordinates
-/// the maintenance runner.
+/// [`FsWriter::shutdown`](crate::FsWriter::shutdown), which closes admission
+/// before draining publication work.
 #[derive(Clone)]
 pub struct PublisherRegistry {
     shared: Arc<RegistryShared>,
