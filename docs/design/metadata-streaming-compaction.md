@@ -35,13 +35,13 @@ Merges above the base can continue reducing delta-run count, but they cannot app
 - More than one active metadata compaction per namespace.
 - A fixed wall-clock limit for the complete job.
 - Changes to the metadata segment format.
-- Configurable process-wide concurrency. The maintenance runner uses a fixed limit of two concurrent jobs.
+- Configurable process-wide concurrency. The `metadata-compaction` job uses a fixed limit of two concurrent runs.
 
 ## One engine, two orchestrations
 
 Both reorganization paths merge with the same code. A maintenance step runs it synchronously over the window its budgets selected, and a background job runs it over every run a group holds. The merge itself does not know which one is driving it: it reads sorted iterators, applies the retention operators, writes segments, and reports what it wrote. Rows are dropped when, and only when, the merge placement is base-tier, which is the same rule that decides the output level.
 
-The two orchestrations exist because the work has two shapes. A step-contained merge is the frequent small case. It is bounded by the step's input budgets, it publishes inside the step that ran it, and paying for a lease, a staging prefix, a registry entry, and an admission permit on every one of them would be pure overhead. It also preserves the step contract that `ManualOnly` deployments drive: one call does one unit of work and either publishes it or reports that there was nothing to do.
+The two orchestrations exist because the work has two shapes. A step-contained merge is the frequent small case. It is bounded by the step's input budgets, it publishes inside the step that ran it, and paying for a lease, a staging prefix, a registry entry, and an admission permit on every one of them would be pure overhead. One call does one unit of work and either publishes it or reports that there was nothing to do.
 
 The background job exists because work of unbounded duration cannot be done that way. A job may run for minutes or hours, so its output has to be staged where a lease can speak for it, its concurrency has to be admitted, and its publication has to revalidate the input it read. Those costs buy nothing for a merge that finishes inside its own step.
 
@@ -92,9 +92,9 @@ The planner balances these cases with the manifest's record of how many delta me
 
 The count is stored in the namespace manifest for each `MetadataFamilyGroup`. It is cleared after successful full compaction or after a bottom-anchored merge becomes possible.
 
-Callers provide a `FrozenBasePolicy` when planning. Background maintenance uses `Amortized`, which reads the manifest's per-group count. `FsMaintenance::compact_metadata` uses `CompactImmediately` because the caller explicitly requested full compaction. A bounded maintenance step without a background runner also uses `CompactImmediately`, allowing it to report that compaction is required instead of repeatedly publishing delta merges that cannot rebuild the base.
+Callers provide a `FrozenBasePolicy` when planning. The `metadata` job uses `Amortized`, which reads the manifest's per-group count. `FsMaintenance::compact_metadata` uses `CompactImmediately` because the caller explicitly requested full compaction.
 
-The planner excludes every family group whose compaction lease is active and unexpired. A process keeps one compaction claim per namespace so it does not start two jobs itself, and allows at most two compaction jobs to run. Maintenance may continue processing unrelated groups in the same namespace. Shutdown cancels both queued and running jobs.
+The bounded step reports `compaction_required`; the `metadata-compaction` job runs the streaming compaction under its own two-permit limit. The planner excludes every family group whose compaction lease is active and unexpired, so the lease excludes that group while unrelated groups remain available. Runner shutdown cancels running jobs.
 
 Runs published after the snapshot was captured are not part of the compaction input. Final publication preserves those runs.
 
@@ -177,9 +177,9 @@ Cancellation and lease fencing never publish a partial result. A process restart
 
 ## Maintenance results and observability
 
-The maintenance API reports `compaction_started` when a step launches a background job. `compaction_at_capacity` means the job is queued for a process permit, `compaction_running` means the namespace already has a queued or running job, and `compaction_required` means the current handle has no background runner and an operator must call `FsMaintenance::compact_metadata`.
+The maintenance API reports `compaction_required` when a bounded step plans a streaming compaction and publishes nothing for that group. The `metadata-compaction` job performs the work.
 
-An explicit `FsMaintenance::compact_metadata` call reports `NoWork`, `BoundedMergePublished`, `AlreadyRunning`, or `Ran`. The separate no-work and bounded-merge outcomes tell callers whether the method changed the manifest without starting a full compaction.
+An explicit `FsMaintenance::compact_metadata` call reports whether no work was needed, a bounded merge published, a streaming compaction published, or the attempt was superseded, abandoned, cancelled, or fenced.
 
 Lifecycle logging covers job selection, start, progress, publication, cancellation, abandonment, supersession, and failure. Progress records include the namespace, family group, input-run count, rows processed, output-segment count, peak retention rows, elapsed time, and final outcome.
 
@@ -201,8 +201,8 @@ The implementation is validated with the following tests:
 - Leave the final lease after publication and verify that an older collection pass cannot remove the published output.
 - Reclaim staged output after a lease expires, is already marked `reaping`, or is missing.
 - Reject malformed and mismatched leases as job ownership records.
-- Exercise continuous delta creation and verify that writer maintenance starts full compaction after two published delta merges.
-- Verify that explicit compaction and maintenance without a background runner select full compaction immediately for a frozen base.
+- Exercise continuous delta creation and verify that metadata maintenance requests full compaction after two published delta merges.
+- Verify that explicit compaction selects full compaction immediately for a frozen base.
 - Process large attribute histories and heavily reused binding slots while holding at most one row in retention state.
 - Reject canonical-family and secondary-index mismatches before publication.
 - Reject a metadata family whose merge input repeats a row key.

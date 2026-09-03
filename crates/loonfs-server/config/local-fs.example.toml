@@ -49,8 +49,8 @@ writer_id = "loonfs-server-local"
 #max_concurrent_uploads = 8
 #max_concurrent_downloads = 16
 
-# How many background maintenance ticks may run at once across all
-# namespaces (each namespace already runs at most one). Defaults to 2.
+# How many maintenance jobs the local runner may invoke at once. Each job and
+# namespace pair runs at most once concurrently. Defaults to 2.
 #max_concurrent_maintenance = 2
 
 # Direct-put needs no configuration. It is offered only where the adapter can

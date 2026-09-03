@@ -14,9 +14,10 @@ use axum::body::Bytes;
 use axum::http::StatusCode;
 use futures::stream::StreamExt;
 use loonfs::{
-    CreateNamespaceOptions, DeleteOptions, FsMaintenance, FsReader, FsWriter, MaintenanceJob,
-    MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepReport,
-    PutFileOptions, StoredMetadataBlockCache, TraceMode, TraceStoreKind,
+    CreateNamespaceOptions, DeleteOptions, FsMaintenance, FsReader, FsWriter,
+    MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
+    MaintenanceProbe, MaintenanceRunReport, PutFileOptions, StoredMetadataBlockCache, TraceMode,
+    TraceStoreKind,
 };
 use loonfs_api::{
     AttributeRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
@@ -73,10 +74,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "committed_at_ms",
     "committed_fingerprint",
     "committed_seq",
-    "compaction_at_capacity",
     "compaction_required",
-    "compaction_running",
-    "compaction_started",
     "complete_upload_prepared",
     "completed_at_ms",
     "content_changed",
@@ -180,6 +178,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "to_display_name",
     "to_parent_inode_id",
     "ttl_ms",
+    "unit_published",
     "unrecognized_key",
     "update_attributes",
     "wal_segments",
@@ -630,6 +629,7 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
             &ServerMetrics::new(),
             Some(metrics_path.clone().into_os_string()),
             None,
+            None,
         )
         .await
         .expect("build handles");
@@ -940,6 +940,7 @@ async fn graceful_shutdown_closes_the_local_cache() {
         listener,
         router,
         state.writer.clone(),
+        state.runner.clone(),
         state.local_cache.clone(),
         shutdown_deadline_ms,
         async move {
@@ -991,6 +992,7 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
         listener,
         router,
         writer.clone(),
+        None,
         None,
         shutdown_deadline_ms,
         async move {
@@ -1148,17 +1150,16 @@ impl MaintenanceJob for StepCountingJob {
         self.id
     }
 
-    async fn step(
+    async fn run(
         &self,
         _namespace_id: &NamespaceId,
         _continuation: Option<&str>,
-    ) -> loonfs::Result<MaintenanceStepReport> {
+        _cancellation: &MaintenanceCancellation,
+    ) -> loonfs::Result<MaintenanceRunReport> {
         self.steps.fetch_add(1, Ordering::SeqCst);
         // Idle rather than progressed: a requeueing step would never let
         // the control settle below.
-        Ok(MaintenanceStepReport::concluded(
-            MaintenanceStepConclusion::Idle,
-        ))
+        Ok(MaintenanceRunReport::concluded(MaintenanceConclusion::Idle))
     }
 
     async fn probe(&self, _namespace_id: &NamespaceId) -> loonfs::Result<MaintenanceProbe> {
@@ -1191,8 +1192,8 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     let steps = Arc::new(AtomicUsize::new(0));
     let job = MaintenanceJobId::new("shutdown-order-probe");
     state
-        .writer
-        .register_maintenance_job(Arc::new(StepCountingJob {
+        .jobs
+        .register(Arc::new(StepCountingJob {
             id: job,
             steps: Arc::clone(&steps),
         }))
@@ -1200,12 +1201,9 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
 
     // The control. Without it, a later count of zero would prove only that
     // this job never ran under any conditions.
-    state.writer.maintenance().nudge(job, &namespace_id);
-    state
-        .writer
-        .flush_background()
-        .await
-        .expect("settle the admitted step");
+    let runner = state.runner.clone().expect("automatic runner");
+    runner.handle().nudge(job, &namespace_id);
+    runner.drain().await.expect("settle the admitted run");
     let admitted_while_serving = steps.load(Ordering::SeqCst);
     assert_eq!(
         admitted_while_serving, 1,
@@ -1232,13 +1230,15 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     });
     blocking.wait_until_blocked().await;
 
+    state.writer.close_admission_for_shutdown();
+    runner.close_admission();
     let mut shutdown = Box::pin(state.writer.shutdown());
     assert!(
         futures::poll!(shutdown.as_mut()).is_pending(),
         "the parked publication must keep the shutdown pending"
     );
     // Everything after this point is the drain window.
-    state.writer.maintenance().nudge(job, &namespace_id);
+    runner.handle().nudge(job, &namespace_id);
 
     blocking.release();
     put.await
@@ -1249,6 +1249,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     shutdown
         .await
         .expect("the shutdown settles with its queue discarded");
+    runner.shutdown().await.expect("runner shutdown");
 
     assert_eq!(
         steps.load(Ordering::SeqCst),
@@ -1256,12 +1257,8 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
         "no maintenance step may be admitted once the shutdown has begun"
     );
     // And the runner stays shut rather than reopening behind the drain.
-    state.writer.maintenance().nudge(job, &namespace_id);
-    state
-        .writer
-        .flush_background()
-        .await
-        .expect("a shut runner has nothing left to settle");
+    runner.handle().nudge(job, &namespace_id);
+    runner.drain().await.expect("a shut runner is settled");
     assert_eq!(
         steps.load(Ordering::SeqCst),
         admitted_while_serving,
@@ -1296,8 +1293,10 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
         .expect("an index-maintaining app carries a maintenance handle")
         .nudge(&namespace_id);
     state
-        .writer
-        .flush_background()
+        .runner
+        .as_ref()
+        .expect("automatic runner")
+        .drain()
         .await
         .expect("settle the backfill");
     assert_eq!(
@@ -1318,8 +1317,10 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
         .await
         .expect("publish file");
     state
-        .writer
-        .flush_background()
+        .runner
+        .as_ref()
+        .expect("automatic runner")
+        .drain()
         .await
         .expect("settle the observer-driven step");
     assert_eq!(
@@ -3254,6 +3255,7 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
         listener,
         router,
         state.writer.clone(),
+        state.runner.clone(),
         None,
         shutdown_deadline_ms,
         async move {

@@ -1,21 +1,14 @@
-//! Scheduler for bounded background maintenance.
-//!
-//! Each [`MaintenanceJob`] performs one unit of work for one namespace. The
-//! runner manages concurrency, retries, deadlines, and continuations. It only
-//! maintains namespaces used by this process or explicitly assigned to it.
+//! Optional in-process scheduler for registered maintenance jobs.
 
-mod admission;
-mod compaction;
-mod jobs;
-#[cfg(test)]
-mod tests;
-
-use crate::metrics::{RuntimeInstruments, RESULT_ERROR};
-use crate::{ChangeSeq, NamespaceId, Result, RuntimeError};
-use admission::{Admission, MaintenanceDispatch, MaintenanceKey, StepOutcome};
-pub(crate) use compaction::{BackgroundCompactions, CompactionStart};
+use super::admission::{Admission, MaintenanceDispatch, MaintenanceKey, StepOutcome};
+use super::hints::{dropped_hints, MaintenanceHintReceiver};
+use super::{
+    MaintenanceCancellation, MaintenanceConclusion, MaintenanceHint, MaintenanceJob,
+    MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry, MaintenanceRunReport,
+};
+use crate::metrics::{MaintenanceInstruments, MetricsRecorder, RESULT_ERROR};
+use crate::{NamespaceId, Result, RuntimeError};
 use futures::FutureExt as _;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -23,187 +16,17 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-pub(crate) use jobs::{
-    completed_upload_reclaim_at_ms, register_core_jobs, upload_session_reclaim_at_ms,
-};
-
 /// Interval between reconciliation sweeps of admitted maintenance keys.
 ///
 /// Sweeps recover work that was blocked, left behind by a quiet writer, or
 /// missed by a trigger. This interval is the maximum expected delay before
 /// such work is probed again.
-const RECONCILE_INTERVAL_MS: u64 = 60_000;
+pub(crate) const RECONCILE_INTERVAL_MS: u64 = 60_000;
 
 /// Most admitted keys one reconciliation sweep probes. The sweep resumes
 /// where it stopped, so a large admitted set costs more sweeps rather than
 /// one long one.
 const MAX_RECONCILE_PROBES_PER_SWEEP: usize = 64;
-
-/// Controls background maintenance started by a writer.
-///
-/// Background work may compact metadata and collect expired uploads. It never
-/// advances the retention floor; that remains an explicit
-/// [`FsMaintenance`](crate::FsMaintenance) operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FsBackgroundWork {
-    /// Run maintenance for namespaces used or explicitly assigned to this
-    /// process.
-    Enabled,
-    /// Disable automatic maintenance. Explicit maintenance operations remain
-    /// available.
-    ManualOnly,
-}
-
-/// Stable identifier for a registered maintenance job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MaintenanceJobId(&'static str);
-
-impl MaintenanceJobId {
-    /// Flushes the WAL tail after it reaches its threshold, then runs one
-    /// bounded reorganization step. Registered for every writer.
-    pub const METADATA: Self = Self("metadata");
-    /// Garbage collection: one bounded mark-and-sweep pass. Registered by
-    /// the runtime on every write-capable handle.
-    pub const GC: Self = Self("gc");
-
-    /// Names a job an extension registers.
-    pub const fn new(name: &'static str) -> Self {
-        Self(name)
-    }
-
-    /// The name as it appears in traces.
-    pub fn as_str(&self) -> &'static str {
-        self.0
-    }
-}
-
-impl fmt::Display for MaintenanceJobId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
-    }
-}
-
-/// Result category for one bounded maintenance step.
-///
-/// Jobs report what happened; the runner decides whether and when to schedule
-/// the key again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MaintenanceStepConclusion {
-    /// Durable state advanced. The job may run again immediately.
-    Progressed,
-    /// No work was available. The job waits for a trigger or reconciliation.
-    Idle,
-    /// Work exists, but this step cannot process it within its limits.
-    Blocked,
-    /// Concurrent work changed the state. The job may retry immediately.
-    Superseded,
-    /// This job is not enabled for the namespace.
-    NotEnabled,
-}
-
-impl MaintenanceStepConclusion {
-    /// The label traces use, and the one a host reporting a step it drove
-    /// itself should use with it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Progressed => "progressed",
-            Self::Idle => "idle",
-            Self::Blocked => "blocked",
-            Self::Superseded => "superseded",
-            Self::NotEnabled => "not_enabled",
-        }
-    }
-}
-
-/// Scheduling information returned by one bounded maintenance step.
-///
-/// The runner stores the conclusion, optional continuation, and earliest next
-/// run time so jobs do not maintain separate scheduler state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaintenanceStepReport {
-    /// What the step accomplished.
-    pub conclusion: MaintenanceStepConclusion,
-    /// Opaque state that lets the next step resume this job.
-    ///
-    /// The runner keeps it while the key is making progress or waiting for
-    /// room to work, clears it on [`MaintenanceStepConclusion::Idle`], and
-    /// drops it with the key on [`MaintenanceStepConclusion::NotEnabled`].
-    /// It never crosses a process boundary: a job that cannot restart its
-    /// pass from the beginning safely must not use this.
-    pub continuation: Option<String>,
-    /// Earliest Unix millisecond when the observed work may become eligible.
-    ///
-    /// The runner keeps the earliest deadline reported by either a trigger or a
-    /// step. `None` means this step did not observe a deadline; it does not prove
-    /// that no deadline exists.
-    pub not_before_ms: Option<u64>,
-}
-
-impl MaintenanceStepReport {
-    /// Creates a report without a continuation or deadline.
-    pub fn concluded(conclusion: MaintenanceStepConclusion) -> Self {
-        Self {
-            conclusion,
-            continuation: None,
-            not_before_ms: None,
-        }
-    }
-}
-
-/// State available to maintenance jobs after a publish attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NamespacePublication {
-    /// Highest sequence committed by the attempt, if any.
-    pub committed_through_seq: Option<ChangeSeq>,
-    /// Whether the publish first folded the WAL tail into a manifest.
-    pub folded: bool,
-    /// Visible WAL-tail length, or zero if the attempt did not read it.
-    pub wal_tail_segments: u64,
-}
-
-/// Result of checking whether a maintenance job has work to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MaintenanceProbe {
-    /// Work is waiting.
-    Due,
-    /// No work is waiting.
-    Idle,
-}
-
-/// A bounded maintenance operation that runs for one namespace at a time.
-///
-/// Each call reloads durable state, performs at most one unit of work, and
-/// reports the result. Steps may run more than once, so implementations must
-/// be idempotent through their durable compare-and-swap.
-#[async_trait::async_trait]
-pub trait MaintenanceJob: Send + Sync + 'static {
-    /// This job's stable identity.
-    fn id(&self) -> MaintenanceJobId;
-
-    /// Runs one bounded step against `namespace_id`'s durable state.
-    ///
-    /// `continuation` is whatever this job's last step for this namespace
-    /// returned, or `None` for a fresh pass — after a restart, after an
-    /// idle conclusion, or the first time the key is admitted. A job that
-    /// has no position to carry ignores it and returns
-    /// [`MaintenanceStepReport::concluded`].
-    async fn step(
-        &self,
-        namespace_id: &NamespaceId,
-        continuation: Option<&str>,
-    ) -> Result<MaintenanceStepReport>;
-
-    /// Checks whether `namespace_id` has work waiting. Called only during
-    /// reconciliation.
-    async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe>;
-
-    /// Returns whether this publish attempt should nudge the job.
-    ///
-    /// A nudge is only a scheduling hint; the job must reload durable state.
-    fn should_nudge_after_publication(&self, _publication: &NamespacePublication) -> bool {
-        false
-    }
-}
 
 /// Clock used to schedule durable Unix-millisecond deadlines.
 ///
@@ -226,7 +49,7 @@ pub(crate) struct SystemMaintenanceClock {
 }
 
 /// The odd increment SplitMix64 walks its counter by.
-const JITTER_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+pub(crate) const JITTER_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 
 impl Default for SystemMaintenanceClock {
     fn default() -> Self {
@@ -261,7 +84,7 @@ impl MaintenanceClock for SystemMaintenanceClock {
 }
 
 /// Applies the SplitMix64 finalizer to the jitter counter.
-fn split_mix_64(counter: u64) -> u64 {
+pub(crate) fn split_mix_64(counter: u64) -> u64 {
     let mut mixed = counter;
     mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -271,7 +94,7 @@ fn split_mix_64(counter: u64) -> u64 {
 /// Cloneable handle for non-blocking maintenance hints.
 ///
 /// Nudges coalesce and never wait for a permit. They are ignored after
-/// admission closes or after the owning writer is dropped.
+/// admission closes or after the owning runner is dropped.
 #[derive(Clone)]
 pub struct MaintenanceHandle {
     inner: Weak<RunnerInner>,
@@ -318,12 +141,59 @@ impl MaintenanceHandle {
         };
         nudge_key(&inner, job, namespace_id, Some(not_before_ms));
     }
+
+    /// Applies one best-effort scheduling hint.
+    pub fn hint(&self, hint: MaintenanceHint) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        match hint {
+            MaintenanceHint::Published(publication) => {
+                for id in inner.registry.job_ids() {
+                    if inner
+                        .registry
+                        .get(id)
+                        .is_some_and(|job| job.should_run_after_publication(&publication))
+                    {
+                        nudge_if_inactive(&inner, id, &publication.namespace_id);
+                    }
+                }
+            }
+            MaintenanceHint::DueAt {
+                namespace_id,
+                job,
+                not_before_ms,
+            } => nudge_key(&inner, job, &namespace_id, Some(not_before_ms)),
+        }
+    }
 }
 
-/// Owner of background maintenance for one write-capable handle:
-/// registration, admission, and the shutdown that settles both.
-pub(crate) struct MaintenanceRunner {
+/// Optional in-process scheduler over a maintenance registry.
+#[derive(Clone)]
+pub struct MaintenanceRunner {
     inner: Arc<RunnerInner>,
+}
+
+/// Builder for [`MaintenanceRunner`].
+pub struct MaintenanceRunnerBuilder {
+    registry: MaintenanceRegistry,
+    max_concurrent: usize,
+    metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+    #[cfg(test)]
+    clock: Option<Arc<dyn MaintenanceClock>>,
+}
+
+/// Current process-local scheduler state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaintenanceRunnerStats {
+    /// Jobs currently registered.
+    pub jobs_registered: usize,
+    /// Job and namespace keys in reconciliation scope.
+    pub keys_admitted: usize,
+    /// Invocations holding scheduler permits.
+    pub running: usize,
+    /// Age of the oldest ready key.
+    pub oldest_queued_ms: u64,
 }
 
 /// Process-wide counters included in maintenance trace events.
@@ -347,11 +217,10 @@ impl RunnerCounters {
 }
 
 pub(crate) struct RunnerInner {
-    policy: FsBackgroundWork,
     /// Runtime that owns spawned work.
     runtime: tokio::runtime::Handle,
     clock: Arc<dyn MaintenanceClock>,
-    jobs: Mutex<BTreeMap<MaintenanceJobId, Arc<dyn MaintenanceJob>>>,
+    registry: MaintenanceRegistry,
     /// One lock over the shutdown flag, the admission book, and the task
     /// registry. Registration checks the flag inside the same critical
     /// section, so a shutdown that drained an empty registry can never race
@@ -366,23 +235,15 @@ pub(crate) struct RunnerInner {
     /// where they are: they answer "is this happening at all", which a
     /// number on an existing trace answers for a reader with no metrics
     /// pipeline at all.
-    instruments: Arc<RuntimeInstruments>,
-    /// The streaming metadata compactions running under this runner, one per
-    /// namespace at most, and the pressure that decides when one has to
-    /// start. Held here rather than beside the admission book because a
-    /// compaction is not a bounded step: it takes no admission permit, it
-    /// runs for as long as it needs, and what the runner owes it is a spawn,
-    /// a cancellation at shutdown, and the drain every spawned task gets.
-    compactions: Arc<Mutex<BTreeMap<NamespaceId, compaction::NamespaceCompactions>>>,
-    /// What caps compactions across every namespace this process serves. The
-    /// map above stops two jobs sharing a namespace; this stops one process
-    /// holding a job's worth of memory per namespace it has touched.
-    compaction_permits: Arc<tokio::sync::Semaphore>,
+    instruments: Arc<MaintenanceInstruments>,
 }
 
 struct RunnerState {
     admission: Admission,
     tasks: Vec<JoinHandle<()>>,
+    hint_tasks: Vec<JoinHandle<()>>,
+    hint_controls: Vec<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
+    cancellations: std::collections::BTreeMap<MaintenanceKey, MaintenanceCancellation>,
     /// The one timer task: it wakes for not-before times, error backoffs,
     /// and the reconciliation interval. Started on first admitted work and
     /// joined by the drain that follows a shutdown.
@@ -391,37 +252,35 @@ struct RunnerState {
 }
 
 impl MaintenanceRunner {
-    pub(crate) fn new(
-        policy: FsBackgroundWork,
-        runtime: tokio::runtime::Handle,
-        max_concurrent: std::num::NonZeroUsize,
-        instruments: Arc<RuntimeInstruments>,
-    ) -> Self {
-        Self::with_clock(
-            policy,
-            runtime,
-            max_concurrent,
-            Arc::new(SystemMaintenanceClock::default()),
-            instruments,
-        )
+    /// Starts a builder over `registry`.
+    pub fn builder(registry: MaintenanceRegistry) -> MaintenanceRunnerBuilder {
+        MaintenanceRunnerBuilder {
+            registry,
+            max_concurrent: crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+            metrics_recorder: None,
+            #[cfg(test)]
+            clock: None,
+        }
     }
 
-    pub(crate) fn with_clock(
-        policy: FsBackgroundWork,
+    fn new(
+        registry: MaintenanceRegistry,
         runtime: tokio::runtime::Handle,
-        max_concurrent: std::num::NonZeroUsize,
+        max_concurrent: usize,
         clock: Arc<dyn MaintenanceClock>,
-        instruments: Arc<RuntimeInstruments>,
+        metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
     ) -> Self {
         let next_reconcile_ms = clock.now_ms().saturating_add(RECONCILE_INTERVAL_MS);
         Self {
             inner: Arc::new(RunnerInner {
-                policy,
                 runtime,
-                jobs: Mutex::new(BTreeMap::new()),
+                registry,
                 state: Mutex::new(RunnerState {
-                    admission: Admission::new(max_concurrent.get(), Arc::clone(&clock)),
+                    admission: Admission::new(max_concurrent, Arc::clone(&clock)),
                     tasks: Vec::new(),
+                    hint_tasks: Vec::new(),
+                    hint_controls: Vec::new(),
+                    cancellations: std::collections::BTreeMap::new(),
                     scheduler: None,
                     next_reconcile_ms,
                 }),
@@ -429,53 +288,35 @@ impl MaintenanceRunner {
                 wake: Arc::new(Notify::new()),
                 counters: RunnerCounters::default(),
                 panicked_tasks: std::sync::atomic::AtomicUsize::new(0),
-                instruments,
-                compactions: Arc::new(Mutex::new(BTreeMap::new())),
-                compaction_permits: Arc::new(tokio::sync::Semaphore::new(
-                    compaction::MAX_CONCURRENT_COMPACTIONS,
-                )),
+                instruments: MaintenanceInstruments::new(metrics_recorder),
             }),
         }
     }
 
     /// Returns a cloneable scheduling handle that cannot shut down admission.
-    pub(crate) fn handle(&self) -> MaintenanceHandle {
+    pub fn handle(&self) -> MaintenanceHandle {
         MaintenanceHandle {
             inner: Arc::downgrade(&self.inner),
         }
     }
 
-    /// Returns a shared view of running streaming compactions.
-    pub(crate) fn compactions(&self) -> BackgroundCompactions {
-        BackgroundCompactions::new(&self.inner)
+    /// Returns the registry this runner schedules.
+    pub fn registry(&self) -> &MaintenanceRegistry {
+        &self.inner.registry
     }
 
-    /// Returns the job registered under `id`.
-    pub(crate) fn job(&self, id: MaintenanceJobId) -> Option<Arc<dyn MaintenanceJob>> {
-        self.inner.job(id)
-    }
-
-    /// Registers a job. Manual-only runners retain jobs for explicit use.
-    pub(crate) fn register(&self, job: Arc<dyn MaintenanceJob>) -> Result<MaintenanceJobId> {
-        let id = job.id();
-        let mut jobs = self.inner.lock_jobs();
-        if jobs.contains_key(&id) {
-            return Err(RuntimeError::Config(format!(
-                "maintenance job `{id}` is already registered"
-            )));
-        }
-        jobs.insert(id, job);
-        Ok(id)
-    }
-
-    /// Stops admission, discards queued work, and cancels compactions.
+    /// Stops admission, discards queued work, and cancels running invocations.
     ///
     /// Running steps and cancelled compactions remain visible to
     /// [`Self::drain`]. This method is synchronous so admission closes before
     /// any shutdown await can allow another job to start.
-    pub(crate) fn close_admission(&self) {
-        self.inner.lock_state().admission.close();
-        self.compactions().cancel_all();
+    pub fn close_admission(&self) {
+        let mut state = self.inner.lock_state();
+        state.admission.close();
+        for cancellation in state.cancellations.values() {
+            cancellation.cancel();
+        }
+        drop(state);
         self.inner.wake.notify_one();
     }
 
@@ -484,7 +325,14 @@ impl MaintenanceRunner {
     /// Loops because an in-flight write may schedule more work while an open
     /// handle waits, and because a finishing step hands its permit to the
     /// next queued key before it exits.
-    pub(crate) async fn drain(&self) -> Result<()> {
+    pub async fn drain(&self) -> Result<()> {
+        let controls = self.inner.lock_state().hint_controls.clone();
+        for control in controls {
+            let (settled, wait) = tokio::sync::oneshot::channel();
+            if control.send(settled).is_ok() {
+                let _ = wait.await;
+            }
+        }
         let mut panicked = 0usize;
         // The timer task only ends once admission closes; joining it before
         // then would never return.
@@ -499,6 +347,19 @@ impl MaintenanceRunner {
         if let Some(scheduler) = scheduler {
             self.inner.wake.notify_one();
             if scheduler.await.is_err_and(|error| error.is_panic()) {
+                panicked += 1;
+            }
+        }
+        let hint_tasks = {
+            let mut state = self.inner.lock_state();
+            if state.admission.is_closed() {
+                std::mem::take(&mut state.hint_tasks)
+            } else {
+                Vec::new()
+            }
+        };
+        for task in hint_tasks {
+            if task.await.is_err_and(|error| error.is_panic()) {
                 panicked += 1;
             }
         }
@@ -525,26 +386,61 @@ impl MaintenanceRunner {
         Ok(())
     }
 
-    /// Nudges interested jobs after a publish attempt.
-    ///
-    /// Nudges are non-blocking, coalesced, and ignored when automatic
-    /// maintenance is disabled or closed.
-    pub(crate) fn nudge_jobs_after_publication(
-        &self,
-        namespace_id: &NamespaceId,
-        publication: &NamespacePublication,
-    ) {
-        // Release the job lock before acquiring scheduling state.
-        let subscribers: Vec<MaintenanceJobId> = self
-            .inner
-            .lock_jobs()
-            .iter()
-            .filter(|(_, job)| job.should_nudge_after_publication(publication))
-            .map(|(id, _)| *id)
-            .collect();
-        for job in subscribers {
-            nudge_key(&self.inner, job, namespace_id, None);
+    /// Closes admission and drains all tasks.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.close_admission();
+        self.drain().await
+    }
+
+    /// Returns a process-local scheduler snapshot.
+    pub fn stats(&self) -> MaintenanceRunnerStats {
+        let now_ms = self.inner.clock.now_ms();
+        let state = self.inner.lock_state();
+        MaintenanceRunnerStats {
+            jobs_registered: self.inner.registry.job_ids().len(),
+            keys_admitted: state.admission.keys_admitted(),
+            running: state.admission.running(),
+            oldest_queued_ms: state.admission.oldest_queued_ms(now_ms),
         }
+    }
+
+    /// Forwards a bounded relay into this runner.
+    pub fn attach_hints(&self, mut receiver: MaintenanceHintReceiver) {
+        let weak = Arc::downgrade(&self.inner);
+        let wake = Arc::clone(&self.inner.wake);
+        let (control, mut commands) =
+            tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
+        let task = self.inner.runtime.spawn(async move {
+            loop {
+                tokio::select! {
+                    hint = receiver.receiver.recv() => {
+                        let Some(hint) = hint else { break };
+                        let Some(inner) = weak.upgrade() else { break };
+                        MaintenanceHandle { inner: Arc::downgrade(&inner) }.hint(hint);
+                        inner.instruments.hints_dropped(
+                            dropped_hints().saturating_sub(receiver.dropped_at_creation),
+                        );
+                    }
+                    command = commands.recv() => {
+                        let Some(settled) = command else { break };
+                        while let Ok(hint) = receiver.receiver.try_recv() {
+                            let Some(inner) = weak.upgrade() else { break };
+                            MaintenanceHandle { inner: Arc::downgrade(&inner) }.hint(hint);
+                        }
+                        let _ = settled.send(());
+                    }
+                    () = wake.notified() => {
+                        let Some(inner) = weak.upgrade() else { break };
+                        if inner.lock_state().admission.is_closed() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let mut state = self.inner.lock_state();
+        state.hint_controls.push(control);
+        state.hint_tasks.push(task);
     }
 
     /// Returns whether this key is currently pending. Used only by tests and
@@ -588,7 +484,7 @@ impl MaintenanceRunner {
 
     #[cfg(test)]
     pub(crate) fn is_registered(&self, job: MaintenanceJobId) -> bool {
-        self.inner.lock_jobs().contains_key(&job)
+        self.inner.registry.get(job).is_some()
     }
 
     /// Permits currently held by running chains.
@@ -598,17 +494,60 @@ impl MaintenanceRunner {
     }
 }
 
+impl MaintenanceRunnerBuilder {
+    /// Sets the shared invocation permit count.
+    pub fn max_concurrent(mut self, permits: usize) -> Self {
+        self.max_concurrent = permits;
+        self
+    }
+
+    /// Registers maintenance instruments with `recorder`.
+    pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.metrics_recorder = Some(recorder);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clock(mut self, clock: Arc<dyn MaintenanceClock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// Builds the runner on the current Tokio runtime.
+    pub fn build(self) -> Result<MaintenanceRunner> {
+        if self.max_concurrent == 0 {
+            return Err(RuntimeError::Config(
+                "`max_concurrent` must be greater than zero".to_owned(),
+            ));
+        }
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+            RuntimeError::Config(
+                "maintenance runner must be built inside a Tokio runtime".to_owned(),
+            )
+        })?;
+        #[cfg(test)]
+        let clock = self
+            .clock
+            .unwrap_or_else(|| Arc::new(SystemMaintenanceClock::default()));
+        #[cfg(not(test))]
+        let clock = Arc::new(SystemMaintenanceClock::default()) as Arc<dyn MaintenanceClock>;
+        Ok(MaintenanceRunner::new(
+            self.registry,
+            runtime,
+            self.max_concurrent,
+            clock,
+            self.metrics_recorder,
+        ))
+    }
+}
+
 impl RunnerInner {
     fn lock_state(&self) -> MutexGuard<'_, RunnerState> {
         self.state.lock().expect("maintenance state lock poisoned")
     }
 
-    fn lock_jobs(&self) -> MutexGuard<'_, BTreeMap<MaintenanceJobId, Arc<dyn MaintenanceJob>>> {
-        self.jobs.lock().expect("maintenance job lock poisoned")
-    }
-
     fn job(&self, id: MaintenanceJobId) -> Option<Arc<dyn MaintenanceJob>> {
-        self.lock_jobs().get(&id).cloned()
+        self.registry.get(id)
     }
 
     /// Spawns maintenance on the owning runtime and tracks it for shutdown.
@@ -650,9 +589,6 @@ fn nudge_key(
     namespace_id: &NamespaceId,
     not_before_ms: Option<u64>,
 ) {
-    if inner.policy != FsBackgroundWork::Enabled {
-        return;
-    }
     let now_ms = inner.clock.now_ms();
     let key = MaintenanceKey::new(job, namespace_id);
     {
@@ -669,6 +605,20 @@ fn nudge_key(
     dispatch_ready(inner);
     // A newly planted obligation may be sooner than what the timer is
     // sleeping on.
+    inner.wake.notify_one();
+}
+
+fn nudge_if_inactive(inner: &Arc<RunnerInner>, job: MaintenanceJobId, namespace_id: &NamespaceId) {
+    let key = MaintenanceKey::new(job, namespace_id);
+    {
+        let mut state = inner.lock_state();
+        if state.admission.is_closed() || state.admission.is_active(&key) {
+            return;
+        }
+        state.admission.nudge(key);
+    }
+    ensure_scheduler(inner);
+    dispatch_ready(inner);
     inner.wake.notify_one();
 }
 
@@ -735,6 +685,50 @@ struct PermitChain {
     dispatch: Option<MaintenanceDispatch>,
 }
 
+struct InvocationCancellation {
+    inner: Arc<RunnerInner>,
+    key: MaintenanceKey,
+    cancellation: MaintenanceCancellation,
+}
+
+impl InvocationCancellation {
+    fn new(inner: &Arc<RunnerInner>, key: &MaintenanceKey) -> Self {
+        let cancellation = MaintenanceCancellation::new();
+        let mut state = inner.lock_state();
+        if state.admission.is_closed() {
+            cancellation.cancel();
+        }
+        state
+            .cancellations
+            .insert(key.clone(), cancellation.clone());
+        report_compactions(&state, &inner.instruments);
+        drop(state);
+        Self {
+            inner: Arc::clone(inner),
+            key: key.clone(),
+            cancellation,
+        }
+    }
+}
+
+impl Drop for InvocationCancellation {
+    fn drop(&mut self) {
+        let mut state = self.inner.lock_state();
+        state.cancellations.remove(&self.key);
+        report_compactions(&state, &self.inner.instruments);
+    }
+}
+
+fn report_compactions(state: &RunnerState, instruments: &MaintenanceInstruments) {
+    let active = state
+        .cancellations
+        .keys()
+        .filter(|key| key.job == MaintenanceJobId::METADATA_COMPACTION)
+        .count();
+    let running = active.min(super::metadata_compaction::MAX_CONCURRENT_COMPACTIONS);
+    instruments.compactions(running, active.saturating_sub(running));
+}
+
 impl Drop for PermitChain {
     fn drop(&mut self) {
         if let Some(dispatch) = self.dispatch.take() {
@@ -753,14 +747,18 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
     let Some(job) = inner.job(key.job) else {
         // Nudged for a job nobody registered: there is nothing to run and
         // nothing to reconcile.
-        return StepOutcome::Concluded(MaintenanceStepReport::concluded(
-            MaintenanceStepConclusion::NotEnabled,
+        return StepOutcome::Concluded(MaintenanceRunReport::concluded(
+            MaintenanceConclusion::NotEnabled,
         ));
     };
     let continuation = dispatch.continuation.as_deref();
     let queued_ms = dispatch.queue_wait_ms;
     let started = tokio::time::Instant::now();
-    match job.step(&key.namespace_id, continuation).await {
+    let invocation = InvocationCancellation::new(inner, key);
+    match job
+        .run(&key.namespace_id, continuation, &invocation.cancellation)
+        .await
+    {
         Ok(result) => {
             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             inner
@@ -779,6 +777,10 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
                 elapsed_ms,
                 "maintenance step settled"
             );
+            if let Some(follow_up) = result.follow_up {
+                inner.instruments.follow_up(follow_up);
+                nudge_if_inactive(inner, follow_up, &key.namespace_id);
+            }
             StepOutcome::Concluded(result)
         }
         Err(error) => {

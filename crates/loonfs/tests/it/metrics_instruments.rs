@@ -8,11 +8,14 @@
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use loonfs::{
-    CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions, FsBackgroundWork,
-    MaintenanceJobId, MaintenanceStepConclusion, MetadataMaintenanceOptions, PutFileOptions,
+    CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions, GarbageCollectionJob,
+    MaintenanceConclusion, MaintenanceHintRelay, MaintenanceJobId, MaintenanceRegistry,
+    MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
+    PutFileOptions,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -48,16 +51,32 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
         .max_wal_tail_segments
         .get()
         + 1;
-    // One runtime for the whole test: the writer's background work is
-    // spawned on the runtime that opened it, so a second `block_on` would
-    // be waiting on tasks that went away with the first.
     let snapshot = block_on(async {
+        let (observer, receiver) =
+            MaintenanceHintRelay::new(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
         let fs = open_runtime_with_async(store(temp_dir.path()), "metrics-writer", |builder| {
             builder
-                .background_work(FsBackgroundWork::Enabled)
+                .maintenance_hint_observer(move |hint| observer(hint))
                 .metrics_recorder(recorder.clone())
         })
         .await;
+        let registry = MaintenanceRegistry::new();
+        registry
+            .register(Arc::new(MetadataMaintenanceJob::new(
+                fs.maintenance.clone(),
+            )))
+            .expect("metadata job");
+        registry
+            .register(Arc::new(MetadataCompactionJob::new(fs.maintenance.clone())))
+            .expect("metadata compaction job");
+        registry
+            .register(Arc::new(GarbageCollectionJob::new(fs.maintenance.clone())))
+            .expect("garbage collection job");
+        let runner = MaintenanceRunner::builder(registry)
+            .metrics_recorder(recorder.clone())
+            .build()
+            .expect("runner");
+        runner.attach_hints(receiver);
         fs.writer
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
@@ -73,11 +92,10 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
                 .await
                 .expect("put file");
         }
-        fs.writer
-            .flush_background()
-            .await
-            .expect("background steps settle");
-        recorder.snapshot()
+        runner.drain().await.expect("maintenance settles");
+        let snapshot = recorder.snapshot();
+        runner.shutdown().await.expect("runner shutdown");
+        snapshot
     });
 
     // The bridge: writes went out and their latency was filed.
@@ -156,11 +174,12 @@ fn a_collection_step_reports_what_the_pass_retained() {
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
-        let job = fs
-            .writer
-            .maintenance_job(MaintenanceJobId::GC)
-            .expect("the runtime registers its collection job");
-        job.step(&namespace_id, None)
+        let registry = MaintenanceRegistry::new();
+        registry
+            .register(Arc::new(GarbageCollectionJob::new(fs.maintenance.clone())))
+            .expect("garbage collection job");
+        registry
+            .run(MaintenanceJobId::GC, &namespace_id, None)
             .await
             .expect("run one collection pass");
         recorder.snapshot()
@@ -244,13 +263,13 @@ struct MetadataConclusions;
 impl MetadataConclusions {
     fn all() -> impl Iterator<Item = &'static str> {
         [
-            MaintenanceStepConclusion::Progressed,
-            MaintenanceStepConclusion::Idle,
-            MaintenanceStepConclusion::Blocked,
-            MaintenanceStepConclusion::Superseded,
-            MaintenanceStepConclusion::NotEnabled,
+            MaintenanceConclusion::Progressed,
+            MaintenanceConclusion::Idle,
+            MaintenanceConclusion::Blocked,
+            MaintenanceConclusion::Superseded,
+            MaintenanceConclusion::NotEnabled,
         ]
         .into_iter()
-        .map(MaintenanceStepConclusion::as_str)
+        .map(MaintenanceConclusion::as_str)
     }
 }

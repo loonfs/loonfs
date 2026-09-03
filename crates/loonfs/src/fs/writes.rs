@@ -1,15 +1,14 @@
 //! [`FsWriter`]'s path mutations, commits, and the publication pipeline.
 
 use super::core::{ReadCore, WriterBits};
-use crate::maintenance_runner::NamespacePublication;
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
 use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::FsWriter;
 use crate::{
     ChangeSeq, CommitId, CommitOptions, CommitResponse, ContentRef, CopyOptions,
-    CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, NamespaceId, PutFileOptions,
-    RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAttributesOptions,
+    CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, NamespaceId, NamespacePublication,
+    PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAttributesOptions,
 };
 use crate::{Result, RuntimeError};
 use loonfs_api::{
@@ -990,6 +989,7 @@ pub(crate) async fn publish_batch_with_engine(
     writer.notify_after_publish(
         namespace_id,
         &NamespacePublication {
+            namespace_id: namespace_id.clone(),
             committed_through_seq: highest_committed_seq(&results),
             folded,
             wal_tail_segments,

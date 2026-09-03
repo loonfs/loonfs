@@ -4,7 +4,8 @@
 //! deadlines, continuations, and shutdown. The parent module handles async
 //! execution, permits, and timers.
 
-use super::{MaintenanceClock, MaintenanceJobId, MaintenanceStepConclusion, MaintenanceStepReport};
+use super::runner::MaintenanceClock;
+use super::{MaintenanceConclusion, MaintenanceJobId, MaintenanceRunReport};
 use crate::NamespaceId;
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -63,7 +64,7 @@ pub(crate) enum StepOutcome {
     /// The executor answered. The result decides what happens to the key:
     /// its conclusion when to run again, its continuation where to resume,
     /// its not-before time when a deadline it saw comes due.
-    Concluded(MaintenanceStepReport),
+    Concluded(MaintenanceRunReport),
     /// The executor failed. The key is retried after its backoff, from
     /// wherever its last step left it.
     Failed,
@@ -210,6 +211,10 @@ impl KeyState {
         matches!(self.run, KeyRunState::Running { .. })
     }
 
+    fn is_active(&self) -> bool {
+        !matches!(self.run, KeyRunState::Parked)
+    }
+
     #[cfg(test)]
     fn is_pending(&self) -> bool {
         self.requested_run().is_some() || self.obligations.is_some()
@@ -306,9 +311,16 @@ impl Admission {
     }
 
     /// Permits currently held by running chains.
-    #[cfg(test)]
     pub(crate) fn running(&self) -> usize {
         self.running
+    }
+
+    pub(crate) fn keys_admitted(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub(crate) fn is_active(&self, key: &MaintenanceKey) -> bool {
+        self.keys.get(key).is_some_and(KeyState::is_active)
     }
 
     /// Whether the key is admitted with work still owed to it: waiting for a
@@ -560,7 +572,7 @@ impl Admission {
             }
             StepOutcome::Concluded(result) => result,
         };
-        if result.conclusion == MaintenanceStepConclusion::NotEnabled {
+        if result.conclusion == MaintenanceConclusion::NotEnabled {
             // The job has nothing to maintain here at all. Drop the key —
             // its continuation and its obligations included — rather than
             // reconcile it forever.
@@ -574,7 +586,7 @@ impl Admission {
                 // Work happened, or the step lost a race it should simply
                 // take again: eligible immediately, behind whatever else is
                 // waiting, resuming from wherever this step stopped.
-                MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded => {
+                MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded => {
                     state.continuation = result.continuation;
                     Some(ReadyRun::queued(ticket, now_ms))
                 }
@@ -583,17 +595,17 @@ impl Admission {
                 // only spin — but keeps where the step stopped, so a retry
                 // with room to work resumes instead of walking the same
                 // ground again.
-                MaintenanceStepConclusion::Blocked => {
+                MaintenanceConclusion::Blocked => {
                     state.continuation = result.continuation;
                     None
                 }
                 // Nothing to do. Whatever the last pass was carrying is
                 // spent, and the next step starts a fresh one.
-                MaintenanceStepConclusion::Idle => {
+                MaintenanceConclusion::Idle => {
                     state.continuation = None;
                     None
                 }
-                MaintenanceStepConclusion::NotEnabled => None,
+                MaintenanceConclusion::NotEnabled => None,
             };
             state.settle(concluding_run);
         }
@@ -672,7 +684,7 @@ fn backoff_window_ms(consecutive_failures: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::maintenance_runner::{split_mix_64, JITTER_GAMMA};
+    use crate::maintenance::runner::{split_mix_64, JITTER_GAMMA};
     use loonfs_test_support::ids::namespace_id;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -732,21 +744,22 @@ mod tests {
         MaintenanceKey::new(MaintenanceJobId::GC, &namespace_id(name))
     }
 
-    fn concluded(conclusion: MaintenanceStepConclusion) -> StepOutcome {
-        StepOutcome::Concluded(MaintenanceStepReport::concluded(conclusion))
+    fn concluded(conclusion: MaintenanceConclusion) -> StepOutcome {
+        StepOutcome::Concluded(MaintenanceRunReport::concluded(conclusion))
     }
 
     /// A conclusion that also tells the runner where the step stopped.
-    fn continuing(conclusion: MaintenanceStepConclusion, continuation: &str) -> StepOutcome {
-        StepOutcome::Concluded(MaintenanceStepReport {
+    fn continuing(conclusion: MaintenanceConclusion, continuation: &str) -> StepOutcome {
+        StepOutcome::Concluded(MaintenanceRunReport {
             conclusion,
             continuation: Some(continuation.to_owned()),
             not_before_ms: None,
+            follow_up: None,
         })
     }
 
     fn idle() -> StepOutcome {
-        concluded(MaintenanceStepConclusion::Idle)
+        concluded(MaintenanceConclusion::Idle)
     }
 
     /// The key a claim landed on. Most of these tests are about which key
@@ -848,7 +861,7 @@ mod tests {
             // The nudge every publication plants, arriving mid-step.
             admission.nudge(key.clone());
             ran.push(key.clone());
-            running = admission.finish(&key, concluded(MaintenanceStepConclusion::Progressed), NOW);
+            running = admission.finish(&key, concluded(MaintenanceConclusion::Progressed), NOW);
         }
 
         assert_eq!(
@@ -902,7 +915,7 @@ mod tests {
         let handed_off = admission
             .finish(
                 &key,
-                concluded(MaintenanceStepConclusion::Progressed),
+                concluded(MaintenanceConclusion::Progressed),
                 NOW + 5_000,
             )
             .expect("a progressing key with nothing else waiting runs again");
@@ -1017,7 +1030,7 @@ mod tests {
         admission.nudge(peer.clone());
         assert_eq!(claimed(admission.try_dispatch(NOW)), Some(busy.clone()));
         assert_eq!(
-            claimed(admission.finish(&busy, concluded(MaintenanceStepConclusion::Progressed), NOW)),
+            claimed(admission.finish(&busy, concluded(MaintenanceConclusion::Progressed), NOW)),
             Some(peer.clone()),
             "one unit per step: the peer runs before the busy key folds again"
         );
@@ -1036,7 +1049,7 @@ mod tests {
         admission.nudge(key.clone());
         assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::Progressed), NOW)),
+            claimed(admission.finish(&key, concluded(MaintenanceConclusion::Progressed), NOW)),
             Some(key.clone()),
             "a sole progressing key folds its backlog without waiting"
         );
@@ -1051,7 +1064,7 @@ mod tests {
         admission.nudge(key.clone());
         assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::Blocked), NOW)),
+            claimed(admission.finish(&key, concluded(MaintenanceConclusion::Blocked), NOW)),
             None,
             "zero-progress work must not requeue itself"
         );
@@ -1072,7 +1085,7 @@ mod tests {
         admission.nudge(key.clone());
         assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::Superseded), NOW)),
+            claimed(admission.finish(&key, concluded(MaintenanceConclusion::Superseded), NOW)),
             Some(key),
             "a superseded step takes the race again"
         );
@@ -1087,7 +1100,7 @@ mod tests {
         admission.nudge(key.clone());
         assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::NotEnabled), NOW)),
+            claimed(admission.finish(&key, concluded(MaintenanceConclusion::NotEnabled), NOW)),
             None
         );
         assert!(!admission.is_pending(&key), "the key is forgotten");
@@ -1114,7 +1127,7 @@ mod tests {
         let resumed = admission
             .finish(
                 &key,
-                continuing(MaintenanceStepConclusion::Progressed, "page-1"),
+                continuing(MaintenanceConclusion::Progressed, "page-1"),
                 NOW,
             )
             .expect("a progressing key is eligible again");
@@ -1128,7 +1141,7 @@ mod tests {
         assert_eq!(
             claimed(admission.finish(
                 &key,
-                continuing(MaintenanceStepConclusion::Blocked, "page-2"),
+                continuing(MaintenanceConclusion::Blocked, "page-2"),
                 NOW
             )),
             None,
@@ -1168,13 +1181,13 @@ mod tests {
         assert_eq!(
             claimed(admission.finish(
                 &key,
-                continuing(MaintenanceStepConclusion::Progressed, "page-1"),
+                continuing(MaintenanceConclusion::Progressed, "page-1"),
                 NOW
             )),
             Some(key.clone())
         );
         assert_eq!(
-            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::NotEnabled), NOW)),
+            claimed(admission.finish(&key, concluded(MaintenanceConclusion::NotEnabled), NOW)),
             None
         );
         assert_eq!(
@@ -1202,7 +1215,7 @@ mod tests {
         assert_eq!(
             claimed(admission.finish(
                 &key,
-                continuing(MaintenanceStepConclusion::Progressed, "page-1"),
+                continuing(MaintenanceConclusion::Progressed, "page-1"),
                 NOW
             )),
             Some(key.clone())
@@ -1228,10 +1241,11 @@ mod tests {
         assert_eq!(
             claimed(admission.finish(
                 &key,
-                StepOutcome::Concluded(MaintenanceStepReport {
-                    conclusion: MaintenanceStepConclusion::Idle,
+                StepOutcome::Concluded(MaintenanceRunReport {
+                    conclusion: MaintenanceConclusion::Idle,
                     continuation: None,
                     not_before_ms: Some(NOW + 60_000),
+                    follow_up: None,
                 }),
                 NOW
             )),
@@ -1249,10 +1263,11 @@ mod tests {
         assert_eq!(
             claimed(admission.finish(
                 &key,
-                StepOutcome::Concluded(MaintenanceStepReport {
-                    conclusion: MaintenanceStepConclusion::Progressed,
+                StepOutcome::Concluded(MaintenanceRunReport {
+                    conclusion: MaintenanceConclusion::Progressed,
                     continuation: None,
                     not_before_ms: Some(NOW + 30_000),
+                    follow_up: None,
                 }),
                 NOW + 60_000
             )),
@@ -1781,11 +1796,11 @@ mod tests {
                 return;
             };
             let conclusion = match self.draws.below(6) {
-                0 => Some(MaintenanceStepConclusion::Progressed),
-                1 => Some(MaintenanceStepConclusion::Idle),
-                2 => Some(MaintenanceStepConclusion::Blocked),
-                3 => Some(MaintenanceStepConclusion::Superseded),
-                4 => Some(MaintenanceStepConclusion::NotEnabled),
+                0 => Some(MaintenanceConclusion::Progressed),
+                1 => Some(MaintenanceConclusion::Idle),
+                2 => Some(MaintenanceConclusion::Blocked),
+                3 => Some(MaintenanceConclusion::Superseded),
+                4 => Some(MaintenanceConclusion::NotEnabled),
                 // The failing step, which is the same report with a backoff
                 // behind it.
                 _ => None,
@@ -1793,7 +1808,7 @@ mod tests {
             let outcome = conclusion.map_or(StepOutcome::Failed, concluded);
             let dispatched = self.admission.finish(&key, outcome, self.now_ms);
             self.running.remove(&key);
-            if conclusion == Some(MaintenanceStepConclusion::NotEnabled) {
+            if conclusion == Some(MaintenanceConclusion::NotEnabled) {
                 // The key and everything on it, obligations included, is
                 // gone.
                 self.owed.remove(&key);

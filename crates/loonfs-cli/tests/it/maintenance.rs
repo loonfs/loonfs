@@ -314,7 +314,7 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
 }
 
 #[test]
-fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
+fn index_enable_waits_to_its_target_and_the_runner_tracks_later_writes() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -327,8 +327,7 @@ fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
     assert_success(&enabled);
     assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
 
-    // A commit that lands after the capture is not waited for: the next
-    // enable is what picks it up.
+    // A later command's local runner advances the enabled index as it writes.
     let more = harness.temp_dir.path().join("two.txt");
     fs::write(&more, b"needle two\n").expect("write payload");
     assert_success(&harness.run(&["put", more.to_str().expect("utf-8 path"), "/two.txt"]));
@@ -336,8 +335,8 @@ fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
     assert_success(&status);
     assert_eq!(
         json_data(&status)["built_through_seq"],
-        1,
-        "the earlier wait stopped at the target it captured"
+        2,
+        "the embedded runner maintains an enabled index after each write"
     );
 
     // An index already at the namespace head returns without stepping.

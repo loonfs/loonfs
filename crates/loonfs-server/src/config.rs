@@ -114,10 +114,10 @@ pub struct ServerConfig {
     /// Worst-case download memory is this times `max_download_bytes`.
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
-    /// How many writer-scheduled maintenance steps may run at once across
-    /// every job and namespace. Each job runs at most one step per
+    /// How many runner-scheduled maintenance runs may execute at once across
+    /// every job and namespace. Each job runs at most one run per
     /// namespace at a time; this bounds the fan-out when a write burst
-    /// crosses thresholds in many namespaces together. A step that waits
+    /// crosses thresholds in many namespaces together. A run that waits
     /// for a permit takes the next one that frees.
     #[serde(default = "default_max_concurrent_maintenance")]
     pub max_concurrent_maintenance: usize,
@@ -245,35 +245,26 @@ pub struct RuntimeCacheConfigOverrides {
 
 /// Controls whether this server schedules maintenance automatically.
 ///
-/// `automatic` schedules metadata, garbage collection, and enabled grep
-/// index jobs for namespaces used by this process. `manual` schedules no
-/// jobs; use it when another server or `loonfs maintenance run`
-/// maintains those namespaces. Explicit maintenance operations remain available
-/// in both modes. Retention is never advanced automatically.
+/// `automatic` runs a local scheduler for metadata, garbage collection, and
+/// enabled grep index jobs. `manual` creates no scheduler; use it when another
+/// server or `loonfs maintenance run` maintains those namespaces. Explicit
+/// maintenance operations remain available in both modes. Retention is never
+/// advanced automatically.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceMode {
-    /// The writer schedules its own metadata and collection steps, and the
-    /// grep index job when the grep mode maintains.
+    /// The server runs metadata and collection jobs, and the grep index job
+    /// when the grep mode maintains.
     #[default]
     Automatic,
-    /// Nothing is scheduled and no automatic job is registered. Explicit
-    /// maintenance operations remain available.
+    /// No local scheduler runs. Explicit maintenance operations remain available.
     Manual,
 }
 
 impl MaintenanceMode {
-    /// Whether this server registers automatic maintenance jobs at all.
-    pub fn registers_automatic_jobs(self) -> bool {
+    /// Whether this server runs its maintenance registry locally.
+    pub fn runs_automatically(self) -> bool {
         matches!(self, Self::Automatic)
-    }
-
-    /// The writer policy this mode selects.
-    pub fn background_work(self) -> loonfs::FsBackgroundWork {
-        match self {
-            Self::Automatic => loonfs::FsBackgroundWork::Enabled,
-            Self::Manual => loonfs::FsBackgroundWork::ManualOnly,
-        }
     }
 }
 
@@ -681,11 +672,7 @@ root = "/tmp/loonfs-server"
         );
         let config = load_server_config(&path).expect("valid config");
         assert_eq!(config.maintenance, super::MaintenanceMode::Automatic);
-        assert!(config.maintenance.registers_automatic_jobs());
-        assert_eq!(
-            config.maintenance.background_work(),
-            loonfs::FsBackgroundWork::Enabled
-        );
+        assert!(config.maintenance.runs_automatically());
 
         let path = write_config(
             r#"
@@ -705,11 +692,7 @@ root = "/tmp/loonfs-server"
             super::MaintenanceMode::Manual,
             "write-serving nodes can hand maintenance to a dedicated process"
         );
-        assert!(!config.maintenance.registers_automatic_jobs());
-        assert_eq!(
-            config.maintenance.background_work(),
-            loonfs::FsBackgroundWork::ManualOnly
-        );
+        assert!(!config.maintenance.runs_automatically());
     }
 
     #[test]

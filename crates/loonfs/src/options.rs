@@ -6,7 +6,7 @@
 //! Results are the `loonfs-api` wire shapes themselves, the same way handles
 //! already return `CommitResponse` and `FlushWalResponse`.
 
-use crate::{EffectiveLimit, GcConfig, Result, RuntimeError};
+use crate::{EffectiveLimit, FrozenBasePolicy, GcConfig, Result, RuntimeError};
 use loonfs_api::{CreateCheckpointRequest, GcRequest, MetadataMaintenanceRequest};
 use loonfs_core::limits::{CHECKPOINT_AT_WAL_SEGMENTS, MAX_UNFLUSHED_WAL_SEGMENTS};
 use std::num::NonZeroU64;
@@ -19,16 +19,19 @@ pub use loonfs_api::options::{
 };
 
 /// Overrides for the metadata-upkeep action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataMaintenanceOptions {
     /// Flush the visible WAL tail once it reaches this many segments.
     pub max_wal_tail_segments: NonZeroU64,
+    /// How a bounded step treats a base run it cannot merge.
+    pub frozen_base: FrozenBasePolicy,
 }
 
 impl Default for MetadataMaintenanceOptions {
     fn default() -> Self {
         Self {
             max_wal_tail_segments: const { NonZeroU64::new(CHECKPOINT_AT_WAL_SEGMENTS).unwrap() },
+            frozen_base: FrozenBasePolicy::Amortized,
         }
     }
 }
@@ -53,6 +56,7 @@ impl MetadataMaintenanceOptions {
         }
         Ok(Self {
             max_wal_tail_segments,
+            ..Self::default()
         })
     }
 

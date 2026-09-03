@@ -105,6 +105,7 @@ pub mod cache {
     };
     pub use crate::recency::Recency;
 
+    pub use crate::checkpoint::metadata_maintenance_due;
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataSegmentCache,
         MetadataSegmentCacheConfig, MetadataSegmentCacheStats, StoredMetadataBlockCache,

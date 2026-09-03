@@ -172,7 +172,7 @@ The periodic check reads the grep root. If an active root is at a commit
 boundary, it also asks the change feed for the next commit. These reads show
 whether the index is behind the namespace.
 
-A server configured to maintain the index registers this job with its writer.
+A server configured to maintain the index registers this job in its maintenance registry.
 Enabling the index schedules the first backfill. Publications and queries that
 find a stale index schedule later work. This allows maintenance to resume
 after a restart without listing every namespace.
@@ -181,10 +181,11 @@ Disabling the index updates its root with one compare-and-swap. An in-progress
 step that loses that race reads the disabled root and stops. A query-only
 server does not register the maintenance job and rejects index mutations.
 
-Embedded CLI profiles do not run background maintenance. The
-`loonfs maintenance index enable` command captures a target sequence and runs
-bounded maintenance steps until the index reaches it. Later writes do not
-move that target, so the command can finish on an active namespace.
+Embedded CLI profiles run a local maintenance scheduler and settle admitted
+work after each mutation. The `loonfs maintenance index enable` command
+captures a target sequence and runs bounded maintenance steps until the index
+reaches it. Later writes do not move that target, so the command can finish on
+an active namespace.
 `--no-wait` returns after enabling the index. `--max-steps` and
 `--deadline-ms` limit how long the command works and report incomplete
 progress as an error. Running the command again advances an index that has

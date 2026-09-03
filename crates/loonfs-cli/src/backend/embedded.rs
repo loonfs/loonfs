@@ -10,7 +10,8 @@ use loonfs::{
     CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, DeleteNamespaceResponse,
     DeleteOptions, FsMaintenance, FsReader, FsWriter,
     ListChangesOptions as RuntimeListChangesOptions, ListChangesResponse, ListPathEntriesOptions,
-    MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenanceStepConclusion, MoveOptions,
+    MaintenanceAssignment, MaintenanceCancellation, MaintenanceConclusion, MaintenanceHandle,
+    MaintenanceJob, MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner, MoveOptions,
     PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions,
     UndeleteOptions, UpdateAttributesOptions,
 };
@@ -27,8 +28,7 @@ use loonfs_api::{
 use loonfs_client::{NamespacePath, ReadFileOptions};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
-    GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads, GREP_GC_JOB,
-    GREP_INDEX_JOB,
+    GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
 };
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -39,18 +39,18 @@ use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, 
 
 /// Purpose-specific handles over one shared store client: reads go through
 /// the reader, mutations through the writer, and maintenance through the
-/// maintenance handle. The embedded writer runs `FsBackgroundWork::Enabled` — the
-/// same policy as the reference server — so a publish that crosses the WAL
-/// threshold schedules its own maintenance step, and every mutation settles
-/// scheduled work before the one-shot process exits. A publish gated on
-/// `maintenance_required` waits for the step that same gated publish
-/// scheduled, then resubmits, so embedded writes recover from WAL debt
+/// maintenance handle. A local runner receives bounded publication hints, and
+/// every mutation settles admitted work before the one-shot process exits. A
+/// publish gated on `maintenance_required` waits for metadata maintenance,
+/// then resubmits, so embedded writes recover from WAL debt
 /// instead of hard-stopping. `loonfs maintenance` commands remain the explicit path
 /// for everything else (GC, retention, forced steps).
 pub(crate) struct EmbeddedBackend {
     pub(crate) writer: FsWriter,
     pub(crate) reader: FsReader,
     pub(crate) maintenance: FsMaintenance,
+    pub(crate) jobs: MaintenanceRegistry,
+    pub(crate) runner: MaintenanceRunner,
     /// Grep is composed here rather than by the runtime: this service owns
     /// the query side for the length of the command.
     pub(crate) grep: GrepService,
@@ -72,7 +72,7 @@ const EMBEDDED_SNAPSHOT_MAX_LIVE_PER_NAMESPACE: usize = 16;
 type HostedJob = (MaintenanceJobId, Arc<dyn MaintenanceJob>);
 
 impl EmbeddedBackend {
-    /// Waits out writer-scheduled maintenance so a one-shot command never
+    /// Waits out locally scheduled maintenance so a one-shot command never
     /// exits (tearing down the runtime) while a step is mid-flight. A settle
     /// failure after a committed mutation is reported as a warning on
     /// stderr, never as the mutation's outcome — the commit landed.
@@ -80,7 +80,7 @@ impl EmbeddedBackend {
         &self,
         result: Result<T, CliError>,
     ) -> Result<T, CliError> {
-        match (result, self.writer.flush_background().await) {
+        match (result, self.runner.drain().await) {
             (result, Ok(())) => result,
             (Ok(value), Err(error)) => {
                 write_stderr_warning(format_args!(
@@ -93,10 +93,9 @@ impl EmbeddedBackend {
     }
 
     /// Runs one mutation with `maintenance_required` recovery: a gated
-    /// publish observes the oversized WAL tail and schedules its own
-    /// recovery step (the writer policy is `Enabled`), so settle that step
-    /// and resubmit. A gated attempt commits nothing, so the resubmission
-    /// cannot double-apply.
+    /// publish observes the oversized WAL tail and emits a maintenance hint,
+    /// so settle the local runner and resubmit. A gated attempt commits
+    /// nothing, so the resubmission cannot double-apply.
     async fn publish_with_maintenance_recovery<T, F, Fut>(
         &self,
         namespace_id: &NamespaceId,
@@ -116,10 +115,7 @@ impl EmbeddedBackend {
             if !gated {
                 break;
             }
-            self.writer
-                .flush_background()
-                .await
-                .map_err(map_runtime_error)?;
+            self.runner.drain().await.map_err(map_runtime_error)?;
             result = attempt().await;
         }
         let result = result.scoped(namespace_id);
@@ -374,45 +370,28 @@ impl EmbeddedBackend {
             },
             || async {
                 let conclusion = job
-                    .step(namespace_id, None)
+                    .run(namespace_id, None, &MaintenanceCancellation::new())
                     .await
                     .scoped(namespace_id)?
                     .conclusion;
                 Ok(match conclusion {
-                    MaintenanceStepConclusion::Progressed
-                    | MaintenanceStepConclusion::Superseded => GrepWaitStep::Continue,
-                    MaintenanceStepConclusion::Idle
-                    | MaintenanceStepConclusion::Blocked
-                    | MaintenanceStepConclusion::NotEnabled => GrepWaitStep::Settled,
+                    MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded => {
+                        GrepWaitStep::Continue
+                    }
+                    MaintenanceConclusion::Idle
+                    | MaintenanceConclusion::Blocked
+                    | MaintenanceConclusion::NotEnabled => GrepWaitStep::Settled,
                 })
             },
         )
         .await
     }
 
-    /// Registers the jobs this process composes itself, then resolves every
-    /// selected job's executor from the writer that owns it.
-    ///
-    /// The runtime's own jobs are registered by the writer; grep's is
-    /// registered here, over the same worker every other index command in
-    /// this process uses. After this, one lookup answers for all three.
+    /// Resolves every selected job from the registry.
     fn hosted_jobs(&self, jobs: &[MaintenanceJobId]) -> Result<Vec<HostedJob>, CliError> {
-        if jobs.contains(&GREP_INDEX_JOB) {
-            self.writer
-                .register_maintenance_job(Arc::new(GrepMaintenanceJob::new(
-                    self.grep_worker(),
-                    GramIndexBuildPolicy::default(),
-                )))
-                .map_err(map_runtime_error)?;
-        }
-        if jobs.contains(&GREP_GC_JOB) {
-            self.writer
-                .register_maintenance_job(Arc::new(GrepGcJob::new(self.grep_worker())))
-                .map_err(map_runtime_error)?;
-        }
         jobs.iter()
             .map(|job| {
-                let executor = self.writer.maintenance_job(*job).ok_or_else(|| {
+                let executor = self.jobs.get(*job).ok_or_else(|| {
                     CliError::runtime_error(format!(
                         "no maintenance job is registered under `{job}`"
                     ))
@@ -428,8 +407,7 @@ impl EmbeddedBackend {
     /// nudges every key once at start-up and again on `poll_interval_ms`
     /// (the default cadence when `None`), and the runner decides when each
     /// step runs, how many run at once, and what happens when one fails. The
-    /// signal ends the assignment and [`FsWriter::shutdown`] ends the
-    /// process's background work, in the one order that is correct.
+    /// signal ends the assignment, then the writer and runner shut down.
     pub(super) async fn host_maintenance(
         &self,
         namespaces: &[NamespaceId],
@@ -439,7 +417,7 @@ impl EmbeddedBackend {
     ) -> Result<(), CliError> {
         let hosted = self.hosted_jobs(jobs)?;
         let interval_ms = poll_interval_ms.unwrap_or(ASSIGNMENT_INTERVAL_MS);
-        let maintenance = self.writer.maintenance();
+        let maintenance = self.runner.handle();
         assign(&maintenance, &hosted, namespaces);
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
@@ -450,7 +428,9 @@ impl EmbeddedBackend {
                 }
             }
         }
-        self.writer.shutdown().await.map_err(map_runtime_error)
+        let writer = self.writer.shutdown().await;
+        let runner = self.runner.shutdown().await;
+        writer.and(runner).map_err(map_runtime_error)
     }
 
     /// Runs every `{job, namespace}` key to a settled conclusion, or until
@@ -458,13 +438,9 @@ impl EmbeddedBackend {
     ///
     /// A drain hosts the steps itself rather than nudging the runner: it has
     /// a budget to spend and per-key progress to report, and admission
-    /// offers neither. So it shuts the writer down first — a second
-    /// scheduler over the same keys would race these steps and make the
-    /// counts below a lie — and then walks the assignment, carrying each
-    /// key's continuation from one step to the next exactly as the runner
-    /// would have. Shutting the writer down does not disarm the steps: a
-    /// job compare-and-swaps the namespace head through `FsMaintenance`, never
-    /// through the publication service the shutdown closed.
+    /// offers neither. It shuts the runner down first so a second scheduler
+    /// cannot race these steps, then closes the writer and walks the
+    /// assignment. Each key's continuation passes from one run to the next.
     pub(super) async fn drain_maintenance(
         &self,
         namespaces: &[NamespaceId],
@@ -472,12 +448,13 @@ impl EmbeddedBackend {
         budget: StepBudget,
     ) -> Result<MaintenanceDrainProgress, CliError> {
         let hosted = self.hosted_jobs(jobs)?;
+        self.runner.shutdown().await.map_err(map_runtime_error)?;
         self.writer.shutdown().await.map_err(map_runtime_error)?;
         let timer = StdMonotonicTimer::default();
         let started_ms = timer.monotonic_now_ms();
         let mut steps = 0;
         let mut keys = Vec::with_capacity(hosted.len() * namespaces.len());
-        for (job, executor) in &hosted {
+        for (job, _executor) in &hosted {
             for namespace_id in namespaces {
                 let mut key = MaintenanceKeyProgress {
                     job: *job,
@@ -487,8 +464,13 @@ impl EmbeddedBackend {
                 };
                 let mut continuation = None;
                 while !budget.spent(steps, timer.monotonic_now_ms().saturating_sub(started_ms)) {
-                    let result = executor
-                        .step(namespace_id, continuation.as_deref())
+                    let result = self
+                        .jobs
+                        .execute(MaintenanceAssignment {
+                            namespace_id: namespace_id.clone(),
+                            job: *job,
+                            continuation,
+                        })
                         .await
                         .scoped(namespace_id)?;
                     steps += 1;
@@ -1054,14 +1036,13 @@ fn store_probe_response(report: StoreProbeReport) -> StoreProbeResponse {
 mod tests {
     use super::{
         cli_page_request, map_runtime_error, resolve_cli_page_limit, GrepError, StepBudget,
-        GREP_GC_JOB, GREP_INDEX_JOB,
     };
     use crate::backend_error::map_namespace_scoped_grep_error;
     use crate::config::StoreConfig;
     use crate::resolve::EmbeddedTarget;
     use loonfs::{
-        BootstrapNamespaceError, CoreError, CreateNamespaceOptions, FsBackgroundWork, FsWriter,
-        MaintenanceJobId, MaintenanceStepConclusion, MetadataMaintenanceOptions, PutFileOptions,
+        BootstrapNamespaceError, CoreError, CreateNamespaceOptions, FsWriter,
+        MaintenanceConclusion, MaintenanceJobId, MetadataMaintenanceOptions, PutFileOptions,
         RuntimeError, SharedObjectStore, StatPathOptions,
     };
     use loonfs_api::{
@@ -1070,6 +1051,7 @@ mod tests {
     use loonfs_client::NamespacePath;
     use loonfs_core::test_support::append_wal_segments;
     use loonfs_core::MutationContext;
+    use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
     use tempfile::tempdir;
 
     fn namespace_id(value: &str) -> NamespaceId {
@@ -1085,9 +1067,10 @@ mod tests {
     }
 
     /// Jobs selected when `maintenance run` omits `--job`.
-    fn every_job() -> [MaintenanceJobId; 4] {
+    fn every_job() -> [MaintenanceJobId; 5] {
         [
             MaintenanceJobId::METADATA,
+            MaintenanceJobId::METADATA_COMPACTION,
             MaintenanceJobId::GC,
             GREP_INDEX_JOB,
             GREP_GC_JOB,
@@ -1098,7 +1081,6 @@ mod tests {
         const PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD: u64 = 34;
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id(format!("{namespace_id}-backlog"))
-            .background_work(FsBackgroundWork::ManualOnly)
             .min_publish_interval_ms(0)
             .build()
             .await
@@ -1173,8 +1155,8 @@ mod tests {
             "an unbudgeted drain settles every key: {:?}",
             progress.keys
         );
-        assert_eq!(progress.keys.len(), 8, "four jobs over two namespaces");
-        assert!(progress.steps >= 8, "every key took at least one step");
+        assert_eq!(progress.keys.len(), 10, "five jobs over two namespaces");
+        assert!(progress.steps >= 10, "every key took at least one step");
         // A namespace with no grep root has nothing for that job to
         // maintain, and saying so is a settled conclusion like any other.
         let unindexed_grep = progress
@@ -1184,7 +1166,7 @@ mod tests {
             .expect("the unindexed namespace's grep key");
         assert_eq!(
             unindexed_grep.conclusion,
-            Some(MaintenanceStepConclusion::NotEnabled)
+            Some(MaintenanceConclusion::NotEnabled)
         );
 
         // The work is durable, not a tally: both backlogs are flushed and
@@ -1246,7 +1228,7 @@ mod tests {
         assert_eq!(metadata.steps, 1);
         assert_eq!(
             metadata.conclusion,
-            Some(MaintenanceStepConclusion::Progressed),
+            Some(MaintenanceConclusion::Progressed),
             "one step of a real backlog moves durable state and leaves more behind"
         );
         assert!(!metadata.settled());
@@ -1530,7 +1512,6 @@ mod tests {
             .into_shared();
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id("debt-builder")
-            .background_work(FsBackgroundWork::ManualOnly)
             .min_publish_interval_ms(0)
             .build()
             .await

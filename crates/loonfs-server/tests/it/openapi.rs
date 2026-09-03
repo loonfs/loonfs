@@ -1249,9 +1249,6 @@ fn openapi_names_tagged_one_of_alternatives() {
             &[
                 "ReorganizeStepOutcomeNotNeeded",
                 "ReorganizeStepOutcomeUnitPublished",
-                "ReorganizeStepOutcomeCompactionStarted",
-                "ReorganizeStepOutcomeCompactionRunning",
-                "ReorganizeStepOutcomeCompactionAtCapacity",
                 "ReorganizeStepOutcomeCompactionRequired",
                 "ReorganizeStepOutcomeRootAdvanced",
             ][..],

@@ -262,9 +262,7 @@ fn projection_is_live(
 
 impl PublisherRegistry {
     /// Creates the registry a writer owns. Batches publish through each
-    /// publisher's own commit engine and writer session, and the writer's
-    /// [`FsBackgroundWork`](crate::FsBackgroundWork) policy governs any
-    /// post-publish maintenance.
+    /// publisher's own commit engine and writer session.
     pub(crate) fn new(
         read_core: ReadCore,
         writer: Weak<WriterBits>,

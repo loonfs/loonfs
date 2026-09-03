@@ -11,7 +11,7 @@
 //! Alone in its process, the read callsites are first hit with the capture
 //! subscriber installed, and the assertions are deterministic.
 
-use loonfs::{CreateNamespaceOptions, FsBackgroundWork, FsWriter, PutFileOptions, StoreConfig};
+use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions, StoreConfig};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
@@ -29,9 +29,6 @@ fn store_config(root: &Path) -> StoreConfig {
 async fn writer(root: &Path) -> FsWriter {
     FsWriter::builder(store_config(root))
         .writer_id("read-tracing-capture-writer")
-        // No background maintenance: the only spans in the capture are the
-        // ones the write and the two reads produce.
-        .background_work(FsBackgroundWork::ManualOnly)
         .build()
         .await
         .expect("build writer")

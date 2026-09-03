@@ -2855,7 +2855,6 @@
         "discriminator": {
           "mapping": {
             "abandoned": "#/components/schemas/MetadataCompactionOutcomeAbandoned",
-            "already_running": "#/components/schemas/MetadataCompactionOutcomeAlreadyRunning",
             "bounded_merge_published": "#/components/schemas/MetadataCompactionOutcomeBoundedMergePublished",
             "cancelled": "#/components/schemas/MetadataCompactionOutcomeCancelled",
             "fenced": "#/components/schemas/MetadataCompactionOutcomeFenced",
@@ -2871,9 +2870,6 @@
           },
           {
             "$ref": "#/components/schemas/MetadataCompactionOutcomeBoundedMergePublished"
-          },
-          {
-            "$ref": "#/components/schemas/MetadataCompactionOutcomeAlreadyRunning"
           },
           {
             "$ref": "#/components/schemas/MetadataCompactionOutcomePublished"
@@ -2898,21 +2894,6 @@
           "outcome": {
             "enum": [
               "abandoned"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "MetadataCompactionOutcomeAlreadyRunning": {
-        "description": "A compaction already holds this namespace's slot in this process.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "already_running"
             ],
             "type": "string"
           }
@@ -3467,10 +3448,7 @@
         "description": "The outcome of the metadata-reorganization part of a maintenance step.",
         "discriminator": {
           "mapping": {
-            "compaction_at_capacity": "#/components/schemas/ReorganizeStepOutcomeCompactionAtCapacity",
             "compaction_required": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired",
-            "compaction_running": "#/components/schemas/ReorganizeStepOutcomeCompactionRunning",
-            "compaction_started": "#/components/schemas/ReorganizeStepOutcomeCompactionStarted",
             "not_needed": "#/components/schemas/ReorganizeStepOutcomeNotNeeded",
             "root_advanced": "#/components/schemas/ReorganizeStepOutcomeRootAdvanced",
             "unit_published": "#/components/schemas/ReorganizeStepOutcomeUnitPublished"
@@ -3485,15 +3463,6 @@
             "$ref": "#/components/schemas/ReorganizeStepOutcomeUnitPublished"
           },
           {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionStarted"
-          },
-          {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionRunning"
-          },
-          {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionAtCapacity"
-          },
-          {
             "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired"
           },
           {
@@ -3501,53 +3470,11 @@
           }
         ]
       },
-      "ReorganizeStepOutcomeCompactionAtCapacity": {
-        "properties": {
-          "outcome": {
-            "enum": [
-              "compaction_at_capacity"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
       "ReorganizeStepOutcomeCompactionRequired": {
         "properties": {
           "outcome": {
             "enum": [
               "compaction_required"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "ReorganizeStepOutcomeCompactionRunning": {
-        "properties": {
-          "outcome": {
-            "enum": [
-              "compaction_running"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "ReorganizeStepOutcomeCompactionStarted": {
-        "properties": {
-          "outcome": {
-            "enum": [
-              "compaction_started"
             ],
             "type": "string"
           }

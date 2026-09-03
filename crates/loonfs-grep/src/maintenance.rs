@@ -11,8 +11,9 @@ use crate::{
     GrepReorganizeOutcome, GrepWorker,
 };
 use loonfs::{
-    current_time_ms, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion,
-    MaintenanceStepReport, NamespaceId, NamespacePublication, Result, RuntimeError,
+    current_time_ms, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
+    MaintenanceJobId, MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication,
+    Result, RuntimeError,
 };
 use loonfs_api::ErrorCode;
 use loonfs_objectstore::ObjectStore;
@@ -50,7 +51,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         GREP_INDEX_JOB
     }
 
-    fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
+    fn should_run_after_publication(&self, publication: &NamespacePublication) -> bool {
         publication.committed_through_seq.is_some()
     }
 
@@ -60,25 +61,26 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
     /// Catch-up takes priority because it affects query completeness;
     /// reorganization only improves read cost. Progress is scheduled again so a
     /// backlog is drained through repeated bounded steps.
-    async fn step(
+    async fn run(
         &self,
         namespace_id: &NamespaceId,
         _continuation: Option<&str>,
-    ) -> Result<MaintenanceStepReport> {
+        _cancellation: &MaintenanceCancellation,
+    ) -> Result<MaintenanceRunReport> {
         let build = match self.worker.build_step(namespace_id, self.policy).await {
             Ok(outcome) => outcome,
             Err(error) if has_nothing_to_index(&error) => return Ok(not_enabled_step()),
             Err(error) => return Err(step_failure(namespace_id, "grep_build", error)),
         };
         let GrepBuildOutcome::UpToDate { .. } = build else {
-            return Ok(MaintenanceStepReport::concluded(build_conclusion(&build)));
+            return Ok(MaintenanceRunReport::concluded(build_conclusion(&build)));
         };
         let reorganize = match self.worker.reorganize_step(namespace_id, self.policy).await {
             Ok(outcome) => outcome,
             Err(error) if has_nothing_to_index(&error) => return Ok(not_enabled_step()),
             Err(error) => return Err(step_failure(namespace_id, "grep_reorganize", error)),
         };
-        Ok(MaintenanceStepReport::concluded(reorganize_conclusion(
+        Ok(MaintenanceRunReport::concluded(reorganize_conclusion(
             &reorganize,
         )))
     }
@@ -129,8 +131,8 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
     }
 }
 
-fn not_enabled_step() -> MaintenanceStepReport {
-    MaintenanceStepReport::concluded(MaintenanceStepConclusion::NotEnabled)
+fn not_enabled_step() -> MaintenanceRunReport {
+    MaintenanceRunReport::concluded(MaintenanceConclusion::NotEnabled)
 }
 
 /// Runs one bounded grep garbage-collection pass.
@@ -155,11 +157,12 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
         GREP_GC_JOB
     }
 
-    async fn step(
+    async fn run(
         &self,
         namespace_id: &NamespaceId,
         continuation: Option<&str>,
-    ) -> Result<MaintenanceStepReport> {
+        _cancellation: &MaintenanceCancellation,
+    ) -> Result<MaintenanceRunReport> {
         let request = GrepGcOptions {
             // Use the default per-step object limit.
             max_objects: None,
@@ -184,8 +187,8 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
                     error = %error.public_message(),
                     "grep collection rejected its resume position; restarting the pass"
                 );
-                return Ok(MaintenanceStepReport::concluded(
-                    MaintenanceStepConclusion::Superseded,
+                return Ok(MaintenanceRunReport::concluded(
+                    MaintenanceConclusion::Superseded,
                 ));
             }
             Err(error) => return Err(step_failure(namespace_id, "grep_gc", error)),
@@ -211,25 +214,26 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
 fn grep_gc_step_result(
     report: GrepGcReport,
     submitted_cursor: Option<&str>,
-) -> MaintenanceStepReport {
+) -> MaintenanceRunReport {
     let conclusion = match report.next_cursor.as_deref() {
         Some(next_cursor) if Some(next_cursor) == submitted_cursor => {
-            MaintenanceStepConclusion::Blocked
+            MaintenanceConclusion::Blocked
         }
-        Some(_) => MaintenanceStepConclusion::Progressed,
+        Some(_) => MaintenanceConclusion::Progressed,
         None if report.deleted_segments > 0 || report.deleted_other_objects > 0 => {
-            MaintenanceStepConclusion::Progressed
+            MaintenanceConclusion::Progressed
         }
-        None if report.namespace_degraded => MaintenanceStepConclusion::Blocked,
-        None => MaintenanceStepConclusion::Idle,
+        None if report.namespace_degraded => MaintenanceConclusion::Blocked,
+        None => MaintenanceConclusion::Idle,
     };
-    MaintenanceStepReport {
+    MaintenanceRunReport {
         conclusion,
         continuation: report.next_cursor,
         // Grep objects age against one fixed grace window rather than
         // against leases a write path plants, so a pass observes no deadline
         // to hand back. What brings the job round again is a nudge.
         not_before_ms: None,
+        follow_up: None,
     }
 }
 
@@ -243,14 +247,14 @@ fn has_nothing_to_index(error: &GrepError) -> bool {
 }
 
 /// What one bounded build accomplished.
-fn build_conclusion(outcome: &GrepBuildOutcome) -> MaintenanceStepConclusion {
+fn build_conclusion(outcome: &GrepBuildOutcome) -> MaintenanceConclusion {
     match outcome {
-        GrepBuildOutcome::NotEnabled => MaintenanceStepConclusion::NotEnabled,
-        GrepBuildOutcome::UpToDate { .. } => MaintenanceStepConclusion::Idle,
+        GrepBuildOutcome::NotEnabled => MaintenanceConclusion::NotEnabled,
+        GrepBuildOutcome::UpToDate { .. } => MaintenanceConclusion::Idle,
         GrepBuildOutcome::Published { .. } | GrepBuildOutcome::BackfillRestarted { .. } => {
-            MaintenanceStepConclusion::Progressed
+            MaintenanceConclusion::Progressed
         }
-        GrepBuildOutcome::Superseded => MaintenanceStepConclusion::Superseded,
+        GrepBuildOutcome::Superseded => MaintenanceConclusion::Superseded,
     }
 }
 
@@ -258,12 +262,12 @@ fn build_conclusion(outcome: &GrepBuildOutcome) -> MaintenanceStepConclusion {
 ///
 /// Reorganization publishes whatever fits within its budget, so it has no
 /// zero-progress `Blocked` result.
-fn reorganize_conclusion(outcome: &GrepReorganizeOutcome) -> MaintenanceStepConclusion {
+fn reorganize_conclusion(outcome: &GrepReorganizeOutcome) -> MaintenanceConclusion {
     match outcome {
-        GrepReorganizeOutcome::NotEnabled => MaintenanceStepConclusion::NotEnabled,
-        GrepReorganizeOutcome::NotNeeded { .. } => MaintenanceStepConclusion::Idle,
-        GrepReorganizeOutcome::UnitPublished { .. } => MaintenanceStepConclusion::Progressed,
-        GrepReorganizeOutcome::Superseded => MaintenanceStepConclusion::Superseded,
+        GrepReorganizeOutcome::NotEnabled => MaintenanceConclusion::NotEnabled,
+        GrepReorganizeOutcome::NotNeeded { .. } => MaintenanceConclusion::Idle,
+        GrepReorganizeOutcome::UnitPublished { .. } => MaintenanceConclusion::Progressed,
+        GrepReorganizeOutcome::Superseded => MaintenanceConclusion::Superseded,
     }
 }
 
@@ -294,22 +298,22 @@ mod tests {
             build_conclusion(&GrepBuildOutcome::UpToDate {
                 built_through_seq: ChangeSeq(7)
             }),
-            MaintenanceStepConclusion::Idle
+            MaintenanceConclusion::Idle
         );
         assert_eq!(
             reorganize_conclusion(&GrepReorganizeOutcome::NotNeeded {
                 delta_runs: 1,
                 mid_runs: 0
             }),
-            MaintenanceStepConclusion::Idle
+            MaintenanceConclusion::Idle
         );
         assert_eq!(
             build_conclusion(&GrepBuildOutcome::NotEnabled),
-            MaintenanceStepConclusion::NotEnabled
+            MaintenanceConclusion::NotEnabled
         );
         assert_eq!(
             reorganize_conclusion(&GrepReorganizeOutcome::NotEnabled),
-            MaintenanceStepConclusion::NotEnabled
+            MaintenanceConclusion::NotEnabled
         );
     }
 
@@ -322,13 +326,13 @@ mod tests {
                 skipped_revisions: 0,
                 segments_written: 1,
             }),
-            MaintenanceStepConclusion::Progressed
+            MaintenanceConclusion::Progressed
         );
         assert_eq!(
             build_conclusion(&GrepBuildOutcome::BackfillRestarted {
                 target_seq: ChangeSeq(9)
             }),
-            MaintenanceStepConclusion::Progressed,
+            MaintenanceConclusion::Progressed,
             "a restarted backfill discarded a dead projection and published a fresh basis"
         );
         assert_eq!(
@@ -337,15 +341,15 @@ mod tests {
                 segments_written: 1,
                 completed: false,
             }),
-            MaintenanceStepConclusion::Progressed
+            MaintenanceConclusion::Progressed
         );
         assert_eq!(
             build_conclusion(&GrepBuildOutcome::Superseded),
-            MaintenanceStepConclusion::Superseded
+            MaintenanceConclusion::Superseded
         );
         assert_eq!(
             reorganize_conclusion(&GrepReorganizeOutcome::Superseded),
-            MaintenanceStepConclusion::Superseded
+            MaintenanceConclusion::Superseded
         );
     }
 
@@ -358,7 +362,7 @@ mod tests {
             },
             Some("first-page"),
         );
-        assert_eq!(stopped.conclusion, MaintenanceStepConclusion::Progressed);
+        assert_eq!(stopped.conclusion, MaintenanceConclusion::Progressed);
         assert_eq!(stopped.continuation.as_deref(), Some("second-page"));
 
         assert_eq!(
@@ -370,7 +374,7 @@ mod tests {
                 Some("first-page"),
             )
             .conclusion,
-            MaintenanceStepConclusion::Blocked
+            MaintenanceConclusion::Blocked
         );
     }
 
@@ -378,7 +382,7 @@ mod tests {
     fn a_finished_pass_separates_reclamation_from_an_unreadable_namespace() {
         assert_eq!(
             grep_gc_step_result(GrepGcReport::default(), None).conclusion,
-            MaintenanceStepConclusion::Idle
+            MaintenanceConclusion::Idle
         );
         assert_eq!(
             grep_gc_step_result(
@@ -389,7 +393,7 @@ mod tests {
                 None,
             )
             .conclusion,
-            MaintenanceStepConclusion::Progressed
+            MaintenanceConclusion::Progressed
         );
         assert_eq!(
             grep_gc_step_result(
@@ -401,7 +405,7 @@ mod tests {
                 None,
             )
             .conclusion,
-            MaintenanceStepConclusion::Blocked
+            MaintenanceConclusion::Blocked
         );
     }
 

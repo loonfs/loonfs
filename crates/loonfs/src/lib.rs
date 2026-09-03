@@ -1,67 +1,44 @@
 //! Embedded LoonFS runtime.
 //!
-//! Use [`FsWriter`] for mutations, [`FsReader`] for reads, and [`FsMaintenance`] for
-//! explicit maintenance. [`FsBackgroundWork`] controls whether a writer also
-//! schedules non-destructive maintenance.
+//! Compose mutation, maintenance, and optional scheduling explicitly.
 //!
 //! ```no_run
 //! # async fn open(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
-//! let writer = loonfs::FsWriter::builder(store_config)
+//! use std::num::NonZeroUsize;
+//! use std::sync::Arc;
+//! use loonfs::{
+//!     FsWriter, GarbageCollectionJob, MaintenanceHintRelay, MaintenanceRegistry,
+//!     MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
+//! };
+//!
+//! let (observer, receiver) = MaintenanceHintRelay::new(
+//!     NonZeroUsize::new(1024).expect("nonzero capacity"),
+//! );
+//! let writer = FsWriter::builder(store_config)
 //!     .writer_id("server-a")
-//!     .background_work(loonfs::FsBackgroundWork::Enabled)
+//!     .maintenance_hint_observer(move |hint| observer(hint))
 //!     .build()
 //!     .await?;
-//! let namespace_id = loonfs::NamespaceId::parse("demo").expect("valid namespace id");
-//! writer
-//!     .create_namespace(&namespace_id, loonfs::CreateNamespaceOptions::default())
-//!     .await?;
-//! let commit = loonfs::CommitOptions::new(loonfs::ActorRef::service(
-//!     loonfs::ActorId::parse("document-worker").expect("valid actor id"),
-//! ));
-//! writer
-//!     .put_file_bytes(
-//!         &namespace_id,
-//!         "/report.txt",
-//!         b"report",
-//!         loonfs::PutFileOptions {
-//!             behavior: loonfs::DestinationBehavior::Replace,
-//!             commit,
-//!             expected_inode_id: None,
-//!             expected_revision_no: None,
-//!         },
-//!     )
-//!     .await?;
+//! let maintenance = writer.maintenance_handle("server-a-maintenance")?;
+//! let jobs = MaintenanceRegistry::new();
+//! jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))?;
+//! jobs.register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))?;
+//! jobs.register(Arc::new(GarbageCollectionJob::new(maintenance)))?;
+//! let runner = MaintenanceRunner::builder(jobs).build()?;
+//! runner.attach_hints(receiver);
+//! # runner.shutdown().await?;
+//! # writer.shutdown().await?;
 //! # Ok(()) }
 //! ```
 //!
-//! Attribute types are available directly from this crate, so embedded
-//! applications do not need a separate `loonfs-api` dependency:
-//!
-//! ```
-//! use loonfs::{ActorId, ActorRef, AttributeKey, AttributeValue, UpdateAttributesOptions};
-//!
-//! let key = AttributeKey::parse("owner").expect("valid attribute key");
-//! let mut options = UpdateAttributesOptions::new(ActorRef::user(
-//!     ActorId::parse("example-user").expect("valid actor id"),
-//! ));
-//! options.set = [
-//!     (key, AttributeValue::parse("platform").expect("valid attribute value")),
-//! ]
-//! .into_iter()
-//! .collect();
-//! assert_eq!(options.set.len(), 1);
-//! ```
-//!
-//! Writers schedule maintenance only for namespaces touched by or assigned to
-//! the process. [`FsWriter::shutdown`] drains that work. Readers and maintenance handles do
-//! not start background tasks.
+//! Readers and maintenance handles start no background work; a runner is the only scheduler and is optional.
 #![warn(missing_docs)]
 
 mod cache;
 mod config;
 mod fs;
 mod handle;
-mod maintenance_runner;
+mod maintenance;
 pub mod metrics;
 mod options;
 pub mod publisher;
@@ -109,10 +86,10 @@ pub use loonfs_core::{
     delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
     select_next_iterator, write_segments_in_waves, BootstrapNamespaceError, CheckpointFile,
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState,
-    DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig,
-    GcCursorKeyspace, GraceAge, MetadataCompactionJobOutcome, MetadataViewError, NamespaceGcCursor,
-    PassBudget, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, WriterFence,
-    CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+    DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, FileContentStream,
+    FrozenBasePolicy, GcConfig, GcCursorKeyspace, GraceAge, MetadataCompactionJobOutcome,
+    MetadataViewError, NamespaceGcCursor, PassBudget, SegmentBlockLoader, SegmentRowIterator,
+    StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 
@@ -201,9 +178,12 @@ pub use fs::{
 pub use handle::{
     FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,
 };
-pub use maintenance_runner::{
-    FsBackgroundWork, MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
-    MaintenanceStepConclusion, MaintenanceStepReport, NamespacePublication,
+pub use maintenance::{
+    GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation, MaintenanceConclusion,
+    MaintenanceHandle, MaintenanceHint, MaintenanceHintObserver, MaintenanceHintReceiver,
+    MaintenanceHintRelay, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry,
+    MaintenanceRunReport, MaintenanceRunner, MaintenanceRunnerBuilder, MaintenanceRunnerStats,
+    MetadataCompactionJob, MetadataMaintenanceJob, NamespacePublication,
 };
 pub use options::{
     gc_config_from_request, CommitOptions, CopyOptions, CreateCheckpointOptions,

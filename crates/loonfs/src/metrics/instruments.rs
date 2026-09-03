@@ -11,9 +11,7 @@ use super::{
 use crate::metrics::{
     LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_HIT, RESULT_MISS, RESULT_OK,
 };
-use crate::{
-    GcResponse, MaintenanceJobId, MaintenanceStepConclusion, MetadataCompactionJobOutcome,
-};
+use crate::{GcResponse, MaintenanceConclusion, MaintenanceJobId, MetadataCompactionJobOutcome};
 use loonfs_core::cache::{DecodedBlockCacheObserver, DecodedBlockWeight};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -119,7 +117,7 @@ impl MetricLabel for PublishOutcome {
     }
 }
 
-impl MetricLabel for MaintenanceStepConclusion {
+impl MetricLabel for MaintenanceConclusion {
     const VALUES: &'static [Self] = &[
         Self::Progressed,
         Self::Idle,
@@ -129,7 +127,7 @@ impl MetricLabel for MaintenanceStepConclusion {
     ];
 
     fn as_str(self) -> &'static str {
-        MaintenanceStepConclusion::as_str(self)
+        MaintenanceConclusion::as_str(self)
     }
 }
 
@@ -164,6 +162,127 @@ const GC_CATEGORIES: [GcCategory; 10] = [
     }),
 ];
 
+/// Instruments owned by one maintenance runner.
+pub(crate) struct MaintenanceInstruments {
+    installed: Option<InstalledMaintenance>,
+    observed_hints_dropped: std::sync::atomic::AtomicU64,
+}
+
+struct InstalledMaintenance {
+    recorder: Arc<dyn MetricsRecorder>,
+    jobs: Mutex<HashMap<&'static str, MaintenanceJobInstruments>>,
+    compactions_running: Arc<dyn GaugeHandle>,
+    compactions_waiting: Arc<dyn GaugeHandle>,
+    follow_ups: Arc<dyn CounterHandle>,
+    hints_dropped: Arc<dyn CounterHandle>,
+}
+
+impl MaintenanceInstruments {
+    pub(crate) fn new(recorder: Option<Arc<dyn MetricsRecorder>>) -> Arc<Self> {
+        Arc::new(Self {
+            installed: recorder.map(|recorder| InstalledMaintenance {
+                jobs: Mutex::new(HashMap::new()),
+                compactions_running: recorder.register_gauge(
+                    "loonfs.maintenance.compactions_running",
+                    "Streaming metadata compactions this process is running",
+                    &[],
+                ),
+                compactions_waiting: recorder.register_gauge(
+                    "loonfs.maintenance.compactions_waiting",
+                    "Streaming metadata compactions waiting for a process permit",
+                    &[],
+                ),
+                follow_ups: recorder.register_counter(
+                    "loonfs.maintenance.follow_ups",
+                    "Follow-up maintenance jobs requested by completed runs",
+                    &[],
+                ),
+                hints_dropped: recorder.register_counter(
+                    "loonfs.maintenance.hints_dropped",
+                    "Maintenance hints dropped by bounded relays",
+                    &[],
+                ),
+                recorder,
+            }),
+            observed_hints_dropped: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    pub(crate) fn maintenance_step(
+        &self,
+        job: MaintenanceJobId,
+        conclusion: MaintenanceConclusion,
+        queued_ms: u64,
+        elapsed_ms: u64,
+    ) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        let instruments = installed.job(job);
+        instruments.steps.get(conclusion).increment(1);
+        instruments.step_seconds.record(seconds_from_ms(elapsed_ms));
+        instruments
+            .queue_wait_seconds
+            .record(seconds_from_ms(queued_ms));
+    }
+
+    pub(crate) fn maintenance_step_failed(&self, job: MaintenanceJobId, queued_ms: u64) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        let instruments = installed.job(job);
+        instruments.failures.increment(1);
+        instruments
+            .queue_wait_seconds
+            .record(seconds_from_ms(queued_ms));
+    }
+
+    pub(crate) fn maintenance_probe_failed(&self, job: MaintenanceJobId) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.job(job).probe_failures.increment(1);
+    }
+
+    pub(crate) fn compactions(&self, running: usize, waiting: usize) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed
+            .compactions_running
+            .set(i64::try_from(running).unwrap_or(i64::MAX));
+        installed
+            .compactions_waiting
+            .set(i64::try_from(waiting).unwrap_or(i64::MAX));
+    }
+
+    pub(crate) fn follow_up(&self, _job: MaintenanceJobId) {
+        if let Some(installed) = &self.installed {
+            installed.follow_ups.increment(1);
+        }
+    }
+
+    pub(crate) fn hints_dropped(&self, total: u64) {
+        let previous = self
+            .observed_hints_dropped
+            .swap(total, std::sync::atomic::Ordering::Relaxed);
+        if let Some(installed) = &self.installed {
+            installed
+                .hints_dropped
+                .increment(total.saturating_sub(previous));
+        }
+    }
+}
+
+impl InstalledMaintenance {
+    fn job(&self, job: MaintenanceJobId) -> MaintenanceJobInstruments {
+        let mut jobs = lock(&self.jobs);
+        jobs.entry(job.as_str())
+            .or_insert_with(|| MaintenanceJobInstruments::register(self.recorder.as_ref(), job))
+            .clone()
+    }
+}
+
 /// Every instrument one runtime reports, or nothing at all.
 pub(crate) struct RuntimeInstruments {
     installed: Option<Installed>,
@@ -172,7 +291,6 @@ pub(crate) struct RuntimeInstruments {
 struct Installed {
     recorder: Arc<dyn MetricsRecorder>,
     object_store: Mutex<HashMap<&'static str, ObjectStoreOperationInstruments>>,
-    maintenance: Mutex<HashMap<&'static str, MaintenanceJobInstruments>>,
     compactions: CompactionInstruments,
     publisher: PublisherInstruments,
     gc: GcInstruments,
@@ -190,7 +308,6 @@ impl RuntimeInstruments {
                 gc: GcInstruments::register(recorder.as_ref()),
                 cache: RuntimeCacheInstruments::register(recorder.as_ref()),
                 object_store: Mutex::new(HashMap::new()),
-                maintenance: Mutex::new(HashMap::new()),
                 recorder,
             }),
         })
@@ -237,68 +354,6 @@ impl RuntimeInstruments {
         }) as Arc<dyn ObjectStoreMetricsRecorder>)
     }
 
-    /// Reports one settled maintenance step.
-    pub(crate) fn maintenance_step(
-        &self,
-        job: MaintenanceJobId,
-        conclusion: MaintenanceStepConclusion,
-        queued_ms: u64,
-        elapsed_ms: u64,
-    ) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        let instruments = installed.maintenance_job(job);
-        instruments.steps.get(conclusion).increment(1);
-        instruments.step_seconds.record(seconds_from_ms(elapsed_ms));
-        instruments
-            .queue_wait_seconds
-            .record(seconds_from_ms(queued_ms));
-    }
-
-    /// Reports one maintenance step that failed before concluding.
-    pub(crate) fn maintenance_step_failed(&self, job: MaintenanceJobId, queued_ms: u64) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        let instruments = installed.maintenance_job(job);
-        instruments.failures.increment(1);
-        instruments
-            .queue_wait_seconds
-            .record(seconds_from_ms(queued_ms));
-    }
-
-    /// Reports one reconciliation probe that could not say whether a job has
-    /// work.
-    ///
-    /// A probe takes no permit, so there is no queue wait to file beside it.
-    pub(crate) fn maintenance_probe_failed(&self, job: MaintenanceJobId) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed.maintenance_job(job).probe_failures.increment(1);
-    }
-
-    /// Reports the streaming metadata compactions this process is running and
-    /// the ones holding a namespace slot while they wait for a permit.
-    ///
-    /// Queued is the number that matters on its own: jobs take as long as
-    /// they take, so a queue that never empties is a process serving more
-    /// namespaces than its compaction limit admits.
-    pub(crate) fn compactions(&self, running: usize, queued: usize) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed
-            .compactions
-            .running
-            .set(i64::try_from(running).unwrap_or(i64::MAX));
-        installed
-            .compactions
-            .queued
-            .set(i64::try_from(queued).unwrap_or(i64::MAX));
-    }
-
     /// Reports one finished streaming compaction and any merge it completed.
     pub(crate) fn compaction_finished(
         &self,
@@ -324,11 +379,6 @@ impl RuntimeInstruments {
             Err(_) => (CompactionOutcome::Failed, None),
         };
         self.record_compaction(outcome, elapsed_ms, totals);
-    }
-
-    /// Reports a queued compaction cancelled before it began doing work.
-    pub(crate) fn compaction_not_admitted(&self) {
-        self.record_compaction(CompactionOutcome::Cancelled, 0, None);
     }
 
     fn record_compaction(
@@ -450,16 +500,6 @@ impl RuntimeInstruments {
         instruments
             .retries
             .increment(u64::from(sample.attempts.saturating_sub(1)));
-    }
-}
-
-impl Installed {
-    fn maintenance_job(&self, job: MaintenanceJobId) -> MaintenanceJobInstruments {
-        let mut registry = lock(&self.maintenance);
-        registry
-            .entry(job.as_str())
-            .or_insert_with(|| MaintenanceJobInstruments::register(self.recorder.as_ref(), job))
-            .clone()
     }
 }
 
@@ -593,7 +633,7 @@ impl ObjectStoreOperationInstruments {
 /// build registers.
 #[derive(Clone)]
 struct MaintenanceJobInstruments {
-    steps: LabeledCounters<MaintenanceStepConclusion>,
+    steps: LabeledCounters<MaintenanceConclusion>,
     failures: Arc<dyn CounterHandle>,
     probe_failures: Arc<dyn CounterHandle>,
     step_seconds: Arc<dyn HistogramHandle>,
@@ -854,8 +894,6 @@ fn metric_level(value: usize) -> i64 {
 
 /// The gauges and durable totals for this process's streaming compactions.
 struct CompactionInstruments {
-    running: Arc<dyn GaugeHandle>,
-    queued: Arc<dyn GaugeHandle>,
     outcomes: LabeledCounters<CompactionOutcome>,
     outcome_seconds: Vec<Arc<dyn HistogramHandle>>,
     input_rows: Arc<dyn CounterHandle>,
@@ -881,17 +919,6 @@ impl CompactionInstruments {
             )
         };
         Self {
-            running: recorder.register_gauge(
-                "loonfs.maintenance.compactions_running",
-                "Streaming metadata compactions this process is running",
-                &[],
-            ),
-            queued: recorder.register_gauge(
-                "loonfs.maintenance.compactions_queued",
-                "Streaming metadata compactions holding a namespace slot while they wait for a \
-                 process permit",
-                &[],
-            ),
             outcomes: LabeledCounters::register(
                 recorder,
                 "loonfs.maintenance.compactions",
@@ -1035,7 +1062,7 @@ mod tests {
         DefaultMetricsRecorder, KeyClass, MetricValue, MetricsSnapshot, ObjectStoreOperation,
         ObjectStoreResultClass, PutModeClass, VecObjectStoreMetricsRecorder,
     };
-    use crate::{MaintenanceJobId, MaintenanceStepConclusion};
+    use crate::{MaintenanceConclusion, MaintenanceJobId};
 
     fn sample(
         operation: ObjectStoreOperation,
@@ -1329,23 +1356,28 @@ mod tests {
         instruments.publisher_batch(4);
         instruments.publisher_wal_fold();
         instruments.publisher_publish(PublishOutcome::Ok);
-        instruments.maintenance_step(MaintenanceJobId::GC, MaintenanceStepConclusion::Idle, 1, 2);
+        MaintenanceInstruments::new(None).maintenance_step(
+            MaintenanceJobId::GC,
+            MaintenanceConclusion::Idle,
+            1,
+            2,
+        );
     }
 
     #[test]
     fn a_settled_step_counts_against_its_job_and_conclusion() {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let instruments = RuntimeInstruments::new(Some(recorder.clone()));
+        let instruments = MaintenanceInstruments::new(Some(recorder.clone()));
 
         instruments.maintenance_step(
             MaintenanceJobId::METADATA,
-            MaintenanceStepConclusion::Progressed,
+            MaintenanceConclusion::Progressed,
             5,
             30,
         );
         instruments.maintenance_step(
             MaintenanceJobId::METADATA,
-            MaintenanceStepConclusion::Idle,
+            MaintenanceConclusion::Idle,
             0,
             1,
         );
@@ -1400,7 +1432,7 @@ mod tests {
     #[test]
     fn a_failed_reconciliation_probe_counts_against_its_job() {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let instruments = RuntimeInstruments::new(Some(recorder.clone()));
+        let instruments = MaintenanceInstruments::new(Some(recorder.clone()));
 
         instruments.maintenance_probe_failed(MaintenanceJobId::METADATA);
         instruments.maintenance_probe_failed(MaintenanceJobId::METADATA);

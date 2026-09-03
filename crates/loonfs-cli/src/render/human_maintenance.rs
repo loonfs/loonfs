@@ -141,17 +141,8 @@ pub(super) fn human_maintenance_ran(response: &MaintenanceRunResponse) -> String
             match metadata.reorganize {
                 ReorganizeStepOutcome::NotNeeded => "reorganize not needed",
                 ReorganizeStepOutcome::UnitPublished => "reorganized one family group",
-                ReorganizeStepOutcome::CompactionStarted => {
-                    "started a background compaction of one family group"
-                }
-                ReorganizeStepOutcome::CompactionAtCapacity => {
-                    "queued a background compaction of one family group behind the server's compaction limit"
-                }
-                ReorganizeStepOutcome::CompactionRunning => {
-                    "one family group is waiting on a background compaction"
-                }
                 ReorganizeStepOutcome::CompactionRequired => {
-                    "one family group needs a compaction this server will not run on its own"
+                    "one family group needs the metadata-compaction job"
                 }
                 ReorganizeStepOutcome::RootAdvanced => {
                     "another publisher moved the metadata root, so the reorganize published nothing"
@@ -162,9 +153,6 @@ pub(super) fn human_maintenance_ran(response: &MaintenanceRunResponse) -> String
             MetadataCompactionOutcome::NotNeeded => "metadata compaction not needed".to_owned(),
             MetadataCompactionOutcome::BoundedMergePublished => {
                 "metadata compaction published one bounded merge".to_owned()
-            }
-            MetadataCompactionOutcome::AlreadyRunning => {
-                "metadata compaction already running".to_owned()
             }
             MetadataCompactionOutcome::Published {
                 manifest_no,

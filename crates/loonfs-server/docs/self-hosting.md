@@ -370,9 +370,8 @@ The server runs metadata maintenance and garbage collection automatically by
 default. Long metadata compactions can log progress for an extended period.
 No action is required unless failures repeat.
 
-`compaction_required` applies only to embedded deployments without a
-background worker. Those deployments must call `FsMaintenance::compact_metadata`.
-The self-hosted server schedules that work itself.
+`compaction_required` asks the registered `metadata-compaction` job to run.
+The self-hosted server schedules that follow-up automatically.
 
 ## Current limitations
 

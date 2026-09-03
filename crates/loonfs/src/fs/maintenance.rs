@@ -5,16 +5,16 @@
 //! builds and collects its own state through this handle's public
 //! checkpoint calls, and its hosts drive it.
 
-use crate::maintenance_runner::CompactionStart;
 use crate::trace::phase_span;
 use crate::FsMaintenance;
 use crate::NamespaceDiagnostics;
 use crate::{
     AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions, ErrorCode,
-    FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenanceRunRequest,
-    MaintenanceRunResponse, MetadataCompactionOutcome, MetadataCompactionResponse,
-    MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
+    FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenanceCancellation,
+    MaintenanceProbe, MaintenanceRunRequest, MaintenanceRunResponse, MetadataCompactionOutcome,
+    MetadataCompactionResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse,
+    NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore,
+    WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
@@ -86,14 +86,10 @@ impl FsMaintenance {
         engine
     }
 
-    /// Drops everything this runtime caches for a namespace: the read
-    /// caches, and — when this handle runs over a writer's runtime — the
-    /// rebuildable half of that namespace's publisher state.
+    /// Drops this runtime's read caches; publisher projections reload because
+    /// their keys include the head etag and basis identity.
     pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
         self.core.invalidate_namespace_read_cache(namespace_id);
-        if let Some(writer) = &self.writer {
-            writer.publisher.invalidate_projection(namespace_id);
-        }
     }
 
     fn finish_namespace_mutation<T>(
@@ -280,7 +276,7 @@ impl FsMaintenance {
         let status = self.load_maintenance_status(namespace_id, false).await?;
         let flush = options.flush_is_due(status.wal_tail_segments);
         let response = self
-            .flush_then_reorganize(namespace_id, flush, status.head_seq)
+            .flush_then_reorganize(namespace_id, flush, status.head_seq, options.frozen_base)
             .await?;
         tracing::debug!(
             wal_tail_segments_before = status.wal_tail_segments,
@@ -291,6 +287,29 @@ impl FsMaintenance {
         Ok(response)
     }
 
+    /// Whether the WAL tail or metadata manifest has bounded work waiting.
+    pub async fn metadata_probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
+        let threshold = MetadataMaintenanceOptions::default()
+            .max_wal_tail_segments
+            .get();
+        let cache = self.core.metadata_segment_cache();
+        loonfs_core::cache::metadata_maintenance_due(
+            self.core.store(),
+            Some(cache.as_ref()),
+            namespace_id,
+            threshold,
+        )
+        .await
+        .map(|due| {
+            if due {
+                MaintenanceProbe::Due
+            } else {
+                MaintenanceProbe::Idle
+            }
+        })
+        .map_err(RuntimeError::Core)
+    }
+
     /// Optionally flushes the WAL tail, then runs one reorganization step.
     /// `observed_head_seq` is reported when concurrent updates prevent every
     /// flush attempt from publishing.
@@ -299,6 +318,7 @@ impl FsMaintenance {
         namespace_id: &NamespaceId,
         flush: bool,
         observed_head_seq: ChangeSeq,
+        frozen_base: loonfs_core::FrozenBasePolicy,
     ) -> Result<MetadataMaintenanceResponse> {
         let wal_flush = if flush {
             match self.run_wal_flush(namespace_id).await {
@@ -322,7 +342,7 @@ impl FsMaintenance {
         } else {
             WalFlushStepOutcome::NotNeeded
         };
-        let reorganize = self.run_reorganization(namespace_id).await?;
+        let reorganize = self.run_reorganization(namespace_id, frozen_base).await?;
         Ok(MetadataMaintenanceResponse {
             wal_flush,
             reorganize,
@@ -330,29 +350,19 @@ impl FsMaintenance {
     }
 
     /// Runs one bounded reorganization step for one metadata family.
-    /// Writer-scheduled maintenance can call this again while work remains.
     ///
-    /// A family group whose oldest run no longer fits one unit is rebuilt by
-    /// a streaming compaction instead, which this step starts as background
-    /// work and does not wait for. While that job runs its group is left
-    /// alone and the step reorganizes the other groups; the plan it carries is what
-    /// tells the planner which group that is.
+    /// A family group whose oldest run no longer fits one unit reports that
+    /// the metadata compaction job is required.
     async fn run_reorganization(
         &self,
         namespace_id: &NamespaceId,
+        frozen_base: loonfs_core::FrozenBasePolicy,
     ) -> Result<ReorganizeStepOutcome> {
-        // Writers with background maintenance spread a rebuild across delta
-        // merges. Manual-only handles report that compaction is required
-        // instead of starting work they cannot finish in the background.
-        let frozen_base = match &self.writer {
-            Some(_) => loonfs_core::FrozenBasePolicy::Amortized,
-            None => loonfs_core::FrozenBasePolicy::CompactImmediately,
-        };
         Ok(
             match self.reorganize_once(namespace_id, frozen_base).await? {
                 ReorganizationStep::Concluded(outcome) => outcome,
-                ReorganizationStep::CompactionPlanned(spec) => {
-                    self.start_streaming_compaction(namespace_id, spec)
+                ReorganizationStep::CompactionPlanned(_) => {
+                    ReorganizeStepOutcome::CompactionRequired
                 }
             },
         )
@@ -361,10 +371,7 @@ impl FsMaintenance {
     /// The one reorganization unit both paths run, and what it left for its
     /// caller.
     ///
-    /// A step starts the planned job as background work; an explicit
-    /// [`Self::compact_metadata`] runs it here. Everything before that point
-    /// is the same call, so cache invalidation happens once, whichever path
-    /// asked.
+    /// A bounded step reports a planned job; [`Self::compact_metadata`] runs it.
     ///
     /// `frozen_base` is what the caller wants done about a group whose base
     /// no bounded window can reach. It is the one thing the two paths
@@ -417,67 +424,9 @@ impl FsMaintenance {
         }))
     }
 
-    /// Starts the job a step planned, unless something already owns the
-    /// namespace's one slot or this handle schedules no background work.
-    fn start_streaming_compaction(
-        &self,
-        namespace_id: &NamespaceId,
-        spec: loonfs_core::MetadataCompactionSpec,
-    ) -> ReorganizeStepOutcome {
-        let families = spec.families();
-        let input_runs = spec.input_runs();
-        let input_rows = spec.input_rows();
-        let started = match &self.writer {
-            Some(writer) => writer.compactions.start(self, namespace_id, spec),
-            None => CompactionStart::NoRunner,
-        };
-        match started {
-            CompactionStart::Started => {
-                tracing::info!(
-                    families = ?families,
-                    input_runs,
-                    input_rows,
-                    "a family group outgrew one reorganization step; a streaming metadata \
-                     compaction is rebuilding it"
-                );
-                ReorganizeStepOutcome::CompactionStarted
-            }
-            CompactionStart::Queued => {
-                tracing::info!(
-                    families = ?families,
-                    input_runs,
-                    input_rows,
-                    "a family group outgrew one reorganization step; its streaming metadata \
-                     compaction is waiting for a process compaction permit"
-                );
-                ReorganizeStepOutcome::CompactionAtCapacity
-            }
-            CompactionStart::AlreadyRunning => {
-                tracing::info!(
-                    families = ?families,
-                    "a streaming metadata compaction is already running for this namespace; this \
-                     group waits for it to finish"
-                );
-                ReorganizeStepOutcome::CompactionRunning
-            }
-            CompactionStart::NoRunner => {
-                tracing::warn!(
-                    families = ?families,
-                    "a family group needs a streaming metadata compaction, and this handle \
-                     schedules no background work; run `FsMaintenance::compact_metadata` to rebuild it"
-                );
-                ReorganizeStepOutcome::CompactionRequired
-            }
-        }
-    }
-
     /// Runs one streaming metadata compaction in the caller's task.
     ///
-    /// Use this when automatic maintenance is disabled or
-    /// [`ReorganizeStepOutcome::CompactionRequired`] is reported. Dropping the
-    /// returned future cancels the compaction. Handles connected to a writer
-    /// share that writer's compaction limits and shutdown signal; standalone
-    /// handles rely on the caller to limit concurrency.
+    /// Use this when [`ReorganizeStepOutcome::CompactionRequired`] is reported.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.compact_metadata",
@@ -493,6 +442,16 @@ impl FsMaintenance {
     pub async fn compact_metadata(
         &self,
         namespace_id: &NamespaceId,
+    ) -> Result<MetadataCompactionResponse> {
+        self.compact_metadata_with(namespace_id, &MaintenanceCancellation::new())
+            .await
+    }
+
+    /// `compact_metadata` with caller-owned cancellation.
+    pub async fn compact_metadata_with(
+        &self,
+        namespace_id: &NamespaceId,
+        cancellation: &MaintenanceCancellation,
     ) -> Result<MetadataCompactionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let spec = match self
@@ -514,31 +473,9 @@ impl FsMaintenance {
                 })
             }
         };
-        let Some(writer) = &self.writer else {
-            // Standalone handles have no shared concurrency limit.
-            let cancellation = loonfs_core::MetadataCompactionCancellation::default();
-            let outcome = self
-                .run_streaming_compaction(namespace_id, &spec, &cancellation)
-                .await;
-            return outcome.map(metadata_compaction_response);
-        };
-        let Some(mut claim) = writer.compactions.claim(namespace_id) else {
-            return Ok(MetadataCompactionResponse {
-                outcome: MetadataCompactionOutcome::AlreadyRunning,
-            });
-        };
-        if !claim.admitted().await {
-            let outcome = loonfs_core::MetadataCompactionJobOutcome::Cancelled;
-            self.core.instruments().compaction_not_admitted();
-            return Ok(metadata_compaction_response(outcome));
-        }
         let outcome = self
-            .run_streaming_compaction(namespace_id, &spec, claim.cancellation())
+            .run_streaming_compaction(namespace_id, &spec, cancellation.metadata_compaction())
             .await;
-        claim.finished(matches!(
-            outcome,
-            Ok(loonfs_core::MetadataCompactionJobOutcome::Published { .. })
-        ));
         outcome.map(metadata_compaction_response)
     }
 
@@ -810,8 +747,13 @@ impl FsMaintenance {
     ) -> Result<MetadataMaintenanceResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let basis = load_namespace_flush_basis(self.core.store(), namespace_id).await?;
-        self.flush_then_reorganize(namespace_id, basis.has_unflushed_wal_tail, basis.head_seq)
-            .await
+        self.flush_then_reorganize(
+            namespace_id,
+            basis.has_unflushed_wal_tail,
+            basis.head_seq,
+            loonfs_core::FrozenBasePolicy::CompactImmediately,
+        )
+        .await
     }
 
     /// Advances the namespace retention floor when a verified checkpoint

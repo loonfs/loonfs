@@ -134,6 +134,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
                 &namespace_id,
                 MetadataMaintenanceOptions {
                     max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                    ..Default::default()
                 },
             )
             .await

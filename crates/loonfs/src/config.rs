@@ -17,11 +17,10 @@ pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
 /// concurrent submissions amortize into fewer, larger WAL segments. Zero
 /// keeps only the batching that in-flight publications force.
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
-/// Default cap on concurrently running writer-scheduled maintenance steps,
-/// across every job and namespace of one handle. Each job already runs at
-/// most one step per namespace at a time; this bounds how many may step at
+/// Default cap on concurrently running maintenance invocations.
+/// Each job already runs at most once per namespace at a time; this bounds how many may run at
 /// once, so a write burst across many namespaces cannot fan out into
-/// unbounded concurrent maintenance. A step that waits for a permit is not
+/// unbounded concurrent maintenance. A run that waits for a permit is not
 /// dropped: it takes the next one that frees.
 pub const DEFAULT_MAX_CONCURRENT_MAINTENANCE: usize = 2;
 

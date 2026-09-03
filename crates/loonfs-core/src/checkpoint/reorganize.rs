@@ -27,6 +27,7 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::load_control_snapshot;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
 use loonfs_api::wire::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
     RunTier,
@@ -176,9 +177,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(&previous.payload);
-    if delta_runs < policy.max_delta_runs.get()
-        && !manifest_has_partial_reorganization(segments.scan_runs.as_ref())
-    {
+    if !manifest_has_reorganization_work(&previous.payload, segments.scan_runs.as_ref(), policy) {
         return Ok(report(
             namespace_id,
             MetadataReorganizeOutcome::NotNeeded { delta_runs },
@@ -291,6 +290,58 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             Ok(report(namespace_id, MetadataReorganizeOutcome::Superseded))
         }
     }
+}
+
+/// Checks WAL and manifest descriptors without decoding segment rows.
+pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&super::cache::MetadataSegmentCache>,
+    namespace_id: &NamespaceId,
+    max_wal_tail_segments: u64,
+) -> Result<bool> {
+    let snapshot = load_control_snapshot(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    crate::namespace::control::ensure_namespace_live(&snapshot.head.state)?;
+    let basis = snapshot.basis();
+    let basis_head_seq = basis
+        .manifest()
+        .map_or(ChangeSeq(0), |manifest| manifest.manifest_head_seq);
+    let head = &snapshot.head.state;
+    let wal_tail_segments = count_visible_wal_tail_segments(&WalChainLoadRequest {
+        namespace_id,
+        chain_base_seq: basis_head_seq,
+        head_seq: head.seq,
+        visible_tip: head.visible_wal_tip.clone(),
+        stop_after_seq: None,
+        max_segment_fetches: None,
+        recent_segments: &head.recent_segments,
+    })
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
+    })?;
+    if wal_tail_segments >= max_wal_tail_segments {
+        return Ok(true);
+    }
+    let Some(root) = snapshot.root else {
+        return Ok(false);
+    };
+    let segments = load_verified_manifest_segments(
+        store,
+        segment_cache,
+        namespace_id,
+        &root.state.manifest.manifest_object_id,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
+    super::load::ensure_root_matches_manifest(namespace_id, &root.state, segments.manifest())?;
+    Ok(manifest_has_reorganization_work(
+        &segments.manifest().payload,
+        segments.scan_runs.as_ref(),
+        MetadataLsmPolicy::default(),
+    ))
 }
 
 /// What one reorganization step should do for the group it selected.
@@ -691,6 +742,20 @@ fn manifest_has_partial_reorganization(runs: &[MetadataRunManifest]) -> bool {
     };
     runs.iter()
         .any(|run| run.tier == RunTier::Base && run.run_seq >= oldest_delta_seq)
+}
+
+fn manifest_has_reorganization_work(
+    payload: &NamespaceManifestPayload,
+    runs: &[MetadataRunManifest],
+    policy: MetadataLsmPolicy,
+) -> bool {
+    let has_group_rows = select_family_group(payload, &BTreeSet::new()).is_some();
+    (delta_run_count(payload) >= policy.max_delta_runs.get() && has_group_rows)
+        || manifest_has_partial_reorganization(runs)
+        || payload
+            .frozen_base_delta_merges
+            .values()
+            .any(|count| *count >= DELTA_MERGES_OVER_A_FROZEN_BASE)
 }
 
 fn run_has_group_rows(run: &MetadataRunManifest, group: MetadataFamilyGroup) -> bool {

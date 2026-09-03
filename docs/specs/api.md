@@ -829,22 +829,12 @@ or retain.
 
 `wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold. `flushed` means this step published a manifest and updated the root. `already_published` means the root already referenced a different manifest, so this step did not update it. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
 
-Four reorganize outcomes describe work the step did not do itself. A family
-group that has outgrown one step is rebuilt by a background streaming
-compaction, and the step publishes nothing in that case: the job publishes
-once, when it finishes. `reorganize.outcome` says what became of that job.
-
-`compaction_started` means this step started one. `compaction_at_capacity`
-means this step's job claimed the namespace but is waiting for a process
-compaction permit, because the process is already running its limit of them;
-it starts when one frees. `compaction_running` means a job was already
-running for this namespace, which runs one at a time, so this step started
-none and a later step plans the group again. `compaction_required` means the
-group needs a job and the handle serving the request has no background work
-behind it at all, so nothing will run one until an operator does; the
-self-hosting guide names the call.
-
-`root_advanced` means another publisher updated the metadata root first. The manifest written by this step remains unreferenced, and a later GC pass can delete it. A later maintenance step retries the reorganization.
+`reorganize.outcome` has four values. `not_needed` means no bounded merge is
+due. `unit_published` means this run published one bounded merge.
+`compaction_required` means a family group needs streaming compaction; run the
+`metadata-compaction` job. `root_advanced` means another publisher updated the
+metadata root first. A manifest this run wrote remains unreferenced, and a
+later GC pass can delete it.
 
 For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the run uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window, `max_objects` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
 `max_objects` bounds the whole pass, from its first read to its last, and

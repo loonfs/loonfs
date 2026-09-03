@@ -8,27 +8,23 @@
 
 use crate::common::collect_path_entries;
 use loonfs::{
-    CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsBackgroundWork,
-    FsMaintenance, FsReader, FsWriter, MaintenanceJobId, ManifestNo, MetadataMaintenanceOptions,
+    CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader,
+    FsWriter, GarbageCollectionJob, MaintenanceHintRelay, MaintenanceRegistry, MaintenanceRunner,
+    ManifestNo, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
     NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
 };
-use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_core::control::load_namespace_metadata_root_control;
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
-use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
-};
+use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
-use tokio::time::{timeout, Duration};
 
 fn store_config(root: &Path) -> StoreConfig {
     StoreConfig::LocalFs {
@@ -52,30 +48,45 @@ fn writes_past_wal_tail_threshold() -> u32 {
         .expect("WAL tail threshold plus one should fit in u32")
 }
 
-async fn writer(root: &Path, background_work: FsBackgroundWork) -> FsWriter {
+async fn writer(root: &Path) -> FsWriter {
     FsWriter::builder(store_config(root))
         .writer_id("handle-test-writer")
-        .background_work(background_work)
         .build()
         .await
         .expect("build writer")
 }
 
-async fn fill_wal_tail_past_threshold<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) {
-    append_wal_segments(
-        store,
-        namespace_id,
-        wal_tail_segment_count_past_threshold(),
-        &MutationContext {
-            writer_id: loonfs_api::WriterId::parse("wal-tail-test-writer").expect("writer id"),
-            now_ms: 1_000,
-        },
-    )
-    .await
-    .expect("fill WAL tail past threshold");
+async fn writer_with_runner(
+    root: &Path,
+    runtime_cache: RuntimeCacheConfig,
+) -> (FsWriter, FsMaintenance, MaintenanceRunner) {
+    let (observer, receiver) =
+        MaintenanceHintRelay::new(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
+    let writer = FsWriter::builder(store_config(root))
+        .writer_id("handle-test-writer")
+        .runtime_cache(runtime_cache)
+        .maintenance_hint_observer(move |hint| observer(hint))
+        .build()
+        .await
+        .expect("build writer");
+    let maintenance = writer
+        .maintenance_handle("handle-test-maintenance")
+        .expect("build maintenance handle");
+    let registry = MaintenanceRegistry::new();
+    registry
+        .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
+        .expect("metadata job");
+    registry
+        .register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))
+        .expect("metadata compaction job");
+    registry
+        .register(Arc::new(GarbageCollectionJob::new(maintenance.clone())))
+        .expect("garbage collection job");
+    let runner = MaintenanceRunner::builder(registry)
+        .build()
+        .expect("build runner");
+    runner.attach_hints(receiver);
+    (writer, maintenance, runner)
 }
 
 /// Leaves the tail exactly at the write-stop bound: every write here is
@@ -98,109 +109,11 @@ async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
 }
 
 #[test]
-fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
-    let temp_dir = tempdir().expect("tempdir");
-    let active_namespace = namespace_id("active");
-    let queued_namespace = namespace_id("queued");
-    block_on(async {
-        // The root is published by whichever step gets there first: a
-        // create-if-absent for a namespace that has never flushed, a
-        // compare-and-swap after that. Both are the publication this test
-        // holds.
-        let blocking = Arc::new(BlockingStore::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::metadata_root(&active_namespace),
-            OperationClass::Put,
-        ));
-        let store: SharedObjectStore = blocking.clone();
-        let writer = FsWriter::builder_with_store(store.clone())
-            .writer_id("handle-test-writer")
-            .background_work(FsBackgroundWork::Enabled)
-            .max_concurrent_maintenance(1)
-            .build()
-            .await
-            .expect("build writer");
-        for namespace_id in [&active_namespace, &queued_namespace] {
-            writer
-                .create_namespace(namespace_id, CreateNamespaceOptions::default())
-                .await
-                .expect("create namespace");
-        }
-
-        fill_wal_tail_past_threshold(blocking.as_ref(), &active_namespace).await;
-        blocking.block_next();
-        writer
-            .maintenance()
-            .nudge(MaintenanceJobId::METADATA, &active_namespace);
-        blocking.wait_until_blocked().await;
-        fill_wal_tail_past_threshold(blocking.as_ref(), &queued_namespace).await;
-        writer
-            .maintenance()
-            .nudge(MaintenanceJobId::METADATA, &queued_namespace);
-
-        let mut shutdown = Box::pin(writer.shutdown());
-        assert!(
-            futures::poll!(shutdown.as_mut()).is_pending(),
-            "shutdown must wait for the parked active step"
-        );
-        blocking.release();
-        timeout(Duration::from_secs(10), shutdown)
-            .await
-            .expect("shutdown must not hang with a non-empty queue")
-            .expect("shut down writer background work");
-
-        let maintenance = FsMaintenance::builder_with_store(blocking.clone() as SharedObjectStore)
-            .actor_id("handle-test-maintenance")
-            .build()
-            .await
-            .expect("build maintenance");
-        let status = maintenance
-            .get_namespace_diagnostics(&queued_namespace)
-            .await
-            .expect("queued namespace status after shutdown");
-        assert_eq!(
-            status.current_manifest_no, None,
-            "shutdown must clear queued work before the active step releases its permit"
-        );
-
-        // The shutdown that cleared the queue also closed the write path,
-        // so nothing can cross the WAL threshold behind it.
-        let refused = writer
-            .put_file_bytes(
-                &queued_namespace,
-                "/after-close.txt",
-                b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect_err("a mutation after shutdown must be refused");
-        assert_eq!(refused.code(), ErrorCode::ShuttingDown);
-        // And the runner stays shut rather than reopening behind the drain:
-        // a nudge is the one trigger left, and it must admit nothing.
-        writer
-            .maintenance()
-            .nudge(MaintenanceJobId::METADATA, &queued_namespace);
-        writer
-            .flush_background()
-            .await
-            .expect("nothing may spawn after shutdown");
-        let status = maintenance
-            .get_namespace_diagnostics(&queued_namespace)
-            .await
-            .expect("queued namespace status after the post-shutdown nudge");
-        assert_eq!(
-            status.current_manifest_no, None,
-            "post-shutdown nudges must not spawn maintenance"
-        );
-    });
-}
-
-#[test]
 fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
+        let writer = writer(temp_dir.path()).await;
         writer
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
@@ -256,12 +169,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
         // cache counters, like writer and reader work through theirs.
         let _ = maintenance.runtime_cache_stats();
 
-        // Only the writer owns background work, so only the writer has
-        // anything to shut down.
-        writer
-            .shutdown()
-            .await
-            .expect("shut down writer background work");
+        writer.shutdown().await.expect("shut down writer");
     });
 }
 
@@ -270,7 +178,7 @@ fn standalone_reader_builds_without_writer_identity() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
+        let writer = writer(temp_dir.path()).await;
         writer
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
@@ -318,11 +226,12 @@ fn standalone_reader_builds_without_writer_identity() {
 }
 
 #[test]
-fn maintenance_over_writer_core_invalidates_shared_caches() {
+fn a_writer_maintenance_handle_invalidates_shared_read_caches() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
+        let (writer, maintenance, runner) =
+            writer_with_runner(temp_dir.path(), RuntimeCacheConfig::default()).await;
         writer
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
@@ -339,16 +248,7 @@ fn maintenance_over_writer_core_invalidates_shared_caches() {
                 .await
                 .expect("put file");
         }
-        writer
-            .flush_background()
-            .await
-            .expect("background maintenance quiesces");
-
-        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-maintenance")
-            .build()
-            .await
-            .expect("build maintenance");
+        runner.drain().await.expect("maintenance quiesces");
         let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
@@ -386,10 +286,8 @@ fn maintenance_over_writer_core_invalidates_shared_caches() {
             .await
             .expect("read after write on the shared core");
 
-        writer
-            .shutdown()
-            .await
-            .expect("shut down writer background work");
+        writer.shutdown().await.expect("shut down writer");
+        runner.shutdown().await.expect("shut down runner");
     });
 }
 
@@ -397,7 +295,7 @@ fn maintenance_over_writer_core_invalidates_shared_caches() {
 fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
     let temp_dir = tempdir().expect("tempdir");
     block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
+        let writer = writer(temp_dir.path()).await;
         let simple_namespace = NamespaceId::parse("simple-put").expect("valid simple namespace id");
         let prepared_namespace =
             NamespaceId::parse("prepared-put").expect("valid prepared namespace id");
@@ -470,11 +368,11 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
 }
 
 #[test]
-fn manual_only_writer_folds_without_scheduling_maintenance() {
+fn writer_folds_without_scheduling_maintenance() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
+        let writer = writer(temp_dir.path()).await;
         writer
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
@@ -490,10 +388,6 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
                 .await
                 .expect("put file");
         }
-        writer
-            .flush_background()
-            .await
-            .expect("no background work to wait for");
 
         let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
             .actor_id("handle-test-maintenance")
@@ -517,7 +411,7 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
 }
 
 #[test]
-fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
+fn a_writer_with_a_runner_maintains_what_it_touches() {
     for runtime_cache in [
         RuntimeCacheConfig::default(),
         RuntimeCacheConfig::disabled(),
@@ -525,23 +419,13 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = namespace_id("demo");
         block_on(async {
-            let writer = FsWriter::builder(store_config(temp_dir.path()))
-                .writer_id("handle-test-writer")
-                .background_work(FsBackgroundWork::Enabled)
-                .runtime_cache(runtime_cache)
-                .build()
-                .await
-                .expect("build writer");
+            let (writer, maintenance, runner) =
+                writer_with_runner(temp_dir.path(), runtime_cache).await;
             writer
                 .create_namespace(&namespace_id, CreateNamespaceOptions::default())
                 .await
                 .expect("create namespace");
 
-            let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
-                .actor_id("handle-test-maintenance")
-                .build()
-                .await
-                .expect("build maintenance");
             writer
                 .put_file_bytes(
                     &namespace_id,
@@ -551,10 +435,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
                 )
                 .await
                 .expect("put file below the threshold");
-            writer
-                .flush_background()
-                .await
-                .expect("nothing was scheduled below the threshold");
+            runner.drain().await.expect("nothing was due");
             let status = maintenance
                 .get_namespace_diagnostics(&namespace_id)
                 .await
@@ -576,10 +457,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
                     .await
                     .expect("put file");
             }
-            writer
-                .flush_background()
-                .await
-                .expect("background maintenance quiesces");
+            runner.drain().await.expect("maintenance quiesces");
 
             let status = maintenance
                 .get_namespace_diagnostics(&namespace_id)
@@ -593,10 +471,8 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
                 status.wal_tail_segments < wal_tail_segment_threshold(),
                 "auto step should have bounded the tail: {status:?}"
             );
-            writer
-                .shutdown()
-                .await
-                .expect("shut down writer background work");
+            writer.shutdown().await.expect("shut down writer");
+            runner.shutdown().await.expect("shut down runner");
         });
     }
 }
@@ -608,7 +484,6 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
     block_on(async {
         let stalled = FsWriter::builder(store_config(temp_dir.path()))
             .writer_id("handle-test-stalled-writer")
-            .background_work(FsBackgroundWork::ManualOnly)
             .build()
             .await
             .expect("build the writer that leaves the debt");
@@ -623,7 +498,7 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .await
             .expect("shut down the first writer");
 
-        let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
+        let writer = writer(temp_dir.path()).await;
         writer
             .put_file_bytes(
                 &namespace_id,
@@ -665,7 +540,6 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         let store: SharedObjectStore = failing.clone();
         let writer = FsWriter::builder_with_store(store)
             .writer_id("fold-failure-writer")
-            .background_work(FsBackgroundWork::ManualOnly)
             .build()
             .await
             .expect("build writer");
@@ -741,7 +615,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
+        let writer = writer(temp_dir.path()).await;
         writer
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
@@ -786,10 +660,6 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .expect("reads survive the writer's shutdown");
         assert_eq!(read.bytes, b"hello");
 
-        writer
-            .flush_background()
-            .await
-            .expect("nothing scheduled after the shutdown");
         let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
             .actor_id("handle-test-maintenance")
             .build()
@@ -844,26 +714,15 @@ fn builders_require_identity_and_a_runtime() {
         Err(other) => panic!("expected config error outside a runtime, got {other:?}"),
         Ok(_) => panic!("build must require an owning runtime"),
     }
-}
 
-#[test]
-fn writer_builder_rejects_zero_maintenance_concurrency() {
-    let temp_dir = tempdir().expect("tempdir");
-    for background_work in [FsBackgroundWork::Enabled, FsBackgroundWork::ManualOnly] {
-        let result = block_on(
-            FsWriter::builder(store_config(temp_dir.path()))
-                .writer_id("handle-test-writer")
-                .background_work(background_work)
-                .max_concurrent_maintenance(0)
-                .build(),
-        );
-
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("zero maintenance concurrency must be rejected"),
-        };
-        assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    }
+    let outside_runtime = MaintenanceRunner::builder(MaintenanceRegistry::new()).build();
+    assert!(matches!(outside_runtime, Err(RuntimeError::Config(_))));
+    block_on(async {
+        let zero = MaintenanceRunner::builder(MaintenanceRegistry::new())
+            .max_concurrent(0)
+            .build();
+        assert!(matches!(zero, Err(RuntimeError::Config(_))));
+    });
 }
 
 #[test]
@@ -871,7 +730,7 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
+        let writer = writer(temp_dir.path()).await;
         writer
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
@@ -907,60 +766,5 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("advance retention");
         assert_eq!(retention.retention_floor_seq, checkpoint.checkpoint_seq);
-    });
-}
-
-#[test]
-fn enabled_writer_drains_reorganization_backlog_without_maintenance() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
-        writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
-        for round in 0..9u32 {
-            for file in 0..writes_past_wal_tail_threshold() {
-                writer
-                    .put_file_bytes(
-                        &namespace_id,
-                        &format!("/docs/round-{round}/file-{file}.txt"),
-                        b"body",
-                        PutFileOptions::new(loonfs_test_support::test_actor()),
-                    )
-                    .await
-                    .expect("put file");
-            }
-            writer
-                .flush_background()
-                .await
-                .expect("background steps finish");
-        }
-
-        let store = LocalFsStore::new(temp_dir.path()).expect("open store for inspection");
-        let root = load_namespace_metadata_root_control(&store, &namespace_id)
-            .await
-            .expect("load metadata root");
-        let manifest_key =
-            metadata_manifest_object(&namespace_id, &root.state.manifest.manifest_object_id);
-        let bytes = store
-            .get(&manifest_key, None)
-            .await
-            .expect("read manifest")
-            .expect("manifest exists");
-        let manifest = decode_namespace_manifest_json(&bytes).expect("decode manifest");
-        let delta_files = manifest
-            .payload
-            .runs
-            .iter()
-            .filter(|run| run.tier == loonfs_api::wire::manifest::RunTier::Delta)
-            .map(|run| run.segments.len())
-            .sum::<usize>();
-        assert_eq!(
-            delta_files, 0,
-            "background steps drain the fold backlog to zero delta runs; \
-             a leftover run means the drain stopped early"
-        );
     });
 }

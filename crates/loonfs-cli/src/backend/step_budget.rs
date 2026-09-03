@@ -1,7 +1,7 @@
 //! Progress and budget state for iterative maintenance and grep operations.
 
 use crate::error::CliError;
-use loonfs::{MaintenanceJobId, MaintenanceStepConclusion};
+use loonfs::{MaintenanceConclusion, MaintenanceJobId};
 use loonfs_api::v0::GrepIndexLifecycle;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -37,7 +37,7 @@ pub(crate) struct MaintenanceKeyProgress {
     /// Steps this drain ran for this key.
     pub steps: u64,
     /// Result of the last step, or `None` if the budget expired first.
-    pub conclusion: Option<MaintenanceStepConclusion>,
+    pub conclusion: Option<MaintenanceConclusion>,
 }
 
 impl MaintenanceKeyProgress {
@@ -48,12 +48,13 @@ impl MaintenanceKeyProgress {
     pub(crate) fn settled(&self) -> bool {
         match self.conclusion {
             Some(
-                MaintenanceStepConclusion::Idle
-                | MaintenanceStepConclusion::Blocked
-                | MaintenanceStepConclusion::NotEnabled,
+                MaintenanceConclusion::Idle
+                | MaintenanceConclusion::Blocked
+                | MaintenanceConclusion::NotEnabled,
             ) => true,
-            Some(MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded)
-            | None => false,
+            Some(MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded) | None => {
+                false
+            }
         }
     }
 }

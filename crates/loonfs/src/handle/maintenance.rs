@@ -2,9 +2,7 @@
 
 use super::HandleBuilderCore;
 use crate::fs::{ReadCore, WriterIdentity};
-use crate::maintenance_runner::BackgroundCompactions;
 use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
-use crate::publisher::PublisherRegistry;
 use crate::{
     Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
     TraceMode, TraceStoreKind,
@@ -19,18 +17,11 @@ use std::sync::Arc;
 pub struct FsMaintenance {
     pub(crate) core: ReadCore,
     pub(crate) actor: WriterIdentity,
-    pub(crate) writer: Option<WriterParts>,
     /// A narrowed per-step row budget for the tests that need a family group
     /// whose base run no bounded step can fold. See
     /// [`Self::starve_reorganization_row_budget`].
     #[cfg(test)]
     pub(crate) reorganization_row_budget: Option<std::num::NonZeroUsize>,
-}
-
-#[derive(Clone)]
-pub(crate) struct WriterParts {
-    pub(crate) publisher: PublisherRegistry,
-    pub(crate) compactions: BackgroundCompactions,
 }
 
 impl FsMaintenance {
@@ -49,27 +40,13 @@ impl FsMaintenance {
         FsMaintenanceBuilder::new(HandleBuilderCore::from_store(store))
     }
 
-    /// Builds a maintenance handle over a writer's own runtime: its read core, its
-    /// identity, and its publication service. Writer-scheduled background
-    /// maintenance uses this so it runs the same operations an operator
-    /// runs — and so its invalidations reach the writer's caches and
-    /// publisher engines rather than a private copy of them.
-    pub(crate) fn from_writer_parts(
-        core: ReadCore,
-        actor: WriterIdentity,
-        publisher: PublisherRegistry,
-        compactions: BackgroundCompactions,
-    ) -> Self {
-        Self {
+    pub(crate) fn from_read_core(core: ReadCore, actor_id: String) -> Result<Self> {
+        Ok(Self {
             core,
-            actor,
-            writer: Some(WriterParts {
-                publisher,
-                compactions,
-            }),
+            actor: WriterIdentity::new(actor_id)?,
             #[cfg(test)]
             reorganization_row_budget: None,
-        }
+        })
     }
 
     /// Narrows the rows one reorganization step this handle drives may
@@ -103,7 +80,6 @@ impl FsMaintenance {
 pub struct FsMaintenanceBuilder {
     core: HandleBuilderCore,
     actor_id: Option<String>,
-    writer: Option<WriterParts>,
 }
 
 impl FsMaintenanceBuilder {
@@ -111,7 +87,6 @@ impl FsMaintenanceBuilder {
         Self {
             core,
             actor_id: None,
-            writer: None,
         }
     }
 
@@ -125,21 +100,6 @@ impl FsMaintenanceBuilder {
     /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.core.runtime_cache = runtime_cache;
-        self
-    }
-
-    /// Connects this maintenance handle to a writer from the same runtime.
-    ///
-    /// The maintenance handle shares the writer's decoded-block cache, publisher, and
-    /// background compactions. The shared cache keeps the writer's byte
-    /// budget; [`Self::runtime_cache`] still configures this handle's other
-    /// caches.
-    pub fn over_writer(mut self, writer: &super::FsWriter) -> Self {
-        self.core.shared_metadata_segment_cache = Some(writer.metadata_segment_cache());
-        self.writer = Some(WriterParts {
-            publisher: writer.publisher(),
-            compactions: writer.background_compactions(),
-        });
         self
     }
 
@@ -170,9 +130,8 @@ impl FsMaintenanceBuilder {
     }
 
     /// Installs the metrics recorder this handle reports its instruments to
-    /// (see [`crate::metrics`]). A maintenance handle registers the object-store and
-    /// collection instruments; the explicit maintenance it drives reports
-    /// through the writer that scheduled it.
+    /// (see [`crate::metrics`]). The handle registers object-store, collection,
+    /// and completed-compaction instruments.
     pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
         self
@@ -188,7 +147,6 @@ impl FsMaintenanceBuilder {
         Ok(FsMaintenance {
             core: self.core.open_read_core()?,
             actor,
-            writer: self.writer,
             #[cfg(test)]
             reorganization_row_budget: None,
         })
