@@ -1,4 +1,4 @@
-//! Snapshots, checkpoints, maintenance, store probes, and grep administration.
+//! Snapshots, checkpoints, maintenance, store probes, and grep maintenance.
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
@@ -105,7 +105,7 @@ impl Client {
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceDiagnostics> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/diagnostics",
+            "{}/v0/maintenance/namespaces/{namespace_id}/diagnostics",
             self.base_url
         );
         self.request_json::<(), NamespaceDiagnostics>(self.get(&url), None, SendPolicy::Retry)
@@ -113,7 +113,7 @@ impl Client {
     }
 
     /// Creates a named, user-owned checkpoint pinning the namespace's
-    /// current view (admin plane). Every call creates a new checkpoint; the
+    /// current view (maintenance plane). Every call creates a new checkpoint; the
     /// name is a label, not a key. This is a maintenance operation, not a
     /// file mutation. The record is a garbage-collection root until released
     /// or expired.
@@ -124,14 +124,14 @@ impl Client {
         request: &CreateCheckpointRequest,
     ) -> Result<Checkpoint> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
+            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints",
             self.base_url
         );
         self.request_json(self.post(&url), Some(request), SendPolicy::Once)
             .await
     }
 
-    /// Creates a checkpoint pager beginning at `cursor` (admin plane).
+    /// Creates a checkpoint pager beginning at `cursor` (maintenance plane).
     pub fn list_checkpoints_pager(
         &self,
         namespace_id: &NamespaceId,
@@ -151,7 +151,7 @@ impl Client {
         })
     }
 
-    /// Lists one bounded page of active checkpoint records (admin plane).
+    /// Lists one bounded page of active checkpoint records (maintenance plane).
     pub async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
@@ -159,7 +159,7 @@ impl Client {
         cursor: Option<&str>,
     ) -> Result<ListCheckpointsResponse> {
         let mut query = QueryBuilder::new(format!(
-            "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
+            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints",
             self.base_url
         ));
         query.pagination(limit, cursor);
@@ -168,7 +168,7 @@ impl Client {
             .await
     }
 
-    /// Releases a user-owned checkpoint pin by id (admin plane). Idempotent:
+    /// Releases a user-owned checkpoint pin by id (maintenance plane). Idempotent:
     /// releasing an already-released or reaped record succeeds.
     pub async fn release_checkpoint(
         &self,
@@ -176,14 +176,14 @@ impl Client {
         checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
+            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
             self.base_url
         );
         self.request_json::<(), ReleaseCheckpointResponse>(self.post(&url), None, SendPolicy::Retry)
             .await
     }
 
-    /// Runs one bounded maintenance step against a namespace (admin plane).
+    /// Runs one bounded maintenance step against a namespace (maintenance plane).
     ///
     /// The request selects the actions by naming them, and a request that
     /// names none is rejected. Absent overrides inside a selected action use
@@ -195,7 +195,7 @@ impl Client {
         request: &MaintenanceStepRequest,
     ) -> Result<MaintenanceStepResponse> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/maintenance/run",
+            "{}/v0/maintenance/namespaces/{namespace_id}/runs",
             self.base_url
         );
         self.request_json(self.post(&url), Some(request), SendPolicy::Once)
@@ -203,7 +203,7 @@ impl Client {
     }
 
     /// Proves the server's backing store honours the object-store contract
-    /// LoonFS depends on (admin plane).
+    /// LoonFS depends on (maintenance plane).
     ///
     /// The probe writes and deletes objects under a scratch prefix, so it
     /// runs only when asked. A store that fails a check answers with that
@@ -211,7 +211,7 @@ impl Client {
     /// the answer is that the store is wrong.
     /// Retrying this request starts a distinct attempt.
     pub async fn probe_store(&self, request: &StoreProbeRequest) -> Result<StoreProbeResponse> {
-        let url = format!("{}/v0/admin/store/probe", self.base_url);
+        let url = format!("{}/v0/maintenance/store/probe", self.base_url);
         self.request_json(self.post(&url), Some(request), SendPolicy::Once)
             .await
     }
@@ -247,29 +247,29 @@ impl Client {
     /// or active. This operation does not change the index.
     pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/grep/index",
+            "{}/v0/maintenance/namespaces/{namespace_id}/grep/index",
             self.base_url
         );
         self.request_json::<(), GrepIndex>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
 
-    /// Enables the namespace's grep root (admin plane); embedded mode starts
+    /// Enables the namespace's grep root (maintenance plane); embedded mode starts
     /// that namespace's event-driven backfill. Idempotent.
     pub async fn enable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/grep/index/enable",
+            "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
             self.base_url
         );
         self.request_json::<(), GrepIndex>(self.post(&url), None, SendPolicy::Retry)
             .await
     }
 
-    /// Disables the namespace's grep root (admin plane); garbage collection
+    /// Disables the namespace's grep root (maintenance plane); garbage collection
     /// reclaims the segments. Idempotent.
     pub async fn disable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/grep/index/disable",
+            "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
             self.base_url
         );
         self.request_json::<(), GrepIndex>(self.post(&url), None, SendPolicy::Retry)
@@ -287,7 +287,7 @@ impl Client {
         request: &GrepGcRequest,
     ) -> Result<GrepGcResponse> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/grep/index/gc",
+            "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
             self.base_url
         );
         self.request_json(self.post(&url), Some(request), SendPolicy::Once)

@@ -1,15 +1,15 @@
-//! `loonfs admin` commands: checkpoints, retention, GC, indexes, and the
+//! `loonfs maintenance` commands: checkpoints, retention, GC, indexes, and the
 //! change feed.
 
 use super::context::{parse_public_ordinal_arg, resolve_command_context, resolve_profile_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use super::pagination::{collect_or_stream_pages, PagePlan, PagedListing};
 use crate::args::{
-    AdminCheckpointArgs, AdminCheckpointCommand, AdminCheckpointListArgs,
-    AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs, AdminIndexCommand, AdminIndexEnableArgs,
-    AdminIndexGcArgs, AdminMaintenanceCommand, AdminNamespaceArgs, AdminRetentionCommand,
-    AdminRunArgs, AdminStepArgs, AdminStoreCommand, AdminStoreProbeArgs, ChangesArgs, CommandKind,
-    MaintenanceJobArg, RuntimeBehavior,
+    ChangesArgs, CommandKind, MaintenanceCheckpointArgs, MaintenanceCheckpointCommand,
+    MaintenanceCheckpointListArgs, MaintenanceCheckpointReleaseArgs, MaintenanceCommand,
+    MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs, MaintenanceIndexGcArgs,
+    MaintenanceJobArg, MaintenanceNamespaceArgs, MaintenanceRetentionCommand, MaintenanceRunArgs,
+    MaintenanceStepArgs, MaintenanceStoreCommand, MaintenanceStoreProbeArgs, RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
 use crate::render::{gc_pass_line, write_stderr_progress};
@@ -26,61 +26,61 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::Path;
 
-// --- maintenance/admin plane ---
+// --- maintenance plane ---
 
-pub(crate) async fn run_admin_command(
+pub(crate) async fn run_maintenance_command(
     kind: CommandKind,
     config_path: &Path,
-    command: AdminCommand,
+    command: MaintenanceCommand,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        AdminCommand::Checkpoint { command } => match command {
-            AdminCheckpointCommand::Create(args) => {
-                run_admin_checkpoint(kind, config_path, args).await
+        MaintenanceCommand::Run(args) => run_maintenance_run(kind, config_path, args).await,
+        MaintenanceCommand::Step(args) => run_maintenance_step(kind, config_path, args).await,
+        MaintenanceCommand::Flush(args) => run_maintenance_flush(kind, config_path, args).await,
+        MaintenanceCommand::Checkpoint { command } => match command {
+            MaintenanceCheckpointCommand::Create(args) => {
+                run_maintenance_checkpoint(kind, config_path, args).await
             }
-            AdminCheckpointCommand::List(args) => {
-                run_admin_checkpoint_list(kind, config_path, args).await
+            MaintenanceCheckpointCommand::List(args) => {
+                run_maintenance_checkpoint_list(kind, config_path, args).await
             }
-            AdminCheckpointCommand::Release(args) => {
-                run_admin_checkpoint_release(kind, config_path, args).await
-            }
-        },
-        AdminCommand::Index { command } => match command {
-            AdminIndexCommand::Enable(args) => {
-                run_admin_index_enable(kind, config_path, args).await
-            }
-            AdminIndexCommand::Disable(args) => {
-                run_admin_index_disable(kind, config_path, args).await
-            }
-            AdminIndexCommand::Status(args) => {
-                run_admin_index_status(kind, config_path, args).await
-            }
-            AdminIndexCommand::Gc(args) => {
-                run_admin_index_gc(kind, config_path, args, runtime).await
+            MaintenanceCheckpointCommand::Release(args) => {
+                run_maintenance_checkpoint_release(kind, config_path, args).await
             }
         },
-        AdminCommand::Maintenance { command } => match command {
-            AdminMaintenanceCommand::Run(args) => run_admin_run(kind, config_path, args).await,
-            AdminMaintenanceCommand::Step(args) => run_admin_step(kind, config_path, args).await,
-            AdminMaintenanceCommand::Flush(args) => run_admin_flush(kind, config_path, args).await,
-        },
-        AdminCommand::Retention { command } => match command {
-            AdminRetentionCommand::Advance(args) => {
-                run_admin_retention_advance(kind, config_path, args).await
+        MaintenanceCommand::Index { command } => match command {
+            MaintenanceIndexCommand::Enable(args) => {
+                run_maintenance_index_enable(kind, config_path, args).await
+            }
+            MaintenanceIndexCommand::Disable(args) => {
+                run_maintenance_index_disable(kind, config_path, args).await
+            }
+            MaintenanceIndexCommand::Status(args) => {
+                run_maintenance_index_status(kind, config_path, args).await
+            }
+            MaintenanceIndexCommand::Gc(args) => {
+                run_maintenance_index_gc(kind, config_path, args, runtime).await
             }
         },
-        AdminCommand::Gc(args) => run_admin_gc(kind, config_path, args, runtime).await,
-        AdminCommand::Store { command } => match command {
-            AdminStoreCommand::Probe(args) => run_admin_store_probe(kind, config_path, args).await,
+        MaintenanceCommand::Retention { command } => match command {
+            MaintenanceRetentionCommand::Advance(args) => {
+                run_maintenance_retention_advance(kind, config_path, args).await
+            }
+        },
+        MaintenanceCommand::Gc(args) => run_maintenance_gc(kind, config_path, args, runtime).await,
+        MaintenanceCommand::Store { command } => match command {
+            MaintenanceStoreCommand::Probe(args) => {
+                run_maintenance_store_probe(kind, config_path, args).await
+            }
         },
     }
 }
 
-async fn run_admin_step(
+async fn run_maintenance_step(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminStepArgs,
+    args: MaintenanceStepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     // A step always runs metadata maintenance. The flags add retention or
@@ -105,10 +105,10 @@ async fn run_admin_step(
 /// one bounded pass. Multi-pass human output writes progress to stderr and a
 /// combined summary to stdout. JSON and single-pass output contain no progress
 /// lines.
-async fn run_admin_gc(
+async fn run_maintenance_gc(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminGcArgs,
+    args: MaintenanceGcArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
@@ -244,10 +244,10 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
     total.next_cursor = pass.next_cursor;
 }
 
-async fn run_admin_checkpoint(
+async fn run_maintenance_checkpoint(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminCheckpointArgs,
+    args: MaintenanceCheckpointArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let request = CreateCheckpointRequest {
@@ -263,10 +263,10 @@ async fn run_admin_checkpoint(
     Ok(context.output(kind, CommandData::CheckpointCreated(response)))
 }
 
-async fn run_admin_checkpoint_list(
+async fn run_maintenance_checkpoint_list(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminCheckpointListArgs,
+    args: MaintenanceCheckpointListArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let listing = collect_or_stream_pages(
@@ -290,10 +290,10 @@ async fn run_admin_checkpoint_list(
     Ok(context.output(kind, CommandData::CheckpointsListed(response)))
 }
 
-async fn run_admin_checkpoint_release(
+async fn run_maintenance_checkpoint_release(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminCheckpointReleaseArgs,
+    args: MaintenanceCheckpointReleaseArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let checkpoint_id = CheckpointId::parse(&args.checkpoint_id).map_err(|error| {
@@ -317,10 +317,10 @@ async fn run_admin_checkpoint_release(
 /// The fold an operator asks for explicitly runs whatever the tail length,
 /// and the reorganization unit rides along: upkeep is one action, and the
 /// output reports both halves.
-async fn run_admin_flush(
+async fn run_maintenance_flush(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminNamespaceArgs,
+    args: MaintenanceNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
@@ -340,10 +340,10 @@ async fn run_admin_flush(
     Ok(context.output(kind, CommandData::MaintenanceStepped(response)))
 }
 
-async fn run_admin_retention_advance(
+async fn run_maintenance_retention_advance(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminNamespaceArgs,
+    args: MaintenanceNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
@@ -363,10 +363,10 @@ async fn run_admin_retention_advance(
 
 /// Runs maintenance for explicitly assigned namespaces. The command runs
 /// until stopped, or completes the current assignments once with `--drain`.
-async fn run_admin_run(
+async fn run_maintenance_run(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminRunArgs,
+    args: MaintenanceRunArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
     let context =
@@ -419,10 +419,10 @@ async fn run_admin_run(
 
 /// Checks that the profile's object store supports the operations LoonFS
 /// requires. This command checks the store, not a namespace.
-async fn run_admin_store_probe(
+async fn run_maintenance_store_probe(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminStoreProbeArgs,
+    args: MaintenanceStoreProbeArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
     let context =
@@ -490,7 +490,7 @@ async fn shutdown_signal() {
     }
 }
 
-pub(crate) async fn run_admin_changes(
+pub(crate) async fn run_changes(
     kind: CommandKind,
     config_path: &Path,
     args: ChangesArgs,
@@ -545,10 +545,10 @@ pub(crate) async fn run_admin_changes(
 /// The sequence is captured before any waiting starts and never re-read:
 /// writes that land afterwards are not waited for, so a namespace that is
 /// being written to cannot keep this command running.
-async fn run_admin_index_enable(
+async fn run_maintenance_index_enable(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminIndexEnableArgs,
+    args: MaintenanceIndexEnableArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
@@ -613,10 +613,10 @@ async fn run_admin_index_enable(
     ))
 }
 
-async fn run_admin_index_status(
+async fn run_maintenance_index_status(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminNamespaceArgs,
+    args: MaintenanceNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
@@ -628,12 +628,12 @@ async fn run_admin_index_status(
 }
 
 /// Collects the namespace's grep keyspace, looping the cursor exactly like
-/// `admin gc`: bounded passes through completion, unless `--max-objects`
+/// `maintenance gc`: bounded passes through completion, unless `--max-objects`
 /// asks for one pass and its resume token.
-async fn run_admin_index_gc(
+async fn run_maintenance_index_gc(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminIndexGcArgs,
+    args: MaintenanceIndexGcArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
@@ -685,10 +685,10 @@ fn accumulate_grep_gc_response(
     total.next_cursor = pass.next_cursor;
 }
 
-async fn run_admin_index_disable(
+async fn run_maintenance_index_disable(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminNamespaceArgs,
+    args: MaintenanceNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context

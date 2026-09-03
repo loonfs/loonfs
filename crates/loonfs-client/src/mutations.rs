@@ -661,7 +661,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_policy_matches_snapshot_and_admin_operation_classes() {
+    async fn retry_policy_matches_snapshot_and_maintenance_operation_classes() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 
         let (transport, client) = single_attempt_probe();
@@ -705,7 +705,7 @@ mod tests {
         let actual = client
             .get_namespace_diagnostics(&namespace_id)
             .await
-            .expect("safe admin read should retry");
+            .expect("safe maintenance read should retry");
         assert_eq!(actual, response);
         assert_eq!(transport.attempts(), 2);
     }

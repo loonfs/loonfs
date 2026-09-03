@@ -230,7 +230,10 @@ fn openapi_documents_current_server_paths() {
             "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
             "post",
         ),
-        ("/v0/admin/namespaces/{namespace_id}/diagnostics", "get"),
+        (
+            "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
+            "get",
+        ),
         ("/v0/namespaces/{namespace_id}/filesystem/entries", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/entry", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/content", "get"),
@@ -264,26 +267,32 @@ fn openapi_documents_current_server_paths() {
             "post",
         ),
         ("/v0/namespaces/{namespace_id}/changes", "get"),
-        ("/v0/admin/namespaces/{namespace_id}/checkpoints", "post"),
-        ("/v0/admin/namespaces/{namespace_id}/checkpoints", "get"),
         (
-            "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
+            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
             "post",
         ),
         (
-            "/v0/admin/namespaces/{namespace_id}/maintenance/run",
+            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+            "get",
+        ),
+        (
+            "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
+            "post",
+        ),
+        ("/v0/maintenance/namespaces/{namespace_id}/runs", "post"),
+        (
+            "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
             "post",
         ),
         (
-            "/v0/admin/namespaces/{namespace_id}/grep/index/enable",
+            "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
             "post",
         ),
         (
-            "/v0/admin/namespaces/{namespace_id}/grep/index/disable",
+            "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
             "post",
         ),
-        ("/v0/admin/namespaces/{namespace_id}/grep/index/gc", "post"),
-        ("/v0/admin/store/probe", "post"),
+        ("/v0/maintenance/store/probe", "post"),
     ] {
         assert_path_method(paths, path, method);
     }
@@ -327,7 +336,7 @@ fn openapi_documents_current_server_paths() {
     );
     assert_query_params(
         paths,
-        "/v0/admin/namespaces/{namespace_id}/checkpoints",
+        "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
         "get",
         &["limit", "cursor"],
     );
@@ -587,7 +596,7 @@ fn proxy_paths_use_namespace_aliases_and_declare_no_security() {
         .collect::<BTreeSet<_>>();
     // `get_capabilities` keeps the `system` tag in the proxy document. The
     // path checks below verify that other system routes are excluded.
-    assert!(!tag_names.contains("admin"));
+    assert!(!tag_names.contains("maintenance"));
     let referenced_tags = spec["paths"]
         .as_object()
         .expect("proxy openapi paths object")
@@ -609,7 +618,7 @@ fn proxy_paths_use_namespace_aliases_and_declare_no_security() {
             !path.contains("namespace_id"),
             "proxy path contains namespace_id: `{path}`"
         );
-        assert!(!path.starts_with("/v0/admin/"));
+        assert!(!path.starts_with("/v0/maintenance/"));
         assert!(!matches!(
             path.as_str(),
             "/health" | "/readiness" | "/metrics"
@@ -945,14 +954,14 @@ fn proxy_cursor_list_operations_keep_pagination_metadata() {
 }
 
 #[test]
-fn openapi_publishes_namespace_diagnostics_in_the_admin_plane() {
+fn openapi_publishes_namespace_diagnostics_in_the_maintenance_plane() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
     )
     .expect("parse openapi json");
-    let operation = &spec["paths"]["/v0/admin/namespaces/{namespace_id}/diagnostics"]["get"];
+    let operation = &spec["paths"]["/v0/maintenance/namespaces/{namespace_id}/diagnostics"]["get"];
     assert_eq!(operation["operationId"], "get_namespace_diagnostics");
-    assert_eq!(operation["tags"], serde_json::json!(["admin"]));
+    assert_eq!(operation["tags"], serde_json::json!(["maintenance"]));
     assert_eq!(
         operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
         "#/components/schemas/NamespaceDiagnostics"
@@ -994,7 +1003,10 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             "get",
         ),
         ("/v0/namespaces/{namespace_id}/filesystem/trash", "get"),
-        ("/v0/admin/namespaces/{namespace_id}/checkpoints", "get"),
+        (
+            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+            "get",
+        ),
         ("/v0/namespaces/{namespace_id}/snapshots", "get"),
         ("/v0/namespaces/{namespace_id}/changes", "get"),
         ("/v0/namespaces/{namespace_id}/grep", "get"),
@@ -1117,7 +1129,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             "cursor",
         ),
         (
-            "/v0/admin/namespaces/{namespace_id}/checkpoints",
+            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
             "get",
             "cursor",
         ),

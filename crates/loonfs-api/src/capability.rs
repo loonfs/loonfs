@@ -1,4 +1,4 @@
-//! Profiles, features, and limits advertised by a deployment.
+//! Planes, features, and limits advertised by a deployment.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -8,55 +8,55 @@ use thiserror::Error;
 pub const PROTOCOL_VERSION: &str = "v0";
 
 /// The mandatory data plane.
-pub const PROFILE_CORE_V0: &str = "core/v0";
+pub const PLANE_FILESYSTEM_V0: &str = "filesystem/v0";
 /// The optional maintenance plane.
-pub const PROFILE_ADMIN_V0: &str = "admin/v0";
+pub const PLANE_MAINTENANCE_V0: &str = "maintenance/v0";
 /// The optional derived-index query plane.
-pub const PROFILE_QUERY_V0: &str = "query/v0";
+pub const PLANE_QUERY_V0: &str = "query/v0";
 
 /// Gates namespace creation.
-pub const FEATURE_NAMESPACES_CREATE: &str = "core.namespaces.create";
+pub const FEATURE_NAMESPACES_CREATE: &str = "filesystem.namespaces.create";
 /// Gates namespace forking.
-pub const FEATURE_NAMESPACES_FORK: &str = "core.namespaces.fork";
+pub const FEATURE_NAMESPACES_FORK: &str = "filesystem.namespaces.fork";
 /// Gates namespace deletion.
-pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
+pub const FEATURE_NAMESPACES_DELETE: &str = "filesystem.namespaces.delete";
 /// Gates read-snapshot lifecycle operations.
-pub const FEATURE_SNAPSHOTS: &str = "core.snapshots";
+pub const FEATURE_SNAPSHOTS: &str = "filesystem.snapshots";
 /// Gates inode attributes: writing them, and projecting them onto reads.
-/// Attributes are part of the core plane, not a composed extension, so a
-/// deployment that serves the core profile serves them.
-pub const FEATURE_ATTRIBUTES: &str = "core.attributes";
-/// Gates listing a directory's children by parent inode ID. Part of the core
+/// Attributes are part of the filesystem plane, not a composed extension, so a
+/// deployment that serves the filesystem plane serves them.
+pub const FEATURE_ATTRIBUTES: &str = "filesystem.attributes";
+/// Gates listing a directory's children by parent inode ID. Part of the filesystem
 /// plane and implemented by the runtime, so current deployments advertise it;
 /// the key exists so inode-driven sync clients can gate on deployments built
 /// before the route.
-pub const FEATURE_INODES_LIST_CHILDREN: &str = "core.inodes.list_children";
+pub const FEATURE_INODES_LIST_CHILDREN: &str = "filesystem.inodes.list_children";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
-pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
+pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "filesystem.uploads.direct_put";
 /// Starting presigned `direct_multipart` upload sessions. Independent of
 /// [`FEATURE_UPLOADS_DIRECT_PUT`]: a provider may sign whole-object writes
 /// without having an S3-style multipart API at all.
-pub const FEATURE_UPLOADS_DIRECT_MULTIPART: &str = "core.uploads.direct_multipart";
+pub const FEATURE_UPLOADS_DIRECT_MULTIPART: &str = "filesystem.uploads.direct_multipart";
 /// Gates download grants that are authorized with short-lived presigned
 /// URLs. A deployment that offers any direct transfer advertises this one,
 /// because letting a client write an object too large to proxy back means
 /// being able to hand it back.
-pub const FEATURE_DOWNLOADS_DIRECT_GET: &str = "core.downloads.direct_get";
+pub const FEATURE_DOWNLOADS_DIRECT_GET: &str = "filesystem.downloads.direct_get";
 
 /// Gates grep-index content search: the serving half of the capability;
 /// the namespace's verified active grep root is the data half.
 pub const FEATURE_QUERY_GREP: &str = "query.grep";
 
-/// Gates grep-index administration: enabling a namespace's grep root,
+/// Gates grep-index maintenance: enabling a namespace's grep root,
 /// disabling it, collecting its garbage, and reading its lifecycle.
 ///
 /// The maintenance half of the same capability, and independent of
 /// [`FEATURE_QUERY_GREP`]: searching an index and keeping one built are
 /// separately deployable, so a deployment may advertise either alone. It is
-/// an `admin.` key because its routes are admin routes, and because a
+/// a `maintenance.` key because its routes are maintenance routes, and because a
 /// deployment that maintains an index it does not serve advertises no
-/// `query/v0` profile for a `query.` key to be parented by.
-pub const FEATURE_ADMIN_GREP_INDEX: &str = "admin.grep.index";
+/// `query/v0` plane for a `query.` key to be parented by.
+pub const FEATURE_MAINTENANCE_GREP_INDEX: &str = "maintenance.grep.index";
 
 macro_rules! limit_keys {
     ($( $(#[$meta:meta])* $name:ident = $value:literal; )+) => {
@@ -132,14 +132,14 @@ limit_keys! {
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES = "query.grep.tail_budget_files";
 }
 
-/// The profiles, features, and limits advertised by a deployment.
+/// The planes, features, and limits advertised by a deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CapabilityDocument {
     /// The protocol generation, currently `v0`.
     pub protocol_version: String,
-    /// The advertised `plane/version` profiles, each with every required operation implemented.
-    pub profiles: Vec<String>,
+    /// The advertised `plane/version` planes, each with every required operation implemented.
+    pub planes: Vec<String>,
     /// The named features supported by this deployment, with absent keys treated as unsupported.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub features: BTreeMap<String, bool>,
@@ -151,9 +151,9 @@ pub struct CapabilityDocument {
 /// Violation of the capability document rules.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CapabilityDocumentError {
-    /// Reports a feature whose dotted plane prefix has no advertised profile.
+    /// Reports a feature whose dotted plane prefix has no advertised plane.
     #[error(
-        "feature `{feature}` is not parented by an advertised profile \
+        "feature `{feature}` is not parented by an advertised plane \
          (its first dotted segment must be one of the advertised plane names)"
     )]
     UnparentedFeature {
@@ -163,9 +163,9 @@ pub enum CapabilityDocumentError {
 }
 
 impl CapabilityDocument {
-    /// Whether a profile (for example `core/v0`) is advertised.
-    pub fn has_profile(&self, profile: &str) -> bool {
-        self.profiles.iter().any(|advertised| advertised == profile)
+    /// Whether a plane (for example `filesystem/v0`) is advertised.
+    pub fn has_plane(&self, plane: &str) -> bool {
+        self.planes.iter().any(|advertised| advertised == plane)
     }
 
     /// Whether a feature is advertised as supported. Absent keys are
@@ -184,7 +184,7 @@ impl CapabilityDocument {
 
     /// Checks the feature-key rule (API spec, "Capability discovery"): every
     /// feature key's first dotted segment must be the plane name of an
-    /// advertised profile.
+    /// advertised plane.
     pub fn validate(&self) -> Result<(), CapabilityDocumentError> {
         for feature in self.features.keys() {
             if !self.feature_is_parented(feature) {
@@ -199,13 +199,15 @@ impl CapabilityDocument {
     /// Drops feature keys that violate the feature-key rule, the
     /// client-side "ignore" handling for malformed documents.
     pub fn retain_well_formed(&mut self) {
-        let advertised_planes: Vec<&str> = self.profiles.iter().map(|p| plane_name(p)).collect();
+        let advertised_planes: Vec<&str> =
+            self.planes.iter().map(|plane| plane_name(plane)).collect();
         self.features
             .retain(|feature, _| feature_is_parented(&advertised_planes, feature));
     }
 
     fn feature_is_parented(&self, feature: &str) -> bool {
-        let advertised_planes: Vec<&str> = self.profiles.iter().map(|p| plane_name(p)).collect();
+        let advertised_planes: Vec<&str> =
+            self.planes.iter().map(|plane| plane_name(plane)).collect();
         feature_is_parented(&advertised_planes, feature)
     }
 }
@@ -217,9 +219,9 @@ fn feature_is_parented(planes: &[&str], feature: &str) -> bool {
     }
 }
 
-/// The plane name of a profile: `core/v0` has plane `core`.
-fn plane_name(profile: &str) -> &str {
-    profile.split('/').next().unwrap_or(profile)
+/// The plane name of a versioned plane: `filesystem/v0` has plane `filesystem`.
+fn plane_name(plane: &str) -> &str {
+    plane.split('/').next().unwrap_or(plane)
 }
 
 #[cfg(test)]
@@ -229,7 +231,10 @@ mod tests {
     fn document() -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
-            profiles: vec![PROFILE_CORE_V0.to_owned(), PROFILE_ADMIN_V0.to_owned()],
+            planes: vec![
+                PLANE_FILESYSTEM_V0.to_owned(),
+                PLANE_MAINTENANCE_V0.to_owned(),
+            ],
             features: BTreeMap::from([
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), false),
@@ -239,10 +244,10 @@ mod tests {
     }
 
     #[test]
-    fn supports_and_has_profile_answer_gating_questions() {
+    fn supports_and_has_plane_answer_gating_questions() {
         let document = document();
-        assert!(document.has_profile(PROFILE_CORE_V0));
-        assert!(!document.has_profile("query/v0"));
+        assert!(document.has_plane(PLANE_FILESYSTEM_V0));
+        assert!(!document.has_plane(PLANE_QUERY_V0));
         assert!(document.supports(FEATURE_NAMESPACES_CREATE));
         // Advertised-false and absent keys are both unsupported.
         assert!(!document.supports(FEATURE_NAMESPACES_DELETE));
@@ -250,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_keys_must_be_parented_by_an_advertised_profile() {
+    fn feature_keys_must_be_parented_by_an_advertised_plane() {
         let mut document = document();
         document
             .features
@@ -273,8 +278,12 @@ mod tests {
     fn capability_document_round_trips_and_tolerates_unknown_fields() {
         let document = document();
         let encoded = serde_json::to_string(&document).expect("encode");
+        assert!(encoded.contains("\"planes\""));
         let decoded: CapabilityDocument = serde_json::from_str(&encoded).expect("decode");
         assert_eq!(decoded, document);
+
+        let old_field = encoded.replace("\"planes\"", "\"profiles\"");
+        assert!(serde_json::from_str::<CapabilityDocument>(&old_field).is_err());
 
         let future = encoded.replacen('{', "{\"field_from_the_future\":true,", 1);
         let decoded: CapabilityDocument =

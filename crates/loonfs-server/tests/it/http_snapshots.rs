@@ -67,7 +67,7 @@ fn release_checkpoint(
     checkpoint_id: &str,
 ) -> ApiResult<loonfs_api::ReleaseCheckpointResponse> {
     post_json(&format!(
-        "{server_url}/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release"
+        "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{checkpoint_id}/release"
     ))
 }
 
@@ -342,7 +342,7 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
         namespace.as_str(),
         snapshot.snapshot_id.as_str(),
     )
-    .expect_err("admin release must refuse snapshot");
+    .expect_err("maintenance release must refuse snapshot");
     assert_eq!(status, 400);
     assert!(error.message.contains("snapshot release operation"));
     let (status, error) = release_snapshot(
@@ -358,7 +358,7 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
         decode_response(
             raw_agent()
                 .get(&format!(
-                    "{}/v0/admin/namespaces/{}/checkpoints",
+                    "{}/v0/maintenance/namespaces/{}/checkpoints",
                     harness.server_url, namespace
                 ))
                 .set("authorization", "Bearer test-token")

@@ -181,7 +181,7 @@ Snapshot management
     Release a snapshot. Repeating the command succeeds.
 
 Pagination
-  ls, grep, revisions, trash, changes, snapshot list, and admin checkpoint
+  ls, grep, revisions, trash, changes, snapshot list, and maintenance checkpoint
   list return one page by default. --limit sets the total maximum across
   pages, --page-size controls each request, and --cursor resumes a previous
   result. --all fetches every page for human output. --json returns a bounded
@@ -307,7 +307,7 @@ History and recovery
 
 Inspection and diagnostics
   loonfs capabilities [--profile <name>]
-    Show the protocol version, profiles, features, and limits supported by
+    Show the protocol version, planes, features, and limits supported by
     the selected deployment
 
   loonfs doctor [--profile <name>] [--namespace <name>] [--write-check]
@@ -318,26 +318,26 @@ Inspection and diagnostics
     and exits nonzero if a check fails
 
 Maintenance
-  loonfs admin maintenance run --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>]
+  loonfs maintenance run --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>]
     Run maintenance for explicitly named namespaces in embedded mode. The
     command runs until stopped. With --drain, it finishes the current
     assignments and exits. --job selects metadata, core-gc, grep-index, or
     grep-gc; omitting it selects all four. --max-steps and --deadline-ms
     bound a drain.
 
-  loonfs admin maintenance step [--max-wal-tail-segments <n>] [--retention] [--gc]
+  loonfs maintenance step [--max-wal-tail-segments <n>] [--retention] [--gc]
     Run one metadata maintenance step. --retention and --gc add retention
     advancement and garbage collection. --max-wal-tail-segments overrides
     the default flush threshold.
 
-  loonfs admin maintenance flush
+  loonfs maintenance flush
     Flush the current WAL tail regardless of its length.
 
-  loonfs admin retention advance
+  loonfs maintenance retention advance
     Advance the retention floor. This removes change-feed replay history
     below the flushed manifest head but does not remove file revisions.
 
-  loonfs admin gc [--grace-window-ms <ms>] [--max-objects <n>] [--cursor <token>]
+  loonfs maintenance gc [--grace-window-ms <ms>] [--max-objects <n>] [--cursor <token>]
     Run mark-and-sweep collection, looping bounded passes through
     completion; --max-objects examines at most that many candidates and
     returns after one pass, --cursor resumes from a previous pass's
@@ -346,35 +346,35 @@ Maintenance
     reports each pass on standard error as it lands, and the summary says
     what the pass kept and mostly why; --json carries every retention reason
 
-  loonfs admin store probe
+  loonfs maintenance store probe
     Test the object-store operations LoonFS requires. The command creates
     and removes temporary objects, prints each result, and exits nonzero if
     any check fails.
 
-  loonfs admin checkpoint create --name <label> [--ttl-ms <ms>]
+  loonfs maintenance checkpoint create --name <label> [--ttl-ms <ms>]
     Pin the namespace's current state. --ttl-ms sets an expiry; without it,
     the checkpoint remains until release.
 
-  loonfs admin checkpoint list [--limit <n>] [--page-size <n>]
+  loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
                                [--cursor <cursor>] [--all] [--jsonl]
     List active checkpoints in ID order. Expired checkpoints remain visible
     until garbage collection removes them.
 
-  loonfs admin checkpoint release <checkpoint-id>
+  loonfs maintenance checkpoint release <checkpoint-id>
     Release a checkpoint pin
 
-  loonfs admin index enable [--no-wait] [--max-steps <n>] [--deadline-ms <ms>]
+  loonfs maintenance index enable [--no-wait] [--max-steps <n>] [--deadline-ms <ms>]
     Enable the gram index and wait until it reaches the namespace sequence
     captured at startup. --no-wait returns after enabling it. --max-steps
     and --deadline-ms bound the wait and report incomplete progress.
 
-  loonfs admin index status
+  loonfs maintenance index status
     Show whether the gram index is disabled, backfilling, or active.
 
-  loonfs admin index disable
+  loonfs maintenance index disable
     Disable the gram content index
 
-  loonfs admin index gc [--max-objects <n>] [--cursor <token>]
+  loonfs maintenance index gc [--max-objects <n>] [--cursor <token>]
     Remove unreferenced gram-index objects. Without --max-objects, continue
     until collection is complete. --max-objects limits one pass to that many
     reads, and --cursor resumes a previous pass.
@@ -640,8 +640,8 @@ Behavior notes
   read, and advances a whole file at a time over the small ones
 
   Embedded profiles do not run continuous maintenance. Run
-  `loonfs admin maintenance run --namespaces <ns>` for ongoing maintenance,
-  or `loonfs admin maintenance step` for one step. Without maintenance, the
+  `loonfs maintenance run --namespaces <ns>` for ongoing maintenance,
+  or `loonfs maintenance step` for one step. Without maintenance, the
   WAL tail grows and reads become slower. Servers maintain the namespaces
   they use automatically.
 ```

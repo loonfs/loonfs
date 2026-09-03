@@ -11,10 +11,10 @@
     reason = "ClientError::Api exposes all structured server error fields"
 )]
 
-mod admin;
 mod config;
 mod downloads;
 mod error;
+mod maintenance;
 mod mutations;
 mod namespace_path;
 mod payload;
@@ -51,9 +51,9 @@ use payload::PartReader;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-pub use admin::{CheckpointsPager, SnapshotsPager};
 pub use config::ClientConfig;
 pub use error::ClientError;
+pub use maintenance::{CheckpointsPager, SnapshotsPager};
 pub use payload::{PayloadSource, PayloadStream};
 pub use reads::{
     ChangesPager, FileRevisionsPager, InodeChildrenPager, ListChangesOptions, PathEntriesPager,
@@ -156,7 +156,7 @@ impl Client {
     /// redeployment's new capabilities builds a new client. The CLI is
     /// one-shot, so its view is always fresh.
     ///
-    /// Feature keys that are not parented by an advertised profile are
+    /// Feature keys that are not parented by an advertised plane are
     /// dropped rather than trusted, per the spec's client guidance for
     /// malformed documents.
     pub async fn get_capabilities(&self) -> Result<CapabilityDocument> {

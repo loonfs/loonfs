@@ -3,7 +3,7 @@
 use super::common::*;
 
 #[test]
-fn admin_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
+fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -13,18 +13,18 @@ fn admin_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     fs::write(&payload, b"body").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
     // Materialize derived state so the tombstone has something reclaimable.
-    assert_success(&harness.run(&["admin", "maintenance", "flush"]));
+    assert_success(&harness.run(&["maintenance", "flush"]));
     assert_success(&harness.run(&["--json", "namespace", "delete", "demo", "--yes"]));
 
     // GC is the reclamation path for a tombstoned namespace: it must run
     // and report, not refuse. (Fresh objects sit inside the grace window,
     // so this pins reachability, not byte counts.)
-    let gc = harness.run(&["--json", "admin", "gc"]);
+    let gc = harness.run(&["--json", "maintenance", "gc"]);
     assert_success(&gc);
     assert_eq!(json_data(&gc)["kind"], "garbage_collected");
 
     // Everything that is not the GC-only step still reports the deletion.
-    let step = harness.run(&["--json", "admin", "maintenance", "step"]);
+    let step = harness.run(&["--json", "maintenance", "step"]);
     assert_failure(&step);
     assert_eq!(json_error(&step)["code"], "namespace_deleted");
     let recreate = harness.run(&["--json", "namespace", "create", "demo"]);
@@ -51,7 +51,7 @@ fn embedded_grep_works_after_index_enable() {
     // Enable waits for the backfill in-process: the one-shot CLI is its own
     // grep maintenance, so the query works immediately — no server, no
     // driver, no state that never resolves.
-    let enabled = harness.run(&["--json", "admin", "index", "enable"]);
+    let enabled = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&enabled);
     assert_eq!(json_data(&enabled)["status"], "active");
     assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
@@ -70,7 +70,7 @@ fn embedded_grep_works_after_index_enable() {
     let more = harness.temp_dir.path().join("lib.rs");
     fs::write(&more, b"// TODO: also here\n").expect("write payload");
     assert_success(&harness.run(&["put", more.to_str().expect("utf-8 path"), "/src/lib.rs"]));
-    let recaught = harness.run(&["--json", "admin", "index", "enable"]);
+    let recaught = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&recaught);
     assert_eq!(json_data(&recaught)["status"], "active");
     let found = harness.run(&["--json", "grep", "TODO"]);
@@ -94,7 +94,7 @@ fn grep_limit_caps_the_whole_search_while_page_size_sizes_requests() {
     let payload = harness.temp_dir.path().join("notes.txt");
     fs::write(&payload, b"TODO one\nTODO two\nTODO three\nTODO four\n").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/notes.txt"]));
-    assert_success(&harness.run(&["--json", "admin", "index", "enable"]));
+    assert_success(&harness.run(&["--json", "maintenance", "index", "enable"]));
 
     let all = harness.run(&["--json", "grep", "TODO"]);
     assert_success(&all);
@@ -187,9 +187,9 @@ fn changes_checkpoints_and_grep_jsonl_follow_across_pages() {
     assert_success(&changes);
     assert_eq!(stdout_string(&changes).lines().count(), 2);
 
-    assert_success(&harness.run(&["admin", "checkpoint", "create", "--name", "first"]));
+    assert_success(&harness.run(&["maintenance", "checkpoint", "create", "--name", "first"]));
     let dated = harness.run(&[
-        "admin",
+        "maintenance",
         "checkpoint",
         "create",
         "--name",
@@ -206,15 +206,21 @@ fn changes_checkpoints_and_grep_jsonl_follow_across_pages() {
         .trim_end()
         .trim_end_matches(')')
         .to_owned();
-    let listed_expiries = harness.run(&["admin", "checkpoint", "list"]);
+    let listed_expiries = harness.run(&["maintenance", "checkpoint", "list"]);
     assert_success(&listed_expiries);
     assert!(
         stdout_string(&listed_expiries).contains(&expiry),
         "create and list must spell one expiry the same way: {created_line}{}",
         stdout_string(&listed_expiries)
     );
-    let one_checkpoint =
-        harness.run(&["--json", "admin", "checkpoint", "list", "--page-size", "1"]);
+    let one_checkpoint = harness.run(&[
+        "--json",
+        "maintenance",
+        "checkpoint",
+        "list",
+        "--page-size",
+        "1",
+    ]);
     assert_success(&one_checkpoint);
     assert_eq!(
         json_data(&one_checkpoint)["checkpoints"]
@@ -224,11 +230,18 @@ fn changes_checkpoints_and_grep_jsonl_follow_across_pages() {
         1
     );
     assert!(json_data(&one_checkpoint)["next_cursor"].is_string());
-    let checkpoints = harness.run(&["admin", "checkpoint", "list", "--page-size", "1", "--jsonl"]);
+    let checkpoints = harness.run(&[
+        "maintenance",
+        "checkpoint",
+        "list",
+        "--page-size",
+        "1",
+        "--jsonl",
+    ]);
     assert_success(&checkpoints);
     assert_eq!(stdout_string(&checkpoints).lines().count(), 2);
 
-    assert_success(&harness.run(&["admin", "index", "enable"]));
+    assert_success(&harness.run(&["maintenance", "index", "enable"]));
     let grep = harness.run(&["grep", "TODO", "--page-size", "1", "--jsonl"]);
     assert_success(&grep);
     assert_eq!(stdout_string(&grep).lines().count(), 2);
@@ -241,11 +254,11 @@ fn index_enable_leaves_core_maintenance_decoupled() {
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     assert_success(&harness.run(&["use", "demo"]));
 
-    let enabled = harness.run(&["--json", "admin", "index", "enable"]);
+    let enabled = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&enabled);
     assert!(json_data(&enabled).get("backfill_step").is_none());
 
-    let retried = harness.run(&["--json", "admin", "index", "enable"]);
+    let retried = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&retried);
     assert_eq!(json_data(&retried)["status"], "active");
     assert!(json_data(&retried).get("backfill_step").is_none());
@@ -258,14 +271,14 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     assert_success(&harness.run(&["use", "demo"]));
 
-    let disabled = harness.run(&["--json", "admin", "index", "status"]);
+    let disabled = harness.run(&["--json", "maintenance", "index", "status"]);
     assert_success(&disabled);
     assert_eq!(json_data(&disabled)["status"], "disabled");
     assert!(json_data(&disabled).get("built_through_seq").is_none());
 
     // `--no-wait` returns with the root the enable published: a backfill,
     // naming the sequence it will walk to and nothing it has indexed.
-    let enabled = harness.run(&["--json", "admin", "index", "enable", "--no-wait"]);
+    let enabled = harness.run(&["--json", "maintenance", "index", "enable", "--no-wait"]);
     assert_success(&enabled);
     let data = json_data(&enabled);
     assert_eq!(data["status"], "backfilling");
@@ -274,28 +287,28 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     assert!(json_data(&enabled).get("waited_for_seq").is_none());
     assert_eq!(json_data(&enabled)["steps"], 0);
 
-    let backfilling = harness.run(&["--json", "admin", "index", "status"]);
+    let backfilling = harness.run(&["--json", "maintenance", "index", "status"]);
     assert_success(&backfilling);
     assert_eq!(json_data(&backfilling)["status"], "backfilling");
     assert_eq!(json_data(&backfilling)["reorganize_pending"], false);
     assert!(backfilling_text_names_no_watermark(&harness));
 
     // Waiting takes it active, and only then is there a watermark.
-    assert_success(&harness.run(&["admin", "index", "enable"]));
-    let active = harness.run(&["--json", "admin", "index", "status"]);
+    assert_success(&harness.run(&["maintenance", "index", "enable"]));
+    let active = harness.run(&["--json", "maintenance", "index", "status"]);
     assert_success(&active);
     assert_eq!(json_data(&active)["status"], "active");
     assert_eq!(json_data(&active)["built_through_seq"], 0);
     assert!(json_data(&active).get("target_seq").is_none());
 
-    let disabled = harness.run(&["--json", "admin", "index", "disable"]);
+    let disabled = harness.run(&["--json", "maintenance", "index", "disable"]);
     assert_success(&disabled);
     let data = json_data(&disabled);
     assert_eq!(data["status"], "disabled");
     assert!(data.get("built_through_seq").is_none());
     assert!(data.get("next_run_no").is_some());
 
-    let disabled_again = harness.run(&["--json", "admin", "index", "disable"]);
+    let disabled_again = harness.run(&["--json", "maintenance", "index", "disable"]);
     assert_success(&disabled_again);
     assert_eq!(json_data(&disabled_again)["status"], "disabled");
 }
@@ -310,7 +323,7 @@ fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
     fs::write(&payload, b"needle one\n").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
 
-    let enabled = harness.run(&["--json", "admin", "index", "enable"]);
+    let enabled = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&enabled);
     assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
 
@@ -319,7 +332,7 @@ fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
     let more = harness.temp_dir.path().join("two.txt");
     fs::write(&more, b"needle two\n").expect("write payload");
     assert_success(&harness.run(&["put", more.to_str().expect("utf-8 path"), "/two.txt"]));
-    let status = harness.run(&["--json", "admin", "index", "status"]);
+    let status = harness.run(&["--json", "maintenance", "index", "status"]);
     assert_success(&status);
     assert_eq!(
         json_data(&status)["built_through_seq"],
@@ -328,8 +341,8 @@ fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
     );
 
     // An index already at the namespace head returns without stepping.
-    assert_success(&harness.run(&["admin", "index", "enable"]));
-    let caught_up = harness.run(&["--json", "admin", "index", "enable"]);
+    assert_success(&harness.run(&["maintenance", "index", "enable"]));
+    let caught_up = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&caught_up);
     assert_eq!(json_data(&caught_up)["status"], "active");
     assert_eq!(json_data(&caught_up)["waited_for_seq"], 2);
@@ -351,7 +364,7 @@ fn index_enable_budgets_exit_nonzero_and_report_progress() {
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
 
     for budget in [vec!["--max-steps", "0"], vec!["--deadline-ms", "0"]] {
-        let mut args = vec!["--json", "admin", "index", "enable"];
+        let mut args = vec!["--json", "maintenance", "index", "enable"];
         args.extend(budget.iter().copied());
         let stopped = harness.run(&args);
         assert_failure(&stopped);
@@ -366,7 +379,7 @@ fn index_enable_budgets_exit_nonzero_and_report_progress() {
     }
 
     // The index is untouched by the give-up, and a plain wait still lands.
-    assert_success(&harness.run(&["admin", "index", "enable"]));
+    assert_success(&harness.run(&["maintenance", "index", "enable"]));
     let found = harness.run(&["--json", "grep", "needle"]);
     assert_success(&found);
 }
@@ -398,21 +411,21 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
     fs::write(&payload, b"remote needle\n").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
 
-    let disabled = harness.run(&["--json", "admin", "index", "status"]);
+    let disabled = harness.run(&["--json", "maintenance", "index", "status"]);
     assert_success(&disabled);
     assert_eq!(json_data(&disabled)["status"], "disabled");
 
-    let enabled = harness.run(&["--json", "admin", "index", "enable"]);
+    let enabled = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&enabled);
     assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
     assert_eq!(json_data(&enabled)["budget_exhausted"], false);
     assert_eq!(json_data(&enabled)["status"], "active");
 
-    let active = harness.run(&["--json", "admin", "index", "status"]);
+    let active = harness.run(&["--json", "maintenance", "index", "status"]);
     assert_success(&active);
     assert_eq!(json_data(&active)["built_through_seq"], 1);
 
-    let caught_up = harness.run(&["--json", "admin", "index", "enable"]);
+    let caught_up = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&caught_up);
     assert_eq!(json_data(&caught_up)["waited_for_seq"], 1);
     assert_eq!(
@@ -431,7 +444,7 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
         1
     );
 
-    let collected = harness.run(&["--json", "admin", "index", "gc"]);
+    let collected = harness.run(&["--json", "maintenance", "index", "gc"]);
     assert_success(&collected);
     assert_eq!(json_data(&collected)["namespace_reaped"], false);
 }
@@ -445,11 +458,11 @@ fn index_gc_loops_its_cursor_and_accumulates() {
     let payload = harness.temp_dir.path().join("one.txt");
     fs::write(&payload, b"needle\n").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
-    assert_success(&harness.run(&["admin", "index", "enable"]));
+    assert_success(&harness.run(&["maintenance", "index", "enable"]));
 
     // Nothing here is past its grace window, so a full loop retains what it
     // examines and, having walked to the end, carries no resume cursor.
-    let collected = harness.run(&["--json", "admin", "index", "gc"]);
+    let collected = harness.run(&["--json", "maintenance", "index", "gc"]);
     assert_success(&collected);
     let data = json_data(&collected);
     assert_eq!(data["deleted_segments"], 0);
@@ -457,7 +470,7 @@ fn index_gc_loops_its_cursor_and_accumulates() {
     assert!(data.get("next_cursor").is_none(), "{data}");
 
     // One bounded pass stops early and returns a resume cursor.
-    let single = harness.run(&["--json", "admin", "index", "gc", "--max-objects", "1"]);
+    let single = harness.run(&["--json", "maintenance", "index", "gc", "--max-objects", "1"]);
     assert_success(&single);
     assert!(
         json_data(&single)["next_cursor"].is_string(),
@@ -470,7 +483,7 @@ fn index_gc_loops_its_cursor_and_accumulates() {
         .to_owned();
     let resumed = harness.run(&[
         "--json",
-        "admin",
+        "maintenance",
         "index",
         "gc",
         "--max-objects",
@@ -488,7 +501,7 @@ fn index_gc_loops_its_cursor_and_accumulates() {
 }
 
 #[test]
-fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
+fn maintenance_run_drains_an_assignment_and_leaves_the_work_done() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     for namespace in ["alpha", "beta"] {
@@ -505,7 +518,7 @@ fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
         // Enabled and deliberately left behind: catching it up is what the
         // assignment is for.
         assert_success(&harness.run(&[
-            "admin",
+            "maintenance",
             "index",
             "enable",
             "--namespace",
@@ -516,7 +529,6 @@ fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
 
     let drained = harness.run(&[
         "--json",
-        "admin",
         "maintenance",
         "run",
         "--namespaces",
@@ -544,7 +556,7 @@ fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
     for namespace in ["alpha", "beta"] {
         let status = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "index",
             "status",
             "--namespace",
@@ -560,14 +572,13 @@ fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
 }
 
 #[test]
-fn admin_run_budgets_exit_nonzero_and_report_per_key_progress() {
+fn maintenance_run_budgets_exit_nonzero_and_report_per_key_progress() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "alpha"]));
 
     let unstarted = harness.run(&[
         "--json",
-        "admin",
         "maintenance",
         "run",
         "--namespaces",
@@ -589,7 +600,6 @@ fn admin_run_budgets_exit_nonzero_and_report_per_key_progress() {
     // One step is enough for the first key on a quiet namespace and reaches
     // no other, which is exactly what the report has to say.
     let partial = harness.run(&[
-        "admin",
         "maintenance",
         "run",
         "--namespaces",
@@ -607,11 +617,11 @@ fn admin_run_budgets_exit_nonzero_and_report_per_key_progress() {
 }
 
 #[test]
-fn admin_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
+fn maintenance_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
 
-    let unassigned = harness.run(&["admin", "maintenance", "run"]);
+    let unassigned = harness.run(&["maintenance", "run"]);
     assert_failure(&unassigned);
     assert!(
         stderr_string(&unassigned).contains("--namespaces"),
@@ -620,7 +630,6 @@ fn admin_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
     );
 
     let unknown_job = harness.run(&[
-        "admin",
         "maintenance",
         "run",
         "--namespaces",
@@ -639,7 +648,7 @@ fn admin_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
 }
 
 #[test]
-fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
+fn maintenance_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     for namespace in ["alpha", "beta"] {
@@ -647,7 +656,6 @@ fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     }
 
     let too_fast = harness.run(&[
-        "admin",
         "maintenance",
         "run",
         "--namespaces",
@@ -668,7 +676,6 @@ fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
 
     let plain = harness.run(&[
         "--json",
-        "admin",
         "maintenance",
         "run",
         "--namespaces",
@@ -678,7 +685,6 @@ fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     assert_success(&plain);
     let paced = harness.run(&[
         "--json",
-        "admin",
         "maintenance",
         "run",
         "--namespaces",
@@ -707,15 +713,15 @@ fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
 }
 
 #[test]
-fn admin_store_probe_renders_the_profile_stores_report() {
+fn maintenance_store_probe_renders_the_profile_stores_report() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
 
-    let probe = harness.run(&["admin", "store", "probe"]);
+    let probe = harness.run(&["maintenance", "store", "probe"]);
     assert_success(&probe);
     let text = stdout_string(&probe);
 
-    let json = harness.run(&["--json", "admin", "store", "probe"]);
+    let json = harness.run(&["--json", "maintenance", "store", "probe"]);
     assert_success(&json);
     let data = json_data(&json);
     assert_eq!(data["kind"], "store_probed");
@@ -746,7 +752,7 @@ fn admin_store_probe_renders_the_profile_stores_report() {
 }
 
 #[test]
-fn admin_run_refuses_a_remote_profile() {
+fn maintenance_run_refuses_a_remote_profile() {
     let harness = Harness::new();
     assert_success(&harness.run(&[
         "--json",
@@ -762,7 +768,6 @@ fn admin_run_refuses_a_remote_profile() {
 
     let refused = harness.run(&[
         "--json",
-        "admin",
         "maintenance",
         "run",
         "--namespaces",
@@ -779,11 +784,11 @@ fn admin_run_refuses_a_remote_profile() {
 }
 
 #[test]
-fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
+fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
     let harness = Harness::new();
     harness.add_embedded_profile("embedded");
     let remote_server =
-        harness.start_external_server(harness.write_server_config("remote", "admin-parity"));
+        harness.start_external_server(harness.write_server_config("remote", "maintenance-parity"));
     let add_remote = harness.run(&[
         "--json",
         "profile",
@@ -871,7 +876,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         let checkpoint = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "create",
             "--name",
@@ -899,7 +904,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         // second checkpoint with a different id.
         let second_checkpoint = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "create",
             "--name",
@@ -916,7 +921,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         let listed = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "list",
             "--profile",
@@ -948,7 +953,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         // A page limit returns one page and a cursor that resumes at the next id.
         let first_page = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "list",
             "--profile",
@@ -976,7 +981,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         let resumed_page = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "list",
             "--profile",
@@ -993,7 +998,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(resumed_page_data.get("next_cursor").is_none());
 
         let first_page_human = harness.run(&[
-            "admin",
+            "maintenance",
             "checkpoint",
             "list",
             "--profile",
@@ -1006,7 +1011,8 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         // The human rendering is the same table in both modes, and it names
         // the id the release command takes.
-        let listed_human = harness.run(&["admin", "checkpoint", "list", "--profile", profile]);
+        let listed_human =
+            harness.run(&["maintenance", "checkpoint", "list", "--profile", profile]);
         assert_success(&listed_human);
         let listed_text = stdout_string(&listed_human);
         assert!(listed_text.contains("CREATED\tEXPIRES\tSEQ\tOWNER\tCHECKPOINT"));
@@ -1017,7 +1023,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         // never per label.
         assert_success(&harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "release",
             &second_checkpoint_id,
@@ -1026,7 +1032,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         ]));
         let after_release = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "list",
             "--profile",
@@ -1040,14 +1046,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         // `maintenance flush` runs metadata maintenance with a flush threshold of one.
         // segment, so it reports both halves and nothing else.
-        let flush = harness.run(&[
-            "--json",
-            "admin",
-            "maintenance",
-            "flush",
-            "--profile",
-            profile,
-        ]);
+        let flush = harness.run(&["--json", "maintenance", "flush", "--profile", profile]);
         assert_success(&flush);
         let flush_data = json_data(&flush);
         assert_eq!(flush_data["kind"], "maintenance_stepped");
@@ -1062,7 +1061,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         let release = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "release",
             &checkpoint_id,
@@ -1077,7 +1076,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         let release_again = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "release",
             &checkpoint_id,
@@ -1089,7 +1088,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         let retention = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "retention",
             "advance",
             "--profile",
@@ -1105,14 +1104,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         // The checkpoint above already covers the head, so a step reports
         // not-needed identically in both modes.
-        let step = harness.run(&[
-            "--json",
-            "admin",
-            "maintenance",
-            "step",
-            "--profile",
-            profile,
-        ]);
+        let step = harness.run(&["--json", "maintenance", "step", "--profile", profile]);
         assert_success(&step);
         let step_data = json_data(&step);
         assert_eq!(step_data["kind"], "maintenance_stepped");
@@ -1133,7 +1125,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(step_data.get("gc").is_none());
 
         // A fresh namespace has nothing eligible to sweep.
-        let gc = harness.run(&["--json", "admin", "gc", "--profile", profile]);
+        let gc = harness.run(&["--json", "maintenance", "gc", "--profile", profile]);
         assert_success(&gc);
         let gc_data = json_data(&gc);
         assert_eq!(gc_data["kind"], "garbage_collected");
@@ -1160,7 +1152,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         // A run that took one pass says nothing on the way: its summary on
         // standard output is the whole report.
-        let quiet_gc = harness.run(&["admin", "gc", "--profile", profile]);
+        let quiet_gc = harness.run(&["maintenance", "gc", "--profile", profile]);
         assert_success(&quiet_gc);
         assert!(!stderr_string(&quiet_gc).contains("pass 1:"));
 
@@ -1170,7 +1162,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         // it never reached.
         let starved_gc = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "gc",
             "--max-objects",
             "1",
@@ -1187,7 +1179,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         // of the CLI's default completion loop.
         let bounded_gc = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "gc",
             "--max-objects",
             "8",
@@ -1206,7 +1198,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         // restart over this unchanged keyspace would return the same token.
         let resumed_gc = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "gc",
             "--max-objects",
             "8",
@@ -1223,10 +1215,10 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             Some(cursor.as_str())
         );
 
-        // Admin failures surface the registry code in both modes.
+        // Maintenance failures surface the registry code in both modes.
         let missing = harness.run(&[
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "create",
             "--name",
@@ -1245,10 +1237,17 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "namespace `missing` does not exist"
         );
 
-        // The store probe is store-scoped, so it is the one admin command
+        // The store probe is store-scoped, so it is the one maintenance command
         // that names no namespace in either mode; both modes still answer
         // with the same report shape.
-        let probe = harness.run(&["--json", "admin", "store", "probe", "--profile", profile]);
+        let probe = harness.run(&[
+            "--json",
+            "maintenance",
+            "store",
+            "probe",
+            "--profile",
+            profile,
+        ]);
         assert_success(&probe);
         let probe_data = json_data(&probe);
         assert_eq!(probe_data["kind"], "store_probed");

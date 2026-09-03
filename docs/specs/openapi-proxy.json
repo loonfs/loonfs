@@ -364,7 +364,7 @@
         "type": "string"
       },
       "CapabilityDocument": {
-        "description": "The profiles, features, and limits advertised by a deployment.",
+        "description": "The planes, features, and limits advertised by a deployment.",
         "properties": {
           "features": {
             "additionalProperties": {
@@ -388,8 +388,8 @@
             },
             "type": "object"
           },
-          "profiles": {
-            "description": "The advertised `plane/version` profiles, each with every required operation implemented.",
+          "planes": {
+            "description": "The advertised `plane/version` planes, each with every required operation implemented.",
             "items": {
               "type": "string"
             },
@@ -402,7 +402,7 @@
         },
         "required": [
           "protocol_version",
-          "profiles"
+          "planes"
         ],
         "type": "object"
       },

@@ -3,9 +3,9 @@ import { FilesClient as GeneratedFilesClient } from "./api/resources/files/clien
 import * as core from "./core/index.js";
 import type * as LoonFS from "./api/index.js";
 
-const DIRECT_GET_FEATURE = "core.downloads.direct_get";
-const DIRECT_MULTIPART_FEATURE = "core.uploads.direct_multipart";
-const DIRECT_PUT_FEATURE = "core.uploads.direct_put";
+const DIRECT_GET_FEATURE = "filesystem.downloads.direct_get";
+const DIRECT_MULTIPART_FEATURE = "filesystem.uploads.direct_multipart";
+const DIRECT_PUT_FEATURE = "filesystem.uploads.direct_put";
 const DIRECT_PUT_MAX_BYTES = "upload.direct_put_max_content_bytes";
 const PROXY_UPLOAD_MAX_BYTES = "upload.max_content_bytes";
 const MULTIPART_MIN_BYTES = 8 * 1024 * 1024;

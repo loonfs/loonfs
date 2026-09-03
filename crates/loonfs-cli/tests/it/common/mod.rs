@@ -122,7 +122,7 @@ pub(super) fn feed_messages(harness: &Harness) -> Vec<String> {
 }
 
 pub(super) fn backfilling_text_names_no_watermark(harness: &Harness) -> bool {
-    let rendered = stdout_string(&harness.run(&["admin", "index", "status"]));
+    let rendered = stdout_string(&harness.run(&["maintenance", "index", "status"]));
     rendered.contains("backfilling toward seq") && !rendered.contains("built through")
 }
 

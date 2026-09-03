@@ -1,4 +1,4 @@
-//! Namespace lifecycle, status, capability discovery, and admin maintenance
+//! Namespace lifecycle, status, capability discovery, and maintenance
 //! handlers.
 
 use super::error::ApiResponseError;
@@ -17,14 +17,14 @@ use loonfs_api::{
     CreateNamespaceRequest, CreateSnapshotRequest, ErrorCode, ExtendSnapshotRequest,
     ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, PageRequest, PaginationPolicy, ReleaseCheckpointResponse,
-    ReleaseSnapshotResponse, SnapshotSummary, FEATURE_ADMIN_GREP_INDEX,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    ReleaseSnapshotResponse, SnapshotSummary, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
     LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_SNAPSHOT_MAX_LIFETIME_MS,
     LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE, LIMIT_SNAPSHOT_MAX_TTL_MS,
     LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PLANE_QUERY_V0,
 };
 
 /// Advertises a feature, or removes the key: an absent key and an
@@ -140,23 +140,23 @@ pub(super) async fn get_capabilities(
         LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE.to_owned(),
         state.config.snapshot_max_live_per_namespace as u64,
     );
-    // The runtime handles describe the core and admin planes. Grep is a
+    // The runtime handles describe the filesystem and maintenance planes. Grep is a
     // composed extension, so this deployment — not the runtime — says
     // whether the query plane exists and what it costs.
     //
-    // Serving searches and administering the index are separate jobs and
+    // Serving searches and maintaining the index are separate jobs and
     // separately deployable, so they are separately advertised. The
-    // administration key sits in the admin plane, which the runtime always
+    // maintenance key sits in the maintenance plane, which the runtime always
     // advertises: a deployment that maintains an index it does not serve has
     // no query plane for a `query.` key to be parented by.
     set_feature(
         &mut capabilities,
-        FEATURE_ADMIN_GREP_INDEX,
+        FEATURE_MAINTENANCE_GREP_INDEX,
         state.config.grep.mode.maintains_index(),
     );
     if state.config.grep.mode.serves_grep() {
         let pagination = PaginationPolicy::default();
-        capabilities.profiles.push(PROFILE_QUERY_V0.to_owned());
+        capabilities.planes.push(PLANE_QUERY_V0.to_owned());
         capabilities
             .features
             .insert(FEATURE_QUERY_GREP.to_owned(), true);
@@ -257,8 +257,8 @@ pub(super) async fn get_namespace(
         get,
         operation_id = "get_namespace_diagnostics",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/admin/namespaces/{namespace_id}/diagnostics",
-        tag = "admin",
+        path = "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
+        tag = "maintenance",
         summary = "Get namespace diagnostics",
         description = "Returns namespace state together with the current manifest and visible WAL tail.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
@@ -612,10 +612,10 @@ fn snapshot_expiry_from_ttl(
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-retries" = json!({"disabled": true})),
         ),
-        path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
-        tag = "admin",
+        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+        tag = "maintenance",
         summary = "Create checkpoint",
-        description = "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is released, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
+        description = "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is released, so routine maintenance should flush the WAL instead. This is a maintenance operation, not a file mutation.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body(content = CreateCheckpointRequest, description = "Checkpoint name and optional lifetime"),
         responses(
@@ -661,8 +661,8 @@ pub(super) async fn create_checkpoint(
                 "results": "$response.checkpoints",
             })),
         ),
-        path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
-        tag = "admin",
+        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+        tag = "maintenance",
         summary = "List checkpoints",
         description = "Lists one page of active checkpoints in checkpoint-id order. Expired checkpoints remain visible until collection releases them. Released checkpoints are omitted. The cursor resumes a live listing and does not create a snapshot.",
         params(
@@ -705,8 +705,8 @@ pub(super) async fn list_checkpoints(
         post,
         operation_id = "release_checkpoint",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
-        tag = "admin",
+        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
+        tag = "maintenance",
         summary = "Release checkpoint",
         description = "Releases a user-owned checkpoint pin by id. Idempotent: releasing an already-released or reaped record succeeds. The record is reaped by a later garbage-collection pass; its pinned data becomes collectable only on the pass after that.",
         params(
@@ -764,8 +764,8 @@ fn decode_checkpoint_cursor(
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-retries" = json!({"disabled": true})),
         ),
-        path = "/v0/admin/namespaces/{namespace_id}/maintenance/run",
-        tag = "admin",
+        path = "/v0/maintenance/namespaces/{namespace_id}/runs",
+        tag = "maintenance",
         summary = "Run maintenance step",
         description = "Runs one bounded maintenance step. Include `metadata_maintenance`, `retention`, or `gc` to select actions. Each selector is an options object, and an empty object uses server defaults. Actions run in that order, and only selected actions appear in the response. At least one action is required. A deleted namespace accepts only `gc`. GC processes up to 1024 candidates by default and returns a cursor when more work remains. A lost root update race is reported as an outcome.",
         params(("namespace_id" = String, Path, description = "Namespace id")),

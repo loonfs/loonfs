@@ -6,7 +6,7 @@ and the consistency and durability invariants. Any implementation that reads
 and writes a store according to this document is format-conformant, whether or
 not it exposes any API surface.
 
-The companion document is `api.md` — the LoonFS API specification: profiles,
+The companion document is `api.md` — the LoonFS API specification: planes,
 capability discovery, the standard error contract, and the HTTP binding;
 normative where implemented.
 
@@ -2269,7 +2269,7 @@ Checkpoint records are standalone files under `checkpoints/`. Maintenance
 never creates one: automatic root advancement leaves superseded manifests and
 folded-away segments unpinned, and garbage collection reaps them under the
 grace-window and delete-time re-verification rules ("Garbage collection").
-A checkpoint record is a deliberate pin — fork sources and explicit admin
+A checkpoint record is a deliberate pin — fork sources and explicit maintenance
 checkpoints — and roots its basis for as long as the record exists.
 
 ### 6.3 Retention management
@@ -2291,7 +2291,7 @@ Delete is tombstone-first. Garbage collection is the separate process that
 eventually reclaims content or metadata that is no longer reachable and no
 longer protected by retention policy. GC and floor advancement are the only
 consumers of listing, and nothing sweeps by default: a pass runs only through
-the admin endpoint or an explicit maintenance-step opt-in.
+the maintenance endpoint or an explicit maintenance-step opt-in.
 
 A pass reads the namespace head first. An absent head means the namespace
 does not exist, so there is nothing to collect and nothing to ignore.

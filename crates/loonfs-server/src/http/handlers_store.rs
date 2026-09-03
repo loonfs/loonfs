@@ -1,4 +1,4 @@
-//! The `admin/v0` routes whose subject is the backing store itself rather
+//! The `maintenance/v0` routes whose subject is the backing store itself rather
 //! than one namespace.
 
 use super::{AppQuery, AppState, NoQuery, OptionalAppJson};
@@ -21,8 +21,8 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome};
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-retries" = json!({"disabled": true})),
         ),
-        path = "/v0/admin/store/probe",
-        tag = "admin",
+        path = "/v0/maintenance/store/probe",
+        tag = "maintenance",
         summary = "Probe the store contract",
         description = "Proves the configured object store honours the create-if-absent, compare-and-swap, visibility, listing, and ranged-read semantics LoonFS depends on, and reports what it found check by check. Nothing runs this implicitly: a probe writes and deletes objects, all of them under a scratch prefix that is not a durable object family, and its last check deletes them and proves the prefix empty. A store that fails a check answers 200 with that check reported `failed` — the probe ran, and the answer is that the store is wrong. Optional capabilities a store declares it lacks answer `unsupported`, which is an answer rather than a fault. This route does not decide whether the deployment may serve presigned direct uploads: that trust comes from the endpoint allowlist, because a probe exercises the server's own request path and never a presigned capability handed to a client.",
         request_body(content = StoreProbeRequest, description = "Probe options; send `{}` for defaults"),

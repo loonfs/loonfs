@@ -150,19 +150,19 @@ async fn capabilities_endpoint_advertises_capabilities() {
         .await
         .expect("fetch capabilities");
     assert_eq!(capabilities.protocol_version, "v0");
-    assert!(capabilities.has_profile("core/v0"));
-    assert!(capabilities.has_profile("admin/v0"));
-    assert!(!capabilities.supports("core.namespaces.list"));
-    assert!(capabilities.supports("core.namespaces.create"));
-    assert!(capabilities.supports("core.namespaces.fork"));
-    assert!(capabilities.supports("core.namespaces.delete"));
-    assert!(capabilities.supports("core.snapshots"));
+    assert!(capabilities.has_plane("filesystem/v0"));
+    assert!(capabilities.has_plane("maintenance/v0"));
+    assert!(!capabilities.supports("filesystem.namespaces.list"));
+    assert!(capabilities.supports("filesystem.namespaces.create"));
+    assert!(capabilities.supports("filesystem.namespaces.fork"));
+    assert!(capabilities.supports("filesystem.namespaces.delete"));
+    assert!(capabilities.supports("filesystem.snapshots"));
     // A local-filesystem deployment presigns nothing, so none of the three
     // transfer capabilities is advertised — and because it presigns no
     // uploads either, no file it holds can be larger than it will proxy.
-    assert!(!capabilities.supports("core.uploads.direct_put"));
-    assert!(!capabilities.supports("core.uploads.direct_multipart"));
-    assert!(!capabilities.supports("core.downloads.direct_get"));
+    assert!(!capabilities.supports("filesystem.uploads.direct_put"));
+    assert!(!capabilities.supports("filesystem.uploads.direct_multipart"));
+    assert!(!capabilities.supports("filesystem.downloads.direct_get"));
     assert!(
         !capabilities
             .limits

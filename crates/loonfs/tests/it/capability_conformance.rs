@@ -5,8 +5,8 @@
 //! The registry describes the reference deployment, which serves one plane
 //! this crate does not implement: `query/v0` and every grep key come from
 //! `loonfs-grep`, which a host composes on top of these handles. Both grep
-//! keys are composed — `query.grep` for searching and `admin.grep.index`
-//! for administering the index — even though the second one is parented by
+//! keys are composed — `query.grep` for searching and `maintenance.grep.index`
+//! for maintaining the index — even though the second one is parented by
 //! a plane these handles do advertise. So the embedded document is the
 //! spec's example minus the grep extension, and `loonfs-server`'s
 //! `grep_modes` test pins the merged document a composed deployment answers
@@ -15,7 +15,7 @@
 // Spec parsing panics with precise messages when a section is missing.
 
 use loonfs::{CapabilityDocument, FsReader, SharedObjectStore};
-use loonfs_api::PROFILE_QUERY_V0;
+use loonfs_api::PLANE_QUERY_V0;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
 use std::collections::BTreeSet;
@@ -34,25 +34,25 @@ fn embedded_capabilities() -> CapabilityDocument {
 /// The composed grep extension, dropped from a document so what remains is
 /// what this crate is responsible for.
 fn without_the_grep_extension(mut document: CapabilityDocument) -> CapabilityDocument {
-    document
-        .profiles
-        .retain(|profile| profile != PROFILE_QUERY_V0);
+    document.planes.retain(|plane| plane != PLANE_QUERY_V0);
     document.features.retain(|key, _| !is_grep_key(key));
     document.limits.retain(|key, _| !is_grep_key(key));
     document
 }
 
 /// A key the composed grep extension owns: the whole query plane, plus the
-/// admin-plane key that gates index administration. A host that composes no
+/// maintenance-plane key that gates index maintenance. A host that composes no
 /// extension advertises none of them, whatever planes it does advertise.
 fn is_grep_key(key: &str) -> bool {
-    key.starts_with("query.") || key.starts_with("admin.grep.")
+    key.starts_with("query.") || key.starts_with("maintenance.grep.")
 }
 
 fn is_host_transfer_key(key: &str) -> bool {
     matches!(
         key,
-        "core.uploads.direct_put" | "core.uploads.direct_multipart" | "core.downloads.direct_get"
+        "filesystem.uploads.direct_put"
+            | "filesystem.uploads.direct_multipart"
+            | "filesystem.downloads.direct_get"
     )
 }
 
@@ -78,7 +78,7 @@ fn embedded_capability_document_is_the_spec_example_without_the_composed_grep_ex
     let expected: CapabilityDocument =
         serde_json::from_str(example).expect("spec capability example parses");
     assert!(
-        expected.profiles.iter().any(|p| p == PROFILE_QUERY_V0),
+        expected.planes.iter().any(|p| p == PLANE_QUERY_V0),
         "the section 2.1 example describes the reference server, which serves the query plane"
     );
 
@@ -104,7 +104,7 @@ fn advertised_features_match_the_spec_feature_registry() {
         !registry.is_empty(),
         "no feature keys parsed from the api.md registry table"
     );
-    for composed in ["query.grep", "admin.grep.index"] {
+    for composed in ["query.grep", "maintenance.grep.index"] {
         assert!(
             registry.contains(composed),
             "the registry must keep `{composed}`, which the reference server composes"

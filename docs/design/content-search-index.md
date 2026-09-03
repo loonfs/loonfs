@@ -182,7 +182,7 @@ step that loses that race reads the disabled root and stops. A query-only
 server does not register the maintenance job and rejects index mutations.
 
 Embedded CLI profiles do not run background maintenance. The
-`loonfs admin index enable` command captures a target sequence and runs
+`loonfs maintenance index enable` command captures a target sequence and runs
 bounded maintenance steps until the index reaches it. Later writes do not
 move that target, so the command can finish on an active namespace.
 `--no-wait` returns after enabling the index. `--max-steps` and
@@ -192,7 +192,7 @@ fallen behind. Queries scan a bounded unindexed tail between runs.
 
 Automatic maintenance covers namespaces used by the current process. To
 maintain an inactive namespace, assign it with
-`loonfs admin maintenance run --namespaces <id>`. Use `--job grep-index` to
+`loonfs maintenance run --namespaces <id>`. Use `--job grep-index` to
 run only index maintenance. Use `--drain` to complete the current assignment
 and exit. `--max-steps` and `--deadline-ms` limit a drain. A namespace without
 a grep index returns `not_enabled` after one read. No separate grep daemon is
@@ -289,8 +289,8 @@ checkpoint or required change history disappears, the worker discards the
 incomplete index and starts a new backfill.
 
 Grep garbage collection is explicit and runs per namespace. The CLI command
-is `loonfs admin index gc`; the server endpoint is
-`POST /v0/admin/namespaces/{ns}/grep/index/gc`. The operation can remove old
+is `loonfs maintenance index gc`; the server endpoint is
+`POST /v0/maintenance/namespaces/{ns}/grep/index/gc`. The operation can remove old
 grep state for a missing or deleted namespace after rechecking that state is
 safe to delete. Index build and reorganization steps never perform garbage
 collection.

@@ -44,8 +44,8 @@ fn upload_sessions_need_a_remote_profile() -> CliError {
 fn maintenance_host_needs_an_embedded_profile() -> CliError {
     CliError::new(
         loonfs_api::ErrorCode::NotSupported.as_str(),
-        "`admin maintenance run` requires an embedded profile because remote servers run their \
-         own maintenance; use `loonfs admin maintenance step` for one pass or `loonfs admin \
+        "`maintenance run` requires an embedded profile because remote servers run their \
+         own maintenance; use `loonfs maintenance step` for one pass or `loonfs maintenance \
          index status` to inspect the index",
     )
 }
@@ -366,7 +366,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Enables the grep index on a namespace (admin plane).
+    /// Enables the grep index on a namespace (maintenance plane).
     pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -377,7 +377,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Disables the grep index on a namespace (admin plane).
+    /// Disables the grep index on a namespace (maintenance plane).
     pub(crate) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -388,7 +388,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Reads the namespace's grep-index lifecycle (admin plane).
+    /// Reads the namespace's grep-index lifecycle (maintenance plane).
     pub(crate) async fn get_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -404,7 +404,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Runs one bounded grep-index garbage-collection pass (admin plane).
+    /// Runs one bounded grep-index garbage-collection pass (maintenance plane).
     pub(crate) async fn gc_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -759,7 +759,7 @@ impl ResolvedTarget {
         }
     }
 
-    // --- maintenance/admin plane (`admin/v0`) ---
+    // --- maintenance plane (`maintenance/v0`) ---
 
     /// Creates or reuses a named, user-owned checkpoint pinning the
     /// namespace's current view.

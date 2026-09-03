@@ -151,7 +151,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         .get_capabilities()
         .await
         .expect("fetch capabilities");
-    assert!(capabilities.supports("core.uploads.direct_put"));
+    assert!(capabilities.supports("filesystem.uploads.direct_put"));
 
     harness
         .client
@@ -240,7 +240,7 @@ async fn assert_direct_get_returns_the_written_bytes(
 ) {
     let capabilities = client.get_capabilities().await.expect("fetch capabilities");
     assert!(
-        capabilities.supports("core.downloads.direct_get"),
+        capabilities.supports("filesystem.downloads.direct_get"),
         "a provider proven for direct writes must be offered for direct reads"
     );
 
@@ -675,10 +675,10 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
         .get_capabilities()
         .await
         .expect("fetch capabilities");
-    assert!(capabilities.supports("core.uploads.direct_put"));
-    assert!(capabilities.supports("core.downloads.direct_get"));
+    assert!(capabilities.supports("filesystem.uploads.direct_put"));
+    assert!(capabilities.supports("filesystem.downloads.direct_get"));
     assert!(
-        !capabilities.supports("core.uploads.direct_multipart"),
+        !capabilities.supports("filesystem.uploads.direct_multipart"),
         "this adapter signs no multipart for GCS, so the key must be absent"
     );
 
@@ -981,7 +981,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .get_capabilities()
         .await
         .expect("fetch capabilities");
-    assert!(capabilities.supports("core.uploads.direct_multipart"));
+    assert!(capabilities.supports("filesystem.uploads.direct_multipart"));
 
     harness
         .client

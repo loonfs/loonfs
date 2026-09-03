@@ -25,7 +25,7 @@ key_prefix = "loonfs-demo"
 force_path_style = false
 
 # Uses the standard AWS SDK credential chain, including environment variables,
-# profiles, SSO, web identity, and AWS compute roles. Temporary credentials
+# named configurations, SSO, web identity, and AWS compute roles. Temporary credentials
 # refresh automatically.
 [store.credentials]
 kind = "ambient"

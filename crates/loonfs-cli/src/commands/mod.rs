@@ -1,10 +1,10 @@
 //! Command implementations, one submodule per command group.
 
-mod admin;
 mod config;
 mod context;
 mod fs;
 mod inspection;
+mod maintenance;
 mod namespace;
 mod output;
 mod pagination;
@@ -99,12 +99,12 @@ pub(crate) async fn run(
                 Command::Mv(args) => fs::run_filesystem_mv(kind, config_path, args, runtime).await,
                 Command::Cp(args) => fs::run_filesystem_cp(kind, config_path, args, runtime).await,
                 Command::Trash(args) => fs::run_filesystem_trash(kind, &location, args).await,
-                Command::Changes(args) => admin::run_admin_changes(kind, config_path, args).await,
+                Command::Changes(args) => maintenance::run_changes(kind, config_path, args).await,
                 Command::Capabilities(args) => {
                     inspection::run_capabilities(kind, config_path, args).await
                 }
-                Command::Admin { command } => {
-                    admin::run_admin_command(kind, config_path, command, runtime).await
+                Command::Maintenance { command } => {
+                    maintenance::run_maintenance_command(kind, config_path, command, runtime).await
                 }
                 Command::Completion(_) | Command::Doctor(_) => pre_config_command_in_nested_match(),
             }
