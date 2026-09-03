@@ -12,10 +12,11 @@ use super::{
 use crate::fs::{ReadCore, WriterBits};
 use crate::publisher::PublisherRegistry;
 use crate::{
-    ErrorCode, FsAdmin, GcConfig, GcResponse, MaintenancePlan, MetadataMaintenanceOptions,
-    MetadataMaintenanceResponse, NamespaceId, ReorganizeStepOutcome, Result, RuntimeError,
-    WalFlushStepOutcome,
+    ErrorCode, FsAdmin, GcConfig, GcResponse, MaintenanceRunRequest, MaintenanceRunResponse,
+    MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId, ReorganizeStepOutcome,
+    Result, RuntimeError, WalFlushStepOutcome,
 };
+use loonfs_api::GcRequest;
 use loonfs_core::cache::load_namespace_diagnostics;
 use loonfs_core::limits::{
     CONTENT_RECLAMATION_GRACE_MS, GC_SAFETY_MARGIN_MS, UPLOAD_SESSION_LEASE_MS,
@@ -121,30 +122,9 @@ impl MaintenanceJob for MetadataJob {
                 MaintenanceStepConclusion::NotEnabled,
             ));
         };
-        // Upkeep alone: no retention, no garbage collection. Both are other
-        // decisions, and one of them is another job.
-        let plan = MaintenancePlan {
-            metadata: Some(self.options),
-            ..MaintenancePlan::default()
-        };
-        match admin.run_maintenance(namespace_id, plan).await {
-            Ok(step) => {
-                let metadata = step
-                    .metadata_maintenance
-                    .expect("a plan selecting metadata upkeep reports it");
+        match admin.maintain_metadata(namespace_id, self.options).await {
+            Ok(metadata) => {
                 let conclusion = metadata_conclusion(&metadata);
-                // Quiet sub-outcomes emit nothing at default levels, so this
-                // is the only record of what a step actually did. The runner
-                // logs what the conclusion means for scheduling; this logs
-                // what produced it.
-                tracing::debug!(
-                    namespace_id = %step.namespace_id,
-                    wal_tail_segments_before = step.status_before.wal_tail_segments,
-                    wal_flush = ?metadata.wal_flush,
-                    reorganize = ?metadata.reorganize,
-                    conclusion = conclusion.as_str(),
-                    "metadata maintenance step concluded"
-                );
                 Ok(MaintenanceStepReport::concluded(conclusion))
             }
             Err(error) if metadata_has_nothing_to_maintain(&error) => Ok(
@@ -209,17 +189,17 @@ impl MaintenanceJob for GcJob {
                 MaintenanceStepConclusion::NotEnabled,
             ));
         };
-        let plan = MaintenancePlan {
-            gc: Some(GcConfig {
-                cursor: continuation.map(str::to_owned),
-                // The step resolves the absent candidate budget to the
-                // per-step default, which is what bounds this pass.
-                ..GcConfig::default()
-            }),
-            ..MaintenancePlan::default()
-        };
-        let step = match admin.run_maintenance(namespace_id, plan).await {
-            Ok(step) => step,
+        let response = match admin
+            .run_maintenance(
+                namespace_id,
+                MaintenanceRunRequest::Gc(GcRequest {
+                    cursor: continuation.map(str::to_owned),
+                    ..GcRequest::default()
+                }),
+            )
+            .await
+        {
+            Ok(response) => response,
             Err(error) if error.code() == ErrorCode::NamespaceNotFound => {
                 // A deleted namespace still owns reclaimable state, so only
                 // one that was never created is nothing to collect.
@@ -242,12 +222,11 @@ impl MaintenanceJob for GcJob {
             }
             Err(error) => return Err(error),
         };
-        // Selection is presence, so a plan that named collection is answered
-        // with a collection report: there is no step that ran and said
-        // nothing.
-        let gc = step
-            .gc
-            .expect("a plan selecting collection reports its pass");
+        let MaintenanceRunResponse::Gc(gc) = response else {
+            return Err(RuntimeError::Core(loonfs_core::Error::Internal(
+                "maintenance GC returned a non-GC response".to_owned(),
+            )));
+        };
         Ok(gc_step_result(gc, continuation))
     }
 

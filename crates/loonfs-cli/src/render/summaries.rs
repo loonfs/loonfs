@@ -111,11 +111,9 @@ fn normalize_probe_message(message: &str) -> String {
 }
 
 /// Formats the result of one WAL flush step.
-pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u64) -> String {
+pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome) -> String {
     match outcome {
-        WalFlushStepOutcome::NotNeeded => {
-            format!("wal flush not needed (tail {tail_segments} segments)")
-        }
+        WalFlushStepOutcome::NotNeeded => "wal flush not needed".to_owned(),
         WalFlushStepOutcome::Flushed { manifest_head_seq } => {
             format!("wal flushed @ seq {}", manifest_head_seq.0)
         }

@@ -3,7 +3,7 @@
 
 use super::error::ApiResponseError;
 use super::query_params::{parse_path_id, parse_public_ordinal, resolve_page_limit};
-use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson};
+use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{
@@ -15,8 +15,8 @@ use loonfs_api::ChangeSeq;
 use loonfs_api::{
     decode_namespace_cursor, CapabilityDocument, Checkpoint, CheckpointId, CreateCheckpointRequest,
     CreateNamespaceRequest, CreateSnapshotRequest, ErrorCode, ExtendSnapshotRequest,
-    ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, PageRequest, PaginationPolicy, ReleaseCheckpointResponse,
+    ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, MaintenanceRunRequest,
+    MaintenanceRunResponse, PageRequest, PaginationPolicy, ReleaseCheckpointResponse,
     ReleaseSnapshotResponse, SnapshotSummary, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
@@ -766,12 +766,12 @@ fn decode_checkpoint_cursor(
         ),
         path = "/v0/maintenance/namespaces/{namespace_id}/runs",
         tag = "maintenance",
-        summary = "Run maintenance step",
-        description = "Runs one bounded maintenance step. Include `metadata_maintenance`, `retention`, or `gc` to select actions. Each selector is an options object, and an empty object uses server defaults. Actions run in that order, and only selected actions appear in the response. At least one action is required. A deleted namespace accepts only `gc`. GC processes up to 1024 candidates by default and returns a cursor when more work remains. A lost root update race is reported as an outcome.",
+        summary = "Run one maintenance job",
+        description = "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` run inspects up to 1024 objects unless `max_objects` says otherwise, and returns a cursor when more remain.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
-        request_body(content = MaintenanceStepRequest, description = "The actions this step selects"),
+        request_body(content = MaintenanceRunRequest, description = "The maintenance job to run"),
         responses(
-            (status = 200, description = "Maintenance step completed", body = MaintenanceStepResponse),
+            (status = 200, description = "Maintenance job completed", body = MaintenanceRunResponse),
             (status = 400, description = "Invalid namespace id or options", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -784,17 +784,20 @@ pub(super) async fn run_maintenance(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-    OptionalAppJson(request): OptionalAppJson<MaintenanceStepRequest>,
-) -> Result<Json<MaintenanceStepResponse>, ApiResponseError> {
-    let plan =
-        loonfs::MaintenancePlan::from_request(request.unwrap_or_default()).map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_invalid_request_param("/metadata_maintenance/max_wal_tail_segments")
-        })?;
+    AppJson(request): AppJson<MaintenanceRunRequest>,
+) -> Result<Json<MaintenanceRunResponse>, ApiResponseError> {
     let result = state
         .admin
-        .run_maintenance(&namespace_id, plan)
+        .run_maintenance(&namespace_id, request)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(|error| {
+            let invalid_threshold = matches!(&error, loonfs::RuntimeError::Config(_));
+            let response = ApiResponseError::runtime_for_namespace(&namespace_id, error);
+            if invalid_threshold {
+                response.with_invalid_request_param("/max_wal_tail_segments")
+            } else {
+                response
+            }
+        })?;
     Ok(Json(result))
 }

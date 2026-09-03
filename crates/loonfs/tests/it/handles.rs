@@ -9,9 +9,8 @@
 use crate::common::collect_path_entries;
 use loonfs::{
     CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsAdmin,
-    FsBackgroundWork, FsReader, FsWriter, MaintenanceJobId, MaintenancePlan, ManifestNo,
-    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError,
-    SharedObjectStore, StoreConfig,
+    FsBackgroundWork, FsReader, FsWriter, MaintenanceJobId, ManifestNo, MetadataMaintenanceOptions,
+    NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
@@ -701,11 +700,9 @@ fn manual_only_writer_never_schedules_maintenance() {
 
         // Explicit admin maintenance bounds the tail the writer left.
         let step = admin
-            .run_maintenance(&namespace_id, MaintenancePlan::metadata())
+            .maintain_metadata(&namespace_id, MetadataMaintenanceOptions::default())
             .await
-            .expect("explicit maintenance step")
-            .metadata_maintenance
-            .expect("metadata selected");
+            .expect("explicit maintenance step");
         assert_ne!(
             step.wal_flush,
             loonfs::WalFlushStepOutcome::NotNeeded,
@@ -1038,17 +1035,10 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .expect("create checkpoint");
         assert!(checkpoint.manifest_no > ManifestNo(0));
         let retention = admin
-            .run_maintenance(
-                &namespace_id,
-                MaintenancePlan {
-                    advance_retention: true,
-                    ..MaintenancePlan::default()
-                },
-            )
+            .advance_retention_floor(&namespace_id)
             .await
             .expect("advance retention");
-        assert_eq!(retention.namespace_id, namespace_id);
-        assert!(retention.retention.is_some());
+        assert_eq!(retention.retention_floor_seq, checkpoint.checkpoint_seq);
     });
 }
 

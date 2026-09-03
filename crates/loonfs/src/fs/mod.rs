@@ -7,7 +7,7 @@ mod reads;
 mod uploads;
 mod writes;
 
-pub use maintenance::{CheckpointsPager, MetadataCompactionOutcome};
+pub use maintenance::CheckpointsPager;
 pub use reads::{
     ChangesPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager, PathEntriesPager,
     TrashPager,

@@ -14,8 +14,8 @@ use futures::StreamExt;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ByteStream, ChangeSeq, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, ListChangesOptions, MaintenancePlan, NamespaceId, PutFileOptions,
-    ReorganizeStepOutcome, RevisionNo,
+    DestinationBehavior, ListChangesOptions, MetadataMaintenanceOptions, NamespaceId,
+    PutFileOptions, ReorganizeStepOutcome, RevisionNo,
 };
 use loonfs_api::ErrorCode;
 use loonfs_api::{ActorId, ActorRef};
@@ -107,17 +107,9 @@ async fn compact_receipt_past_horizon(
     }
     let advanced = runtime
         .admin
-        .run_maintenance(
-            namespace_id,
-            MaintenancePlan {
-                advance_retention: true,
-                ..MaintenancePlan::default()
-            },
-        )
+        .advance_retention_floor(namespace_id)
         .await
-        .expect("advance retention floor")
-        .retention
-        .expect("retention selected");
+        .expect("advance retention floor");
     assert!(
         advanced.retention_floor_seq > committed_seq,
         "the floor must pass the commit for this to test anything: floor {:?}, commit {:?}",
@@ -131,11 +123,9 @@ async fn compact_receipt_past_horizon(
     for _ in 0..32 {
         let step = runtime
             .admin
-            .run_maintenance(namespace_id, MaintenancePlan::metadata())
+            .maintain_metadata(namespace_id, MetadataMaintenanceOptions::default())
             .await
-            .expect("upkeep step")
-            .metadata_maintenance
-            .expect("metadata selected");
+            .expect("upkeep step");
         if matches!(step.reorganize, ReorganizeStepOutcome::NotNeeded) {
             break;
         }
@@ -631,17 +621,9 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
         .expect("create checkpoint");
     let advanced = runtime
         .admin
-        .run_maintenance(
-            &namespace_id,
-            MaintenancePlan {
-                advance_retention: true,
-                ..MaintenancePlan::default()
-            },
-        )
+        .advance_retention_floor(&namespace_id)
         .await
-        .expect("advance retention floor")
-        .retention
-        .expect("retention selected");
+        .expect("advance retention floor");
     assert!(
         advanced.retention_floor_seq >= first.committed_seq,
         "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",

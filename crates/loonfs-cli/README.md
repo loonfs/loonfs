@@ -325,13 +325,16 @@ Maintenance
     grep-gc; omitting it selects all four. --max-steps and --deadline-ms
     bound a drain.
 
-  loonfs maintenance step [--max-wal-tail-segments <n>] [--retention] [--gc]
-    Run one metadata maintenance step. --retention and --gc add retention
-    advancement and garbage collection. --max-wal-tail-segments overrides
-    the default flush threshold.
+  loonfs maintenance step [--max-wal-tail-segments <n>]
+    Run one metadata maintenance step: flush the WAL tail when it reaches
+    the threshold, then merge one reorganization unit.
+    --max-wal-tail-segments overrides the default flush threshold.
 
   loonfs maintenance flush
     Flush the current WAL tail regardless of its length.
+
+  loonfs maintenance compact
+    Run one full metadata compaction for the namespace.
 
   loonfs maintenance retention advance
     Advance the retention floor. This removes change-feed replay history

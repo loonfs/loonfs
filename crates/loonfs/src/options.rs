@@ -3,14 +3,11 @@
 //! Options shared with the HTTP client are re-exported from
 //! [`loonfs_api::options`]. Runtime-only options remain in this module.
 //!
-//! Results are the `loonfs-api` wire shapes themselves: the handles return
-//! `MaintenanceStepResponse` and `GcResponse` directly, the same way they
+//! Results are the `loonfs-api` wire shapes themselves, the same way handles
 //! already return `CommitResponse` and `FlushWalResponse`.
 
 use crate::{EffectiveLimit, GcConfig, Result, RuntimeError};
-use loonfs_api::{
-    CreateCheckpointRequest, GcRequest, MaintenanceStepRequest, MetadataMaintenanceRequest,
-};
+use loonfs_api::{CreateCheckpointRequest, GcRequest, MetadataMaintenanceRequest};
 use loonfs_core::limits::{CHECKPOINT_AT_WAL_SEGMENTS, MAX_UNFLUSHED_WAL_SEGMENTS};
 use std::num::NonZeroU64;
 
@@ -20,24 +17,6 @@ pub use loonfs_api::options::{
     PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
     UpdateAttributesOptions,
 };
-
-/// The actions one maintenance step performs.
-///
-/// Selection is presence: a step runs exactly the actions this plan
-/// carries, in the fixed order metadata, retention, collection. Nothing
-/// surrenders replay history or sweeps objects without being named here,
-/// and a plan that names nothing is not a step.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[must_use]
-pub struct MaintenancePlan {
-    /// Fold the visible WAL tail and merge one bounded reorganization unit.
-    pub metadata: Option<MetadataMaintenanceOptions>,
-    /// Advance the retention floor to the flushed manifest head.
-    pub advance_retention: bool,
-    /// Run one bounded mark-and-sweep pass. An absent `max_objects` inside
-    /// the config resolves to the per-step default.
-    pub gc: Option<GcConfig>,
-}
 
 /// Overrides for the metadata-upkeep action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,76 +34,39 @@ impl Default for MetadataMaintenanceOptions {
 }
 
 impl MetadataMaintenanceOptions {
+    /// Resolves a wire-level metadata maintenance request.
+    pub fn from_request(request: MetadataMaintenanceRequest) -> Result<Self> {
+        let Some(threshold) = request.max_wal_tail_segments else {
+            return Ok(Self::default());
+        };
+        let Some(max_wal_tail_segments) = NonZeroU64::new(threshold) else {
+            return Err(RuntimeError::Config(
+                "max_wal_tail_segments must be greater than zero".to_owned(),
+            ));
+        };
+        let reject_writes_at_segments = MAX_UNFLUSHED_WAL_SEGMENTS;
+        if max_wal_tail_segments.get() > reject_writes_at_segments {
+            return Err(RuntimeError::Config(format!(
+                "max_wal_tail_segments may not exceed the write-rejection threshold \
+                 ({reject_writes_at_segments})"
+            )));
+        }
+        Ok(Self {
+            max_wal_tail_segments,
+        })
+    }
+
     /// Returns whether the WAL tail has reached the flush threshold.
     pub fn flush_is_due(&self, wal_tail_segments: u64) -> bool {
         wal_tail_segments >= self.max_wal_tail_segments.get()
     }
 }
 
-impl MaintenancePlan {
-    /// The plan for one metadata-upkeep pass at the default threshold.
-    pub fn metadata() -> Self {
-        Self {
-            metadata: Some(MetadataMaintenanceOptions::default()),
-            ..Self::default()
-        }
-    }
-
-    /// True when the plan selects no action at all.
-    pub fn is_empty(&self) -> bool {
-        self.metadata.is_none() && !self.advance_retention && self.gc.is_none()
-    }
-
-    /// Resolves a wire-level step request into the plan it selects.
-    ///
-    /// A request that selects nothing resolves to an empty plan, which
-    /// [`FsAdmin::run_maintenance`](crate::FsAdmin::run_maintenance)
-    /// then refuses — one gate, wherever the plan came from.
-    pub fn from_request(request: MaintenanceStepRequest) -> Result<Self> {
-        Ok(Self {
-            metadata: request
-                .metadata_maintenance
-                .map(metadata_options_from_request)
-                .transpose()?,
-            advance_retention: request.retention.is_some(),
-            gc: request.gc.map(gc_config_from_request),
-        })
-    }
-}
-
-/// Resolves the wire-level flush threshold, rejecting the two values that
-/// would make the action useless.
-fn metadata_options_from_request(
-    request: MetadataMaintenanceRequest,
-) -> Result<MetadataMaintenanceOptions> {
-    let Some(threshold) = request.max_wal_tail_segments else {
-        return Ok(MetadataMaintenanceOptions::default());
-    };
-    let Some(max_wal_tail_segments) = NonZeroU64::new(threshold) else {
-        return Err(RuntimeError::Config(
-            "max_wal_tail_segments must be greater than zero".to_owned(),
-        ));
-    };
-    // A threshold above the write-rejection cap would make the step answer
-    // `not needed` while every publish is being rejected — the one tool that
-    // relieves backpressure refusing to act.
-    let reject_writes_at_segments = MAX_UNFLUSHED_WAL_SEGMENTS;
-    if max_wal_tail_segments.get() > reject_writes_at_segments {
-        return Err(RuntimeError::Config(format!(
-            "max_wal_tail_segments may not exceed the write-rejection threshold \
-             ({reject_writes_at_segments})"
-        )));
-    }
-    Ok(MetadataMaintenanceOptions {
-        max_wal_tail_segments,
-    })
-}
-
 /// Resolves wire-level GC window overrides onto the conservative defaults.
 ///
 /// [`GcRequest`] carries optional overrides; [`GcConfig`] carries the values
 /// the pass actually runs with, so the two are deliberately distinct shapes.
-pub(crate) fn gc_config_from_request(request: GcRequest) -> GcConfig {
+pub fn gc_config_from_request(request: GcRequest) -> GcConfig {
     let defaults = GcConfig::default();
     GcConfig {
         grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
@@ -214,56 +156,19 @@ impl Default for ReadFileStreamOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::AdvanceRetentionRequest;
-
-    fn plan(request: MaintenanceStepRequest) -> MaintenancePlan {
-        MaintenancePlan::from_request(request).expect("the request selects an action")
-    }
 
     #[test]
     fn a_gc_request_translates_without_resolving_its_budget() {
         let explicit = gc_config_from_request(GcRequest::default());
         assert_eq!(explicit.max_objects, None);
         assert_eq!(explicit.cursor, None);
-
-        let step = plan(MaintenanceStepRequest {
-            gc: Some(GcRequest::default()),
-            ..MaintenanceStepRequest::default()
-        });
-        assert_eq!(step.gc.expect("GC opted in").max_objects, None);
-    }
-
-    #[test]
-    fn a_request_that_selects_nothing_is_an_empty_plan() {
-        assert!(plan(MaintenanceStepRequest::default()).is_empty());
-        assert!(!MaintenancePlan::metadata().is_empty());
-    }
-
-    #[test]
-    fn each_action_is_selected_on_its_own() {
-        assert!(plan(MaintenanceStepRequest {
-            metadata_maintenance: Some(MetadataMaintenanceRequest::default()),
-            ..MaintenanceStepRequest::default()
-        })
-        .metadata
-        .is_some());
-
-        let retention = plan(MaintenanceStepRequest {
-            retention: Some(AdvanceRetentionRequest::default()),
-            ..MaintenanceStepRequest::default()
-        });
-        assert!(retention.advance_retention);
-        assert!(retention.metadata.is_none() && retention.gc.is_none());
     }
 
     #[test]
     fn an_absent_threshold_resolves_to_the_default() {
-        let step = plan(MaintenanceStepRequest {
-            metadata_maintenance: Some(MetadataMaintenanceRequest::default()),
-            ..MaintenanceStepRequest::default()
-        });
         assert_eq!(
-            step.metadata.expect("metadata selected"),
+            MetadataMaintenanceOptions::from_request(MetadataMaintenanceRequest::default())
+                .expect("default metadata options should resolve"),
             MetadataMaintenanceOptions::default()
         );
     }
@@ -271,11 +176,8 @@ mod tests {
     #[test]
     fn a_useless_flush_threshold_is_rejected() {
         for threshold in [0, MAX_UNFLUSHED_WAL_SEGMENTS + 1] {
-            let error = MaintenancePlan::from_request(MaintenanceStepRequest {
-                metadata_maintenance: Some(MetadataMaintenanceRequest {
-                    max_wal_tail_segments: Some(threshold),
-                }),
-                ..MaintenanceStepRequest::default()
+            let error = MetadataMaintenanceOptions::from_request(MetadataMaintenanceRequest {
+                max_wal_tail_segments: Some(threshold),
             })
             .expect_err("the threshold is out of range");
             assert_eq!(error.code(), crate::ErrorCode::InvalidRequest);
@@ -283,16 +185,12 @@ mod tests {
     }
 
     #[test]
-    fn step_gc_preserves_explicit_budget_and_cursor() {
-        let step = plan(MaintenanceStepRequest {
-            gc: Some(GcRequest {
-                max_objects: Some(7),
-                cursor: Some("opaque".to_owned()),
-                ..GcRequest::default()
-            }),
-            ..MaintenanceStepRequest::default()
+    fn gc_conversion_preserves_explicit_budget_and_cursor() {
+        let gc = gc_config_from_request(GcRequest {
+            max_objects: Some(7),
+            cursor: Some("opaque".to_owned()),
+            ..GcRequest::default()
         });
-        let gc = step.gc.expect("GC opted in");
         assert_eq!(gc.max_objects, Some(7));
         assert_eq!(gc.cursor.as_deref(), Some("opaque"));
     }

@@ -124,7 +124,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "manifest_no",
     "max_objects",
     "max_wal_tail_segments",
-    "metadata_maintenance",
+    "metadata_compaction",
     "metadata_segments",
     "missing_basis",
     "move_by_inode",

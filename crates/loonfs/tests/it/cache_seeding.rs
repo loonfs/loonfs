@@ -763,7 +763,7 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
 }
 
 #[test]
-fn metadata_maintenance_offers_nothing_to_the_local_block_cache() {
+fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let stored_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
@@ -788,7 +788,7 @@ fn metadata_maintenance_offers_nothing_to_the_local_block_cache() {
         .expect("put file");
         let calls_before = stored_blocks.call_count();
         let step = fs
-            .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+            .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
             .expect("maintenance step");
         assert_eq!(
             stored_blocks.call_count(),

@@ -1113,25 +1113,19 @@ pub struct AdvanceRetentionResponse {
     pub retention_floor_seq: ChangeSeq,
 }
 
-/// The actions selected for one explicit maintenance step.
-///
-/// The request must select at least one action, and unknown fields are rejected.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// One maintenance job for one namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MaintenanceStepRequest {
-    /// The optional WAL flush and bounded metadata reorganization action.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub metadata_maintenance: Option<MetadataMaintenanceRequest>,
-    /// The optional action that advances the retention floor to the flushed manifest head.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub retention: Option<AdvanceRetentionRequest>,
-    /// The optional bounded mark-and-sweep garbage-collection action.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub gc: Option<GcRequest>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MaintenanceRunRequest {
+    /// Runs WAL flushing and one bounded metadata reorganization step.
+    Metadata(MetadataMaintenanceRequest),
+    /// Runs one full metadata compaction.
+    MetadataCompaction(MetadataCompactionRequest),
+    /// Runs one bounded mark-and-sweep garbage-collection pass.
+    Gc(GcRequest),
+    /// Advances the retention floor to the flushed manifest head.
+    Retention(AdvanceRetentionRequest),
 }
 
 /// Overrides for the metadata-upkeep action.
@@ -1143,6 +1137,12 @@ pub struct MetadataMaintenanceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wal_tail_segments: Option<u64>,
 }
+
+/// An option-free request that selects one full metadata compaction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MetadataCompactionRequest {}
 
 /// What the WAL-flush part of a maintenance step did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1191,28 +1191,19 @@ pub enum ReorganizeStepOutcome {
     RootAdvanced,
 }
 
-/// The result of one explicit maintenance step.
-///
-/// Each field is present only when the request selected its action.
+/// The result of one maintenance job. The `kind` matches the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct MaintenanceStepResponse {
-    /// Namespace the step ran against.
-    pub namespace_id: NamespaceId,
-    /// Namespace diagnostics observed before the step acted.
-    pub status_before: NamespaceDiagnostics,
-    /// What the metadata-upkeep action did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub metadata_maintenance: Option<MetadataMaintenanceResponse>,
-    /// Where the retention floor ended up.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub retention: Option<AdvanceRetentionResponse>,
-    /// What the collection pass reclaimed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub gc: Option<GcResponse>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MaintenanceRunResponse {
+    /// Result of WAL flushing and one bounded metadata reorganization step.
+    Metadata(MetadataMaintenanceResponse),
+    /// Result of one full metadata compaction.
+    MetadataCompaction(MetadataCompactionResponse),
+    /// Result of one bounded mark-and-sweep garbage-collection pass.
+    Gc(GcResponse),
+    /// Result of advancing the retention floor.
+    Retention(AdvanceRetentionResponse),
 }
 
 /// What one metadata-upkeep action did, part by part.
@@ -1223,6 +1214,50 @@ pub struct MetadataMaintenanceResponse {
     pub wal_flush: WalFlushStepOutcome,
     /// What the reorganization unit did.
     pub reorganize: ReorganizeStepOutcome,
+}
+
+/// What one metadata compaction run did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MetadataCompactionResponse {
+    /// The compaction outcome.
+    pub outcome: MetadataCompactionOutcome,
+}
+
+/// The outcome of one metadata compaction run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum MetadataCompactionOutcome {
+    /// No family group has outgrown a bounded reorganization step and nothing was published.
+    NotNeeded,
+    /// The planner chose a bounded merge and this run published it; no full compaction was needed.
+    BoundedMergePublished,
+    /// A compaction already holds this namespace's slot in this process.
+    AlreadyRunning,
+    /// The rebuilt group replaced its snapshot in a published manifest.
+    Published {
+        /// Manifest published by the compaction.
+        manifest_no: ManifestNo,
+        /// Rows read by the compaction.
+        rows_read: u64,
+        /// Rows written by the compaction.
+        rows_written: u64,
+        /// Input bytes read by the compaction.
+        input_bytes: u64,
+        /// Output bytes written by the compaction.
+        output_bytes: u64,
+        /// Output segments written by the compaction.
+        output_segments: u64,
+    },
+    /// The run was cancelled; the manifest did not move.
+    Cancelled,
+    /// A run the job read changed under it; nothing was published.
+    Abandoned,
+    /// The job lost its lease; nothing was published.
+    Fenced,
+    /// Every publication attempt lost the root race; nothing was published.
+    Superseded,
 }
 
 /// An empty request for one store contract probe.
@@ -2000,24 +2035,76 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_request_bodies_reject_unknown_fields() {
-        serde_json::from_value::<MaintenanceStepRequest>(serde_json::json!({
-            "metadata_maintenance": {"max_wal_tail_segments": 4},
-            "retention": {},
-            "gc": {"grace_window_ms": 1_800_000, "max_objects": 32}
-        }))
-        .expect("the same body without a typo decodes");
+    fn maintenance_run_requests_are_strict_and_round_trip() {
+        let cases = [
+            (
+                serde_json::json!({"kind": "metadata"}),
+                Some(MaintenanceRunRequest::Metadata(
+                    MetadataMaintenanceRequest::default(),
+                )),
+            ),
+            (
+                serde_json::json!({"kind": "metadata", "max_wal_tail_segments": 4}),
+                Some(MaintenanceRunRequest::Metadata(
+                    MetadataMaintenanceRequest {
+                        max_wal_tail_segments: Some(4),
+                    },
+                )),
+            ),
+            (
+                serde_json::json!({"kind": "metadata_compaction"}),
+                Some(MaintenanceRunRequest::MetadataCompaction(
+                    MetadataCompactionRequest {},
+                )),
+            ),
+            (
+                serde_json::json!({"kind": "gc"}),
+                Some(MaintenanceRunRequest::Gc(GcRequest::default())),
+            ),
+            (
+                serde_json::json!({
+                    "kind": "gc",
+                    "max_objects": 10_000,
+                    "grace_window_ms": 600_000,
+                    "cursor": "..."
+                }),
+                Some(MaintenanceRunRequest::Gc(GcRequest {
+                    grace_window_ms: Some(600_000),
+                    max_objects: Some(10_000),
+                    cursor: Some("...".to_owned()),
+                })),
+            ),
+            (
+                serde_json::json!({"kind": "retention"}),
+                Some(MaintenanceRunRequest::Retention(AdvanceRetentionRequest {})),
+            ),
+            (serde_json::json!({}), None),
+            (serde_json::json!({"kind": "nope"}), None),
+            (serde_json::json!({"kind": "gc", "bogus": 1}), None),
+            (serde_json::json!({"kind": "retention", "bogus": 1}), None),
+            (
+                serde_json::json!({"kind": "metadata_compaction", "bogus": 1}),
+                None,
+            ),
+        ];
 
-        for body in [
-            serde_json::json!({"retenton": {}}),
-            serde_json::json!({"retention": {"through_seq": 4}}),
-            serde_json::json!({"metadata_maintenance": {"maxWalTailSegments": 4}}),
-            serde_json::json!({"gc": {"max_object": 32}}),
-        ] {
-            assert!(
-                serde_json::from_value::<MaintenanceStepRequest>(body.clone()).is_err(),
-                "an unknown field decoded instead of failing the step: {body}"
-            );
+        for (body, expected) in cases {
+            let decoded = serde_json::from_value::<MaintenanceRunRequest>(body.clone());
+            match expected {
+                Some(expected) => {
+                    let decoded = decoded.expect("valid maintenance request should decode");
+                    assert_eq!(decoded, expected);
+                    assert_eq!(
+                        serde_json::to_value(decoded)
+                            .expect("maintenance request should serialize"),
+                        body
+                    );
+                }
+                None => assert!(
+                    decoded.is_err(),
+                    "invalid maintenance request decoded: {body}"
+                ),
+            }
         }
 
         serde_json::from_value::<CreateCheckpointRequest>(

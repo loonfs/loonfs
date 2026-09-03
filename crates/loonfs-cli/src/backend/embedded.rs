@@ -10,7 +10,7 @@ use loonfs::{
     CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, DeleteNamespaceResponse,
     DeleteOptions, FsAdmin, FsReader, FsWriter, ListChangesOptions as RuntimeListChangesOptions,
     ListChangesResponse, ListPathEntriesOptions, MaintenanceHandle, MaintenanceJob,
-    MaintenanceJobId, MaintenancePlan, MaintenanceStepConclusion, MoveOptions, PutFileOptions,
+    MaintenanceJobId, MaintenanceStepConclusion, MoveOptions, PutFileOptions,
     RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions, UndeleteOptions,
     UpdateAttributesOptions,
 };
@@ -21,8 +21,8 @@ use loonfs_api::{
     },
     AbsolutePath, ChangeSeq, Checkpoint, CheckpointId, CommitResponse, CreateCheckpointRequest,
     EffectiveLimit, ErrorCode, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, Namespace, NamespaceId, PaginationPolicy, PathEntry, RevisionNo,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceRunRequest,
+    MaintenanceRunResponse, Namespace, NamespaceId, PaginationPolicy, PathEntry, RevisionNo,
 };
 use loonfs_client::{NamespacePath, ReadFileOptions};
 use loonfs_grep::{
@@ -846,15 +846,16 @@ impl EmbeddedBackend {
     pub(super) async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceStepRequest,
-    ) -> Result<MaintenanceStepResponse, CliError> {
-        let plan = MaintenancePlan::from_request(request)
-            .scoped(namespace_id)
-            .map_err(|error| error.with_invalid_request_param("/metadata/max_wal_tail_segments"))?;
-        self.admin
-            .run_maintenance(namespace_id, plan)
-            .await
-            .scoped(namespace_id)
+        request: MaintenanceRunRequest,
+    ) -> Result<MaintenanceRunResponse, CliError> {
+        let result = self.admin.run_maintenance(namespace_id, request).await;
+        let invalid_threshold = matches!(&result, Err(RuntimeError::Config(_)));
+        let result = result.scoped(namespace_id);
+        if invalid_threshold {
+            result.map_err(|error| error.with_invalid_request_param("/max_wal_tail_segments"))
+        } else {
+            result
+        }
     }
 
     /// Proves this profile's object store honours the contract LoonFS

@@ -5,8 +5,8 @@
 use crate::common::*;
 use loonfs::{
     ActorId, ActorRef, CopyOptions, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, MaintenancePlan, MoveOptions, PageRequest, PutFileOptions,
-    RestoreRevisionOptions, RevisionNo, UpdateAttributesOptions,
+    DestinationBehavior, MoveOptions, PageRequest, PutFileOptions, RestoreRevisionOptions,
+    RevisionNo, UpdateAttributesOptions,
 };
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use std::collections::BTreeMap;
@@ -253,14 +253,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
 
     fs.create_checkpoint_blocking(&source_id)
         .expect("checkpoint deletion rows");
-    block_on(fs.admin.run_maintenance(
-        &source_id,
-        MaintenancePlan {
-            advance_retention: true,
-            ..MaintenancePlan::default()
-        },
-    ))
-    .expect("advance retention");
+    block_on(fs.admin.advance_retention_floor(&source_id)).expect("advance retention");
     drop(fs);
 
     let reopened = open_runtime(object_store, "attribution-projections-reopened");

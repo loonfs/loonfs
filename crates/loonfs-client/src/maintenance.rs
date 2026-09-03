@@ -183,17 +183,13 @@ impl Client {
             .await
     }
 
-    /// Runs one bounded maintenance step against a namespace (maintenance plane).
-    ///
-    /// The request selects the actions by naming them, and a request that
-    /// names none is rejected. Absent overrides inside a selected action use
-    /// the server's defaults.
+    /// Runs one maintenance job against a namespace (maintenance plane).
     /// Retrying this request starts a distinct attempt.
     pub async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
-        request: &MaintenanceStepRequest,
-    ) -> Result<MaintenanceStepResponse> {
+        request: &MaintenanceRunRequest,
+    ) -> Result<MaintenanceRunResponse> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/runs",
             self.base_url

@@ -19,7 +19,8 @@ use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
 use loonfs_api::{
     AdvanceRetentionRequest, ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode,
-    GcRequest, MaintenanceStepRequest, MetadataMaintenanceRequest,
+    GcRequest, MaintenanceRunRequest, MaintenanceRunResponse, MetadataCompactionRequest,
+    MetadataMaintenanceRequest,
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
@@ -38,6 +39,7 @@ pub(crate) async fn run_maintenance_command(
         MaintenanceCommand::Run(args) => run_maintenance_run(kind, config_path, args).await,
         MaintenanceCommand::Step(args) => run_maintenance_step(kind, config_path, args).await,
         MaintenanceCommand::Flush(args) => run_maintenance_flush(kind, config_path, args).await,
+        MaintenanceCommand::Compact(args) => run_maintenance_compact(kind, config_path, args).await,
         MaintenanceCommand::Checkpoint { command } => match command {
             MaintenanceCheckpointCommand::Create(args) => {
                 run_maintenance_checkpoint(kind, config_path, args).await
@@ -83,22 +85,16 @@ async fn run_maintenance_step(
     args: MaintenanceStepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    // A step always runs metadata maintenance. The flags add retention or
-    // garbage collection when requested.
-    let request = MaintenanceStepRequest {
-        metadata_maintenance: Some(MetadataMaintenanceRequest {
-            max_wal_tail_segments: args.max_wal_tail_segments,
-        }),
-        retention: args.retention.then(AdvanceRetentionRequest::default),
-        gc: args.gc.then(GcRequest::default),
-    };
+    let request = MaintenanceRunRequest::Metadata(MetadataMaintenanceRequest {
+        max_wal_tail_segments: args.max_wal_tail_segments,
+    });
     let response = context
         .target
         .run_maintenance(context.namespace(), request)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(context.output(kind, CommandData::MaintenanceStepped(response)))
+    Ok(context.output(kind, CommandData::MaintenanceRan(response)))
 }
 
 /// Runs garbage collection until it finishes unless `--max-objects` requests
@@ -119,22 +115,24 @@ async fn run_maintenance_gc(
         single_pass,
         args.cursor,
         |cursor| async {
-            Ok(context
+            let response = context
                 .target
                 .run_maintenance(
                     context.namespace(),
-                    MaintenanceStepRequest {
-                        gc: Some(GcRequest {
-                            grace_window_ms: args.grace_window_ms,
-                            max_objects,
-                            cursor,
-                        }),
-                        ..MaintenanceStepRequest::default()
-                    },
+                    MaintenanceRunRequest::Gc(GcRequest {
+                        grace_window_ms: args.grace_window_ms,
+                        max_objects,
+                        cursor,
+                    }),
                 )
-                .await?
-                .gc
-                .expect("a step selecting collection reports its pass"))
+                .await?;
+            match response {
+                MaintenanceRunResponse::Gc(gc) => Ok(gc),
+                _ => Err(crate::error::CliError::new(
+                    ErrorCode::ServerError.as_str(),
+                    "maintenance GC returned a non-GC response",
+                )),
+            }
         },
         |pass| pass.next_cursor.clone(),
         gc_pass_line,
@@ -327,17 +325,32 @@ async fn run_maintenance_flush(
         .target
         .run_maintenance(
             context.namespace(),
-            MaintenanceStepRequest {
-                metadata_maintenance: Some(MetadataMaintenanceRequest {
-                    max_wal_tail_segments: Some(1),
-                }),
-                ..MaintenanceStepRequest::default()
-            },
+            MaintenanceRunRequest::Metadata(MetadataMaintenanceRequest {
+                max_wal_tail_segments: Some(1),
+            }),
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(context.output(kind, CommandData::MaintenanceStepped(response)))
+    Ok(context.output(kind, CommandData::MaintenanceRan(response)))
+}
+
+async fn run_maintenance_compact(
+    kind: CommandKind,
+    config_path: &Path,
+    args: MaintenanceNamespaceArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let response = context
+        .target
+        .run_maintenance(
+            context.namespace(),
+            MaintenanceRunRequest::MetadataCompaction(MetadataCompactionRequest {}),
+        )
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+
+    Ok(context.output(kind, CommandData::MaintenanceRan(response)))
 }
 
 async fn run_maintenance_retention_advance(
@@ -350,15 +363,12 @@ async fn run_maintenance_retention_advance(
         .target
         .run_maintenance(
             context.namespace(),
-            MaintenanceStepRequest {
-                retention: Some(AdvanceRetentionRequest::default()),
-                ..MaintenanceStepRequest::default()
-            },
+            MaintenanceRunRequest::Retention(AdvanceRetentionRequest {}),
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(context.output(kind, CommandData::MaintenanceStepped(response)))
+    Ok(context.output(kind, CommandData::MaintenanceRan(response)))
 }
 
 /// Runs maintenance for explicitly assigned namespaces. The command runs

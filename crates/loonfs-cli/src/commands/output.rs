@@ -11,7 +11,7 @@ use loonfs_api::v0::{
 };
 use loonfs_api::{
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteNamespaceResponse,
-    FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse, MaintenanceStepResponse,
+    FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse, MaintenanceRunResponse,
     Namespace, NamespaceId, PathEntry, ReleaseCheckpointResponse,
 };
 use serde::Serialize;
@@ -172,7 +172,6 @@ pub(crate) enum CommandData {
     CheckpointCreated(Checkpoint),
     CheckpointsListed(ListCheckpointsResponse),
     CheckpointReleased(ReleaseCheckpointResponse),
-    MaintenanceStepped(MaintenanceStepResponse),
     GarbageCollected(GcResponse),
     GrepIndexEnabled {
         /// The lifecycle and bookkeeping last observed: what enable read
@@ -330,6 +329,8 @@ pub(crate) enum CommandData {
     /// written chunk by chunk cannot also be handed to the renderer at the
     /// end without holding all of it.
     StreamedToStdout,
+    #[serde(untagged)]
+    MaintenanceRan(MaintenanceRunResponse),
 }
 
 impl CommandData {

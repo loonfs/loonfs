@@ -7,8 +7,8 @@ use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, FsAdmin, FsReader, FsWriter, MaintenancePlan, MetadataMaintenanceOptions,
-    MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore,
+    DestinationBehavior, FsAdmin, FsReader, FsWriter, MetadataMaintenanceOptions, MoveOptions,
+    NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
 use loonfs_grep::root::load_grep_root;
@@ -250,13 +250,10 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
     let materialized_head = control::head(&fixture.store, &fixture.namespace_id).await;
     fixture
         .admin
-        .run_maintenance(
+        .maintain_metadata(
             &fixture.namespace_id,
-            MaintenancePlan {
-                metadata: Some(MetadataMaintenanceOptions {
-                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
-                }),
-                ..MaintenancePlan::default()
+            MetadataMaintenanceOptions {
+                max_wal_tail_segments: std::num::NonZeroU64::MIN,
             },
         )
         .await
@@ -331,13 +328,10 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         .expect("write materialized revision");
     fixture
         .admin
-        .run_maintenance(
+        .maintain_metadata(
             &fixture.namespace_id,
-            MaintenancePlan {
-                metadata: Some(MetadataMaintenanceOptions {
-                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
-                }),
-                ..MaintenancePlan::default()
+            MetadataMaintenanceOptions {
+                max_wal_tail_segments: std::num::NonZeroU64::MIN,
             },
         )
         .await

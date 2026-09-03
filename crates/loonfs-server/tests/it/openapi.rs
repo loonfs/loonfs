@@ -151,7 +151,12 @@ fn no_schema_a_response_reaches_admits_null() {
         assert_no_null_property(&spec, response, &location, &mut visited, &mut properties);
     }
 
-    for schema_name in ["ErrorResponse", "ErrorDetails", "GcResponse", "GrepMatch"] {
+    for schema_name in [
+        "ErrorResponse",
+        "ErrorDetails",
+        "MaintenanceRunResponseGc",
+        "GrepMatch",
+    ] {
         assert!(
             visited.contains(&format!("#/components/schemas/{schema_name}")),
             "the walk never reached `{schema_name}`"
@@ -167,11 +172,11 @@ fn no_schema_a_response_reaches_admits_null() {
 const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
     ("DeletedObjectCounts", "content_objects"),
     ("DeletedObjectCounts", "upload_sessions"),
-    ("GcResponse", "budget_exhausted"),
-    ("GcResponse", "content_reclamation_deferred"),
-    ("GcResponse", "deleted"),
-    ("GcResponse", "released_checkpoints"),
-    ("GcResponse", "retained"),
+    ("MaintenanceRunResponseGc", "budget_exhausted"),
+    ("MaintenanceRunResponseGc", "content_reclamation_deferred"),
+    ("MaintenanceRunResponseGc", "deleted"),
+    ("MaintenanceRunResponseGc", "released_checkpoints"),
+    ("MaintenanceRunResponseGc", "retained"),
     ("GrepMatch", "line_truncated"),
     ("ReleasedCheckpointCounts", "expired"),
     ("ReleasedCheckpointCounts", "missing_basis"),

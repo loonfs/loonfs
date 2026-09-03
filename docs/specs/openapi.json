@@ -82,24 +82,6 @@
         ],
         "type": "object"
       },
-      "AdvanceRetentionRequest": {
-        "additionalProperties": false,
-        "description": "An option-free request that selects retention-floor advancement.",
-        "type": "object"
-      },
-      "AdvanceRetentionResponse": {
-        "description": "Result of advancing the retention floor.",
-        "properties": {
-          "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "New minimum sequence for incremental replay."
-          }
-        },
-        "required": [
-          "retention_floor_seq"
-        ],
-        "type": "object"
-      },
       "AttributeKey": {
         "description": "A validated inode attribute name from 1 to 128 UTF-8 bytes without control characters.\n\nNames are byte-exact; writes reject the reserved `loonfs.` prefix even though\nthe type accepts it.",
         "example": "owner",
@@ -2054,98 +2036,6 @@
         ],
         "type": "object"
       },
-      "GcRequest": {
-        "additionalProperties": false,
-        "description": "Optional overrides for one garbage-collection pass.\n\nUnknown fields are rejected.",
-        "properties": {
-          "cursor": {
-            "description": "The opaque `next_cursor` returned by an earlier pass for the same namespace.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "grace_window_ms": {
-            "description": "The minimum object age for deletion in milliseconds, which must meet the\nserver's advertised safety floor.",
-            "format": "int64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "max_objects": {
-            "description": "The maximum objects this pass may inspect, or `None` to run to completion.",
-            "format": "int64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
-      "GcResponse": {
-        "description": "The result of one mark-and-sweep garbage-collection pass.",
-        "properties": {
-          "budget_exhausted": {
-            "description": "Whether the pass reached `max_objects` before completion.",
-            "type": "boolean"
-          },
-          "content_reclamation_deferred": {
-            "description": "Whether `max_objects` prevented a complete reference scan for content reclamation.",
-            "type": "boolean"
-          },
-          "deleted": {
-            "$ref": "#/components/schemas/DeletedObjectCounts",
-            "description": "Objects the pass deleted, split by object family."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace the pass ran against."
-          },
-          "next_cursor": {
-            "description": "The opaque resume token for remaining candidates in the same namespace.",
-            "type": "string"
-          },
-          "next_reclamation_at_ms": {
-            "description": "The earliest known reclamation time for an upload session inspected by this\npass, in Unix milliseconds.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "released_checkpoints": {
-            "$ref": "#/components/schemas/ReleasedCheckpointCounts",
-            "description": "The checkpoint records released by the pass, grouped by reason."
-          },
-          "retained": {
-            "$ref": "#/components/schemas/RetainedCandidates",
-            "description": "`retained_candidates` grouped by reason."
-          },
-          "retained_candidates": {
-            "description": "The number of candidates retained at deletion time.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "retention_degraded": {
-            "description": "True when ambiguous roots suppressed manifest/segment deletion.",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "namespace_id",
-          "deleted",
-          "released_checkpoints",
-          "retained_candidates",
-          "retained",
-          "retention_degraded",
-          "content_reclamation_deferred",
-          "budget_exhausted"
-        ],
-        "type": "object"
-      },
       "GrepGcRequest": {
         "additionalProperties": false,
         "description": "One explicit grep-index garbage-collection pass (maintenance plane).",
@@ -2675,66 +2565,81 @@
         ],
         "type": "object"
       },
-      "MaintenanceStepRequest": {
-        "additionalProperties": false,
-        "description": "The actions selected for one explicit maintenance step.\n\nThe request must select at least one action, and unknown fields are rejected.",
-        "properties": {
-          "gc": {
-            "$ref": "#/components/schemas/GcRequest",
-            "description": "The optional bounded mark-and-sweep garbage-collection action."
+      "MaintenanceRunRequest": {
+        "description": "One maintenance job for one namespace.",
+        "discriminator": {
+          "mapping": {
+            "gc": "#/components/schemas/MaintenanceRunRequestGc",
+            "metadata": "#/components/schemas/MaintenanceRunRequestMetadata",
+            "metadata_compaction": "#/components/schemas/MaintenanceRunRequestMetadataCompaction",
+            "retention": "#/components/schemas/MaintenanceRunRequestRetention"
           },
-          "metadata_maintenance": {
-            "$ref": "#/components/schemas/MetadataMaintenanceRequest",
-            "description": "The optional WAL flush and bounded metadata reorganization action."
-          },
-          "retention": {
-            "$ref": "#/components/schemas/AdvanceRetentionRequest",
-            "description": "The optional action that advances the retention floor to the flushed manifest head."
-          }
+          "propertyName": "kind"
         },
-        "type": "object"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/MaintenanceRunRequestMetadata"
+          },
+          {
+            "$ref": "#/components/schemas/MaintenanceRunRequestMetadataCompaction"
+          },
+          {
+            "$ref": "#/components/schemas/MaintenanceRunRequestGc"
+          },
+          {
+            "$ref": "#/components/schemas/MaintenanceRunRequestRetention"
+          }
+        ]
       },
-      "MaintenanceStepResponse": {
-        "description": "The result of one explicit maintenance step.\n\nEach field is present only when the request selected its action.",
+      "MaintenanceRunRequestGc": {
+        "description": "Runs one bounded mark-and-sweep garbage-collection pass.",
         "properties": {
-          "gc": {
-            "$ref": "#/components/schemas/GcResponse",
-            "description": "What the collection pass reclaimed."
+          "cursor": {
+            "description": "The opaque `next_cursor` returned by an earlier pass for the same namespace.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
-          "metadata_maintenance": {
-            "$ref": "#/components/schemas/MetadataMaintenanceResponse",
-            "description": "What the metadata-upkeep action did."
+          "grace_window_ms": {
+            "description": "The minimum object age for deletion in milliseconds, which must meet the\nserver's advertised safety floor.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace the step ran against."
+          "kind": {
+            "enum": [
+              "gc"
+            ],
+            "type": "string"
           },
-          "retention": {
-            "$ref": "#/components/schemas/AdvanceRetentionResponse",
-            "description": "Where the retention floor ended up."
-          },
-          "status_before": {
-            "$ref": "#/components/schemas/NamespaceDiagnostics",
-            "description": "Namespace diagnostics observed before the step acted."
+          "max_objects": {
+            "description": "The maximum objects this pass may inspect, or `None` to run to completion.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
-          "namespace_id",
-          "status_before"
+          "kind"
         ],
         "type": "object"
       },
-      "ManifestNo": {
-        "description": "Monotonic manifest counter for one namespace. It can increase when metadata changes, even if no namespace commit is written.",
-        "format": "int64",
-        "maximum": 9007199254740991,
-        "minimum": 0,
-        "type": "integer"
-      },
-      "MetadataMaintenanceRequest": {
-        "additionalProperties": false,
-        "description": "Overrides for the metadata-upkeep action.",
+      "MaintenanceRunRequestMetadata": {
+        "description": "Runs WAL flushing and one bounded metadata reorganization step.",
         "properties": {
+          "kind": {
+            "enum": [
+              "metadata"
+            ],
+            "type": "string"
+          },
           "max_wal_tail_segments": {
             "description": "The WAL-tail threshold for flushing, or `None` for the server default.",
             "format": "int64",
@@ -2745,11 +2650,143 @@
             ]
           }
         },
+        "required": [
+          "kind"
+        ],
         "type": "object"
       },
-      "MetadataMaintenanceResponse": {
-        "description": "What one metadata-upkeep action did, part by part.",
+      "MaintenanceRunRequestMetadataCompaction": {
+        "description": "Runs one full metadata compaction.",
         "properties": {
+          "kind": {
+            "enum": [
+              "metadata_compaction"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "MaintenanceRunRequestRetention": {
+        "description": "Advances the retention floor to the flushed manifest head.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "retention"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "MaintenanceRunResponse": {
+        "description": "The result of one maintenance job. The `kind` matches the request.",
+        "discriminator": {
+          "mapping": {
+            "gc": "#/components/schemas/MaintenanceRunResponseGc",
+            "metadata": "#/components/schemas/MaintenanceRunResponseMetadata",
+            "metadata_compaction": "#/components/schemas/MaintenanceRunResponseMetadataCompaction",
+            "retention": "#/components/schemas/MaintenanceRunResponseRetention"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/MaintenanceRunResponseMetadata"
+          },
+          {
+            "$ref": "#/components/schemas/MaintenanceRunResponseMetadataCompaction"
+          },
+          {
+            "$ref": "#/components/schemas/MaintenanceRunResponseGc"
+          },
+          {
+            "$ref": "#/components/schemas/MaintenanceRunResponseRetention"
+          }
+        ]
+      },
+      "MaintenanceRunResponseGc": {
+        "description": "Result of one bounded mark-and-sweep garbage-collection pass.",
+        "properties": {
+          "budget_exhausted": {
+            "description": "Whether the pass reached `max_objects` before completion.",
+            "type": "boolean"
+          },
+          "content_reclamation_deferred": {
+            "description": "Whether `max_objects` prevented a complete reference scan for content reclamation.",
+            "type": "boolean"
+          },
+          "deleted": {
+            "$ref": "#/components/schemas/DeletedObjectCounts",
+            "description": "Objects the pass deleted, split by object family."
+          },
+          "kind": {
+            "enum": [
+              "gc"
+            ],
+            "type": "string"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the pass ran against."
+          },
+          "next_cursor": {
+            "description": "The opaque resume token for remaining candidates in the same namespace.",
+            "type": "string"
+          },
+          "next_reclamation_at_ms": {
+            "description": "The earliest known reclamation time for an upload session inspected by this\npass, in Unix milliseconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "released_checkpoints": {
+            "$ref": "#/components/schemas/ReleasedCheckpointCounts",
+            "description": "The checkpoint records released by the pass, grouped by reason."
+          },
+          "retained": {
+            "$ref": "#/components/schemas/RetainedCandidates",
+            "description": "`retained_candidates` grouped by reason."
+          },
+          "retained_candidates": {
+            "description": "The number of candidates retained at deletion time.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retention_degraded": {
+            "description": "True when ambiguous roots suppressed manifest/segment deletion.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "namespace_id",
+          "deleted",
+          "released_checkpoints",
+          "retained_candidates",
+          "retained",
+          "retention_degraded",
+          "content_reclamation_deferred",
+          "budget_exhausted",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "MaintenanceRunResponseMetadata": {
+        "description": "Result of WAL flushing and one bounded metadata reorganization step.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "metadata"
+            ],
+            "type": "string"
+          },
           "reorganize": {
             "$ref": "#/components/schemas/ReorganizeStepOutcome",
             "description": "What the reorganization unit did."
@@ -2761,7 +2798,257 @@
         },
         "required": [
           "wal_flush",
-          "reorganize"
+          "reorganize",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "MaintenanceRunResponseMetadataCompaction": {
+        "description": "Result of one full metadata compaction.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "metadata_compaction"
+            ],
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/MetadataCompactionOutcome",
+            "description": "The compaction outcome."
+          }
+        },
+        "required": [
+          "outcome",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "MaintenanceRunResponseRetention": {
+        "description": "Result of advancing the retention floor.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "retention"
+            ],
+            "type": "string"
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "New minimum sequence for incremental replay."
+          }
+        },
+        "required": [
+          "retention_floor_seq",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "ManifestNo": {
+        "description": "Monotonic manifest counter for one namespace. It can increase when metadata changes, even if no namespace commit is written.",
+        "format": "int64",
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "MetadataCompactionOutcome": {
+        "description": "The outcome of one metadata compaction run.",
+        "discriminator": {
+          "mapping": {
+            "abandoned": "#/components/schemas/MetadataCompactionOutcomeAbandoned",
+            "already_running": "#/components/schemas/MetadataCompactionOutcomeAlreadyRunning",
+            "bounded_merge_published": "#/components/schemas/MetadataCompactionOutcomeBoundedMergePublished",
+            "cancelled": "#/components/schemas/MetadataCompactionOutcomeCancelled",
+            "fenced": "#/components/schemas/MetadataCompactionOutcomeFenced",
+            "not_needed": "#/components/schemas/MetadataCompactionOutcomeNotNeeded",
+            "published": "#/components/schemas/MetadataCompactionOutcomePublished",
+            "superseded": "#/components/schemas/MetadataCompactionOutcomeSuperseded"
+          },
+          "propertyName": "outcome"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/MetadataCompactionOutcomeNotNeeded"
+          },
+          {
+            "$ref": "#/components/schemas/MetadataCompactionOutcomeBoundedMergePublished"
+          },
+          {
+            "$ref": "#/components/schemas/MetadataCompactionOutcomeAlreadyRunning"
+          },
+          {
+            "$ref": "#/components/schemas/MetadataCompactionOutcomePublished"
+          },
+          {
+            "$ref": "#/components/schemas/MetadataCompactionOutcomeCancelled"
+          },
+          {
+            "$ref": "#/components/schemas/MetadataCompactionOutcomeAbandoned"
+          },
+          {
+            "$ref": "#/components/schemas/MetadataCompactionOutcomeFenced"
+          },
+          {
+            "$ref": "#/components/schemas/MetadataCompactionOutcomeSuperseded"
+          }
+        ]
+      },
+      "MetadataCompactionOutcomeAbandoned": {
+        "description": "A run the job read changed under it; nothing was published.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "abandoned"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "MetadataCompactionOutcomeAlreadyRunning": {
+        "description": "A compaction already holds this namespace's slot in this process.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "already_running"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "MetadataCompactionOutcomeBoundedMergePublished": {
+        "description": "The planner chose a bounded merge and this run published it; no full compaction was needed.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "bounded_merge_published"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "MetadataCompactionOutcomeCancelled": {
+        "description": "The run was cancelled; the manifest did not move.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "MetadataCompactionOutcomeFenced": {
+        "description": "The job lost its lease; nothing was published.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "fenced"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "MetadataCompactionOutcomeNotNeeded": {
+        "description": "No family group has outgrown a bounded reorganization step and nothing was published.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "not_needed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "MetadataCompactionOutcomePublished": {
+        "description": "The rebuilt group replaced its snapshot in a published manifest.",
+        "properties": {
+          "input_bytes": {
+            "description": "Input bytes read by the compaction.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "manifest_no": {
+            "$ref": "#/components/schemas/ManifestNo",
+            "description": "Manifest published by the compaction."
+          },
+          "outcome": {
+            "enum": [
+              "published"
+            ],
+            "type": "string"
+          },
+          "output_bytes": {
+            "description": "Output bytes written by the compaction.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_segments": {
+            "description": "Output segments written by the compaction.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows_read": {
+            "description": "Rows read by the compaction.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows_written": {
+            "description": "Rows written by the compaction.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "manifest_no",
+          "rows_read",
+          "rows_written",
+          "input_bytes",
+          "output_bytes",
+          "output_segments",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "MetadataCompactionOutcomeSuperseded": {
+        "description": "Every publication attempt lost the root race; nothing was published.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "superseded"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
         ],
         "type": "object"
       },
@@ -4869,7 +5156,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one bounded maintenance step. Include `metadata_maintenance`, `retention`, or `gc` to select actions. Each selector is an options object, and an empty object uses server defaults. Actions run in that order, and only selected actions appear in the response. At least one action is required. A deleted namespace accepts only `gc`. GC processes up to 1024 candidates by default and returns a cursor when more work remains. A lost root update race is reported as an outcome.",
+        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` run inspects up to 1024 objects unless `max_objects` says otherwise, and returns a cursor when more remain.",
         "operationId": "run_maintenance",
         "parameters": [
           {
@@ -4886,11 +5173,11 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/MaintenanceStepRequest"
+                "$ref": "#/components/schemas/MaintenanceRunRequest"
               }
             }
           },
-          "description": "The actions this step selects",
+          "description": "The maintenance job to run",
           "required": true
         },
         "responses": {
@@ -4898,11 +5185,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MaintenanceStepResponse"
+                  "$ref": "#/components/schemas/MaintenanceRunResponse"
                 }
               }
             },
-            "description": "Maintenance step completed"
+            "description": "Maintenance job completed"
           },
           "400": {
             "content": {
@@ -4948,7 +5235,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "summary": "Run maintenance step",
+        "summary": "Run one maintenance job",
         "tags": [
           "maintenance"
         ],

@@ -1,8 +1,8 @@
 //! Immutable view inputs are cached once per handle.
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
-    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MetadataMaintenanceOptions, NamespaceId,
+    PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
@@ -44,13 +44,10 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
             .expect("seed file");
     }
     admin
-        .run_maintenance(
+        .maintain_metadata(
             namespace_id,
-            MaintenancePlan {
-                metadata: Some(MetadataMaintenanceOptions {
-                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
-                }),
-                ..MaintenancePlan::default()
+            MetadataMaintenanceOptions {
+                max_wal_tail_segments: std::num::NonZeroU64::MIN,
             },
         )
         .await
